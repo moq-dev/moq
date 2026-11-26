@@ -147,7 +147,10 @@ fn stateless_resets_are_limited_per_source() {
 
 	let mut answered = 0;
 	for source in 0..1024 {
-		if matches!(answer_from(&mut server, from(source), now, &packet), Answer::Response(_)) {
+		if matches!(
+			answer_from(&mut server, from(source), now, &packet),
+			Answer::Response(_)
+		) {
 			answered += 1;
 		}
 	}
@@ -272,43 +275,21 @@ fn initial_with_short_cid_is_refused() {
 	assert_eq!(close[0] & 0xf0, 0xc0, "a long-header Initial");
 }
 
-/// Garbage under header protection unmasks to random reserved bits. The endpoint drops an
-/// Initial whose bits are invalid, and takes one whose bits pass as a new connection, which
-/// then fails to accept.
+/// Garbage under header protection unmasks to random reserved bits, and when they pass as zero
+/// the packet still fails authentication. The endpoint drops it before it holds a slot, buffers
+/// bytes, or earns a reply, whichever sample it carries.
 #[test]
-fn undecryptable_initial() {
+fn undecryptable_initial_is_dropped_unbuffered() {
 	let _guard = subscribe();
 	let mut server = endpoint(true);
 	let now = Instant::ZERO;
 	let mut packet = long(0, Version::V1.wire(), &[0x11; 8], 1200);
-	assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
-
-	// Vary the header protection sample, 4 bytes past the packet number at byte 22, until the
-	// reserved bits unmask as zero
-	let mut buf = Vec::new();
-	let incoming = (0..=u8::MAX)
-		.find_map(|byte| {
-			packet[26] = byte;
-			match server.handle(
-				now,
-				Received {
-					remote: REMOTE.parse().unwrap(),
-					local_ip: None,
-					ecn: None,
-					data: packet[..].into(),
-					arrival: None,
-				},
-				&mut buf,
-			) {
-				Some(DatagramEvent::NewConnection(incoming)) => Some(incoming),
-				None => None,
-				Some(_) => panic!("unexpected response"),
-			}
-		})
-		.expect("some sample unmasks valid reserved bits");
-	let error = server.accept(incoming, now, &mut buf).unwrap_err();
-	assert_matches!(error.cause, ConnectionError::TransportError(_));
-	assert!(error.response.is_none());
+	for byte in 0..=u8::MAX {
+		// Vary the header protection sample, 4 bytes past the packet number at byte 22
+		packet[26] = byte;
+		assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
+	}
+	assert_eq!(server.incoming_buffer_bytes(), 0);
 	assert_eq!(server.open_connections(), 0);
 }
 

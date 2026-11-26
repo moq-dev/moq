@@ -318,7 +318,10 @@ impl Endpoint {
 		dst_cid: ConnectionId,
 		buf: &mut Vec<u8>,
 	) -> Option<Transmit> {
-		if self.resets.limited(addresses.remote.ip(), now, self.config.min_reset_interval) {
+		if self
+			.resets
+			.limited(addresses.remote.ip(), now, self.config.min_reset_interval)
+		{
 			debug!("ignoring unexpected packet within minimum stateless reset interval");
 			return None;
 		}
@@ -478,7 +481,15 @@ impl Endpoint {
 
 		// Saturation only happens under heavy load, where deriving initial keys per Initial just to
 		// reply with CONNECTION_REFUSED would starve packet processing for existing connections.
-		if self.cids_exhausted() || self.incoming_buffers.len() >= server_config.max_incoming {
+		// An attempt holds its first datagram until the application disposes of it, so the byte
+		// budget bounds memory however large the datagrams are, and the count bounds the slots.
+		if self.cids_exhausted()
+			|| self.incoming_buffers.len() >= server_config.max_incoming
+			|| self
+				.all_incoming_buffers_total_bytes
+				.checked_add(datagram_len as u64)
+				.is_none_or(|n| n > server_config.incoming_buffer_size_total)
+		{
 			debug!("ignoring initial for connection {} due to saturation", dst_cid);
 			return None;
 		}
@@ -502,7 +513,7 @@ impl Endpoint {
 			)));
 		}
 
-		let packet = match event.first_decode.finish(Some(&*crypto.header.remote)) {
+		let mut packet = match event.first_decode.finish(Some(&*crypto.header.remote)) {
 			Ok(packet) => packet,
 			Err(e) => {
 				trace!("unable to decode initial packet: {}", e);
@@ -518,6 +529,19 @@ impl Endpoint {
 		let Header::Initial(header) = packet.header else {
 			panic!("non-initial packet in handle_first_packet()");
 		};
+
+		// Initial keys derive from the destination CID, so this does not prove who sent it, but it
+		// keeps junk that merely looks like an Initial from holding a slot or earning a reply.
+		let packet_number = header.number.expand(0);
+		if crypto
+			.packet
+			.remote
+			.decrypt(packet_number, &packet.header_data, &mut packet.payload)
+			.is_err()
+		{
+			debug!(packet_number, "dropping initial that fails authentication");
+			return None;
+		}
 
 		let server_config = self.server_config.as_ref().unwrap().clone();
 
@@ -539,9 +563,11 @@ impl Endpoint {
 		let incoming_idx = self.incoming_buffers.insert(IncomingBuffer {
 			server_config,
 			datagrams: Vec::new(),
-			total_bytes: 0,
+			total_bytes: datagram_len as u64,
 		});
-		self.index.insert_initial_incoming(header.dst_cid, incoming_idx);
+		self.all_incoming_buffers_total_bytes += datagram_len as u64;
+		self.index
+			.insert_initial_incoming(addresses, header.dst_cid, incoming_idx);
 
 		Some(DatagramEvent::NewConnection(Incoming {
 			received_at: event.now,
@@ -588,15 +614,15 @@ impl Endpoint {
 	/// the connection and delivers the buffered datagrams to it, or releases the reserved state if
 	/// the handshake failed.
 	///
-	/// Until `finish_accept`, the attempt counts toward [`server::Config::max_incoming`], and
-	/// datagrams buffered for it toward [`server::Config::incoming_buffer_size`] and the 100 MiB
+	/// Until `finish_accept`, the attempt counts toward [`server::Config::max_incoming`], and its
+	/// datagrams, the first included, toward [`server::Config::incoming_buffer_size`] and the 100 MiB
 	/// shared by every attempt.
 	///
 	/// On error, no endpoint state remains reserved for the attempt.
 	// box err to avoid clippy::result_large_err
 	pub fn start_accept(
 		&mut self,
-		mut incoming: Incoming,
+		incoming: Incoming,
 		now: Instant,
 		buf: &mut Vec<u8>,
 	) -> Result<Accepting, Box<AcceptError>> {
@@ -637,25 +663,6 @@ impl Endpoint {
 				response: Some(response),
 			}));
 		}
-
-		if incoming
-			.crypto
-			.packet
-			.remote
-			.decrypt(
-				packet_number,
-				&incoming.packet.header_data,
-				&mut incoming.packet.payload,
-			)
-			.is_err()
-		{
-			debug!(packet_number, "failed to authenticate initial packet");
-			self.ignore(incoming);
-			return Err(Box::new(AcceptError {
-				cause: TransportError::PROTOCOL_VIOLATION("authentication failed").into(),
-				response: None,
-			}));
-		};
 
 		let loc_cid = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx));
 		let mut params = TransportParameters::new(
@@ -771,7 +778,7 @@ impl Endpoint {
 					_ => None,
 				};
 				// Release the routes and buffer slot reserved by `start_accept`
-				self.index.remove_initial(init_cid);
+				self.index.remove_initial_incoming(&addresses, init_cid);
 				self.index.retire(loc_cid);
 				if let Some(cid) = pref_addr_cid {
 					self.index.retire(cid);
@@ -782,6 +789,9 @@ impl Endpoint {
 		};
 
 		let incoming_buffer = self.remove_incoming_buffer(incoming_idx);
+		if init_cid.is_empty() {
+			self.index.incoming_attempt_remotes.remove(&addresses);
+		}
 		let ch = ConnectionHandle(self.connections.vacant_key());
 		// Re-points the routes reserved by `start_accept` at the connection
 		self.register_connection(ch, init_cid, loc_cid, pref_addr_cid, addresses, Side::Server);
@@ -892,7 +902,8 @@ impl Endpoint {
 
 	/// Remove endpoint state associated with an `Incoming`.
 	fn remove_incoming_state(&mut self, incoming: &Incoming) {
-		self.index.remove_initial(incoming.packet.header.dst_cid);
+		self.index
+			.remove_initial_incoming(&incoming.addresses, incoming.packet.header.dst_cid);
 		self.remove_incoming_buffer(incoming.incoming_idx);
 	}
 
@@ -1168,6 +1179,11 @@ struct ConnectionIndex {
 	///
 	/// Uses a standard `HashMap` to protect against hash collision attacks.
 	incoming_connection_remotes: HashMap<FourTuple, ConnectionHandle>,
+	/// Identifies connection attempts whose Initial has a zero-length destination CID, which is
+	/// all a retransmit of it has to match on, until they become connections
+	///
+	/// Uses a standard `HashMap` to protect against hash collision attacks.
+	incoming_attempt_remotes: HashMap<FourTuple, usize>,
 	/// Identifies outgoing connections with zero-length CIDs
 	///
 	/// We don't yet support explicit source addresses for client connections, and zero-length CIDs
@@ -1185,13 +1201,24 @@ struct ConnectionIndex {
 }
 
 impl ConnectionIndex {
-	/// Associate an incoming connection with its initial destination CID
-	fn insert_initial_incoming(&mut self, dst_cid: ConnectionId, incoming_key: usize) {
+	/// Associate an incoming connection with its initial destination CID, or its four-tuple when
+	/// that is empty
+	fn insert_initial_incoming(&mut self, addresses: FourTuple, dst_cid: ConnectionId, incoming_key: usize) {
 		if dst_cid.is_empty() {
+			self.incoming_attempt_remotes.insert(addresses, incoming_key);
 			return;
 		}
 		self.connection_ids_initial
 			.insert(dst_cid, RouteDatagramTo::Incoming(incoming_key));
+	}
+
+	/// Remove what [`insert_initial_incoming`](Self::insert_initial_incoming) associated
+	fn remove_initial_incoming(&mut self, addresses: &FourTuple, dst_cid: ConnectionId) {
+		if dst_cid.is_empty() {
+			self.incoming_attempt_remotes.remove(addresses);
+			return;
+		}
+		self.remove_initial(dst_cid);
 	}
 
 	/// Remove an association with an initial destination CID
@@ -1247,6 +1274,9 @@ impl ConnectionIndex {
 		if datagram.dst_cid().is_empty() {
 			if let Some(&ch) = self.incoming_connection_remotes.get(addresses) {
 				return Some(RouteDatagramTo::Connection(ch));
+			}
+			if let Some(&idx) = self.incoming_attempt_remotes.get(addresses) {
+				return Some(RouteDatagramTo::Incoming(idx));
 			}
 			if let Some(&ch) = self.outgoing_connection_remotes.get(&addresses.remote) {
 				return Some(RouteDatagramTo::Connection(ch));

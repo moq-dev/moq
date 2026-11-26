@@ -1223,7 +1223,9 @@ fn accepting_state_buffers_retransmitted_initials() {
 	let incoming = pair.server.pop_waiting_incoming();
 
 	let accepting = pair.server.start_split_accept(incoming, pair.time);
-	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+	// Until `finish_accept`, the attempt holds its first datagram.
+	let first_datagram = pair.server.incoming_buffer_bytes();
+	assert!(first_datagram >= 1200);
 	assert_eq!(pair.server.open_connections(), 0);
 
 	// With no server response, the client's next wakeup is its loss timer. Advancing to it and
@@ -1235,7 +1237,7 @@ fn accepting_state_buffers_retransmitted_initials() {
 	pair.drive_server();
 
 	assert!(pair.server.waiting_incoming.is_empty());
-	assert!(pair.server.incoming_buffer_bytes() > 0);
+	assert!(pair.server.incoming_buffer_bytes() > first_datagram);
 
 	let server_ch = pair.server.finish_split_accept(accepting);
 	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
@@ -1289,6 +1291,66 @@ fn max_incoming_counts_accepts_in_progress() {
 	assert_eq!(pair.server.open_connections(), 0);
 
 	pair.server.finish_split_accept(accepting);
+	assert_eq!(pair.server.open_connections(), 1);
+}
+
+/// The shared byte budget bounds what pending attempts hold, first datagram included, so Initials
+/// stop being taken once it is spent however many slots remain.
+#[test]
+fn first_datagrams_count_toward_the_incoming_byte_budget() {
+	let _guard = subscribe();
+	let mut server_config = server_config();
+	// Room for one 1200-byte Initial, not two
+	server_config.incoming_buffer_size_total = 2000;
+	let mut pair = Pair::new(endpoint::Config::default(), server_config);
+	pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+
+	let _first = pair.begin_connect(client_config());
+	let _second = pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	assert_eq!(pair.server.waiting_incoming.len(), 1);
+	assert_eq!(pair.server.incoming_buffer_bytes(), 1200);
+
+	// Disposing of the attempt frees its bytes for the next Initial, which the client retransmits.
+	let incoming = pair.server.pop_waiting_incoming();
+	pair.server.reject(incoming);
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+	pair.time = pair.client.next_wakeup().unwrap();
+	pair.drive_client();
+	pair.drive_server();
+	assert_eq!(pair.server.waiting_incoming.len(), 1);
+}
+
+/// A retried Initial with a zero-length destination CID has nothing but its four-tuple to match a
+/// retransmit on, which must reach the pending attempt rather than start a second one.
+#[test]
+fn retransmitted_zero_length_cid_initial_joins_its_attempt() {
+	let _guard = subscribe();
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config()),
+			cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0)))),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(Endpoint::new(endpoint::Config::default(), true).unwrap(), server);
+	pair.server.handle_incoming = Box::new(|incoming| match incoming.remote_address_validated() {
+		true => IncomingConnectionBehavior::Wait,
+		false => IncomingConnectionBehavior::Retry,
+	});
+
+	pair.begin_connect(client_config());
+	// Driving to idle has the client resend its Initial, with the same token and empty destination
+	// CID, until its handshake gives up. Each lands in the one attempt.
+	pair.drive();
+	let incoming = pair.server.pop_waiting_incoming();
+	assert!(pair.server.incoming_buffer_bytes() >= 2 * 1200);
+
+	pair.server.try_accept(incoming, pair.time).unwrap();
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
 	assert_eq!(pair.server.open_connections(), 1);
 }
 

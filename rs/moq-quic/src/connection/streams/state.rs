@@ -663,7 +663,8 @@ impl StreamsState {
 	pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
 		// A peer stream not opened yet, or opened implicitly and untouched, starts at offset 0 too
 		if id.initiator() != self.side
-			&& (id.index() >= self.next_remote[id.dir() as usize] || self.skipped[id.dir() as usize].contains(id.index()))
+			&& (id.index() >= self.next_remote[id.dir() as usize]
+				|| self.skipped[id.dir() as usize].contains(id.index()))
 		{
 			return Some(0);
 		}
@@ -3480,7 +3481,10 @@ mod tests {
 		server.received_stop_sending(stopped, 0u32.into()).unwrap();
 		assert_eq!(server.recv.len(), 1);
 		assert!(server.quiesce(&mut pending, 0u32.into(), &keep));
-		assert!(server.recv.values().all(Option::is_none), "a quiesce allocated receive state");
+		assert!(
+			server.recv.values().all(Option::is_none),
+			"a quiesce allocated receive state"
+		);
 		assert!(pending.stop_sending.is_empty());
 
 		let mut server = make(Side::Server);

@@ -379,7 +379,10 @@ mod tests {
 	fn hashed_validate_refuses_other_lengths() {
 		let generator = HashedConnectionIdGenerator::new();
 		for len in [0, 1, 2, 3, 7, 9, 20] {
-			assert!(generator.validate(ConnectionId::new(&vec![0; len])).is_err(), "{len} bytes");
+			assert!(
+				generator.validate(ConnectionId::new(&vec![0; len])).is_err(),
+				"{len} bytes"
+			);
 		}
 	}
 
