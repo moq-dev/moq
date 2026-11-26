@@ -668,12 +668,17 @@ export class Sync {
 	#runMember(effect: Effect): void {
 		const out = this.#clock.out;
 		const group = effect.get(this.in.sync);
-		if (!group) return;
+		// A closed shared sync places no playhead: its members play alone, as if unlinked.
+		if (!group || effect.get(group.#clock.closed)) return;
 		effect.cleanup(() => {
 			this.#inStep = false;
 		});
 
-		const error = this.#refusal(group, effect.get(this.in.delay), effect.get(this.in.lookahead));
+		const error = this.#refusal(
+			group,
+			[effect.get(this.in.delay), effect.get(this.in.lookahead)],
+			[effect.get(group.in.delay), effect.get(group.in.lookahead)],
+		);
 		effect.set(out.error, error, undefined);
 		// Without a clock, this broadcast has no place on the group's timeline.
 		const clock = effect.get(this.in.clock);
@@ -686,7 +691,15 @@ export class Sync {
 		const reference = new Derived([out.reference], (reference) =>
 			reference === undefined ? undefined : reference - zero,
 		);
-		const member: Member = { reference, target: this.#target, video: this.video };
+		// What the group sees: a member showing video keeps its place while its timeline restarts, as
+		// when its publisher does, so the others don't jump ahead and back. One that stops showing
+		// video, as a hidden tile, lets go at once.
+		const place = new Signal<number | undefined>(undefined);
+		effect.run((nested) => {
+			const current = nested.get(reference);
+			if (current !== undefined || !nested.get(this.video)) place.set(current);
+		});
+		const member: Member = { reference: place, target: this.#target, video: this.video };
 		group.#members.update((members) => [...members, member]);
 		effect.cleanup(() => group.#members.update((members) => members.filter((other) => other !== member)));
 
@@ -713,11 +726,12 @@ export class Sync {
 	}
 
 	// Why `group` won't take this member, if it won't.
-	#refusal(group: Sync, delay: Delay, lookahead: Duration): Error | undefined {
+	#refusal(group: Sync, own: [Delay, Duration], shared: [Delay, Duration]): Error | undefined {
 		if (group === this) return new Error("Watch.Sync: a sync can't be its own group");
-		if (delay === "instant") return new Error('Watch.Sync: a grouped member can\'t use delay "instant"');
-		if (!lookahead.isZero()) return new Error("Watch.Sync: a grouped member can't hold a lookahead");
-		if (group.in.delay.peek() === "instant") return new Error('Watch.Sync: a group can\'t use delay "instant"');
+		if (own[0] === "instant") return new Error('Watch.Sync: a grouped member can\'t use delay "instant"');
+		if (!own[1].isZero()) return new Error("Watch.Sync: a grouped member can't hold a lookahead");
+		if (shared[0] === "instant") return new Error('Watch.Sync: a group can\'t use delay "instant"');
+		if (!shared[1].isZero()) return new Error("Watch.Sync: a group can't hold a lookahead");
 		return undefined;
 	}
 

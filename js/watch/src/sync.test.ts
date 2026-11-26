@@ -954,6 +954,88 @@ describe("group", () => {
 		for (const s of [sync, b.sync, group]) s.close();
 	});
 
+	it("aligns frames captured before the page loaded, as a warmup replays", async () => {
+		const group = new Sync();
+		// PTS zero years before the viewer's clock origin, and frames from its first seconds.
+		const a = member(group, 0);
+		const b = member(group, 50);
+		await flush();
+		a.video.received(Duration.millis(0), at(5000));
+		b.video.received(Duration.millis(0), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(70));
+		expect(b.sync.out.delay.peek()).toEqual(Duration.millis(20));
+
+		const first = a.video.wait(Duration.millis(50));
+		const second = b.video.wait(Duration.millis(0));
+		await clock.advance(Duration.millis(119));
+		expect(Bun.peek.status(first)).toBe("pending");
+		await clock.advance(Duration.millis(1));
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("plays its members alone once the shared sync closes", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// Closing a member closes only its own sync; closing the shared one releases the rest.
+		b.sync.close();
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		group.close();
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+
+		a.sync.close();
+	});
+
+	it("refuses members of a shared sync that holds a lookahead", async () => {
+		const group = new Sync({ lookahead: Duration.secs(1) });
+		const a = member(group, 1000);
+		await flush();
+		expect(a.sync.out.error.peek()?.message).toContain("group can't hold a lookahead");
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		for (const sync of [a.sync, group]) sync.close();
+	});
+
+	it("holds a restarting member's place, so the others don't jump ahead and back", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// B's publisher restarts: its only track's timeline ends until the new one's first frame.
+		b.video.reset();
+		await flush();
+		expect(b.sync.out.reference.peek()).toBeUndefined();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+		b.video.received(Duration.millis(2000), at(6100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// Hidden, B shows no video and lets go of the playhead at once.
+		b.video.reset();
+		b.sync.video.set(false);
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
 	it("plays exactly as alone once it leaves its group", async () => {
 		const groupSignal = new Signal<Sync | undefined>(new Sync());
 		const group = groupSignal.peek();
