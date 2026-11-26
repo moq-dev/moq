@@ -222,7 +222,8 @@ impl Declared {
 
 /// The producer's `clock` re-based on a `sync.clock` of `advertised`, or `None` when that is the
 /// mapping it already has. A changed mapping is adopted while nothing has `anchored` the clock and
-/// refused once something has. Clearing it is always refused.
+/// refused once something has. Clearing it is a change like any other: a derivative of a source with
+/// no `sync.clock` advertises none rather than a host wall clock the source never had.
 fn adopt(
 	clock: &crate::Clock,
 	anchored: bool,
@@ -232,15 +233,18 @@ fn adopt(
 		return Ok(None);
 	}
 	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("media clock {advertised:?} {why}"));
-	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
+	let wall = advertised.map(crate::Clock::exact).transpose()?;
 	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
-	if Some(wall) == clock.wall() {
+	if wall == clock.wall() {
 		return Ok(None);
 	}
 	if anchored {
 		return Err(refuse("changes the producer's clock after it was fixed"));
 	}
-	Ok(Some(clock.adopted(wall)?))
+	Ok(Some(match wall {
+		Some(wall) => clock.adopted(wall)?,
+		None => clock.unmapped(),
+	}))
 }
 
 /// `at` on clock `from` moved onto clock `to`, a re-basing of it: shifted by what separates their
@@ -671,8 +675,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// The `sync.clock` is the producer's [`clock`](Self::clock). Writing a different one re-bases
 	/// the clock on it until something fixes the clock ([`Config::with_clock`], taking
 	/// [`clock`](Self::clock), an importer's first frame, or the first publish), so a derivative
-	/// adopts its input's mapping. After that a changed `clock` is refused, as is clearing it at any
-	/// time; writing the same mapping again is no change. Writes through
+	/// adopts its input's mapping, or the lack of one. After that a changed `clock` is refused; writing
+	/// the same mapping again is no change. Writes through
 	/// [`Reserved::video`](super::Reserved::video) and the codec producers keep their timestamps
 	/// verbatim, so they mean something only under the mapping they were written for.
 	pub fn modify(&mut self, timestamp: moq_net::Timestamp) -> crate::Result<Guard<'_, E>> {
@@ -3022,14 +3026,42 @@ mod test {
 		let future = hang::catalog::Clock::new(moq_net::Timestamp::from_secs(future).unwrap()).unwrap();
 		refused(&mut catalog, Some(future));
 
-		// Clearing it, even before anything fixed it.
-		refused(&mut catalog, None);
-		assert_eq!(catalog.current_clock().wall(), own, "nothing re-based");
-
-		// A change once the clock is handed out.
+		// A change once the clock is handed out, clearing it included.
 		let taken = catalog.clock();
 		refused(&mut catalog, Some(an_hour_ago(moq_net::Timescale::MICRO)));
+		refused(&mut catalog, None);
 		assert_eq!(catalog.clock(), taken);
+	}
+
+	/// A derivative of a source with no `sync.clock` clears the producer's host wall clock before
+	/// anything fixes it, and advertises none, on the same timeline. Once fixed, a mapping is refused.
+	#[tokio::test(start_paused = true)]
+	async fn a_cleared_root_clock_before_the_clock_is_fixed_advertises_none() {
+		let _ = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		assert!(catalog.snapshot().sync.clock.is_some());
+		let before = catalog.current_clock();
+
+		catalog
+			.mutate(|c| c.sync.clock = None, catalog.next_timestamp())
+			.unwrap();
+		assert_eq!(catalog.snapshot().sync.clock, None, "no wall is invented");
+		let clock = catalog.clock();
+		assert_eq!(clock.wall(), None);
+		assert_eq!(clock, before, "the timeline is unchanged");
+
+		// Clearing it again is no change; adopting a mapping now is refused.
+		catalog
+			.mutate(|c| c.sync.clock = None, catalog.next_timestamp())
+			.unwrap();
+		let err = catalog
+			.mutate(
+				|c| c.sync.clock = Some(an_hour_ago(moq_net::Timescale::MICRO)),
+				catalog.next_timestamp(),
+			)
+			.unwrap_err();
+		assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err}");
 	}
 
 	/// A host whose wall clock reads before 2020 (booted before NTP sync) publishes its media on the

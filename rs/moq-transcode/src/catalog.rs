@@ -349,6 +349,38 @@ pub(crate) fn inherit(rungs: &mut [Published], source: &VideoConfig) {
 	}
 }
 
+/// The source `sync.clock` the derivative first published under, which a later snapshot cannot move.
+///
+/// Once published, the derivative's catalog refuses a different mapping, and its rungs have already
+/// stamped the source's timestamps under the old one. A source that changes its clock mid-stream
+/// keeps the derivative on the first one: [`pin`](Self::pin) overwrites the snapshot's, so
+/// `populate` never asks the catalog producer to change it.
+#[derive(Default)]
+pub(crate) struct Anchor {
+	/// `Some` once a snapshot was seen; the inner `None` is a source with no clock.
+	clock: Option<Option<hang::catalog::Clock>>,
+	/// The last changed clock warned about, so a repeating snapshot warns once.
+	warned: Option<Option<hang::catalog::Clock>>,
+}
+
+impl Anchor {
+	/// Pin `snapshot` to the clock the first one carried, which the first call records.
+	pub(crate) fn pin(&mut self, snapshot: &mut moq_mux::catalog::hang::Catalog) {
+		let anchored = *self.clock.get_or_insert(snapshot.sync.clock);
+		if snapshot.sync.clock != anchored {
+			if self.warned != Some(snapshot.sync.clock) {
+				tracing::warn!(
+					?anchored,
+					changed = ?snapshot.sync.clock,
+					"source sync.clock changed; the derivative keeps the one it published under"
+				);
+				self.warned = Some(snapshot.sync.clock);
+			}
+			snapshot.sync.clock = anchored;
+		}
+	}
+}
+
 /// Fill the derivative catalog: rung entries plus, when `source_rel` is set,
 /// every source rendition referenced through it (so players fetch those tracks
 /// from the source broadcast directly). Called again on each source catalog
@@ -362,7 +394,7 @@ pub(crate) fn populate(
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
 	// The derivative republishes the child's timeline, so its timestamps only mean something under
-	// the child's wall mapping.
+	// the child's wall mapping, or none when the child has none. See [`Anchor`] for a change.
 	out.sync.clock = source.sync.clock;
 
 	// Display metadata applies to the rungs too (same picture, smaller).
@@ -1009,6 +1041,37 @@ mod tests {
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
 		assert_eq!(out.sync.clock, Some(clock), "a derivative keeps the child's clock");
+	}
+
+	#[test]
+	fn populate_mirrors_a_clockless_child() {
+		let child = moq_mux::catalog::hang::Catalog::<()>::default();
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		out.sync.clock = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1).unwrap()).unwrap());
+		populate(&mut out, &child, &[], None).unwrap();
+		assert_eq!(out.sync.clock, None, "no clock is invented for a child without one");
+	}
+
+	/// The first snapshot's clock, or lack of one, is the one every later snapshot carries.
+	#[test]
+	fn anchor_holds_the_first_clock() {
+		let clock = |micros| Some(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(micros).unwrap()).unwrap());
+		let pinned = |anchor: &mut Anchor, to| {
+			let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
+			snapshot.sync.clock = to;
+			anchor.pin(&mut snapshot);
+			snapshot.sync.clock
+		};
+
+		let mut anchor = Anchor::default();
+		assert_eq!(pinned(&mut anchor, clock(1)), clock(1));
+		assert_eq!(pinned(&mut anchor, clock(1)), clock(1));
+		assert_eq!(pinned(&mut anchor, clock(2)), clock(1));
+		assert_eq!(pinned(&mut anchor, None), clock(1));
+
+		let mut anchor = Anchor::default();
+		assert_eq!(pinned(&mut anchor, None), None);
+		assert_eq!(pinned(&mut anchor, clock(2)), None, "a clockless start stays clockless");
 	}
 
 	/// A derivative joins on the source's interval, whether it lists only its rungs or the source's

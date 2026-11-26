@@ -248,6 +248,15 @@ impl Clock {
 		self.mapped(zero, unmappable)
 	}
 
+	/// This clock without its wall mapping: the same timeline, for a broadcast whose source
+	/// advertises no `sync.clock`, so none is invented.
+	pub(crate) fn unmapped(&self) -> Self {
+		Self {
+			wall: None,
+			..self.clone()
+		}
+	}
+
 	/// A catalog root `clock` in [`TIMESCALE`](Self::TIMESCALE), the units [`wall`](Self::wall)
 	/// reports, so equal mappings compare equal.
 	///
