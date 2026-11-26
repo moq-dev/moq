@@ -68,6 +68,16 @@ impl PartialDecode {
 		}
 	}
 
+	/// Copy the packet into an allocation of its own
+	///
+	/// A datagram is a slice of the receive batch it arrived in, so holding it keeps the whole
+	/// batch alive, however little of it the holder is charged for.
+	pub(crate) fn detach(&mut self) {
+		let position = self.buf.position();
+		self.buf = io::Cursor::new(BytesMut::from(&self.buf.get_ref()[..]));
+		self.buf.set_position(position);
+	}
+
 	/// The underlying partially-decoded packet data
 	pub(crate) fn data(&self) -> &[u8] {
 		self.buf.get_ref()

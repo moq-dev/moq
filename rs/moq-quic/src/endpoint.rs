@@ -277,6 +277,8 @@ impl Endpoint {
 							.checked_add(datagram_len as u64)
 							.is_some_and(|n| n <= config.incoming_buffer_size_total)
 					{
+						let mut event = event;
+						event.detach();
 						incoming_buffer.datagrams.push(event);
 						incoming_buffer.total_bytes += datagram_len as u64;
 						self.all_incoming_buffers_total_bytes += datagram_len as u64;
@@ -460,7 +462,7 @@ impl Endpoint {
 	fn handle_first_packet(
 		&mut self,
 		datagram_len: usize,
-		event: DatagramConnectionEvent,
+		mut event: DatagramConnectionEvent,
 		addresses: FourTuple,
 		buf: &mut Vec<u8>,
 	) -> Option<DatagramEvent> {
@@ -485,6 +487,7 @@ impl Endpoint {
 		// budget bounds memory however large the datagrams are, and the count bounds the slots.
 		if self.cids_exhausted()
 			|| self.incoming_buffers.len() >= server_config.max_incoming
+			|| datagram_len as u64 > server_config.incoming_buffer_size
 			|| self
 				.all_incoming_buffers_total_bytes
 				.checked_add(datagram_len as u64)
@@ -513,6 +516,8 @@ impl Endpoint {
 			)));
 		}
 
+		// The attempt is charged for this datagram's length, so it must not pin the receive batch.
+		event.detach();
 		let mut packet = match event.first_decode.finish(Some(&*crypto.header.remote)) {
 			Ok(packet) => packet,
 			Err(e) => {

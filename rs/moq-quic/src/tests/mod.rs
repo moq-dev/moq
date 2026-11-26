@@ -1322,6 +1322,22 @@ fn first_datagrams_count_toward_the_incoming_byte_budget() {
 	assert_eq!(pair.server.waiting_incoming.len(), 1);
 }
 
+/// An Initial larger than one attempt may hold is dropped, though the shared budget has room.
+#[test]
+fn an_initial_past_the_per_attempt_limit_is_dropped() {
+	let _guard = subscribe();
+	let mut server_config = server_config();
+	server_config.incoming_buffer_size = 1000;
+	let mut pair = Pair::new(endpoint::Config::default(), server_config);
+	pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+
+	pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	assert!(pair.server.waiting_incoming.is_empty());
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+}
+
 /// A retried Initial with a zero-length destination CID has nothing but its four-tuple to match a
 /// retransmit on, which must reach the pending attempt rather than start a second one.
 #[test]
