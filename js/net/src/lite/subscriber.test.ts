@@ -60,7 +60,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
@@ -3604,7 +3603,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 			{ start: answer(version, 0n) },
 			old(1n, 3n),
 			old(4n, 5n),
-			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
+			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.Skip }) },
 			{ drop: new SubscribeDrop({ start: 4n, end: 5n, error: StreamCode.NotFound }) },
 		] satisfies SubscribeResponse[]) {
 			await encodeSubscribeResponse(writer, resp, version);
@@ -3670,11 +3669,11 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 		entry.track.createGroup(5n).finish();
 
 		await send([
-			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
+			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.Skip }) },
 			// A later drop leaves the skip in place.
 			{ drop: new SubscribeDrop({ start: 2n, end: 3n, error: StreamCode.NotFound }) },
 			// Group 5 arrived, so the skip names only 4 and 6.
-			{ skip: new SubscribeSkip({ start: 4n, end: 7n }) },
+			{ drop: new SubscribeDrop({ start: 4n, end: 7n, error: StreamCode.Skip }) },
 		]);
 		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
 		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);

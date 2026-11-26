@@ -199,7 +199,7 @@ test("a gap is returned once, even when a later drop names it again", () =>
 		expect(items(ordered)).toEqual(["group 3"]);
 	}));
 
-test("a skip replaces a gap still waiting, and the rest of the drop stays one", () =>
+test("a skip leaves a gap still waiting, and the drop stays one", () =>
 	withClock(() => {
 		const producer = receivedTrack();
 		const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
@@ -211,7 +211,7 @@ test("a skip replaces a gap still waiting, and the rest of the drop stays one", 
 		drop(producer, 1n, 2n);
 		expect(items(ordered)).toEqual(["gap 1..2 (delivery timeout)", "group 2"]);
 		put(producer, 3n, false);
-		expect(items(ordered)).toEqual(["group 3", "gap 4..5 (delivery timeout)", "gap 7..8 (delivery timeout)"]);
+		expect(items(ordered)).toEqual(["group 3", "gap 4..8 (delivery timeout)"]);
 	}));
 
 test("a cached group the seek passes as stale is a gap", () =>

@@ -1119,6 +1119,9 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(self.conn.receive_window())
 	}
+	fn reliable_reset(&self) -> bool {
+		self.conn.reset_stream_at()
+	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
 		let mut quic = moq_quic::Limits::default();
@@ -1354,6 +1357,20 @@ mod tests {
 			async { crate::quic::web::Request::accept(server).await.unwrap().ok().await },
 		);
 		(client.unwrap(), server.unwrap())
+	}
+
+	/// Both ends advertise RESET_STREAM_AT, so a reset keeps its prefix for the peer's reader,
+	/// which lets a lite-07 publisher account for a reset group by its header alone.
+	#[tokio::test]
+	async fn resets_are_reliable_between_peers_with_reset_stream_at() {
+		use moq_net::transport::poll::Session as _;
+
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			assert!(client.reliable_reset(), "framed: {framed}");
+			assert!(server.reliable_reset(), "framed: {framed}");
+		}
 	}
 
 	/// Out of connection flow control, an open still returns its stream at once and the

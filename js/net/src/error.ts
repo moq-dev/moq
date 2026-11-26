@@ -109,6 +109,8 @@ export const StreamCode = Object.freeze(
 		GroupTooLarge: 0x32 as StreamCode,
 		/** A frame's timedness or timestamp doesn't match its track's timescale. */
 		TimestampMismatch: 0x39 as StreamCode,
+		/** The group start will never be produced (declared skipped, or a discontinuity). */
+		Skip: 0x3a as StreamCode,
 	} as const),
 );
 

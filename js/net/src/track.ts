@@ -872,10 +872,10 @@ type End = {
 	error?: Error;
 	// A received end, declared ahead of the group streams below it that QUIC may deliver in any
 	// order: readers wait for a hole below it to fill, or for the track to close, rather than end
-	// at the boundary with groups still to arrive. Once the subscription feeding the copy ends (see
-	// `hooks.cacheTrack`), nothing is owed and readers end at the boundary. Mirrors the Rust
-	// `End::tail`.
-	tail: boolean;
+	// at the boundary with groups still to arrive. Once the subscription feeding the copy ends
+	// cleanly (`settled`), nothing is owed and readers end at the boundary. `local` on a local
+	// track, which owes no tail. Mirrors the Rust `End::tail`.
+	tail: "local" | "pending" | "settled";
 };
 
 // The wire subscription feeding a received copy, and what it declared. Ending the subscription
@@ -1026,6 +1026,7 @@ let reofferCached: (
 let reofferKeys: (producer: Producer, sink: TrackState, keys: readonly bigint[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+let provenOf: (producer: Producer) => boolean;
 // Take a sink that just became a fetch out of the producer's live aggregate; assigned in its
 // static block.
 let unlive: (producer: Producer, sink: TrackState) => void;
@@ -1056,6 +1057,8 @@ let departedEdge: (producer: Producer) => { key: bigint; latest: Timestamp } | u
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
+// The runs of `[start, end)` outside every cached whole group's span; assigned in its static block.
+let outsideSpans: (producer: Producer, start: bigint, end: bigint) => Run[];
 // The first time the held group at `key` can't place, undefined once it finished, and 0 with none
 // held. Mirrors the Rust `Slot::unplaced_from`; assigned in its static block.
 let unplacedFromAt: (producer: Producer, key: bigint) => bigint | undefined;
@@ -1249,7 +1252,7 @@ function givenUp(
 // received end's tail decides it instead: what it misses below is owed only while the feed may
 // still deliver it. Mirrors the Rust `TrackState::reaches`.
 function reaches(received: bigint, drops: DropSet, end: End, refused: readonly Run[] = []): boolean {
-	if (end.tail) return true;
+	if (end.tail !== "local") return true;
 	const final = finalKey(end.at);
 	if (received >= final) return true;
 	const given: Run[] = [];
@@ -1560,6 +1563,8 @@ export class Producer {
 	// The wire subscription feeding this copy, from `hooks.receiveTrack` until `hooks.cacheTrack`
 	// ends it: only a copy one feeds owes missing groups. Unset on a track's own publisher.
 	#wire?: Wire;
+	// Lite-07: the wire names every start, so a gap waits for it however long that takes.
+	#proven = false;
 	// A copy some wire subscription fed, which knows the live feed only from its upstream's answer,
 	// even between feeds; never set on a track's own publisher.
 	#copy = false;
@@ -1619,8 +1624,11 @@ export class Producer {
 			protects: (entry) => this.#protects(entry),
 			evict: (entry) => {
 				const span = hooks.groupSpan(entry.group);
+				const wholeEnd = hooks.groupWholeEnd(entry.group);
 				this.#evict(entry);
 				this.#uncache(entry, true);
+				if (wholeEnd !== undefined && wholeEnd > entry.group.start + 1n)
+					this.#skipReceived(entry.group.start + 1n, wholeEnd);
 				if (!entry.fetched && span.started && !span.failed) this.#depart(entry, span);
 				this.#evictions++;
 			},
@@ -1818,6 +1826,7 @@ export class Producer {
 			const end = wholeAt(producer, start);
 			return end !== undefined && key < end ? { start, end } : undefined;
 		};
+		outsideSpans = (producer, start, end) => producer.#outsideSpans(start, end);
 		timeAnchors = (producer) => ({
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
@@ -1885,7 +1894,12 @@ export class Producer {
 		hooks.askProducer = (producer, ask) => producer.#ask(ask);
 		hooks.requestProducer = (producer, signal) => producer.#request(signal);
 		hooks.endTrack = (producer, end, error) => producer.#endPending(end, error);
+		hooks.settleTail = (producer) => producer.#settleTail();
 		hooks.tailGrace = (producer) => producer.#grace();
+		hooks.proveTrack = (producer) => {
+			producer.#proven = true;
+		};
+		provenOf = (producer) => producer.#proven;
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
@@ -2030,6 +2044,35 @@ export class Producer {
 		return undefined;
 	}
 
+	// The runs of `[start, end)` outside every cached whole group's span, where a group may still
+	// start: none starts strictly inside one. Mirrors the Rust `TrackState::outside_spans`.
+	#outsideSpans(start: bigint, end: bigint): Run[] {
+		const runs: Run[] = [];
+		const keys = this.#keys;
+		let at = start;
+		while (at < end) {
+			const idx = keyIndex(keys, at);
+			if (idx > 0) {
+				const prev = keys[idx - 1];
+				const prevEnd = wholeAt(this, prev);
+				if (prevEnd !== undefined && prevEnd > at) at = prevEnd;
+			}
+			if (at >= end) break;
+			let next = end;
+			for (let i = keyIndex(keys, at); i < keys.length && keys[i] < end; i++) {
+				const key = keys[i];
+				const keyEnd = wholeAt(this, key);
+				if (keyEnd !== undefined && keyEnd > key + 1n) {
+					next = key + 1n;
+					break;
+				}
+			}
+			if (at < next) runs.push({ start: at, end: next });
+			at = next;
+		}
+		return runs;
+	}
+
 	*#landing(land: Land): Generator<Run & { folds?: Instant }> {
 		if (this.#state.closed.peek() !== undefined) return;
 		let start = land.start;
@@ -2045,13 +2088,13 @@ export class Producer {
 		const declared = this.#state.end.peek()?.at;
 		const end = declared === undefined ? land.end : min(land.end, finalKey(declared));
 		const at = now();
-		const limit = land.grace;
+		const limit = this.#proven ? undefined : land.grace;
 		const drops = this.#state.drops;
 		for (const gap of this.#arrivals.gaps(start, end)) {
-			const folds = gap.since?.saturatingAdd(limit);
+			const folds = limit && gap.since?.saturatingAdd(limit);
 			if (folds !== undefined && at.ge(folds)) continue;
 			for (const open of runGaps(drops.overlapping(gap.start, gap.end), gap.start, gap.end)) {
-				yield { ...open, folds };
+				for (const part of this.#outsideSpans(open.start, open.end)) yield { ...part, folds };
 			}
 		}
 	}
@@ -2071,7 +2114,7 @@ export class Producer {
 		const at = now();
 		const limit = this.#grace();
 		for (const gap of this.#arrivals.gaps(start, end)) {
-			const folds = gap.since?.saturatingAdd(limit);
+			const folds = limit && gap.since?.saturatingAdd(limit);
 			if (folds !== undefined && at.ge(folds)) continue;
 			if (runGaps(settled(gap.start, gap.end), gap.start, gap.end).length > 0) return { folds };
 		}
@@ -3097,7 +3140,7 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		const declared = this.#state.end.peek()?.at;
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
-		this.#declareEnd(end, undefined, false);
+		this.#declareEnd(end, undefined, "local");
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
@@ -3109,7 +3152,7 @@ export class Producer {
 	#endPending(end: Position, error?: Error): void {
 		const declared = this.#state.end.peek();
 		const code = (err?: Error) => (err === undefined ? undefined : toStreamCode(err));
-		const tail = this.#wire !== undefined;
+		const tail = this.#wire !== undefined ? "pending" : "local";
 		if (declared === undefined) {
 			if (this.#state.closed.peek() !== undefined) return;
 			this.#declareEnd(end, error, tail);
@@ -3119,9 +3162,22 @@ export class Producer {
 			if (declared.at.frame !== 0 || end.frame === 0 || finalKey(end) !== declared.at.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
 			}
-			this.#declareEnd(end, error, declared.tail || tail);
+			this.#declareEnd(end, error, declared.tail === "local" ? tail : declared.tail);
 		}
 		this.#owe();
+	}
+
+	// Settle a received copy's pending tail once its subscription finishes cleanly, preserving the
+	// declared end and error even when trailing keys were skipped, dropped, or never asked.
+	#settleTail(): void {
+		const declared = this.#state.end.peek();
+		if (declared?.tail !== "pending") return;
+		const settled: End = { ...declared, tail: "settled" };
+		for (const state of [this.#state, ...this.#sinks]) {
+			state.end.set(settled);
+			state.owed.set(false);
+		}
+		this.#endLargest();
 	}
 
 	// Record that the live feed accounted for `[start, end)`, then fold the gaps that aged out.
@@ -3134,8 +3190,10 @@ export class Producer {
 	}
 
 	// The grace the session's tail uses, from the widest budget the track's subscribers ask for,
-	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is not.
-	#grace(): Duration {
+	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is
+	// not. None on a local track or a copy whose wire names every start.
+	#grace(): Duration | undefined {
+		if (this.#proven || !this.#wire) return undefined;
 		const maxDelay = Duration.millis(this.#requested.maxDelay());
 		const maxAge = this.#state.info.peek()?.maxAge;
 		return grace(maxAge == null ? maxDelay : maxDelay.min(maxAge));
@@ -3144,7 +3202,7 @@ export class Producer {
 	// Tell every reader whether the pending tail still owes a group below the end.
 	#owe(): void {
 		const end = this.#state.end.peek();
-		if (!end?.tail) return;
+		if (end?.tail !== "pending") return;
 		const owed = this.#owes(finalKey(end.at));
 		for (const state of [this.#state, ...this.#sinks]) state.owed.set(owed);
 		this.#endLargest();
@@ -3219,19 +3277,33 @@ export class Producer {
 	}
 
 	#owes(final: bigint): boolean {
-		if (!this.#wire || !this.#state.end.peek()?.tail) return false;
+		if (!this.#wire || this.#state.end.peek()?.tail !== "pending") return false;
 		const feed = this.#feedStart();
 		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
 		// A key the publisher gave up is owed no more. A stale verdict is not receipt: a new
 		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
 		const drops = this.#state.drops;
-		return this.#arrivals.gaps(min(floor, final), final).some((gap) => {
-			const given = drops.overlapping(gap.start, gap.end).filter((run) => run.stale === undefined);
-			return runGaps(given, gap.start, gap.end).length > 0;
-		});
+		const missing = (start: bigint, end: bigint): boolean =>
+			this.#arrivals.gaps(start, end).some((gap) => {
+				const given = drops.overlapping(gap.start, gap.end).filter((run) => run.stale === undefined);
+				return runGaps(given, gap.start, gap.end).length > 0;
+			});
+		const from = min(floor, final);
+		// On a proven copy (lite-07) with active demand ranges, only gaps inside the asked ranges
+		// are owed by the wire: a gap between two disjoint ranges is never named on the wire.
+		const requested = this.#proven ? this.#requested.peek() : undefined;
+		if (requested) {
+			const held = wireHeld(requested);
+			const ranges = placedAsTimes(held.ranges, held.placed);
+			if (ranges.length > 0) {
+				const window = new Window(ranges, this.#state.largest.peek()?.group);
+				return window.runs(from, final).some((run) => missing(run.start, run.end));
+			}
+		}
+		return missing(from, final);
 	}
 
-	#declareEnd(end: Position, error: Error | undefined, tail: boolean): void {
+	#declareEnd(end: Position, error: Error | undefined, tail: End["tail"]): void {
 		const { group, frame } = end;
 		if (typeof group !== "bigint" || group < 0n || !Number.isSafeInteger(frame) || frame < 0) {
 			throw new RangeError(`invalid track end: ${group}/${frame}`);
@@ -3299,7 +3371,7 @@ export class Producer {
 	 */
 	fail(error: Error): Finished {
 		if (this.#state.end.peek() === undefined && this.#state.closed.peek() === undefined)
-			this.#declareEnd({ group: this.#received, frame: 0 }, error, false);
+			this.#declareEnd({ group: this.#received, frame: 0 }, error, "local");
 		return this;
 	}
 
@@ -3333,7 +3405,7 @@ export class Producer {
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
-		if (abort && this.#state.end.peek()?.tail) this.#arrivals.expire(now(), this.#grace());
+		if (abort && this.#state.end.peek()?.tail === "pending") this.#arrivals.expire(now(), this.#grace());
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
@@ -3458,8 +3530,8 @@ type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined 
 
 /**
  * How a reader reported a run, and what its wire was told. Mirrors the Rust `record::Report`:
- * `settled` is a group served, or a drop on a version whose drops are all final, and a skip
- * replaces a drop.
+ * `settled` is a group served, or a drop on a version with no skip. Every report is final: nothing
+ * goes out over a drop.
  *
  * @internal
  */
@@ -3468,12 +3540,6 @@ export interface Reported extends Run {
 }
 
 const sameReport = (a: Reported, b: Reported) => a.kind === b.kind;
-
-// Whether `reported` stops `hole` going out over it: only a skip goes out over a drop, which it
-// replaces. Mirrors the Rust `Report::blocks`.
-function blocksHole(reported: Reported, hole: Hole): boolean {
-	return reported.kind !== "dropped" || !hole.skip;
-}
 
 /**
  * What a lite publisher told its wire about a reader's keys, kept in the reader's own
@@ -4737,7 +4803,9 @@ export class Subscriber {
 					for (const verdict of intersectDrops(this.#adopted, run.start, run.end)) {
 						if (settles(verdict, budget, coverage)) insertRun(gone, verdict.start, verdict.end);
 					}
-					for (const open of runGaps(gone, run.start, run.end)) {
+					for (const open of runGaps(gone, run.start, run.end).flatMap((part) =>
+						outsideSpans(producer, part.start, part.end),
+					)) {
 						let next = open.start;
 						for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
 							const group = timeline[i];
@@ -5054,9 +5122,9 @@ export class Subscriber {
 			const drops = overlapping.filter((run) => settles(run, budget, coverage));
 			const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
 			// A miss this reader gave up on is never wanted again.
-			const opens = runGaps(drops, gap.start, gap.end).flatMap((run) =>
-				runGaps(this.#givenUp, run.start, run.end),
-			);
+			const opens = runGaps(drops, gap.start, gap.end)
+				.flatMap((run) => runGaps(this.#givenUp, run.start, run.end))
+				.flatMap((run) => (producer ? outsideSpans(producer, run.start, run.end) : [run]));
 			for (const open of opens) {
 				if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
 				// Cached under the local floor, which lowering offers again, unless a key-order read
@@ -5491,6 +5559,11 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.mayLand(land);
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
+		};
+		hooks.provenTrack = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.proven();
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && provenOf(producer);
 		};
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription ?? Subscription.default());
@@ -6117,13 +6190,12 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
-	// replacing what it goes out over. Mirrors the Rust `Record::report`.
+	// The first part of `[from, to)` nothing reported already, now reported, with why. Mirrors the
+	// Rust `Record::report`.
 	#reportRun(from: bigint, to: bigint, hole: Hole & { own?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const start = max(from, this.#floor);
 		if (start >= to) return undefined;
-		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
-		const [gap] = runGaps(blocked, start, to);
+		const [gap] = runGaps(this.#reported.overlapping(start, to), start, to);
 		if (!gap) return undefined;
 		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };

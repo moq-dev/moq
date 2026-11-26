@@ -505,6 +505,38 @@ enum Outcome {
 }
 
 /// A track's declared end.
+/// How a declared end waits on lower groups still in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailState {
+	/// Local track: no wire tail; `reaches` waits for the live edge to reach `at`.
+	Local,
+	/// Received copy whose wire subscription is still delivering up to `at`, waiting since the
+	/// recorded instant.
+	Pending(crate::time::Instant),
+	/// Received copy whose wire subscription settled its tail: no further live groups arrive.
+	Settled,
+}
+
+impl TailState {
+	fn pending(self) -> Option<crate::time::Instant> {
+		match self {
+			Self::Pending(at) => Some(at),
+			Self::Local | Self::Settled => None,
+		}
+	}
+
+	fn pending_mut(&mut self) -> Option<&mut crate::time::Instant> {
+		match self {
+			Self::Pending(at) => Some(at),
+			Self::Local | Self::Settled => None,
+		}
+	}
+
+	fn is_received(self) -> bool {
+		matches!(self, Self::Pending(_) | Self::Settled)
+	}
+}
+
 #[derive(Debug)]
 struct End {
 	/// The exclusive end: no frame at or past it exists.
@@ -512,12 +544,10 @@ struct End {
 	/// The error the track ended with at `at`, if it did not end cleanly: a reader reaching
 	/// the end gets it instead of the end of stream, while everything below stays readable.
 	error: Option<Error>,
-	/// On a received copy, when its readers began waiting out the grace for group streams
-	/// below the end that QUIC may deliver in any order: when the end or a start was
-	/// declared, or a group last arrived since. Readers wait for that tail (see
-	/// [`TrackState::tail_deadline`]) rather than end at the boundary with groups still to
-	/// arrive. `None` on a local track, which owes no tail.
-	tail: Option<crate::time::Instant>,
+	/// On a received copy, whether its readers are still waiting out the tail for group streams
+	/// below the end that QUIC may deliver in any order, or the subscription already settled it.
+	/// `Local` on a local track, which owes no tail.
+	tail: TailState,
 	/// Whether the end settled before a write that could reopen it or an abort, or
 	/// `closed()` reported it: every group below it was produced and finished then, so the
 	/// clean end stands for good. Atomic so reporting it latches through a read guard; see
@@ -846,6 +876,10 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
+	// Whether the copy's wire names every start: a lite-07 publisher tells each with a group,
+	// its GROUP_END, a skip, a drop, or the track's end, so no gap is given up for its age.
+	// Another copy gives up a gap once its grace passes, as nothing else may ever name it.
+	proven: bool,
 	// How readers learn where the live feed is; see [`Subscriber::knows_edge`].
 	edge: EdgeSource,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
@@ -1893,6 +1927,12 @@ impl TrackState {
 	fn evict_group(&mut self, key: u64, abort: impl Into<group::Abort>) {
 		let slot = self.uncache(key).expect("a cached group");
 		self.depart(key, &slot);
+		if let Some(end) = slot.end()
+			&& let Some(from) = key.checked_add(1)
+			&& end > from
+		{
+			self.skip_groups(from..end);
+		}
 		slot.abort(abort);
 		self.evicted_groups += 1;
 		let landed = self
@@ -2354,7 +2394,7 @@ impl TrackState {
 		let since = self
 			.outcome
 			.end()
-			.and_then(|end| end.tail)
+			.and_then(|end| end.tail.pending())
 			.map_or(now, |tail| tail.min(now));
 		self.arrivals.account(start..run.end, since);
 		self.bill_arrivals();
@@ -3573,8 +3613,12 @@ impl TrackState {
 	}
 
 	/// How long a missing live group is waited for, from the max delay the track's
-	/// subscribers ask for.
+	/// subscribers ask for: for as long as it takes on a local track or a copy whose wire
+	/// names every start.
 	fn arrival_grace(&self) -> Duration {
+		if self.proven || !self.anchors.received() {
+			return Duration::MAX;
+		}
 		let max_delay = clamp_max_delay(self.subscriptions.lock().max_delay(), self.max_age_bound());
 		ledger::grace(max_delay)
 	}
@@ -4125,7 +4169,8 @@ impl TrackState {
 	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
 	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
 	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
-	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds.
+	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds. A
+	/// copy whose wire names every start waits however long `grace` would have given up.
 	fn may_land(
 		&self,
 		groups: ops::Range<u64>,
@@ -4134,6 +4179,10 @@ impl TrackState {
 		delivered: Option<&Delivered>,
 		waiter: &kio::Waiter,
 	) -> bool {
+		let grace = match self.proven {
+			true => Duration::MAX,
+			false => grace,
+		};
 		self.find_landable(groups, floor, grace, |open, folds| {
 			if delivered.is_some_and(|delivered| delivered.covers(open)) {
 				return None;
@@ -4247,7 +4296,7 @@ impl TrackState {
 
 	/// Restart a received copy's tail grace from `now`, once it is waiting one out.
 	fn refresh_tail(&mut self, now: crate::time::Instant) {
-		if let Some(tail) = self.outcome.end_mut().and_then(|end| end.tail.as_mut()) {
+		if let Some(tail) = self.outcome.end_mut().and_then(|end| end.tail.pending_mut()) {
 			*tail = now;
 		}
 	}
@@ -4259,18 +4308,12 @@ impl TrackState {
 		if !matches!(self.outcome, Outcome::Open) {
 			return Err(Error::Closed);
 		}
-		self.declare(end, error, None, false)
+		self.declare(end, error, TailState::Local, false)
 	}
 
 	/// Declare `end` on an open track, or one whose declared end it refines (the declared end
 	/// already taken out of `outcome`), carrying over that end's `tail` and settling.
-	fn declare(
-		&mut self,
-		end: Position,
-		error: Option<Error>,
-		tail: Option<crate::time::Instant>,
-		settled: bool,
-	) -> Result<()> {
+	fn declare(&mut self, end: Position, error: Option<Error>, tail: TailState, settled: bool) -> Result<()> {
 		let fin = end.final_key().ok_or(coding::BoundsExceeded)?;
 		if let Some(max) = self.max_key
 			&& fin <= max
@@ -4373,11 +4416,11 @@ impl TrackState {
 
 	/// Whether the live edge reached `fin`, counting a gap up to it that was wholly given up
 	/// (skipped or dropped), or a received copy's tail decides it instead: what it still
-	/// misses up to `fin` is waited for only as long as the grace.
+	/// misses up to `fin` is waited for only while the subscription owes it.
 	fn reaches(&self, fin: u64) -> bool {
 		let edge = self.edge();
 		edge >= fin
-			|| self.outcome.end().is_some_and(|end| end.tail.is_some())
+			|| self.outcome.end().is_some_and(|end| end.tail.is_received())
 			|| self.drops.gaps(&(edge..fin)).next().is_none()
 	}
 
@@ -4420,7 +4463,7 @@ impl TrackState {
 	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group
 	/// counts as delivered, and the check costs the same however much is cached.
 	fn tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
-		let active = self.outcome.end()?.tail?;
+		let active = self.outcome.end()?.tail.pending()?;
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
 		// arrivals count. Without a declared start, the first one stands in for it.
@@ -4433,14 +4476,53 @@ impl TrackState {
 				.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
 			return missing.then(|| active.checked_add(grace));
 		}
-		let floor = self.tail_floor();
+		let floor = self.tail_floor().min(fin);
+		let check = |range: ops::Range<u64>| {
+			self.arrivals
+				.gaps(range)
+				.filter(|(gap, _)| self.drops.gaps(gap).next().is_some())
+				.map(|(_, opened)| opened.unwrap_or(active).checked_add(grace))
+				// A gap that is never given up holds the end for good.
+				.reduce(|a, b| a.zip(b).map(|(a, b)| a.max(b)))
+		};
+		// On a proven copy (lite-07) with active demand ranges, only gaps inside the asked
+		// ranges are owed by the wire: a gap between two disjoint ranges is never named on the
+		// wire, so waiting on it would stall forever.
+		if self.proven
+			&& let Some(sub) = self.subscriptions.lock().combined()
+			&& !sub.ranges.is_empty()
+		{
+			let mut deadline: Option<Option<crate::time::Instant>> = None;
+			for range in &sub.ranges {
+				let lo = match range.start {
+					Start::Oldest | Start::Live { .. } => floor,
+					Start::Time(time) => {
+						let placed = self
+							.time_starts
+							.get(&time)
+							.and_then(|reported| reported.containing(time))
+							.and_then(|containing| match containing {
+								Containing::At(start) => Some(start),
+								Containing::Before | Containing::Unknown => None,
+							});
+						placed.unwrap_or(time).max(floor)
+					}
+				};
+				let hi = range.end.map_or(fin, |end| end.saturating_add(1).min(fin));
+				if lo >= hi {
+					continue;
+				}
+				if let Some(next) = check(lo..hi) {
+					deadline = Some(match deadline {
+						Some(prev) => prev.zip(next).map(|(a, b)| a.max(b)),
+						None => next,
+					});
+				}
+			}
+			return deadline;
+		}
 		// Nothing opened the gap above the last arrival, so its grace runs from `active`.
-		self.arrivals
-			.gaps(floor.min(fin)..fin)
-			.filter(|(gap, _)| self.drops.gaps(gap).next().is_some())
-			.map(|(_, opened)| opened.unwrap_or(active).checked_add(grace))
-			// A gap that is never given up holds the end for good.
-			.reduce(|a, b| a.zip(b).map(|(a, b)| a.max(b)))
+		check(floor..fin)
 	}
 
 	/// The lowest key a received copy's tail owes: where the feed starts, or before a
@@ -5765,20 +5847,22 @@ impl Producer {
 	/// [`Self::finish`] through a shared handle, which a session keeps to take the lower
 	/// groups still in flight.
 	///
-	/// On a received copy whose clean end was declared at its live edge, this ends the wait
-	/// for its tail instead: the session has every group stream it will get, so a key below
-	/// the end that never arrived is not coming, as with sparse starts it never existed.
+	/// On a received copy whose end was already declared, this settles the wait for its tail:
+	/// the session has every group stream it will get, preserving the declared boundary and
+	/// error even when trailing keys were skipped, dropped, or never asked.
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
 		let end = Position::group(state.next_key());
-		if let Outcome::Ending(declared) = &state.outcome
-			&& declared.at == end
-			&& declared.error.is_none()
-			&& declared.tail.is_some()
+		if let Outcome::Ending(declared) = &mut state.outcome
+			&& declared.tail.is_received()
 		{
-			let settled = declared.settled();
-			state.outcome = Outcome::Open;
-			return state.declare(end, None, None, settled);
+			declared.tail = TailState::Settled;
+			let fin = declared.at.final_key();
+			state.latch_settled();
+			if let Some(fin) = fin {
+				state.cache.wakes().arrived(0..fin);
+			}
+			return Ok(());
 		}
 		state.set_end(end, None)
 	}
@@ -5832,7 +5916,10 @@ impl Producer {
 		let mut state = self.modify()?;
 		let code = |err: Option<&Error>| err.map(|err| StreamError::from(err).to_code());
 		// A received copy's readers wait out a grace for groups still in flight below its end.
-		let tail = state.anchors.received().then(|| state.cache.pool().now_wall());
+		let tail = match state.anchors.received() {
+			true => TailState::Pending(state.cache.pool().now_wall()),
+			false => TailState::Local,
+		};
 		match std::mem::take(&mut state.outcome) {
 			Outcome::Open => state.declare(end, error, tail, false),
 			Outcome::Ending(declared) if code(declared.error.as_ref()) != code(error.as_ref()) => {
@@ -5846,7 +5933,11 @@ impl Producer {
 			Outcome::Ending(declared)
 				if declared.at.frame == 0 && end.frame != 0 && end.final_key() == Some(declared.at.group) =>
 			{
-				let refined = state.declare(end, error, declared.tail.or(tail), declared.settled());
+				let keep = match declared.tail {
+					TailState::Local => tail,
+					other => other,
+				};
+				let refined = state.declare(end, error, keep, declared.settled());
 				if refined.is_err() {
 					state.outcome = Outcome::Ending(declared);
 				}
@@ -5919,6 +6010,16 @@ impl Producer {
 		if let Ok(mut state) = self.modify() {
 			state.answers_joins = true;
 			state.placing += 1;
+		}
+	}
+
+	/// Have this received copy wait on its wire for every start rather than give a gap up once
+	/// its grace passes: a lite-07 publisher names each one, with a group, its GROUP_END, a skip,
+	/// a drop, or the track's end.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn proven(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.proven = true;
 		}
 	}
 
@@ -6060,8 +6161,8 @@ impl Producer {
 
 	/// Declare that this producer will never produce `groups`: none will arrive, so a reader
 	/// waiting on one moves past it, the declared end does not wait for them, and a relay
-	/// serving this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends
-	/// no reader.
+	/// serving this track forwards the skip (a lite-07 SUBSCRIBE_SKIP). Unlike a drop,
+	/// it ends no reader.
 	///
 	/// This and [`Self::append_group`] are the only sources of a skip: a gap between created
 	/// groups says nothing, since groups may be created out of order, so only the producer
@@ -6798,7 +6899,15 @@ pub struct Requests {
 impl Requests {
 	fn new(name: Arc<str>, state: kio::Producer<TrackState>, alive: Arc<Alive>) -> Self {
 		let fills = state.read().fills.clone();
-		fills.lock().add_handler();
+		let first = {
+			let mut fills = fills.lock();
+			let first = !fills.has_handlers();
+			fills.add_handler();
+			first
+		};
+		if first {
+			state.read().cache.wakes().wake_all();
+		}
 		Self {
 			name,
 			state,
@@ -7571,11 +7680,8 @@ impl Arrivals {
 	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> ArrivalRead<'_> {
 		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
 		let state = self.state.read();
-		let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
-		ArrivalRead {
-			state,
-			grace: ledger::grace(max_delay),
-		}
+		let grace = state.arrival_grace();
+		ArrivalRead { state, grace }
 	}
 }
 
@@ -7910,8 +8016,7 @@ impl Consumer {
 				return Poll::Ready(Ok(None));
 			};
 			let res = state.poll(waiter, |state| {
-				let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
-				let grace = ledger::grace(max_delay);
+				let grace = state.arrival_grace();
 				let now = state.cache.pool().now_wall();
 				let res = state.poll_arrival(key, now, grace, waiter);
 				if res.is_pending() {
@@ -8059,6 +8164,14 @@ impl Consumer {
 				!state.is_closed() && state.read().may_land(groups, floor, grace, delivered, waiter)
 			})
 		})
+	}
+
+	/// Whether this copy's wire names every start; see [`Producer::proven`].
+	pub(super) fn is_proven(&self) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.is_proven();
+		}
+		self.with_state(|state| state.is_some_and(|state| state.read().proven))
 	}
 
 	/// The wall clock this track's cache judges ages by.
@@ -10874,7 +10987,11 @@ impl Cursor {
 			for key in self.seek_pending.range(gap).map(|(key, _)| *key) {
 				left.remove(key..key + 1);
 			}
-			for open in left.iter().filter(|open| !(passes && Self::passes(&state, open))) {
+			for open in left
+				.iter()
+				.flat_map(|open| state.outside_spans(open.clone()))
+				.filter(|open| !(passes && Self::passes(&state, open)))
+			{
 				let read = open.start.max(self.min_key)..open.end.min(self.end_key.unwrap_or(u64::MAX));
 				if !read.is_empty() {
 					return false;
@@ -13117,6 +13234,19 @@ impl Subscriber {
 			Inner::Resume(resume, logical) => {
 				logical.record.untell(range.clone());
 				resume.untell(range);
+			}
+		}
+	}
+
+	/// Rescan the track's recorded drops on the next drop poll, once delivery has widened below
+	/// where an earlier start held drops back.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn rescan_drops(&mut self) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.rescan = true,
+			Inner::Resume(resume, logical) => {
+				logical.record.rescan = true;
+				resume.rescan_drops();
 			}
 		}
 	}
@@ -15528,6 +15658,7 @@ mod test {
 	#[test]
 	fn a_missing_group_uses_the_subscription_grace() {
 		let producer = track_producer("test", None);
+		producer.received();
 		let budget = Duration::from_millis(50);
 		let _sub = producer.subscribe(Subscription::default().with_max(budget));
 		let feed = producer.consume();
@@ -16073,8 +16204,8 @@ mod test {
 	}
 
 	/// A received copy places and ends an ordered read between two groups only on what its feed
-	/// proves: a hole it may still land waits, and the starts between skipped, as a GROUP's
-	/// Previous Start says, place its start at the lower group and end it.
+	/// proves: a hole it may still land waits, and the starts between skipped, as a
+	/// SUBSCRIBE_SKIP says, place its start at the lower group and end it.
 	#[cfg(feature = "async")]
 	#[test]
 	fn a_time_end_between_received_groups_ends_only_once_proven() {
@@ -19408,7 +19539,7 @@ mod test {
 		assert_eq!(start(&mut paused), None, "a group may still start in 1400..=1700");
 		assert_eq!(drain(&mut paused), Vec::<u64>::new(), "reads from the time meanwhile");
 
-		// The publisher names the pause with SUBSCRIBE_SKIP.
+		// The publisher's skip proves the pause empty.
 		producer.skip_groups(1400..2000);
 		assert_eq!(start(&mut paused), Some(1400));
 		write_group(&producer, 2000);
@@ -22881,9 +23012,10 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![3], "past the edge, live");
 		let mut live = producer.subscribe(live_join());
 		assert_eq!(drain(&mut live), vec![3], "the live edge");
-		// 3 moved the live edge, so 2 lands below it: the fetch gets it, no subscription does.
+		// 3 moved the live edge, so 2 lands below it: a replay subscriber with a fill handler asks
+		// for hole 2 on demand, while the live-edge subscription ignores history below 3.
 		assert_eq!(fill(2).await.unwrap().start, 2);
-		assert!(drain(&mut subscriber).is_empty(), "below the edge, history");
+		assert_eq!(drain(&mut subscriber), vec![2], "filled on demand for replay");
 		assert!(drain(&mut live).is_empty(), "below the edge, history");
 	}
 
@@ -26225,11 +26357,11 @@ mod test {
 		assert_eq!(items(&mut ordered), ["group 3", "pending"]);
 	}
 
-	/// A skip replaces a drop still waiting for the groups below it, so the keys it names are
-	/// no gap, and the part of a drop it leaves still is.
+	/// A skip leaves a drop still waiting for the groups below it: every drop is final, and the
+	/// wire carries no skip over one.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_skip_replaces_a_buffered_gap() {
+	fn a_skip_leaves_a_buffered_gap() {
 		let producer = received_producer(None);
 		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
 		put(&producer, 0, None);
@@ -26245,12 +26377,7 @@ mod test {
 		put(&producer, 3, None);
 		assert_eq!(
 			items(&mut ordered),
-			[
-				"group 3",
-				"gap 4..5 (delivery timeout)",
-				"gap 7..8 (delivery timeout)",
-				"pending"
-			]
+			["group 3", "gap 4..8 (delivery timeout)", "pending"]
 		);
 	}
 
@@ -30964,6 +31091,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn cached_backfill_is_owed_to_a_subscriber() {
 		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.received();
 		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
@@ -31644,6 +31772,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn started_late() -> (Producer, Requests, Subscriber) {
 		let mut producer = track_producer("test", Info::timed());
+		producer.received();
 		let dynamic = producer.requests();
 		let subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(2).unwrap();
@@ -34340,6 +34469,7 @@ mod test {
 	fn a_wide_fill_its_handler_left_settles_by_run() {
 		const WIDE: u64 = 1 << 40;
 		let mut producer = track_producer("test", Info::timed());
+		producer.received();
 		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(WIDE).unwrap();
@@ -34638,6 +34768,7 @@ mod test {
 	#[kio::test]
 	async fn dropped_fill_group_fails_its_fetch() {
 		let producer = track_producer("test", Info::timed());
+		producer.received();
 		let dynamic = producer.requests();
 		write_group(&producer, 5);
 		assert!(matches!(drop_through_fill(&producer, &dynamic, true), Error::NotFound));
@@ -37036,41 +37167,6 @@ mod test {
 			.map(|(run, hole)| (run.clone(), hole.clone()))
 			.collect();
 		assert_eq!(drops, [(0..1, Hole::Skip), (2..5, Hole::Skip)]);
-	}
-
-	/// A skip after a drop already reported goes out again, replacing it, while a reader that
-	/// moved past the drop is not handed anything again; one already reported as a skip is
-	/// not reported twice, and a later drop leaves it skipped.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_skip_is_reported_over_a_reported_drop() {
-		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay().with_range(0..));
-		let waiter = kio::Waiter::noop();
-		write_group(&producer, 0);
-		producer.give_up(1..3, Hole::drop(StreamError::Cancel));
-		producer.give_up(4..5, Hole::drop(StreamError::NotFound));
-		write_group(&producer, 5);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((1..3, Hole::drop(StreamError::Cancel)))
-		);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((4..5, Hole::drop(StreamError::NotFound)))
-		);
-		assert!(subscriber.poll_drop(&waiter).is_pending());
-		assert_eq!(drain_groups(&mut subscriber), [5, 0]);
-
-		// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
-		producer.skip_groups(0..5);
-		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..5, Hole::Skip)));
-		assert!(subscriber.poll_drop(&waiter).is_pending());
-		assert!(drain_groups(&mut subscriber).is_empty(), "nothing is delivered again");
-
-		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
-		assert!(subscriber.poll_drop(&waiter).is_pending(), "the skip stands");
-		assert!(producer.state.read().skipped(2));
 	}
 
 	/// An appended first group skips every key below it, down to 0: a time-keyed track's first
@@ -39589,6 +39685,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_hole_below_an_undeclared_start_is_asked_after_a_bounded_grace() {
 		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.received();
 		let dynamic = producer.requests();
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
 		let mut reader = producer.subscribe(Subscription::default().with_max(None).with_range(0..1));
@@ -39605,8 +39702,9 @@ mod test {
 		fill.reject(Error::NotFound);
 		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
 
-		// With no fill handler, the hole is given up once the grace passed.
+		// With no fill handler on a legacy received copy, the hole is given up once the grace passed.
 		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.received();
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
 		let mut reader = producer.subscribe(Subscription::default().with_max(None).with_range(0..1));
 		assert_eq!(read_now(&mut reader, false), None);
@@ -39614,9 +39712,9 @@ mod test {
 		assert_eq!(read_now(&mut reader, false), Some(None));
 	}
 
-	/// A hole below a declared start is asked at once, and a refusal there is held while the
-	/// live feed may still deliver the group late. With nothing bounding the arrival grace the
-	/// hold lasts [`ledger::GRACE`], on a received copy as on a local track, so the read ends.
+	/// A hole below a declared start is asked at once: on a legacy received copy a refusal is held
+	/// for [`ledger::GRACE`] while the live feed may still deliver the group late, whereas on a
+	/// local track the refusal is final at once with no timer.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_refusal_below_the_start_is_held_for_a_bounded_grace() {
@@ -39637,12 +39735,14 @@ mod test {
 				.unwrap();
 			assert_eq!(fill.key(), 0, "received: {received}");
 			fill.reject(Error::NotFound);
-			assert_eq!(
-				read_now(&mut reader, false),
-				None,
-				"received: {received}: may still arrive"
-			);
-			elapse(&producer, ledger::GRACE);
+			if received {
+				assert_eq!(
+					read_now(&mut reader, false),
+					None,
+					"received: {received}: may still arrive"
+				);
+				elapse(&producer, ledger::GRACE);
+			}
 			assert_eq!(read_now(&mut reader, false), Some(None), "received: {received}");
 		}
 	}
@@ -39755,6 +39855,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn an_unfillable_hole_below_the_start_wakes_its_reader() {
 		let (mut producer, _pool) = pooled_producer(1 << 40);
+		producer.received();
 		producer.start_at(10).unwrap();
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
 		let mut reader = producer.subscribe(Subscription::default().with_max(None).with_range(0..1));
@@ -39764,5 +39865,130 @@ mod test {
 		elapse(&producer, ledger::GRACE);
 		assert!(flag.take(), "the hold's end woke the reader");
 		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// On a proven received copy (lite-07) with disjoint ranges, an unasked gap between two
+	/// ranges never holds the declared end open, and finishing the subscription settles the tail
+	/// cleanly or with its declared error.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn disjoint_ranges_on_a_proven_copy_settle_at_end_without_waiting_on_unasked_gap() {
+		for err in [None, Some(Error::App(7))] {
+			let (mut producer, _pool) = pooled_producer(1 << 40);
+			producer.received();
+			producer.proven();
+			let mut sub = producer.subscribe(
+				Subscription::default()
+					.with_order(Order::Ascending)
+					.with_ranges([Range::groups(0..2), Range::groups(10..12)]),
+			);
+			producer.start_at(0).unwrap();
+			for key in [0u64, 1, 10, 11] {
+				producer.create_group(key.into()).unwrap().finish().unwrap();
+			}
+			producer.end_at(Position::group(12), err.clone()).unwrap();
+			for expected in [0, 1, 10, 11] {
+				assert_eq!(read_now(&mut sub, false), Some(Some(expected)));
+			}
+			let end = sub
+				.poll_recv_group(&kio::Waiter::noop())
+				.map(|res| res.map(|opt| opt.map(|group| group.start)));
+			match &err {
+				None => assert!(matches!(end, Poll::Ready(Ok(None))), "clean end: {end:?}"),
+				Some(Error::App(7)) => assert!(matches!(end, Poll::Ready(Err(Error::App(7)))), "err end: {end:?}"),
+				_ => unreachable!(),
+			}
+		}
+	}
+
+	/// On a local track, a fill handler is asked immediately and its refusal is final at once
+	/// with zero clock advance. With no handler, a hole stays owed past [`ledger::GRACE`] until
+	/// created, skipped, ended, or a handler attaches.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn local_track_holes_settle_immediately_with_handler_and_wait_without_timer() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(Subscription::default().with_max(None).with_range(0..1));
+		assert_eq!(read_now(&mut reader, false), None, "fill is asked immediately");
+		let fill = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("local fill handler asked with zero timer")
+			.unwrap();
+		assert_eq!(fill.key(), 0);
+		fill.reject(Error::NotFound);
+		assert_eq!(
+			read_now(&mut reader, false),
+			Some(None),
+			"local refusal is final immediately"
+		);
+
+		// Without a handler, no timer drops the hole; attaching a handler later wakes the reader.
+		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(Subscription::default().with_max(None).with_range(0..1));
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_group(false, &waiter).is_pending());
+		flag.take();
+		elapse(&producer, ledger::GRACE * 10);
+		assert!(!flag.take(), "no grace timer fires on a local track");
+		assert!(reader.poll_group(false, &waiter).is_pending());
+
+		let dynamic = producer.requests();
+		assert!(flag.take(), "attaching a fill handler wakes the parked reader");
+		assert_eq!(read_now(&mut reader, false), None);
+		let fill = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("newly attached handler is asked at once")
+			.unwrap();
+		fill.reject(Error::NotFound);
+		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// A local group finished whole via `finish_at(end)` proves `(start + 1)..end` empty while
+	/// cached and preserves that skip when evicted from the cache.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn local_group_finish_at_skips_its_span_while_cached_and_after_eviction() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.starts_at_keys();
+		let dynamic = producer.requests();
+		let group = producer.create_group(10u64.into()).unwrap();
+		group.finish_at(20).unwrap();
+
+		let mut reader = producer.subscribe(Subscription::default().with_max(None).with_range(10..20));
+		assert_eq!(read_now(&mut reader, false), Some(Some(10)));
+		assert_eq!(
+			read_now(&mut reader, false),
+			Some(None),
+			"whole span 11..20 is skipped without asking a fill"
+		);
+		assert!(dynamic.requested_fill().now_or_never().is_none());
+
+		evict(&producer, 10);
+		let mut after_evict = producer.subscribe(Subscription::default().with_max(None).with_range(10..20));
+		assert_eq!(read_now(&mut after_evict, false), None);
+		let fill = dynamic
+			.requested_fill()
+			.now_or_never()
+			.expect("evicted group 10 is asked")
+			.unwrap();
+		assert!(!fill.is_time_start());
+		assert_eq!(
+			fill.start().group..fill.end(),
+			10..11,
+			"evicting group 10 preserves 11..20 as skipped"
+		);
+		fill.drop_groups(10..11);
+		drop(fill);
+		assert_eq!(
+			read_now(&mut after_evict, false),
+			Some(None),
+			"after dropping 10, skipped 11..20 finishes immediately"
+		);
+		assert!(dynamic.requested_fill().now_or_never().is_none());
 	}
 }

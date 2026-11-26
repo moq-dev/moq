@@ -1600,12 +1600,15 @@ impl Inner {
 	}
 
 	/// Refuse `groups` with `err`, as the source answered, recording them in the track's drops
-	/// as `hole` says, so the later readers it settles do not ask again.
+	/// as `hole` says, so the later readers it settles do not ask again. A time-start lookup
+	/// (`floor.is_some()`) only answers where the time falls and records no drop on the track.
 	fn drop_groups(&self, groups: &RangeSet<u64>, err: Error, hole: super::Hole) {
 		if groups.is_empty() {
 			return;
 		}
-		if let Ok(mut state) = TrackState::modify(&self.state) {
+		if self.floor.is_none()
+			&& let Ok(mut state) = TrackState::modify(&self.state)
+		{
 			for groups in groups.iter() {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
@@ -1715,7 +1718,9 @@ impl Drop for Inner {
 			wanted.iter().flat_map(|run| outcome.resolved.gaps(run)).collect()
 		};
 		if !left.is_empty() && self.result.wanted() {
-			if let Ok(mut state) = TrackState::modify(&self.state) {
+			if self.floor.is_none()
+				&& let Ok(mut state) = TrackState::modify(&self.state)
+			{
 				// Unanswered is a miss downstream, as an explicit `drop_groups` would say.
 				for groups in left.iter() {
 					state.drop_unfed(groups.clone(), super::Hole::drop(StreamError::NotFound));

@@ -225,8 +225,10 @@ struct Accepted {
 /// stream then takes its own.
 #[derive(Default)]
 struct Parked {
-	/// The headers still waiting on the accept, by ticket, in arrival order.
-	waiting: Vec<(u64, lite::Group)>,
+	/// The headers still waiting on the accept, by ticket, in arrival order, each already
+	/// holding its [`Reading`] so its group start is accounted for even if reset or evicted
+	/// while parked.
+	waiting: Vec<(u64, lite::Group, Reading)>,
 	/// What the accept opened for each, until its stream takes it.
 	opened: HashMap<u64, Result<Open, Error>>,
 	next: u64,
@@ -310,14 +312,16 @@ impl TrackEntry {
 		Self::new(Some(Accepted { producer, framing }), tail)
 	}
 
-	/// Park a group stream whose `hdr` arrived before the copy, returning its ticket.
-	fn park(&mut self, hdr: &lite::Group) -> (kio::Consumer<Parked>, u64) {
+	/// Park a group stream whose `hdr` arrived before the copy, opening its [`Reading`] now so
+	/// `hdr.key` is accounted for in the tail even if reset or evicted before `TRACK_INFO` lands.
+	fn park(&mut self, hdr: &lite::Group, now: crate::time::Instant) -> (kio::Consumer<Parked>, u64) {
+		let reading = Reading::open(&self.tail, Some(hdr.key), now);
 		let parked = self.parked.get_or_insert_with(Default::default);
 		let ticket = match parked.write() {
 			Ok(mut state) => {
 				let ticket = state.next;
 				state.next += 1;
-				state.waiting.push((ticket, hdr.clone()));
+				state.waiting.push((ticket, hdr.clone(), reading));
 				ticket
 			}
 			Err(_) => unreachable!("open while the entry holds it"),
@@ -337,7 +341,7 @@ impl TrackEntry {
 		};
 		let opened: Vec<_> = waiting
 			.into_iter()
-			.map(|(ticket, hdr)| (ticket, self.open(&hdr, version, now)))
+			.map(|(ticket, hdr, reading)| (ticket, self.open_with_reading(&hdr, reading, version, now)))
 			.collect();
 		if let Ok(mut state) = parked.write() {
 			state.opened.extend(opened);
@@ -370,7 +374,7 @@ impl TrackEntry {
 		};
 		let (opened, done) = match parked.write() {
 			Ok(mut state) => {
-				state.waiting.retain(|(waiting, _)| *waiting != ticket);
+				state.waiting.retain(|(waiting, _, _)| *waiting != ticket);
 				let opened = state.opened.remove(&ticket);
 				(opened, state.opened.is_empty() && state.waiting.is_empty())
 			}
@@ -400,6 +404,36 @@ impl TrackEntry {
 		// cache holds the group, so a fetch held for the feed that sees it
 		// accounted also finds it.
 		let reading = Reading::open(&self.tail, Some(hdr.key), now);
+		self.finish_open(hdr, version, received, reading, now)
+	}
+
+	/// Open the group for a parked stream whose [`Reading`] was already opened on arrival.
+	fn open_with_reading(
+		&mut self,
+		hdr: &lite::Group,
+		reading: Reading,
+		version: Version,
+		now: crate::time::Instant,
+	) -> Result<Open, Error> {
+		let Some(Accepted { producer, .. }) = &mut self.copy else {
+			return Err(Error::Cancel);
+		};
+		let group_info = group::Info { start: hdr.key };
+		let received = producer.create_group_at(group_info, hdr.frame_start, 0..0);
+		self.finish_open(hdr, version, received, reading, now)
+	}
+
+	fn finish_open(
+		&mut self,
+		hdr: &lite::Group,
+		version: Version,
+		received: Result<track::Received, Error>,
+		reading: Reading,
+		now: crate::time::Instant,
+	) -> Result<Open, Error> {
+		let Some(Accepted { producer, .. }) = &mut self.copy else {
+			return Err(Error::Cancel);
+		};
 		// A route's first group says where its live feed is, when its answer does
 		// not: even one the cache already holds, as an idle copy asked from its
 		// head gets back. The copy goes live once the cache shows that group.
@@ -420,11 +454,6 @@ impl TrackEntry {
 			}
 		}
 		self.place(hdr, version, received, reading, now)
-	}
-
-	/// Whether the track carries moq-transport object records.
-	fn has_records(&self) -> bool {
-		self.copy.as_ref().is_some_and(|copy| copy.framing.ietf.is_some())
 	}
 
 	/// Open the group of a held stream again, once the copy it waited on failed.
@@ -1395,30 +1424,19 @@ impl GroupRecv {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let header: (bool, lite::Group) = wait!(Header => {
-			// Before the header, which a wait after it would lose.
-			let Poll::Ready(ietf) = self.subscriber.peer_setup.poll_ietf(waiter) else {
-				if self.setup_wait.is_none() {
-					self.setup_wait = Some(SetupWait::new(&self.subscriber.setup_waits));
-					self.reader.set_priority(crate::priority::RECV_PARKED);
-				}
-				// Unread meanwhile, so a reset or an eviction would otherwise go unseen.
-				return self.reader.poll_reset(waiter).map(Err);
-			};
-			if self.setup_wait.take().is_some() {
-				self.reader.set_priority(crate::priority::RECV_UNIDENTIFIED);
-			}
-			self.reader.poll_decode::<lite::Group>(waiter).map_ok(|hdr| (ietf, hdr))
-		})?;
+		// Decode GROUP before waiting on SETUP or TRACK_INFO: `lite::Group` does not depend on
+		// SETUP, and reading it first lets us account for `hdr.key` in the subscription's tail
+		// before parking, so a reset or eviction while parked never drops the group unaccounted.
+		let hdr: lite::Group = wait!(Header => self.reader.poll_decode::<lite::Group>(waiter))?;
 		// A SUBSCRIBE sent alongside its TRACK may be served before the TRACK_INFO that says
 		// how to read it: the stream parks, unread, until the accept opens its group.
 		let parked: Option<(kio::Consumer<Parked>, u64)> = {
 			let mut subs = self.subscriber.subscribes.lock();
-			match subs.get_mut(&header.1.subscribe) {
+			match subs.get_mut(&hdr.subscribe) {
 				Some(entry) if entry.copy.is_none() => {
 					self.park_wait = Some(ParkWait::new(&self.subscriber.park_waits));
 					self.reader.set_priority(crate::priority::RECV_PARKED);
-					Some(entry.park(&header.1))
+					Some(entry.park(&hdr, self.subscriber.runtime.now()))
 				}
 				_ => None,
 			}
@@ -1437,16 +1455,6 @@ impl GroupRecv {
 			None => Poll::Ready(Ok(())),
 		});
 		self.park_wait = None;
-		let ietf: bool = header.0;
-		let hdr: lite::Group = header.1;
-		// Under the `ietf` extension, a track a moq-transport publisher made carries object records.
-		let records: bool = ietf
-			&& self
-				.subscriber
-				.subscribes
-				.lock()
-				.get(&hdr.subscribe)
-				.is_some_and(|entry| entry.has_records());
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -1517,12 +1525,31 @@ impl GroupRecv {
 				}
 			}
 		})?;
+		// Wait for the peer's SETUP only once `hdr.key` is accounted for, to know whether the
+		// `ietf` extension's object records precede each frame.
+		let ietf: bool = wait!(Setup => {
+			match self.subscriber.peer_setup.poll_ietf(waiter) {
+				Poll::Ready(ietf) => {
+					self.setup_wait = None;
+					Poll::Ready(Ok(ietf))
+				}
+				Poll::Pending => {
+					if self.setup_wait.is_none() {
+						self.setup_wait = Some(SetupWait::new(&self.subscriber.setup_waits));
+						self.reader.set_priority(crate::priority::RECV_PARKED);
+					}
+					// Unread meanwhile, so a reset or an eviction would otherwise go unseen.
+					self.reader.poll_reset(waiter).map(Err)
+				}
+			}
+		})?;
 		let Opened {
 			group,
 			track,
 			framing,
 			reading,
 		} = opened;
+		let records: bool = ietf && framing.ietf.is_some();
 		let (priority, order) = track
 			.subscription()
 			.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
@@ -1544,6 +1571,18 @@ impl GroupRecv {
 			if let Poll::Ready(err) = track.poll_aborted(waiter) {
 				Poll::Ready(Err(err))
 			} else if let Poll::Ready(err) = group.handle().poll_aborted(waiter) {
+				// If the entire stream up to FIN already arrived in the transport buffer, the
+				// publisher may already have received the FIN ACK and retired the group stream,
+				// so a STOP_SENDING would not trigger a re-sent skip. Drain locally to extract
+				// GROUP_END without blocking or allocating; if more bytes are still on the wire,
+				// STOP_SENDING reaches the live publisher stream and it re-sends the cut span.
+				if self.subscriber.version.has_group_span()
+					&& let Some(end) = ingest.try_drain_end(&mut self.reader, group.compressed())
+					&& group.check_end(end).is_ok()
+				{
+					reading.account(hdr.key..end, self.subscriber.runtime.now());
+					track.skip_groups(hdr.key.saturating_add(1)..end);
+				}
 				Poll::Ready(Err(err))
 			} else {
 				ingest.poll(&mut self.reader, group, waiter)
@@ -1555,13 +1594,13 @@ impl GroupRecv {
 			// span holds no other start, so its stream accounts for those starts too, and the
 			// track records them skipped, as its own publisher's append did.
 			Ok(end) => {
-				if let Some(end) = end {
-					reading.account(hdr.key..end, self.subscriber.runtime.now());
-				}
+				// Only a GROUP_END the group accepts accounts for its span: one below a frame it
+				// holds is malformed, and names nothing.
 				let ended = group.end(end);
 				if ended.is_ok()
 					&& let Some(end) = end
 				{
+					reading.account(hdr.key..end, self.subscriber.runtime.now());
 					track.skip_groups(hdr.key.saturating_add(1)..end);
 				}
 				ended
@@ -1927,6 +1966,102 @@ impl FrameIngest {
 					// hold the session's other tasks.
 					ready!(budget.poll_yield(waiter));
 				}
+			}
+		}
+	}
+
+	/// Synchronously drain any already-buffered lite-07 frames to extract a trailing `GROUP_END`
+	/// without allocating or blocking. Returns `Some(end)` only when the entire stream up to
+	/// `GROUP_END` + `FIN` is already buffered locally; returns `None` if more bytes are still on
+	/// the wire (in which case stopping the stream sends `STOP_SENDING` to the still-live
+	/// publisher stream).
+	fn try_drain_end<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut Reader<R, Version>,
+		compressed: bool,
+	) -> Option<u64> {
+		if self.records.is_some() || !self.framing.length_first {
+			return None;
+		}
+		let noop = kio::Waiter::noop();
+		let mut max_ts = 0u64;
+		let mut skip = match std::mem::replace(&mut self.phase, IngestPhase::Length) {
+			IngestPhase::Payload { frame } => frame.remaining() as u64,
+			IngestPhase::Admit { header } => {
+				if header.info.timestamp.scale().is_some() {
+					max_ts = max_ts.max(header.info.timestamp.value());
+				}
+				header.info.size
+			}
+			other @ (IngestPhase::Inflated { timestamp, .. } | IngestPhase::Size { timestamp, .. }) => {
+				if let Some(ts) = timestamp {
+					max_ts = max_ts.max(ts.value());
+				}
+				self.phase = other;
+				0
+			}
+			other => {
+				self.phase = other;
+				0
+			}
+		};
+		loop {
+			if skip > 0 {
+				match reader.poll_skip(&noop, &mut skip) {
+					Poll::Ready(Ok(())) => continue,
+					Poll::Ready(Err(_)) | Poll::Pending => return None,
+				}
+			}
+			match &self.phase {
+				IngestPhase::Length => match reader.poll_varint_maybe(&noop) {
+					Poll::Ready(Ok(Some(0))) => self.phase = IngestPhase::GroupEnd,
+					Poll::Ready(Ok(Some(length))) => {
+						self.phase = IngestPhase::Timing { size: Some(length - 1) };
+					}
+					Poll::Ready(Ok(None)) | Poll::Ready(Err(_)) | Poll::Pending => return None,
+				},
+				IngestPhase::Timing { size } => {
+					let size = *size;
+					if self.framing.stamped() {
+						let Poll::Ready(Ok(zz)) = reader.poll_varint(&noop) else {
+							return None;
+						};
+						let next = self.clock.timestamp(crate::coding::varint::unzigzag(zz))?;
+						max_ts = max_ts.max(next);
+					}
+					self.phase = IngestPhase::Inflated { size, timestamp: None };
+				}
+				IngestPhase::Inflated { size, .. } => {
+					let size = (*size)?;
+					if compressed {
+						let Poll::Ready(Ok(_)) = reader.poll_varint(&noop) else {
+							return None;
+						};
+					}
+					skip = size;
+					self.phase = IngestPhase::Length;
+				}
+				IngestPhase::GroupEnd => {
+					let Poll::Ready(Ok(delta)) = reader.poll_varint(&noop) else {
+						return None;
+					};
+					let end = self.clock.end(delta)?;
+					if end < max_ts {
+						return None;
+					}
+					self.phase = IngestPhase::Finished { end };
+				}
+				IngestPhase::Finished { end } => {
+					let end = *end;
+					if end < max_ts {
+						return None;
+					}
+					return match reader.poll_has_more(&noop) {
+						Poll::Ready(Ok(false)) => Some(end),
+						_ => None,
+					};
+				}
+				_ => return None,
 			}
 		}
 	}
@@ -6922,7 +7057,7 @@ mod tests {
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups: 1..3 }),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(1..3, &crate::StreamError::Skip, version)),
 			)
 			.unwrap();
 		serving
@@ -6936,7 +7071,7 @@ mod tests {
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups: 6..6 }),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(6..6, &crate::StreamError::Skip, version)),
 			)
 			.unwrap();
 
@@ -6969,9 +7104,11 @@ mod tests {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, version))
 		};
 		let skip = |first, last: u64| {
-			lite::SubscribeResponse::Skip(lite::SubscribeSkip {
-				groups: first..last + 1,
-			})
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
+				first..last + 1,
+				&crate::StreamError::Skip,
+				version,
+			))
 		};
 		let mut group = serving.serving.create_group(crate::group::Info { start: 5 }).unwrap();
 		group
@@ -8214,10 +8351,11 @@ mod tests {
 			key,
 			frame_start: 0,
 		};
+		let now = crate::time::sim().now();
 		let mut entry = TrackEntry::new(None, Default::default());
-		let (_early_wait, early) = entry.park(&header(1));
-		let (_late_wait, late) = entry.park(&header(2));
-		let (_kept_wait, kept) = entry.park(&header(3));
+		let (_early_wait, early) = entry.park(&header(1), now);
+		let (_late_wait, late) = entry.park(&header(2), now);
+		let (_kept_wait, kept) = entry.park(&header(3), now);
 		entry.withdraw(early, &Error::Cancel);
 
 		let track = crate::track::Producer::new(
@@ -8265,6 +8403,11 @@ mod tests {
 		}
 		assert_eq!(keys, [3]);
 		assert!(entry.parked.is_none(), "released once the last stream took its group");
+		// The withdrawn parked header (key 1) was still accounted in the tail at park time.
+		assert!(
+			entry.tail.read().covers(1..2),
+			"withdrawn parked stream kept its key accounted"
+		);
 	}
 
 	/// TRACK opens its stream before the fetches sent alongside it: TRACK fails fast without
@@ -13213,8 +13356,13 @@ impl TrackServe {
 
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let tail = kio::Producer::new(Tail::new(tail::grace(track::budget(max_age))));
+		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted. Lite-07 names
+		// every start, so its tail waits out no grace.
+		let tail = match self.subscriber.version.has_skip() {
+			true => Tail::proven(),
+			false => Tail::new(tail::grace(track::budget(max_age))),
+		};
+		let tail = kio::Producer::new(tail);
 		if let Some(copy) = &copy
 			&& let Ok(mut tail) = tail.write()
 		{
@@ -14751,6 +14899,10 @@ impl ServeLoop {
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
 		}
+		// Lite-07 names every start, so the copy waits for its wire rather than a grace.
+		if serve.subscriber.version.has_skip() {
+			serving.proven();
+		}
 		// A wire whose ranges carry each live join answers where each starts, which alone
 		// places a reader's.
 		if serve.subscriber.version.has_ranges() {
@@ -15083,9 +15235,10 @@ impl ServeLoop {
 				}
 			}
 			// The publisher will never send these groups, so they
-			// are accounted for without a stream, and a reader of
-			// one still arriving ends with the drop's error now. Every
-			// drop is final on the subscription, a stale one included.
+			// are accounted for without a stream. On lite-07, SKIP names starts never produced:
+			// it ends no reader and replaces any drop of the same groups. Any other drop ends a
+			// reader of one still arriving with the drop's error now. Every drop is final on the
+			// subscription, a stale one included.
 			lite::SubscribeResponse::Drop(dropped) => {
 				let groups = dropped.groups.clone();
 				if groups.is_empty() {
@@ -15094,6 +15247,22 @@ impl ServeLoop {
 				let error = dropped.error(serve.subscriber.version);
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
+				}
+				if serve.subscriber.version.has_skip() && error == crate::StreamError::Skip {
+					// A fill owing them is answered: the source never had them.
+					self.range_fills.refuse(groups.clone(), crate::StreamError::NotFound);
+					// A group that arrived was produced after all, so the skip contradicts it: it
+					// keeps the group, and the session goes on, since the draft requires no more.
+					let cached = self.serving.skip_received(groups);
+					if let Some(first) = cached.iter().next() {
+						tracing::warn!(
+							track = %serve.name,
+							groups = ?dropped.groups,
+							cached = first.start,
+							"protocol error: SUBSCRIBE_DROP(SKIP) names a group that arrived; keeping the group"
+						);
+					}
+					return Ok(());
 				}
 				match serve.subscriber.version.has_skip() && error == crate::StreamError::Old {
 					// Lite-07 judged it stale, recorded under the narrowest max age it may have been
@@ -15119,30 +15288,6 @@ impl ServeLoop {
 					}
 				}
 				self.range_fills.refuse(groups, error);
-			}
-			// Never produced, so nothing is waited for and no reader ends. A skip replaces any
-			// drop of the same groups, stale or final; a reader a drop already ended stays ended.
-			lite::SubscribeResponse::Skip(skipped) => {
-				let groups = skipped.groups.clone();
-				if groups.is_empty() {
-					return Ok(());
-				}
-				if let Ok(mut tail) = active.tail.write() {
-					tail.account(groups.clone(), serve.subscriber.runtime.now());
-				}
-				// A fill owing them is answered: the source never had them.
-				self.range_fills.refuse(groups.clone(), crate::StreamError::NotFound);
-				// A group that arrived was produced after all, so the skip contradicts it: it
-				// keeps the group, and the session goes on, since the draft requires no more.
-				let cached = self.serving.skip_received(groups);
-				if let Some(first) = cached.iter().next() {
-					tracing::warn!(
-						track = %serve.name,
-						groups = ?skipped.groups,
-						cached = first.start,
-						"protocol error: SUBSCRIBE_SKIP names a group that arrived; keeping the group"
-					);
-				}
 			}
 			// OK just resolves the range (the producer already orders
 			// groups).

@@ -1,12 +1,15 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
-import { GRACE, Ledger } from "./ledger.ts";
+import { GRACE, Ledger, MAX_RUNS } from "./ledger.ts";
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
-	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
-	grace?: () => Duration;
+	/**
+	 * How long to wait for a group that cannot be accounted for, or `undefined` to wait until the
+	 * wire accounts for it (lite-07, which names every start). Read each time it is needed.
+	 */
+	grace?: () => Duration | undefined;
 }
 
 /** A group stream a {@link Tail} counts, from its header until it is read to its end. */
@@ -49,7 +52,7 @@ export class Tail {
 	// on them, as the ledger does on a gap.
 	#excused = new Set<object>();
 	#changed = new Signal(0);
-	#grace: () => Duration;
+	#grace: () => Duration | undefined;
 	// Keys a drop named, so a stream whose header the drop overtook can be told from one
 	// whose gap the grace gave up on.
 	#dropped: Run[] = [];
@@ -161,6 +164,7 @@ export class Tail {
 	/** Record `[start, end)` as given up by a drop, accounting for it. */
 	drop(start: bigint, end: bigint): void {
 		insertRun(this.#dropped, start, end);
+		while (this.#dropped.length > MAX_RUNS) this.#dropped.shift();
 		this.#account(start, end);
 	}
 
@@ -202,16 +206,19 @@ export class Tail {
 	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
 	 * never because its track ended. The grace gives up on streams that never arrived, and on
 	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
-	 * publisher's drop already accounted for its group. `limit` caps the grace.
+	 * publisher's drop already accounted for its group. `limit` caps the grace. With no grace,
+	 * only excused streams are given up, after `limit` or {@link GRACE}: every other start
+	 * waits for the wire to account for it.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
-		this.#ledger.expire(now(), this.#grace());
+		const grace = this.#grace();
+		this.#ledger.expire(now(), grace);
 
 		let expired = false;
 		const timer = new AbortController();
-		const grace = this.#grace();
-		void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
+		const wait = grace === undefined ? (limit ?? GRACE) : limit === undefined ? grace : grace.min(limit);
+		void sleep(wait, { signal: timer.signal }).then(
 			() => {
 				expired = true;
 				this.#bump();
@@ -224,7 +231,7 @@ export class Tail {
 					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
 					// not wait another grace for them.
 					this.#excused.clear();
-					return;
+					if (grace !== undefined) return;
 				}
 				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
 				await Signal.race(this.#changed, closed);

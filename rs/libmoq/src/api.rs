@@ -3717,6 +3717,9 @@ pub unsafe extern "C" fn moq_publish_track_group(track: u32, start: *const moq_t
 
 /// Create a raw group with an explicit start.
 ///
+/// Unlike [moq_publish_track_group], this declares nothing below `start` skipped; settle empty
+/// gaps with [moq_publish_group_finish_at] or [moq_publish_track_skip].
+///
 /// Returns a non-zero group handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_track_group_at(track: u32, start: u64) -> i32 {
@@ -4237,6 +4240,18 @@ pub extern "C" fn moq_publish_group_finish(group: u32) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		State::lock().publish.group_finish(group)
+	})
+}
+
+/// Finish a raw group with its exclusive `end` in its track's timescale. No more frames can be
+/// written, and no other group may start before `end`.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_group_finish_at(group: u32, end: u64) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		State::lock().publish.group_finish_at(group, end)
 	})
 }
 

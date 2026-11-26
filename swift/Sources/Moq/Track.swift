@@ -275,6 +275,12 @@ public final class GroupProducer: Sendable {
         try ffi.finish()
     }
 
+    /// Mark the group complete with its exclusive `end` in the track's timescale.
+    /// No other group may start before `end`.
+    public func finish(at end: UInt64) throws {
+        try ffi.finishAt(end: end)
+    }
+
     /// Abort the group with an application error code.
     public func abort(errorCode: UInt16) throws {
         try ffi.abort(errorCode: errorCode)

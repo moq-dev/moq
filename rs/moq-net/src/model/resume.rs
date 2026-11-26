@@ -1103,9 +1103,13 @@ impl Copy {
 		{
 			self.since = Some(self.track.now());
 		}
-		// The copy is let go as a whole, so it waits out the widest budget any group gets.
+		// The copy is let go as a whole, so it waits out the widest budget any group gets. One
+		// whose wire names every start waits for it to, however long that takes.
 		let budget = reader.widest;
-		let grace = ledger::grace(budget);
+		let grace = match self.track.is_proven() {
+			true => Duration::MAX,
+			false => ledger::grace(budget),
+		};
 		// What is under the bound is past the reader's budget a full budget after a newer
 		// group superseded it, landed or not.
 		if self.done.is_none()
@@ -1629,6 +1633,12 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
 		self.reader().untell(range)
+	}
+
+	/// Rescan drops on every copy; see [`track::Subscriber::rescan_drops`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn rescan_drops(&mut self) {
+		self.reader().rescan_drops()
 	}
 
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -3501,6 +3511,15 @@ impl Reader {
 		}
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn rescan_drops(&mut self) {
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.rescan_drops();
+			}
+		}
+	}
+
 	/// Forget `run` as queued, received or not.
 	fn remove_drop(&mut self, run: std::ops::Range<u64>) {
 		self.received.remove(run.clone());
@@ -4678,7 +4697,7 @@ mod test {
 			let mut held = recv(&mut sub);
 			assert_eq!(read(&mut held), Some(b"first".to_vec()));
 
-			let b = copy();
+			let b = received_copy();
 			let dynamic = b.requests();
 			let mut newer = b.create_group(group::Info { start: 1 }).unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
@@ -7685,34 +7704,6 @@ mod test {
 		drop(held);
 	}
 
-	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed
-	/// reader reports it again, as a skip, and only once.
-	#[kio::test]
-	async fn a_resumed_reader_reports_a_skip_over_a_reported_drop() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, HOUR);
-		write(&a, 0);
-		assert_eq!(drain(&mut sub, false), [0]);
-		let holes = |sub: &mut track::Subscriber| {
-			let mut runs = Vec::new();
-			while let Poll::Ready(run) = sub.poll_drop(&kio::Waiter::noop()) {
-				runs.push(run);
-			}
-			runs
-		};
-
-		a.drop_groups(1..3, StreamError::NotFound);
-		assert_eq!(holes(&mut sub), [(1..3, track::Hole::drop(StreamError::NotFound))]);
-		a.skip_groups(1..3);
-		assert_eq!(holes(&mut sub), [(1..3, track::Hole::Skip)]);
-		assert_eq!(holes(&mut sub), []);
-		write(&a, 3);
-		assert_eq!(drain(&mut sub, false), [3]);
-	}
-
 	/// The boundary group the serving copy gave up waits while a copy it replaced may still
 	/// deliver it, and goes out once that copy is past the reader's budget, a budget after
 	/// the serving copy holds a newer group.
@@ -9827,7 +9818,7 @@ mod test {
 			let case = format!("{start}..{end}");
 			let routes = Producer::new();
 			let logical = logical(&routes);
-			let a = copy();
+			let a = received_copy();
 			routes.serve(a.consume());
 			let budget = Duration::from_secs(1);
 			// A live join through group 4, so the copies are given up within its budget.
@@ -9845,7 +9836,7 @@ mod test {
 				write(&a, sequence);
 			}
 			assert_eq!(drain(&mut sub, false), [3, 1, 0], "{case}");
-			let b = copy();
+			let b = received_copy();
 			routes.serve(b.consume());
 			write(&b, 4);
 			assert_eq!(drain(&mut sub, false), [4], "{case}");
@@ -13534,6 +13525,7 @@ mod test {
 					..crate::track::Info::timed()
 				},
 			);
+			b.received();
 			routes.serve(b.consume());
 			let groups = groups
 				.iter()

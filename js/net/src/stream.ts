@@ -161,8 +161,14 @@ export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
 /** A send stream that reports what it sent, as W3C WebTransport's `WebTransportSendStream.getStats()` does. */
 type Stats = WritableStream<Uint8Array> & { getStats(): Promise<{ bytesAcknowledged: number }> };
 
-/** A send stream that can reset while still delivering a prefix, as `@moq/qmux`'s can. */
-type ResetsAt = WritableStream<Uint8Array> & { resetAt(offset: number, reason?: unknown): void };
+/**
+ * A send stream that can reset while still delivering a prefix to the peer's reader, as `@moq/qmux`'s
+ * can once both sides negotiated RESET_STREAM_AT, which `reliableReset` says.
+ */
+type ResetsAt = WritableStream<Uint8Array> & {
+	resetAt(offset: number, reason?: unknown): void;
+	readonly reliableReset: boolean;
+};
 
 export class Stream {
 	reader: Reader;
@@ -719,8 +725,6 @@ export class Writer implements OpenStream {
 	#acknowledges = false;
 	/** Reset by this side, or failed or stopped by the peer, so never acknowledged. */
 	#aborted = false;
-	/** Whether the transport can reset while still delivering a prefix, known at open. */
-	#resetsAt: boolean;
 	/** The bytes every later reset still delivers, once {@link hold} marks them. */
 	#held?: number;
 	/** What this side first reset the stream with, which tells its end apart from a peer's stop. */
@@ -739,7 +743,6 @@ export class Writer implements OpenStream {
 		this.#stream = stream;
 		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
-		this.#resetsAt = typeof (stream as Partial<ResetsAt>).resetAt === "function";
 		this.version = version;
 		// The stream ends once it is finished, or with a failure: a reset, a stop, or the session closing.
 		this.#writer.closed.then(
@@ -788,13 +791,14 @@ export class Writer implements OpenStream {
 	/**
 	 * From now on, every reset of the stream, a preemption included, still delivers the bytes
 	 * written so far. Call it once every write so far resolved. Returns whether the transport
-	 * can: a browser's WebTransport cannot, so its resets may still lose them, and a stream
+	 * can, holding nothing otherwise: a browser's WebTransport cannot, nor can a peer without
+	 * RESET_STREAM_AT, whose plain reset lets it discard bytes it has not read; and a stream
 	 * already reset or stopped, perhaps preempted before this, has lost them already.
 	 */
 	hold(): boolean {
-		if (this.#aborted) return false;
+		if (this.#aborted || (this.#stream as Partial<ResetsAt>).reliableReset !== true) return false;
 		this.#held = this.#written;
-		return this.#resetsAt;
+		return true;
 	}
 
 	/**
@@ -908,7 +912,7 @@ export class Writer implements OpenStream {
 		const coded = withCode(reason, this.version);
 		// Only the first reset reaches the transport, so its reason is the one the stream ends with.
 		this.#reason ??= coded;
-		if (this.#held !== undefined && this.#resetsAt) {
+		if (this.#held !== undefined) {
 			(this.#stream as ResetsAt).resetAt(this.#held, coded);
 		} else {
 			this.#writer.abort(coded).catch(() => void 0);
