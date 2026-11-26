@@ -307,13 +307,17 @@ impl Want {
 
 /// Whether `subscription` reaches the live edge, the newest source group `edge`: some range is
 /// open or ends at or past it. As moq-net judges a copy's feed,
-/// ranges wholly below it read only history, which fills serve. Before any group, every range
-/// does.
+/// ranges wholly below it read only history, which fills serve.
+///
+/// Before any group, only an open range does. A paused source's feed may never deliver a group
+/// to place the edge by, so a bounded range counted as live would hold the serving session its
+/// own fills then wait behind.
 fn reaches_live(subscription: &moq_net::track::Subscription, edge: Option<u64>) -> bool {
 	subscription.ranges.iter().any(|range| match (range.end, edge) {
+		(None, _) => true,
 		// A time end is the last key it reads.
 		(Some(last), Some(edge)) => last >= edge,
-		_ => true,
+		(Some(_), None) => false,
 	})
 }
 
@@ -551,7 +555,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					return Ok(Ended::Finished);
 				}
 				None => {
-					// The feed died mid-stream (source or decode error).
+					// The feed died mid-stream (a source error, or a decoder that would not open).
 					if let Some(output) = current.take() {
 						let _ = output.abort(moq_net::Error::Cancel);
 					}

@@ -131,9 +131,14 @@ impl Pipeline {
 	/// out. Pass an empty slice when every rung is retiring regardless of shape,
 	/// since a name one of them was serving can never come back.
 	///
-	/// Nothing is committed here: a probe that fails leaves the ladder exactly as
-	/// it was. The probes that succeeded before it are remembered regardless,
-	/// since they describe the encoder rather than the ladder.
+	/// A rung whose probe fails is left out: the encoder refusing one geometry, such
+	/// as a sliver below a hardware encoder's minimum, says nothing about the rest.
+	/// Only a ladder whose every fresh probe failed is an error, since that is an
+	/// encoder that opens at no size.
+	///
+	/// Nothing is committed here: an error leaves the ladder exactly as it was. The
+	/// probes that succeeded are remembered regardless, since they describe the
+	/// encoder rather than the ladder.
 	async fn resolve(
 		&mut self,
 		source_name: &str,
@@ -143,6 +148,7 @@ impl Pipeline {
 		let resolved = catalog::resolve_rungs(&self.config.ladder, source_name, source)?;
 
 		let mut published = Vec::new();
+		let mut refused = None;
 		for mut rung in resolved {
 			let reused = carry.iter().find(|other| other.rung.same_shape(&rung)).cloned();
 			let entry = match reused {
@@ -154,12 +160,25 @@ impl Pipeline {
 					entry.optimize_for_latency = source.optimize_for_latency;
 					entry
 				}
-				None => {
-					rung.name = self.names.mint(rung.short_side);
-					self.probe(&rung, source).await?
-				}
+				None => match self.probe(&rung, source).await {
+					// Named only once it serves, so a skipped rung burns no revision.
+					Ok(entry) => {
+						rung.name = self.names.mint(rung.short_side);
+						entry
+					}
+					Err(err) => {
+						tracing::warn!(%err, size = ?rung.size, short_side = rung.short_side, "skipping a rung the encoder refused");
+						refused = Some(err);
+						continue;
+					}
+				},
 			};
 			published.push(Published { rung, entry });
+		}
+		if published.is_empty()
+			&& let Some(err) = refused
+		{
+			return Err(err);
 		}
 		catalog::inherit(&mut published, source);
 		Ok(published)
@@ -399,6 +418,47 @@ mod tests {
 		let mut cursor = active.consume();
 		assert_eq!(cursor.try_next().unwrap().rendition.name(), "video/120p.5");
 		assert!(cursor.try_next().is_none());
+	}
+
+	/// A rung the encoder refuses, here one past openh264's largest picture, is left out rather
+	/// than failing the rung beside it. Only a ladder the encoder refuses whole is an error.
+	#[tokio::test]
+	async fn an_unprobeable_rung_leaves_the_rest_of_the_ladder() {
+		let source = moq_net::broadcast::Info::default().produce();
+		let ladder = |rungs: &[u32]| Config {
+			ladder: Ladder::new(
+				rungs
+					.iter()
+					.map(|side| Rung::new(*side, moq_net::bandwidth::Rate::from_bps(u64::from(*side) * 500))),
+			)
+			.unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let pipeline = |config: Config| {
+			let decoders = catalog::Decoders::new(config.decoder());
+			// 16:1, so the 1024p rung is 16384x1024, past openh264's 36864 macroblocks.
+			Pipeline::new(
+				source.consume(),
+				config,
+				active::Producer::default(),
+				decoders,
+				"video".into(),
+				video(32768, 2048),
+				hang::container::TIMESCALE,
+			)
+		};
+
+		let both = pipeline(ladder(&[1024, 128])).await.unwrap();
+		let names: Vec<_> = both
+			.rungs()
+			.iter()
+			.map(|published| published.rung.name.as_str())
+			.collect();
+		assert_eq!(names, ["video/128p"]);
+		assert!(pipeline(ladder(&[1024])).await.is_err(), "no rung encodes");
 	}
 
 	/// Each rung keys its groups in its source track's timescale, so a ladder following the source
