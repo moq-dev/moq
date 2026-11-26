@@ -4064,7 +4064,8 @@ impl Recover {
 				// Nothing replaced a copy that closed the group, as when its track parks, so its
 				// close stands.
 				(None, Cause::Closed) => return Poll::Ready(Err(Error::NotFound)),
-				(None, Cause::Cut) => return Poll::Ready(Err(Error::Evicted)),
+				(None, Cause::Cut) if staged.is_none() || done => return Poll::Ready(Err(Error::Evicted)),
+				(None, Cause::Cut) => return Poll::Pending,
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				(None, _) => {
 					return match (failed, done) {
@@ -4088,12 +4089,13 @@ impl Recover {
 					Cause::Cut | Cause::Failed(_) => {}
 				}
 			}
-			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
+			let mut res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
 			// A delayed Position-cut FIN arriving while the front stages a replacement route
 			// still polls the serving route so an already-available suffix does not stall,
-			// deferring only a terminal refusal until the staged route splices or withdraws.
+			// deferring only a terminal refusal until the staged route splices or withdraws
+			// while still applying the reader's expiry budget below.
 			if matches!(cause, Cause::Cut) && staged.is_some() && !done && matches!(res, Poll::Ready(Err(_))) {
-				return Poll::Pending;
+				res = Poll::Pending;
 			}
 			// The serving route failed too, or will not fetch the rest while its subscription
 			// will not deliver it either, and no front is left to replace it.
