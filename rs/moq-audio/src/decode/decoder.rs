@@ -114,10 +114,9 @@ impl Decoder {
 	///
 	/// An empty Opus packet marks one lost packet and conceals as much audio as the
 	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
-	/// refused with [`Error::Decode`] before any packet has decoded, since there is
-	/// no length to conceal, and after a SILK or hybrid packet, which the bundled
-	/// decoder cannot conceal. Loss during DTX remains classified as DTX, while loss
-	/// during active audio remains active.
+	/// refused with [`Error::Decode`] before any packet has decoded since the last
+	/// [`reset`](Self::reset), since there is no length to conceal. Loss during DTX
+	/// remains classified as DTX, while loss during active audio remains active.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		self.backend.decode(packet)
 	}
@@ -496,30 +495,93 @@ pub(crate) mod tests {
 		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
 	}
 
-	/// unsafe-libopus 0.2 conceals SILK at full scale, so loss after a SILK packet is refused.
-	#[test]
-	fn opus_refuses_to_conceal_after_silk() {
+	/// A `Voice` encoder at `bitrate`, and the packets it codes from `frames` of a 440 Hz
+	/// sine at 0.35 RMS followed by `silent` frames of silence.
+	fn voice(bitrate: u64, frames: usize, silent: usize) -> (crate::encode::Encoder, Vec<crate::encode::Encoded>) {
 		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
 			kind: Some(crate::encode::Kind::Voice),
-			bitrate: Some(moq_net::bandwidth::Rate::from_bps(12_000)),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(bitrate)),
 			..crate::encode::Config::new(48_000, Layout::Mono)
 		})
 		.unwrap();
-		let pcm: Vec<f32> = (0..encoder.frame_size())
-			.map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5)
+		let size = encoder.frame_size();
+		let packets = (0..frames + silent)
+			.map(|frame| {
+				let pcm: Vec<f32> = (frame * size..(frame + 1) * size)
+					.map(|i| match frame < frames {
+						true => (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5,
+						false => 0.0,
+					})
+					.collect();
+				crate::single(encoder.encode_all(&pcm).unwrap())
+			})
 			.collect();
-		let packet = crate::single(encoder.encode_all(&pcm).unwrap()).payload;
-		assert!(packet[0] >> 3 < 16, "expected a SILK packet");
-		let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
-		crate::single(decoder.decode_all(&packet).unwrap());
-		assert!(!decoder.conceals());
-		// CELT DTX and one-byte frames decode as a loss in the SILK mode before them, so they
-		// conceal nothing either.
-		for packet in [&[0xf8][..], &[0xf8, 0xaa]] {
-			crate::single(decoder.decode_all(packet).unwrap());
+		(encoder, packets)
+	}
+
+	/// SILK and hybrid conceal a loss by fading the audio before it, as C libopus does,
+	/// rather than at full scale; a reset leaves nothing to conceal from.
+	#[test]
+	fn opus_conceals_silk_and_hybrid() {
+		// RFC 6716 §3.1: TOC configurations 0 to 11 are SILK, 12 to 15 hybrid.
+		for (bitrate, modes) in [(12_000, 0..12), (32_000, 12..16)] {
+			let (encoder, packets) = voice(bitrate, 10, 0);
+			let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
+			let mut last = Vec::new();
+			for packet in &packets {
+				assert!(
+					modes.contains(&(packet.payload[0] >> 3)),
+					"{bitrate}: mode {}",
+					packet.payload[0] >> 3
+				);
+				last = crate::single(decoder.decode_all(&packet.payload).unwrap()).samples;
+			}
+			let level = rms(&last);
+			assert!(decoder.conceals());
+
+			let concealed: Vec<f32> = (0..5)
+				.map(|_| rms(&crate::single(decoder.decode_all(&[]).unwrap()).samples))
+				.collect();
+			// Saturated concealment reads about 1.0 RMS.
+			assert!(
+				concealed.iter().all(|&rms| rms < 1.5 * level),
+				"{bitrate}: {level} then {concealed:?}"
+			);
+			assert!(
+				concealed[0] > 0.2 * level,
+				"{bitrate}: concealed silence, {concealed:?}"
+			);
+			assert!(concealed[4] < 0.5 * concealed[0], "{bitrate}: no fade, {concealed:?}");
+
+			decoder.reset().unwrap();
 			assert!(!decoder.conceals());
+			assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
 		}
-		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
+	}
+
+	/// libopus decodes a SILK or hybrid DTX packet as a loss, playing quiet comfort noise
+	/// rather than the full-scale noise a broken concealment would.
+	#[test]
+	fn opus_silk_dtx_is_quiet() {
+		for bitrate in [12_000, 32_000] {
+			let (encoder, packets) = voice(bitrate, 10, 40);
+			let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
+			let mut dtx = 0;
+			for packet in &packets {
+				let decoded = crate::single(decoder.decode_all(&packet.payload).unwrap());
+				if packet.payload.len() <= 2 {
+					dtx += 1;
+					assert!(decoded.activity.is_dtx());
+					let peak = decoded.samples.iter().fold(0f32, |peak, s| peak.max(s.abs()));
+					assert!(
+						peak < 0.05,
+						"{bitrate}: DTX packet {:?} peaks at {peak}",
+						packet.payload
+					);
+				}
+			}
+			assert!(dtx > 10, "{bitrate}: only {dtx} DTX packets");
+		}
 	}
 
 	#[test]

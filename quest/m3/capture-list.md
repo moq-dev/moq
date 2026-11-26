@@ -35,12 +35,14 @@ the picker itself.
 
 Planned 2026-11-09 (maintainer, studio /quest-plan): ✅ m3, since a named
 consumer waits on it (the studio's m0). Consumer: the studio's
-[Add page](https://github.com/moq-dev/studio/blob/main/quest/m0/ux/add.md),
+[Add pictures](https://github.com/moq-dev/studio/blob/main/quest/m0/ux/add-pictures.md),
 through
 [its pin](https://github.com/moq-dev/studio/blob/main/quest/m0/pin-capture-list.md).
 It draws every window as a live thumbnail under its app's icon, grouped by
 app, and each display and camera as a live picture with a device icon, and
 refreshes when a device is plugged in or a window opens.
+Studio's Add landed on today's listing on 2026-11-26, splitting these
+pictures into the quest linked above, which is now the consumer.
 
 Today (`rs/moq-video/src/capture/mod.rs`) the listing is `Camera { id, name }`,
 `Display { id, name, width, height }`, `Window { id, title, app, width,

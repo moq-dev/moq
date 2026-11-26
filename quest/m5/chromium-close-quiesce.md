@@ -46,3 +46,7 @@ every user still on an affected release.
 - Chromium: fixes [issue 589817008](https://issues.chromium.org/issues/589817008)
   and the fix reaches Chrome stable. Check the issue's status and its fixed-in
   milestone, then run the reproduction on that stable release.
+
+## Related
+
+- [A Chromium patch stops a WebTransport close from crashing the tab](/quest/m4/browser-fixes/chromium-close-crash.md) - the fix we write for issue 589817008

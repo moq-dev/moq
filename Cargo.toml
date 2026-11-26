@@ -3,7 +3,6 @@
 # including the separately packaged UniFFI generator.
 members = [
     "rs/*",
-    "rs/kio/macros",
     "rs/moq-auth/fuzz",
     "rs/moq-mux/fuzz",
     "rs/moq-net/fuzz",
@@ -15,8 +14,6 @@ members = [
 ]
 default-members = [
     "rs/bench-harness",
-    "rs/kio",
-    "rs/kio/macros",
     "rs/hang",
     # "rs/libmoq",     # requires C toolchain
     "rs/moq-congestion",
@@ -38,6 +35,7 @@ default-members = [
     "rs/moq-net-tests",
     "rs/moq-mux",
     "rs/moq-nvenc",
+    "rs/moq-opus",
     "rs/moq-pattern",
     "rs/moq-quic",
     "rs/moq-relay",
@@ -124,8 +122,7 @@ indexmap = "2.14.2"
 io-uring = "0.7.15"
 jni = "0.22"
 jsonwebtoken = "11"
-kio = { version = "0.6.2", path = "rs/kio" }
-kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
+kio = { version = "0.6.2", git = "https://github.com/kixel-ai/kio", rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671" }
 libc = "0.2"
 libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
@@ -148,6 +145,7 @@ moq-net = { version = "0.3.10", path = "rs/moq-net" }
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.1.2", path = "rs/moq-nvenc" }
+moq-opus = { version = "0.1.0", path = "rs/moq-opus" }
 moq-pattern = { version = "0.1.2", path = "rs/moq-pattern" }
 # default-features off so each consumer picks its crypto provider.
 moq-quic = { version = "0.1.0", path = "rs/moq-quic", default-features = false }

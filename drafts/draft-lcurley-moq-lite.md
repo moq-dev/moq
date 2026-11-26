@@ -105,7 +105,7 @@ No two Groups of a Track share a start; moq-lite carries no Group sequence numbe
 
 A Group's span is `[start, End)` ({{group-end}}).
 Spans never overlap: no Group starts strictly inside a finished Group's span, and every frame of a lower Group is timestamped before every frame of a higher Group (frames within a Group may reorder; a higher Group's leading frames may fall inside a lower Group's span and resolve to the lower Group).
-A gap between one Group's `End` and the next Group's start is declared skipped with `SUBSCRIBE_SKIP`.
+A gap between one Group's `End` and the next Group's start is declared skipped with `SUBSCRIBE_DROP(SKIP)`.
 Group start `2^64 - 1` is reserved; receiving a Group Stream naming it is a malformed Track.
 
 A Group ends in one of three states:
@@ -194,13 +194,14 @@ Unrecognized codes MUST be treated as unspecified errors (never inferred as auth
 | `0x12` | `MALFORMED_TRACK` | Track content failed to parse. |
 | `0x31` | `CONTROL_TIMEOUT` | Control request timed out waiting for answer. |
 | `0x32` | `GROUP_TOO_LARGE` | Group exceeded publisher cache budget. |
-| `0x33` | `NOT_FOUND` | Requested group, track, or broadcast absent (unskipped gaps use `NOT_FOUND` unless past subscriber budget). |
+| `0x33` | `NOT_FOUND` | Requested group, track, or broadcast absent (a declared gap uses `SKIP`; any other gap uses `NOT_FOUND` unless past subscriber budget). |
 | `0x34` | `OLD` | Group superseded and expired. |
 | `0x35` | `EVICTED` | Current group evicted under memory pressure (re-fetchable). |
 | `0x36` | `UNROUTABLE` | No route to broadcast, or upstream serving session ended. |
 | `0x37` | `WRONG_SIZE` | Frame payload length disagreed with declared size. |
 | `0x38` | `FRAME_TOO_LARGE` | Frame exceeded receiver payload limit. |
 | `0x39` | `TIMESTAMP_MISMATCH` | Group frame 0 timestamp at or before a lower-start group. |
+| `0x3A` | `SKIP` | Publisher declared it will never produce a Group at these starts ({{subscribe-skip}}); final, ends no reader, and relays cache it. |
 | `0x3B` | `UNAUTHORIZED` | Request outside active authorization scope (session stays up). |
 
 Use `SESSION_CLOSED` when tearing down streams for a closing session, and `UNROUTABLE` when tearing down downstream streams because an upstream session ended.
@@ -224,14 +225,14 @@ Every stream starts with a varint `STREAM_TYPE` ({{stream_type}}).
 
 ### Subscribe {#subscribe-stream}
 Subscriber sends `SUBSCRIBE` followed by zero or more `SUBSCRIBE_UPDATE` messages.
-Publisher replies with one `SUBSCRIBE_START` per Range once its start resolves, `SUBSCRIBE_DROP` / `SUBSCRIBE_SKIP` for undelivered starts, and `SUBSCRIBE_END` once the Track's final boundary is known.
+Publisher replies with one `SUBSCRIBE_START` per Range once its start resolves, `SUBSCRIBE_DROP` for undelivered or skipped starts, and `SUBSCRIBE_END` once the Track's final boundary is known.
 
 - Each Range is answered independently as soon as resolved. A publisher MAY withhold `SUBSCRIBE_START` (and withholds `SUBSCRIBE_DROP`s until the first `SUBSCRIBE_START`) until a matching group resolves it, but MUST answer once no group can resolve a bounded Range or the Track finishes. A Track finishing with zero groups is answered by `SUBSCRIBE_END(Group=0)` alone.
 - Refusals (missing track, ended broadcast, unserved claim) MUST promptly reset the stream with a typed code rather than hang.
 - Immutable track properties come from a concurrent [Track Stream](#track-stream) (subscribers MAY buffer frames until `TRACK_INFO` arrives).
 - Neither `SUBSCRIBE_START` nor `SUBSCRIBE_END` closes the stream: publishers never FIN first, so subscribers can widen Ranges via `SUBSCRIBE_UPDATE` even into an ended Track's history.
 - Subscribers fill multi-group holes by adding Ranges on a subscription (never repeated per-group `FETCH`); Groups already delivered or dropped on a subscription are never reopened by `SUBSCRIBE_UPDATE` and require a new `SUBSCRIBE`.
-- Once satisfied (after tail accounting settles past `SUBSCRIBE_END`: all Group Streams read/reset/dropped and all in-range starts accounted for or grace period elapsed), the subscriber FINs, and the publisher replies with FIN and cancels open Group Streams. Graceful session close MUST wait for subscriber FIN/reset on all Subscribe Streams.
+- Once satisfied (after tail accounting settles past `SUBSCRIBE_END`: all Group Streams read/reset/dropped and all in-range starts arrived, inside a `GROUP_END` span, or named by `SUBSCRIBE_DROP`), the subscriber FINs, and the publisher replies with FIN and cancels open Group Streams. Graceful session close MUST wait for subscriber FIN/reset on all Subscribe Streams.
 
 ### Fetch {#fetch-stream}
 Single HTTP-like request/response for one Group or frame slice (works on both live and ended broadcasts; the only way to read an ended broadcast).
@@ -293,10 +294,12 @@ Each endpoint MAY open one unidirectional Announce Stream (`0x3`) carrying all d
 Opened by a publisher per Group served to a Subscribe Stream: `GROUP`, zero or more `FRAME`s, and `GROUP_END` + `FIN` if finished (or `FIN` alone if closed, or reset if aborted).
 A publisher MUST NOT send `GROUP_END` for an unfinished Group, MUST NOT send two Group Streams for the same Group Start on one subscription, and a subscriber treats bytes after `GROUP_END` as a malformed Track.
 
-A publisher that resets a Group Stream after sending its `GROUP` message MUST still deliver that message: it sends `RESET_STREAM_AT` {{reliable-reset}} with a Reliable Size at the end of the `GROUP` message, or, toward a peer that did not negotiate it, holds the `RESET_STREAM` until the peer acknowledges the `GROUP` message.
+A publisher that resets a Group Stream after sending its `GROUP` message, toward a peer that negotiated `RESET_STREAM_AT` {{reliable-reset}}, SHOULD send it with a Reliable Size at the end of the `GROUP` message.
 The `GROUP` message then accounts for the Group and the reset ends its readers with its error, so the publisher names it in no `SUBSCRIBE_DROP`.
-Without `RESET_STREAM_AT`, a subscriber SHOULD read a Group Stream's `GROUP` message as soon as the stream arrives, since an acknowledged message can still be discarded unread by a reset; one that loses it waits out its grace period for the Group.
-A publisher whose transport can do neither, such as a browser's WebTransport, names each Group whose stream it resets in a `SUBSCRIBE_DROP` with the reset's error instead, as it does a Group whose stream it resets before sending the `GROUP` message.
+A reset after a `GROUP_END` may cut the `GROUP_END`, so the publisher names the starts it accounted for again in `SUBSCRIBE_DROP(SKIP)`.
+Any other reset may lose the `GROUP` message, since a `RESET_STREAM` lets the peer's transport discard data it has not delivered, even data it acknowledged.
+So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT` or over a browser's WebTransport, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
+A subscriber that read the `GROUP` message first already accounted for the Group, and the drop ends its readers with the reset's error.
 
 A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder `FETCH` from the missing frame index).
 Both peers MAY reset a Group Stream at any time without affecting the session.
@@ -825,7 +828,7 @@ Retune {
 Restates `Subscriber Priority`, `Group Order`, and `Wanted Start`; edits live Ranges (retire `Remove` IDs, retune `Max Age` of remaining Live/Joined Ranges without re-resolving, then append new Ranges taking sequential Range IDs).
 Invalid/duplicate Range IDs, retuning a non-Live/Joined Range, leaving zero live Ranges, or exceeding `65,535` bytes for the resulting live Ranges -> `PROTOCOL_VIOLATION`.
 
-Widening Ranges serves newly covered Groups not already delivered or dropped; shrinking sends no drops/skips; updates never reopen dropped Groups.
+Widening Ranges serves newly covered Groups not already delivered or dropped; shrinking sends no drops; updates never reopen dropped Groups.
 `Wanted Start` > publisher's largest start evaluates as a refresh request ({{track-info}}).
 
 ### SUBSCRIBE_START {#subscribe-start}
@@ -869,26 +872,20 @@ SUBSCRIBE_DROP Message {
 }
 ~~~
 
-Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up before their `GROUP` message was sent ([Group Stream](#group-stream)) as aborted, evicted, or expired `OLD`, and `NOT_FOUND` for undeclared gaps.
-For every start in range, a publisher MUST send a Group Stream, cover it inside a `GROUP_END` span, or name it in `SUBSCRIBE_SKIP` or `SUBSCRIBE_DROP`.
+Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up before their `GROUP` message was sent ([Group Stream](#group-stream)) as aborted, evicted, or expired `OLD`, starts it declared it will never produce as `SKIP` ({{subscribe-skip}}), and `NOT_FOUND` for undeclared gaps.
+For every start in range, a publisher MUST send a Group Stream, cover it inside a `GROUP_END` span, or name it in `SUBSCRIBE_DROP`, and SHOULD name a start as soon as it gives it up or skips it.
 A Group Stream the subscriber stopped (`STOP_SENDING`) with `EVICTED` before the publisher's transport acknowledged its `GROUP` message, which the subscriber may have discarded unread, is named in a drop with `EVICTED`; no other stop is, since the subscriber sent it knowing the Group or wanting none of it.
 Dropping a whole held Group names `[start, max(End, start + 1))`.
 
-Drops are final on their subscription and end active readers of affected Groups with `Error Code` (unless another Group Stream already completed the Group).
+Drops are final on their subscription and, for any `Error Code` but `SKIP`, end active readers of affected Groups with it (unless another Group Stream already completed the Group).
+A publisher names each start once, besides the starts of a `GROUP_END` a reset may have cut ([Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
 A relay settles downstream readers with an upstream `OLD` drop only if their `Max Age <=` the narrowest upstream live-join `Max Age` and their Ranges cover every group above the dropped start.
 
-### SUBSCRIBE_SKIP {#subscribe-skip}
-~~~
-SUBSCRIBE_SKIP Message {
-  Type (i) = 0x3,
-  Message Length (i),
-  Group Start (i),
-  Group End (i),          ; exclusive; Group End <= Group Start -> PROTOCOL_VIOLATION
-}
-~~~
-
-Names starts the original publisher declared will never hold a Group (final, error-free, ends no readers; relays forward skips and never invent them).
-A skip overrides any earlier `SUBSCRIBE_DROP` of the same starts (relays still forward the skip, though readers already ended by the drop stay ended); a later drop never overrides a skip; a skip never overrides an already-received Group (ignored).
+#### Skips (`SKIP`) {#subscribe-skip}
+A `SUBSCRIBE_DROP` with `Error Code = SKIP` (`0x3A`) names starts the original publisher declared will never hold a Group: final, ends no readers, and a publisher MUST NOT later create a Group there.
+Relays forward skips and cache them as the answer for later subscriptions covering those starts, but never invent one: a start a relay never received is named `OLD` or `NOT_FOUND`.
+A gap between starts is not a skip on its own (Groups may be created out of order), and a `GROUP_END` already covers a finished Group's span, so a publisher skips only starts no `GROUP_END` covers: a gap between one Group's `End` and the next Group's start, starts below the first Group or after a Group closed without `GROUP_END`, and those of a `GROUP_END` a reset may have cut.
+A skip never overrides an already-received Group (ignored, MAY be logged).
 
 ### FETCH {#fetch}
 ~~~
@@ -1098,12 +1095,13 @@ This document has no IANA actions.
 - Added Tracks Stream (`0x8`: `TRACKS`, `TRACKS_ADD`/`REMOVE`/`FINISH` with `Kind`, `SYNCED`).
 - Added `TRACK_INFO` `Refresh`, `Refresh Interval`, `Compression`, optional `Publisher Max Age`, and scale-less `Timescale = 0`; added `SUBSCRIBE_UPDATE.Wanted Start`.
 - Replaced Group sequence numbers with timestamp `Group Start` (`< 2^61`; `2^64-1` reserved) and added `GROUP_END` (`Payload Length = 0` followed by `End Delta`) with non-overlapping `[start, End)` group spans.
-- Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP`/`SUBSCRIBE_SKIP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
+- Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
 - `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a zigzag `Timestamp Delta` (omitted when scale-less), and optional `Inflated Size`.
 - A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
-- A publisher resets a Group Stream after its `GROUP` message with `RESET_STREAM_AT`, or a `RESET_STREAM` held until the `GROUP` message is acknowledged, and names no such Group in `SUBSCRIBE_DROP`; a publisher whose transport can do neither, such as a browser's WebTransport, still does. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
+- Added stream error code `SKIP` (`0x3A`) on `SUBSCRIBE_DROP` for starts the publisher declared it will never produce: final, ends no reader, and cached by relays. A start nothing accounts for is still owed, so a subscriber waits out no grace period.
+- A publisher that resets a Group Stream with `RESET_STREAM_AT` whose Reliable Size covers the `GROUP` message names no such Group in `SUBSCRIBE_DROP`; any other reset may lose the `GROUP` message, so the publisher names the Group with the reset's error, and a reset that may cut a `GROUP_END` names its inner starts again with `SKIP`. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
 - A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.
 
 ## moq-lite-06

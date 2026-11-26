@@ -65,6 +65,10 @@ route there is the node's marked route, `[marked identity, node]`, whose marked
 hop counts toward the 32.
 
 **Claims.** The destination is a broadcast: one Instance at one path. A claim
+filed at a prefix of the path reaches it lowered, its Above counted from the
+path, so the claims of one prefix tie on precedence wherever each is filed and
+rank as one tier, as `Router::tier` gathers them and the draft's Resolution
+ranks them. A claim
 leads with its precedence (a claim exactly at its path before a broader one shown
 there, then the newer run) and orders, among equal ranks, marks, and lengths, by
 its claimant's Node ID and then the key its holder gives the neighbour that gave
@@ -77,7 +81,7 @@ link against or whose path reaches the longest chain; or a domain step
 (`Claim::over`), which joins an announcer's claim with the settled route there.
 Every step into a node refuses a claim below the best precedence the node knows
 of, reachable or not, so the rank chooses only among claims of that precedence,
-as `closest` does. A claim's path names each relay that handed it on, then the
+as `Router::tier` and `closest` do. A claim's path names each relay that handed it on, then the
 publisher and the broadcast: Rust's chain backward, with the holder in front
 where it holds another node's claim.
 

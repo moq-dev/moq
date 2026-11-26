@@ -2672,6 +2672,25 @@ fn raw_track_sparse_groups_and_known_end() {
 }
 
 #[test]
+fn raw_group_finish_at_sets_end_and_rejects_below_start() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"raw-group-finish-at");
+	let name = b"span";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	let group = id(moq_publish_track_group_at(track, 10));
+	assert_eq!(moq_publish_group_finish_at(group, 20), 0);
+	assert!(moq_publish_group_finish_at(group, 20) < 0);
+
+	let bad = id(moq_publish_track_group_at(track, 30));
+	assert!(moq_publish_group_finish_at(bad, 25) < 0);
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
 fn raw_track_skips_are_final() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"raw-track-skips-are-final");

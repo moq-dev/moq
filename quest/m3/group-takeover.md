@@ -33,7 +33,7 @@ version" read as lite-08:
   the zero.
 - **The pause must not hang on a reset's error code.** Chromium loses a
   reset that lands right after stream data and Firefox loses its code
-  ([browser reset reports](/quest/m4/browser-reset-reports.md)), which is
+  ([Chromium reset fix](/quest/m4/browser-fixes/chromium-reset-before-accept.md)), which is
   why lite-07-wip's draft told a subscriber to pause on any reset without a
   code, and only JS did. Recommended: the publisher says a group is paused
   on the Subscribe Stream, or with the in-band marker, and Rust and JS read

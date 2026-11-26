@@ -242,7 +242,7 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
 - **`TrackConsumer`**. Async iterator of raw groups, in start order.
   - `await .next_group() → GroupConsumer | None`. Start order; what the default iteration yields.
-  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start order. Prefer it when latency matters more than order.
+  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start order; groups already held come in the subscription's group order, newest first unless it asks ascending. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
   - `.info() → TrackInfo`

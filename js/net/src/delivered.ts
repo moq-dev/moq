@@ -74,16 +74,14 @@ export class Delivered {
 	}
 
 	/** The parts of `[start, end)` not handed out, in order. */
-	gaps(start: bigint, end: bigint): { start: bigint; end: bigint }[] {
-		const gaps: { start: bigint; end: bigint }[] = [];
+	*gaps(start: bigint, end: bigint): Generator<{ start: bigint; end: bigint }> {
 		let next = start;
 		for (let index = Math.max(this.#below(start), 0); index < this.#runs.length && next < end; index++) {
 			const [first, last] = this.#runs[index];
-			if (first > next) gaps.push({ start: next, end: min(first, end) });
+			if (first > next) yield { start: next, end: min(first, end) };
 			next = max(next, last + 1n);
 		}
-		if (next < end) gaps.push({ start: next, end });
-		return gaps;
+		if (next < end) yield { start: next, end };
 	}
 
 	/** Count every key below `floor` as handed out. */

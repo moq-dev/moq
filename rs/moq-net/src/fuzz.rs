@@ -230,6 +230,21 @@ impl CanonicalStorage {
 	}
 }
 
+/// A session at its live-edge budget whose every write reclaims, for the edges bench.
+pub struct LiveEdges(crate::model::track::EdgesBench);
+
+impl LiveEdges {
+	/// `quiet` edges holding a `frame`-byte frame nobody read, and one written edge.
+	pub fn new(quiet: usize, frame: usize) -> Self {
+		Self(crate::model::track::EdgesBench::new(quiet, frame))
+	}
+
+	/// Write a `frame`-byte frame to the written edge and read it.
+	pub fn write(&mut self) {
+		self.0.write()
+	}
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),

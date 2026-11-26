@@ -486,6 +486,11 @@ impl poll::Session for Session {
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
 		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
+
+	/// A reset queues behind the prefix it keeps, which the reader still drains.
+	fn reliable_reset(&self) -> bool {
+		true
+	}
 }
 
 /// One direction of a stream: the messages its writer queued for its reader.

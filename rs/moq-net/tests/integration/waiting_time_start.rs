@@ -229,6 +229,47 @@ async fn a_range_before_every_group_reads_past_it() {
 	fixture.serving.abort();
 }
 
+/// An ordered reader at the publisher waits for the history lookup of a time start before
+/// every group held, and reads the group the lookup finds before the later one held.
+#[kio::test]
+async fn a_looked_up_time_start_reads_before_a_held_later_group() {
+	let publisher = origin(1);
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track("value", moq_net::track::Info::default().with_max_age(None))
+		.unwrap();
+	let requests = track.requests();
+	let serving = kio::clock::sim::spawn(async move {
+		while let Ok(fill) = requests.requested_fill().await {
+			if (fill.start().group..fill.end()).contains(&10)
+				&& let Ok(Some(group)) = fill.accept(10, None)
+			{
+				write(group);
+			}
+		}
+	});
+	write(track.create_group(moq_net::group::Info { start: LIVE }).unwrap());
+	let subscription = Subscription::default()
+		.with_max(None)
+		.with_order(Order::Ascending)
+		.with_ranges([
+			Range {
+				start: moq_net::track::Start::Time(10),
+				end: Some(20),
+			},
+			Range {
+				start: moq_net::track::Start::Time(LIVE),
+				end: None,
+			},
+		]);
+	let mut reader = track.subscribe(subscription).ordered();
+	assert_eq!(read(&mut reader, 1).await, [Ok(10)]);
+	serving.abort();
+}
+
 /// A copy holding the groups on either side of a time, from fetches, says nothing of a group
 /// between them: a reader asking from that time starts where the publisher would.
 #[kio::test]

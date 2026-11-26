@@ -599,9 +599,19 @@ struct PlainState {
 	fin: Option<usize>,
 	// The first failure, sticky: every later frame builds on the one that failed.
 	err: Option<Error>,
+	// The first frame each inflate job in flight still needs, which no shed passes: the job
+	// reads its frames back only after the group's guard is released.
+	pins: Vec<usize>,
 	// Why the group released its frames, failing a late inflater rather than billing past
 	// the release.
 	released: Option<Error>,
+}
+
+impl PlainState {
+	/// The lowest frame an inflate job in flight still needs, or none.
+	fn pinned(&self) -> usize {
+		self.pins.iter().copied().min().unwrap_or(usize::MAX)
+	}
 }
 
 impl Plain {
@@ -724,6 +734,25 @@ impl Plain {
 		freed
 	}
 
+	/// Shed the oldest inflated frames a reader took, those ending at or below `read` on the
+	/// group copy's pace scale, as [`GroupState::shed_taken`] does for the slices. Stops short of
+	/// frame `held`, whose slice is still stored, and of every frame an inflate job in flight
+	/// has yet to take.
+	fn shed_taken(&self, read: u64, held: usize) {
+		let mut state = self.lock();
+		while state.base < held.min(state.pinned())
+			&& state
+				.frames
+				.front()
+				.is_some_and(|entry| entry.end != 0 && entry.end <= read)
+		{
+			self.pop(&mut state);
+		}
+		if state.frames.is_empty() {
+			state.frames = VecDeque::new();
+		}
+	}
+
 	/// Whether inflating failed on the group's content, rather than its release.
 	fn malformed(&self) -> bool {
 		let state = self.lock();
@@ -746,9 +775,12 @@ impl Plain {
 struct Inflate {
 	release: Arc<Release>,
 	plain: Arc<Plain>,
+	// The group copy's reader progress, told when inflating lets a reclaim shed more slices.
+	pace: Arc<Pace>,
 	// Local index of the first slice: the copy's inflated length when the read took them.
 	from: usize,
-	// The first frame the read needs, which shedding the inflated copy stops short of.
+	// The first frame the read needs, pinned in `plain` until this job drops, so no shed of
+	// the inflated copy passes it.
 	keep: usize,
 	// Each stored slice, with its declared inflated size.
 	slices: Vec<Entry>,
@@ -761,7 +793,13 @@ impl Inflate {
 	/// Locks per frame, so a release waits on at most one frame's inflation. Call with no
 	/// lock held, since settling the debt takes the track's.
 	fn run(&self, meter: &stats::Meter) {
-		self.inflate(meter);
+		let advanced = self.inflate(meter);
+		// Slices a raw reader took that a taken-frame shed kept for this copy may go now.
+		self.pace.retake();
+		// The inflated copy is shared by every copy of the group, the live edge's too.
+		if advanced {
+			self.pace.decoded();
+		}
 		// The inflated bytes are written like a producer's, so they pay the pool's debt the
 		// same way: a finished track has no writer left to settle it.
 		self.plain.bill.settle();
@@ -770,8 +808,10 @@ impl Inflate {
 	/// [`Self::run`] without settling the pool's debt, so the group's guard may be held.
 	///
 	/// The inflated copy keeps at most [`MAX_CACHE_BYTES`], shedding its oldest frames past
-	/// that, but never one from [`Self::keep`] on.
-	fn inflate(&self, meter: &stats::Meter) {
+	/// that, but never one an inflate job in flight needs, this one's [`Self::keep`] on.
+	/// Returns whether it inflated a frame.
+	fn inflate(&self, meter: &stats::Meter) -> bool {
+		let mut advanced = false;
 		for (index, slice) in (self.from..).zip(&self.slices) {
 			let released = self.release.error.lock().unwrap_or_else(PoisonError::into_inner);
 			if released.is_some() {
@@ -811,7 +851,8 @@ impl Inflate {
 					self.plain.bill.add(cost);
 					state.bytes += cost;
 					state.frames.push_back(entry);
-					while state.bytes > MAX_CACHE_BYTES && state.base < self.keep.min(index) {
+					advanced = true;
+					while state.bytes > MAX_CACHE_BYTES && state.base < state.pinned().min(index) {
 						self.plain.pop(&mut state);
 					}
 					let len = state.base + state.frames.len();
@@ -827,6 +868,7 @@ impl Inflate {
 				}
 			}
 		}
+		advanced
 	}
 
 	/// Inflated local frame `local`, or why it is not.
@@ -836,6 +878,27 @@ impl Inflate {
 			return Err(err.clone());
 		}
 		self.plain.get(local)
+	}
+}
+
+impl Drop for Inflate {
+	fn drop(&mut self) {
+		let held_back = {
+			let mut state = self.plain.lock();
+			if let Some(at) = state.pins.iter().position(|pin| *pin == self.keep) {
+				state.pins.swap_remove(at);
+			}
+			// A reclaim that visited the copy meanwhile left the frames this job pinned, and with
+			// the slices shed there is nothing else to list it for.
+			state.base < state.pinned()
+				&& state
+					.frames
+					.front()
+					.is_some_and(|entry| entry.end != 0 && entry.end <= self.pace.read())
+		};
+		if held_back {
+			self.pace.retake_inflated();
+		}
 	}
 }
 
@@ -1157,6 +1220,50 @@ impl GroupState {
 		}
 	}
 
+	/// Shed the front frames the fastest reader took, those ending at or below `read` on the
+	/// pace scale: a reader on the group loses nothing it has yet to take, though a slower one
+	/// falls off as after any shed. Frames adopted from a head are off that scale, so the shed
+	/// stops at them. So does a started plain copy's inflated prefix: inflating slices to shed
+	/// them would bill the session more than it frees.
+	///
+	/// The plain copy's own front goes with them: each inflated frame whose slice that reader
+	/// took, by the `end` it kept. A long group's tail shed leaves inflated frames past `read`
+	/// to the plain reader owed them, so the slice front does not bound this. A copy whose
+	/// content other copies share leaves them: those readers' progress is not on its scale.
+	fn shed_taken(&mut self, read: u64) {
+		if self.outcome.error().is_some() {
+			return;
+		}
+		let inflated = match &self.flate {
+			Some(flate) => match flate.plain.len.load(Ordering::Acquire) {
+				0 => usize::MAX,
+				len => len,
+			},
+			None => usize::MAX,
+		};
+		let mut end = self.held();
+		while end < inflated
+			&& let Some(entry) = self.entry(end)
+			&& entry.end != 0
+			&& entry.end <= read
+		{
+			end += 1;
+		}
+		self.shed_frames(end, false);
+		if let Some(flate) = &self.flate
+			&& self.content.is_none()
+		{
+			flate.plain.shed_taken(read, self.held());
+		}
+	}
+
+	/// Whether a frame still arriving bills the session: its payload or its header's fields.
+	fn arriving(&self) -> bool {
+		self.partial
+			.as_ref()
+			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
+	}
+
 	/// Whether this copy holds no committed frame.
 	fn is_empty(&self) -> bool {
 		self.front.is_empty() && self.log.base() == self.log.end()
@@ -1254,12 +1361,16 @@ impl GroupState {
 		if from <= last && from < self.held() {
 			return Err(self.outcome.error().cloned().unwrap_or(Error::Evicted));
 		}
+		let release = flate
+			.release
+			.clone()
+			.ok_or_else(|| self.outcome.error().cloned().unwrap_or(Error::Dropped))?;
+		// Under the group's guard, so a shed that takes it sees the pin or finds no job.
+		flate.plain.lock().pins.push(first);
 		Ok(Inflate {
-			release: flate
-				.release
-				.clone()
-				.ok_or_else(|| self.outcome.error().cloned().unwrap_or(Error::Dropped))?,
+			release,
 			plain: flate.plain.clone(),
+			pace: self.pace.clone(),
 			from,
 			keep: first,
 			slices: self.entries(from, last + 1).cloned().collect(),
@@ -1817,6 +1928,9 @@ impl Producer {
 					Arc::new(Plain::new(charge.extra())),
 					charge.extra(),
 				)));
+			}
+			if let Some(report) = cache.report(&charge) {
+				state.pace.report(report);
 			}
 			state.charge = charge;
 			(state.log.reader(), state.pace.clone())
@@ -2875,14 +2989,18 @@ impl Handle {
 			return;
 		};
 		state.shed_all();
-		// Its payload and its header's fields both bill the session.
-		if state
-			.partial
-			.as_ref()
-			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
-		{
+		if state.arriving() {
 			self.commit_abort(state, Abort::Evicted);
 		}
+	}
+
+	/// Shed the frames this copy's fastest reader took, see [`GroupState::shed_taken`]. A copy
+	/// no reader holds keeps the rest: one not yet handed out is still owed downstream.
+	pub(super) fn shed_taken(&self) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		state.shed_taken(self.alive.pace.read());
 	}
 
 	pub(super) fn delivery_size(&self) -> u64 {
@@ -3145,6 +3263,12 @@ impl Handle {
 	/// which hands out a group whose consumer then surfaces the abort.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.alive.fall() != Fall::Live
+	}
+
+	/// Whether the group was aborted only to free its cache, by cache policy or after it
+	/// finished, rather than failed. Reads the mirror, like [`Self::is_aborted`].
+	pub(super) fn is_released(&self) -> bool {
+		self.alive.fall() == Fall::Released
 	}
 
 	/// Why the publisher gave this group up, once it did, rather than cache policy
@@ -4183,7 +4307,6 @@ impl Consumer {
 
 	/// Resolves once the group's outcome is final, wherever this cursor is: `Ok` once
 	/// finished, or the abort error.
-	#[cfg(feature = "async")]
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.cursor.poll(waiter, |state| state.poll_outcome())
 	}
@@ -7659,6 +7782,130 @@ mod test {
 		}
 		let flate = group.handle.state.read().flate.as_ref().unwrap().plain.clone();
 		assert!(flate.lock().bytes >= 1_000 * size_of::<Entry>() as u64);
+	}
+
+	/// A group of four frames whose slices are all inflated, with the pace each frame ends at.
+	/// No reader took any, so nothing is owed to the pace yet.
+	#[cfg(feature = "async")]
+	fn inflated_group(pool: &cache::Pool) -> (Producer, Arc<Plain>, Vec<u64>) {
+		let mut group = compressed_group(pool);
+		for index in 0..4 {
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), verbose(index))
+				.unwrap();
+		}
+		take_slices(&group.handle, 3).run(&stats::Meter::default());
+		let state = group.handle.state.read();
+		let ends = (0..4).map(|index| state.entry(index).unwrap().end).collect();
+		let copy = state.flate.as_ref().unwrap().plain.clone();
+		drop(state);
+		assert_eq!(copy.len.load(Ordering::Acquire), 4, "every slice inflated");
+		(group, copy, ends)
+	}
+
+	/// A taken-frame shed drops the inflated frames of the slices a reader took along with the
+	/// slices, and stops at the first frame that reader has yet to take.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_taken_shed_drops_the_inflated_frames_a_reader_took() {
+		let pool = cache::Pool::unbounded();
+		let (group, plain, ends) = inflated_group(&pool);
+		let billed = plain.bill.size();
+		// Frames 0 and 1 are all that is held of the slices, as after a long group's tail shed.
+		group.handle.state.write().ok().unwrap().shed_frames(2, true);
+		group.handle.state.read().pace.took(ends[0]);
+
+		group.handle.shed_taken();
+		assert_eq!(plain.lock().base, 1, "only the frame its reader took went");
+		assert!(plain.bill.size() < billed, "the inflated frame was billed");
+		assert_eq!(plain.get(1).unwrap(), verbose(1), "an owed frame stayed");
+
+		group.handle.state.read().pace.took(ends[3]);
+		group.handle.shed_taken();
+		let state = plain.lock();
+		assert_eq!(
+			(state.base, state.frames.len()),
+			(4, 0),
+			"every frame a reader took went"
+		);
+		assert_eq!(state.bytes, 0);
+		drop(state);
+		assert!(matches!(plain.get(0), Err(Error::Evicted)));
+		assert_eq!(group.handle.state.read().held(), 4, "the slices went too");
+	}
+
+	/// A copy whose content other copies share leaves the inflated frames alone: a sibling's
+	/// reader, on its own pace scale, may still be owed them, and cannot inflate them again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_taken_shed_leaves_inflated_frames_shared_content_holds() {
+		let pool = cache::Pool::unbounded();
+		let (group, plain, ends) = inflated_group(&pool);
+		group.handle.activate_content().unwrap().unwrap();
+		group.handle.state.read().pace.took(ends[3]);
+
+		group.handle.shed_taken();
+		assert_eq!(plain.lock().base, 0, "a shared inflated copy was shed");
+		assert_eq!(group.handle.state.read().held(), 4, "the slices still went");
+	}
+
+	/// Once a job that pinned frames from a reclaim is done, the edge lists again for them, even
+	/// when every slice they came from is shed and its reader's progress shows nothing new.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_finished_job_relists_the_frames_it_pinned() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(
+			pool.clone(),
+			Default::default(),
+			cache::Edges::new(Some(1 << 30)),
+			kio::Weak::new(),
+		);
+		let mut group = Producer::new(
+			Info::from(0u64),
+			track::Info::default().with_compression(crate::track::Compression::Deflate),
+			cache.clone(),
+		);
+		for index in 0..4 {
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), verbose(index))
+				.unwrap();
+		}
+		// Inflated without telling the session, so only the job's drop can list the edge.
+		take_slices(&group.handle, 3).inflate(&stats::Meter::default());
+		let end = group.handle.state.read().entry(3).unwrap().end;
+		// Taken before the copy is the live edge, so it lists nothing; a reclaim that visited
+		// it meanwhile would have left it unlisted the same way.
+		group.handle.state.read().pace.took(end);
+		group.handle.state.write().ok().unwrap().charge.promote();
+		assert!(!cache.listed());
+
+		let job = take_slices(&group.handle, 2);
+		assert!(!cache.listed(), "a job in flight listed the edge");
+		drop(job);
+		assert!(cache.listed(), "the pinned frames went unreported");
+	}
+
+	/// A taken-frame shed never passes the frames an inflate job in flight has yet to take: the
+	/// job reads them back once the group's guard is released, after its slices were counted
+	/// taken, and a later reader reaches the rest only once the job is done.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_taken_shed_leaves_the_frames_of_a_job_in_flight() {
+		let pool = cache::Pool::unbounded();
+		let (group, plain, ends) = inflated_group(&pool);
+		let job = take_slices(&group.handle, 2);
+		group.handle.state.read().pace.took(ends[3]);
+
+		group.handle.shed_taken();
+		assert_eq!(plain.lock().base, 2, "a frame the job needs went");
+		job.run(&stats::Meter::default());
+		assert_eq!(job.get(2).unwrap(), verbose(2));
+		assert_eq!(job.get(3).unwrap(), verbose(3));
+
+		drop(job);
+		group.handle.shed_taken();
+		assert_eq!(plain.lock().base, 4, "the finished job still pinned its frames");
 	}
 
 	/// A batch of large frames that deflate to almost nothing stays within one tail of

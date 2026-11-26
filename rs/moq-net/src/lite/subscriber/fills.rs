@@ -524,8 +524,9 @@ impl RangeFills {
 		// A run stays asked whole while a fill still owes any of it, so the subscription
 		// changes once as a run is asked and once as it is done, and the streams of its
 		// answered groups keep arriving. One no fill owes stays while any of its streams is
-		// still being read, each group searched for once. The copy's own outcome says so: a
-		// reader's end would ask a flight for what the copy lacks, which nobody here reads.
+		// still being read and someone reads the track, each group searched for once. The
+		// copy's own outcome says so: a reader's end would ask a flight for what the copy
+		// lacks, which nobody here reads.
 		self.reading.retain(|_, group| group.poll_closed(waiter).is_pending());
 		let edge = serving.consume();
 		let mut groups = ask.groups.clone();
@@ -533,6 +534,9 @@ impl RangeFills {
 		for run in self.ask.groups.iter() {
 			if ask.groups.overlaps(run) {
 				groups.insert(run.clone());
+				continue;
+			}
+			if !read {
 				continue;
 			}
 			// Only the groups the cache holds, so a wide run costs what it holds.
@@ -942,15 +946,17 @@ impl Recovery {
 							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
-							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
-						}
-						// Never produced, such as the keys between two sparse group starts: the copy
-						// records the skip, as the subscription itself does, and a fill owing one
-						// is answered rather than asked again.
-						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
-							if !skipped.groups.is_empty() {
-								self.serving.skip_received(skipped.groups.clone());
-								given_up(skipped.groups, Refusal::skipped());
+							let error = dropped.error(version);
+							if version.has_skip() && error == StreamError::Skip {
+								// Never produced, such as the keys between two sparse group starts: the copy
+								// records the skip, as the subscription itself does, and a fill owing one
+								// is answered rather than asked again.
+								if !dropped.groups.is_empty() {
+									self.serving.skip_received(dropped.groups.clone());
+									given_up(dropped.groups, Refusal::skipped());
+								}
+							} else {
+								given_up(dropped.groups.clone(), Refusal::dropped(error));
 							}
 						}
 						// Nothing at or past the track's end will be produced.

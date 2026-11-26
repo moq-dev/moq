@@ -14,8 +14,8 @@ audit): the cut also waits on the routing fixes that audit found. NodeId
 drops Start, whether an origin forwards moves into its config, and moq-relay's
 cluster peers lose `egress`.
 That audit's three m1 fixes (the scoped peer, the route floors, and the
-origin's route rank) have landed; the lite-07 router's half of the rank is
-[router-claim-tier](/quest/m2/router-claim-tier.md).
+origin's route rank) have landed, and so has the lite-07 router's half of the
+rank.
 
 Decided 2026-11-21 (maintainer, /quest-plan of an exhaustive full-codebase
 audit before the `0.22.0` cut, covering both pre-release and new code): the cut
@@ -42,8 +42,9 @@ opened Group Streams, removes `FETCH` and `SUBSCRIBE_SKIP` on lite-07, moves
 `track::Range` across Rust, JS, and all FFI bindings, and adds judged `Max Age`
 to `SUBSCRIBE_DROP(OLD)` (rejected: bugfixes only without wire changes; drop).
 This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
-#9538; non-wire progress and cache-invariant fixes live independently in
-[m1](/quest/m1/subscribe-progress-fixes.md).
+#9538; the non-wire progress and cache-invariant fixes landed separately in
+moq-dev/moq#9564.
+Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what

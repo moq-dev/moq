@@ -8,8 +8,9 @@ The timestamp work split out of the 0.22 draft review lands:
   (`0x40B70`) and each object's Object ID encodes its timestamp
   (`Group ID + Object ID - TIMESTAMP_TIE`, with `TIMESTAMP_TIE` `0x40B72`
   omitted when zero), per draft-lcurley-moq-timestamp-03.
-- moq-lite carries unsigned, non-decreasing `FRAME` timestamp deltas instead
-  of zigzag signed ones, with `GROUP_END`'s delta measured from the last frame.
+- moq-lite carries unsigned `FRAME` timestamp deltas instead of zigzag signed
+  ones, so a Group's timestamps never decrease, with `GROUP_END`'s delta
+  measured from the last frame.
 - First-party encoders emit the `cts` container, so B-frame streams keep their
   presentation times while the transport timestamp stays monotonic.
 
