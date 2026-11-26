@@ -3678,20 +3678,14 @@ impl Reader {
 			.collect();
 		// Kept until a copy places the ranges, but those whose start the resume point raised,
 		// which only the backfill places: only then can the gaps they cover be judged.
-		let floor = match placed {
-			Some(floor) => floor,
-			None if !raised.is_empty() && raised.len() == self.window.unsettled().len() => {
-				self.window.runs(0).next().map_or(0, |run| *run.start())
+		if placed.is_none() && (raised.is_empty() || raised.len() != self.window.unsettled().len()) {
+			// The gaps wait for the other ranges to place, but an owed raised start is asked
+			// now: its backfill places it whatever they wait on, and a later ask finds it.
+			if let (Some(resumed), Some(start)) = (resumed, owed.values().min()) {
+				self.backfill(*start..resumed, true, delivered);
 			}
-			None => {
-				// The gaps wait for the other ranges to place, but an owed raised start is asked
-				// now: its backfill places it whatever they wait on, and a later ask finds it.
-				if let (Some(resumed), Some(start)) = (resumed, owed.values().min()) {
-					self.backfill(*start..resumed, true, delivered);
-				}
-				return;
-			}
-		};
+			return;
+		}
 		if owed.len() < raised.len() {
 			let mut placed = BTreeMap::new();
 			for (key, start) in raised.iter().filter(|(key, _)| !owed.contains_key(key)) {
@@ -3711,6 +3705,9 @@ impl Reader {
 		let Some(resumed) = resumed else {
 			return;
 		};
+		// Placing the covered raised starts may move the floor: read it again. Still unplaced, only
+		// owed raised starts wait, and only they are asked.
+		let floor = self.window().floor();
 		// From the window's floor after a route change, as the JS reader asks. After an edit, from
 		// the lowest start of the ranges it added: the rest were judged when they came. A time
 		// start is asked from its time, and the group holding it below is read as `raised` says.
@@ -3719,10 +3716,10 @@ impl Reader {
 			// Retired since, so nothing new is covered: only an owed raised start is asked.
 			Resumed::Ranges(keys) => (keys.iter())
 				.filter_map(|key| self.mirrored.ranges.get(key))
-				.map(|range| range.time().unwrap_or(floor))
-				.min()
-				.unwrap_or(resumed),
-		};
+				.filter_map(|range| range.time().or(floor))
+				.min(),
+		}
+		.unwrap_or(resumed);
 		let from = from.max(self.groups.0);
 		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
 		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
