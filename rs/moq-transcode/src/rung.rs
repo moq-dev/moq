@@ -393,6 +393,8 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				retiring = true;
 				continue;
 			}
+			// Before attaching a new feed: a source ending may never end the wait for a session.
+			() = ending.fired() => return Ok(Ended::Unfinished),
 		};
 
 		// Attach the meter here rather than at the first frame: it counts nothing
@@ -623,7 +625,7 @@ async fn fetches(
 		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
 	}
 
-	// A rung ending with its source catalog was idle, so what it still owes are fills.
+	// A rung ending with its source catalog has its live path done, so it drains what it owes.
 	if retired || rung.ending.is_fired() {
 		// A consumer that asked for a group before retirement is already waiting on
 		// it, whether or not this loop had reached it yet: the fill queues on the
@@ -676,6 +678,7 @@ fn spawn_fill(
 	limit: Arc<Semaphore>,
 ) {
 	let mut retire = rung.retire.clone();
+	let mut ending = rung.ending.clone();
 	tasks.spawn(async move {
 		let mut last = None;
 		loop {
@@ -683,12 +686,18 @@ fn spawn_fill(
 			// own earlier groups before they are read. The slot is released before waiting on
 			// them, so a reader that stops reading never holds an encoder session.
 			//
-			// Once retired, the track ends only after this drain, so serve what is still owed
-			// without waiting on a reader that may never read again. Each group once: one this
-			// fill left unanswered is not asked for again.
+			// Once retired, or once the source catalog has ended, the track ends only after this
+			// drain, so serve what is still owed without waiting on a reader that may never read
+			// again. Each group once: one this fill left unanswered is not asked for again.
+			let draining = async {
+				tokio::select! {
+					() = retire.fired() => {}
+					() = ending.fired() => {}
+				}
+			};
 			let sequence = tokio::select! {
 				biased;
-				() = retire.fired() => fill.wanted().filter(|sequence| last != Some(*sequence)),
+				() = draining => fill.wanted().filter(|sequence| last != Some(*sequence)),
 				sequence = fill.wanted_changed() => sequence,
 			};
 			let Some(sequence) = sequence else { break };
@@ -1419,8 +1428,22 @@ mod tests {
 	/// are served without waiting for that reader to pick up the last one.
 	#[tokio::test(start_paused = true)]
 	async fn retirement_serves_a_fill_past_a_reader_that_stopped() {
+		drain_past_a_reader_that_stopped(false).await;
+	}
+
+	/// The source catalog ending drains a fill the same way, or the rung would wait on that
+	/// reader before its track could end.
+	#[tokio::test(start_paused = true)]
+	async fn a_finished_catalog_serves_a_fill_past_a_reader_that_stopped() {
+		drain_past_a_reader_that_stopped(true).await;
+	}
+
+	/// Drain a fill whose reader stopped, on retirement or, when `ending`, the catalog's end.
+	async fn drain_past_a_reader_that_stopped(ending: bool) {
 		use std::task::Poll;
-		let (rung, source, retire) = idle_rung();
+		let (mut rung, source, retire) = idle_rung();
+		let (catalog, signal) = Retire::channel();
+		rung.ending = signal;
 		let timed =
 			hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::MILLI);
 		let source_fills = source.create_track("video", timed.clone()).unwrap().requests();
@@ -1467,12 +1490,19 @@ mod tests {
 			"group 8 waits for a reader to pick up group 7"
 		);
 
-		retire.send(true).unwrap();
+		match ending {
+			true => catalog.send(true).unwrap(),
+			false => retire.send(true).unwrap(),
+		}
 		let requested = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
-			.expect("a retired rung serves what its fill still owes")
+			.expect("a draining rung serves what its fill still owes")
 			.unwrap();
 		assert_eq!(requested.start().group, 8);
+		if ending {
+			// The source's media is still there to transcode, which is the drain's business from here.
+			return;
+		}
 		// The source no longer has it. It holds no group to place the gap after it by, and the
 		// drain can't wait for one, so the rest of the fill is refused with it, not named lost.
 		requested.drop_groups(8..9);
