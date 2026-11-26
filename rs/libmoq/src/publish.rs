@@ -1232,9 +1232,9 @@ impl Publish {
 	/// if you want to describe the track in the catalog as well.
 	///
 	/// Errors with `Duplicate` while a live track holds the name, including one whose last
-	/// producer was released while read and whose request handler has not answered its
-	/// renewal, unless that renewal is still queued and `info` is the one the track was
-	/// published with.
+	/// producer was released while read and whose request handler took its renewal. A renewal
+	/// still queued is served by this: with another `info`, its readers end with
+	/// `MalformedTrack` and the new track takes the name.
 	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;

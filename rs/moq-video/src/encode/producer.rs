@@ -179,7 +179,7 @@ impl Producer {
 	/// dropped while read: serve it with the options it was first published with. Its readers
 	/// hold the track info they set, so options that change it (such as the priority a
 	/// [`lower`](Options::lower) rung sets) end the track with
-	/// [`Duplicate`](moq_net::Error::Duplicate) and fail here. Nothing checks the rest: its
+	/// [`MalformedTrack`](moq_net::Error::MalformedTrack) and fail here. Nothing checks the rest: its
 	/// readers also decode with the codec settings they were first given, so keep those too. The
 	/// request names the track, so [`Options::track`] must be `None`. A config this machine can't
 	/// encode rejects the request with [`NotFound`](moq_net::Error::NotFound), and a
@@ -1453,7 +1453,7 @@ mod tests {
 	}
 
 	/// A renewal served with options that change its track info ends the track with
-	/// `Duplicate`, so the producer fails rather than advertise a rendition nothing will carry.
+	/// `MalformedTrack`, so the producer fails rather than advertise a rendition nothing will carry.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
 	async fn a_requested_producer_refuses_a_renewal_it_would_change() {
@@ -1470,9 +1470,9 @@ mod tests {
 		let request = requests.requested_track().await.unwrap();
 		let options = Options::new(config(encoder::Kind::Software, Rate::from_mbps(1)));
 		let refused = Producer::requested(request, catalog.clone(), options).await;
-		assert!(matches!(refused, Err(Error::Net(moq_net::Error::Duplicate))));
+		assert!(matches!(refused, Err(Error::Net(moq_net::Error::MalformedTrack))));
 		assert!(!catalog.snapshot().video.renditions.contains_key("video"));
-		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Duplicate)));
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::MalformedTrack)));
 	}
 
 	/// A rendition the catalog refuses, here a name another producer claims, ends its track

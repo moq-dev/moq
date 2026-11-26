@@ -338,7 +338,7 @@ impl Producer {
 	/// This is how an on-demand publisher serves a track asked for again after its last producer
 	/// dropped while read: serve it with the options it was first published with. Its readers
 	/// hold the track info they set, so options that change it end the track with
-	/// [`Duplicate`](moq_net::Error::Duplicate) and fail here. Nothing checks the rest: its
+	/// [`MalformedTrack`](moq_net::Error::MalformedTrack) and fail here. Nothing checks the rest: its
 	/// readers also decode with the codec settings they were first given, so keep those too. The
 	/// request names the track, so [`Options::track`] must be `None`. A config the codec refuses
 	/// rejects the request with [`NotFound`](moq_net::Error::NotFound), or ends the
@@ -1113,7 +1113,7 @@ mod tests {
 	}
 
 	/// A renewal served with options that change its track info ends the track with
-	/// `Duplicate`, so the producer fails rather than advertise a rendition nothing will carry.
+	/// `MalformedTrack`, so the producer fails rather than advertise a rendition nothing will carry.
 	#[tokio::test]
 	async fn a_requested_producer_refuses_a_renewal_it_would_change() {
 		let input = Input::default();
@@ -1138,9 +1138,9 @@ mod tests {
 
 		let request = requests.requested_track().await.unwrap();
 		let refused = Producer::requested(request, catalog.clone(), input, &options);
-		assert!(matches!(refused, Err(Error::Net(moq_net::Error::Duplicate))));
+		assert!(matches!(refused, Err(Error::Net(moq_net::Error::MalformedTrack))));
 		assert!(!catalog.snapshot().audio.renditions.contains_key("audio"));
-		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Duplicate)));
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::MalformedTrack)));
 	}
 
 	/// A rendition the catalog refuses after the request was accepted, here a name another

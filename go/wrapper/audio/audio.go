@@ -151,7 +151,7 @@ func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Prod
 // NewRequestedProducer opens an audio track on the track a subscriber's request asks for, which
 // names it, so options.Track must be nil. This is how an on-demand publisher serves a track asked
 // for again after its producer was closed while read: pass the options it was first published
-// with. Options that change the track info its readers hold end the track with Duplicate and fail
+// with. Options that change the track info its readers hold end the track with MalformedTrack and fail
 // here; nothing checks the codec settings, which its readers decode with, so keep those too. The
 // request must belong to the catalog's broadcast, and a config that can't be encoded rejects it
 // with NotFound.

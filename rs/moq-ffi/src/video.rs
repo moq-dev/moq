@@ -551,7 +551,7 @@ impl MoqVideoProducer {
 	///
 	/// This is how an on-demand publisher serves a track asked for again after its producer was
 	/// released while read: serve it with the options it was first published with. Options that
-	/// change the track info its readers hold end the track with `Duplicate` and fail here;
+	/// change the track info its readers hold end the track with `MalformedTrack` and fail here;
 	/// nothing checks the codec settings, which its readers decode with, so keep those too. The
 	/// request names the track, so [`MoqVideoProducerOptions::track`] must be `None`, and it
 	/// must belong to the catalog's broadcast. A config this machine can't encode rejects the

@@ -716,7 +716,9 @@ pub unsafe extern "C" fn moq_encode_video(
 /// serves a track asked for again after its handle was freed while read: accept it with the
 /// configuration it was first published with. One that changes the track info its readers hold
 /// ends the track and fails here; nothing checks the codec settings, which its readers decode
-/// with, so keep those too. A configuration this machine can't encode rejects the request.
+/// with, so keep those too. A configuration this machine can't encode rejects the request. A failure before the request is
+/// taken, such as invalid arguments or an unknown allocator, leaves its handle open: retry, or
+/// release it with [moq_track_request_free](crate::moq_track_request_free).
 ///
 /// # Safety
 /// - As [moq_encode_video], for `input`, `output`, and `options`.

@@ -106,7 +106,7 @@ public enum Video {
         ///
         /// This is how an on-demand publisher serves a track asked for again after its producer
         /// was released while read: pass the settings it was first published with. Settings that
-        /// change the track info its readers hold end the track with `Duplicate` and throw here;
+        /// change the track info its readers hold end the track with `MalformedTrack` and throw here;
         /// nothing checks the codec settings, which its readers decode with, so keep those too.
         /// The request must belong to the catalog's broadcast, and a config that can't be encoded
         /// rejects it with `NotFound`.

@@ -6644,6 +6644,9 @@ struct Alive {
 	// `Requests` holds this guard too) isn't reported as an abandoned publisher.
 	published: AtomicBool,
 
+	// Set for a request asking again for a track whose last producer dropped while read.
+	renewal: AtomicBool,
+
 	// Ingress subscription for this track, opened by the tagged producer that claimed
 	// it and closed when this guard drops.
 	stats: OnceLock<stats::Subscription>,
@@ -6663,6 +6666,7 @@ impl Alive {
 			name,
 			state,
 			published: Default::default(),
+			renewal: Default::default(),
 			stats: Default::default(),
 			home: OnceLock::new(),
 			listed: kio::Lock::new(None),
@@ -6708,6 +6712,15 @@ impl Drop for Alive {
 		}
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
+			// Unless it renewed a published track: end that as its producer's drop would have,
+			// so the live edge held for the next producer stops being protected. Without asking
+			// its broadcast again, whose queue may be dropping it under the broadcast's lock.
+			if self.renewal.load(Ordering::Relaxed)
+				&& let Ok(state) = self.state.write()
+				&& matches!(state.outcome, Outcome::Open)
+			{
+				Self::drop_wanted(state, &self.name);
+			}
 			return;
 		}
 		// Decided under the lock a lookup joins the track under: a reader either joins in
@@ -14320,10 +14333,12 @@ impl Request {
 	/// Ask for a track again on the state its last producer left, so the readers still
 	/// waiting on it are served by the producer accepting this.
 	fn renew(name: Arc<str>, state: kio::Producer<TrackState>, home: broadcast::Home) -> Self {
-		Self {
+		let request = Self {
 			renewed: true,
 			..Self::with_state(name, state).homed(home)
-		}
+		};
+		request.alive.renewal.store(true, Ordering::Relaxed);
+		request
 	}
 
 	fn with_state(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
@@ -14467,7 +14482,7 @@ impl Request {
 	/// The name is taken from [`Self::name`]; `info` supplies the remaining knobs
 	/// (`None` for the defaults). A track asked for again because its last producer dropped
 	/// while read must be accepted with the info it was first accepted with, which its
-	/// readers already hold: a different `info` aborts the track with [`Error::Duplicate`],
+	/// readers already hold: a different `info` aborts the track with [`Error::MalformedTrack`],
 	/// so those readers end and a later lookup asks for the track afresh. Such a track also
 	/// keeps the groups its last producer finished, so continue past them, as
 	/// [`Producer::append_group`] does, rather than numbering from zero again. If the track was
@@ -14491,9 +14506,10 @@ impl Request {
 		let open = match self.state.write() {
 			// Its readers, and the peers they forward to, already hold the info the track was
 			// first accepted with, which nothing may change under them. Aborted as a producer
-			// would abort it: a fill answered before this accept may have opened groups.
+			// would abort it: a fill answered before this accept may have opened groups. A cause
+			// every version carries as terminal, so a relay stops rather than asks again.
 			Ok(state) if conflicts => {
-				commit_abort(state, Error::Duplicate, None).abort();
+				commit_abort(state, Error::MalformedTrack, None).abort();
 				false
 			}
 			Ok(mut state) => {
@@ -24694,6 +24710,35 @@ mod test {
 		open.abort(Error::Cancel).unwrap();
 		next.modify().unwrap().reclaim_aborted(2);
 		assert_eq!(handle.resume_position(), Some(Position::group(3)));
+	}
+
+	/// A renewal its handler drops unanswered ends the track as its producer's drop would have,
+	/// so the live edge it held for the next producer joins the eviction order.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unanswered_renewal_releases_the_live_edge() {
+		let producer = broadcast::Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_next().unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		drop(track);
+		assert_eq!(
+			handle.with_state(|state| state.map(|state| state.read().protects(0))),
+			Some(true)
+		);
+
+		drop(dynamic.assert_request());
+		assert_eq!(
+			handle.with_state(|state| state.map(|state| state.read().protects(0))),
+			Some(false)
+		);
 	}
 
 	/// The arrival ledger giving up on a gap wakes the reader, even when the owed group's

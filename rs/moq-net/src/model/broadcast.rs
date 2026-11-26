@@ -328,9 +328,10 @@ impl Producer {
 	/// holds the name.
 	///
 	/// A track whose last producer dropped while read keeps holding its name until the
-	/// broadcast's [`Requests`] handler answers the renewal: while the renewal is still
-	/// queued, this fulfils it when `info` is the one the track was first accepted with;
-	/// otherwise it returns `None`.
+	/// broadcast's [`Requests`] handler answers the renewal. While the renewal is still queued,
+	/// this fulfils it when `info` is the one the track was first accepted with, and otherwise
+	/// replaces it, ending its readers with [`Error::MalformedTrack`](crate::Error::MalformedTrack)
+	/// as an accept with another info would. Once the handler took it, this returns `None`.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
 	/// `create_track("video", None)` creates an untimed track.
@@ -342,8 +343,22 @@ impl Producer {
 		// Fulfilling a pending request wakes its readers, who may be polled inline and look this
 		// broadcast up again: hold the wakes until the lock drops.
 		let _hold = kio::hold();
-		let state = self.state.lock();
-		self.insert_created(state, name.into(), info.into().unwrap_or_default())
+		let (name, info) = (name.into(), info.into().unwrap_or_default());
+		let mut state = self.state.lock();
+		// A queued renewal this info would change is answered as its handler would answer it,
+		// ending the readers that hold the old info, which frees the name. Outside the lock:
+		// the ended track's last guard looks this broadcast up as it drops.
+		if state
+			.requests
+			.get(name.as_ref())
+			.is_some_and(|request| request.conflicts(&info))
+			&& let Some(request) = state.requests.take(name.as_ref())
+		{
+			drop(state);
+			drop(request.unlisted().accept(info.clone()));
+			state = self.state.lock();
+		}
+		self.insert_created(state, name, info)
 	}
 
 	fn insert_created(
@@ -374,9 +389,8 @@ impl Producer {
 				.with_stats(self.stats.clone())
 				.homed(Home(self.state.clone()))
 				.accept(info.clone());
-			// Cache it like a served request so concurrent lookups coalesce; a
-			// live same-name entry cannot exist (its presence would have kept
-			// the request from queuing).
+			// Cache it like a served request so concurrent lookups coalesce. The
+			// only live same-name entry is the request's own track, as a renewal's.
 			let _ = state.cache_track(track.weak());
 			let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
 			return Some(track.listed(unlist));
@@ -2655,7 +2669,7 @@ mod test {
 		dynamic.assert_no_request();
 	}
 
-	/// A renewal accepted with an info its reader doesn't hold aborts the track with `Duplicate`,
+	/// A renewal accepted with an info its reader doesn't hold aborts the track with `MalformedTrack`,
 	/// for the reader and the producer alike, and a later lookup asks for the track afresh.
 	#[kio::test]
 	#[cfg(feature = "async")]
@@ -2672,16 +2686,43 @@ mod test {
 
 		let compressed = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
 		let next = dynamic.assert_request().accept(compressed.clone());
-		assert!(matches!(next.append_next(), Err(Error::Duplicate)));
-		assert!(matches!(joined.recv_group().await, Err(Error::Duplicate)));
+		assert!(matches!(next.append_next(), Err(Error::MalformedTrack)));
+		assert!(matches!(joined.recv_group().await, Err(Error::MalformedTrack)));
 
 		let later = consumer.track("video").unwrap().subscribe(None);
 		let _fresh = dynamic.assert_request().accept(compressed.clone());
 		assert_eq!(later.await.unwrap().info(), &compressed);
 	}
 
+	/// Creating a track whose renewal is still queued, with an info its reader doesn't hold,
+	/// replaces it: the reader ends as a conflicting accept ends it, and later ones read the new
+	/// track at once.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn creating_over_a_queued_renewal_with_another_info_replaces_it() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut joined = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+
+		let compressed = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
+		let next = producer
+			.create_track("video", compressed.clone())
+			.expect("replaces the renewal");
+		assert!(matches!(joined.recv_group().await, Err(Error::MalformedTrack)));
+		dynamic.assert_no_request();
+
+		let mut later = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		assert_eq!(later.info(), &compressed);
+		next.append_next().unwrap().finish().unwrap();
+		assert_eq!(later.recv_group().await.unwrap().unwrap().start, 0);
+	}
+
 	/// A conflicting renewal also ends the unfinished groups its request filled before the
-	/// accept, so their readers read `Duplicate` instead of waiting on a writer nobody serves.
+	/// accept, so their readers read `MalformedTrack` instead of waiting on a writer nobody serves.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_conflicting_renewal_aborts_the_groups_its_request_filled() {
@@ -2709,15 +2750,15 @@ mod test {
 
 		let compressed = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
 		let _next = request.accept(compressed);
-		assert!(matches!(held.read_frame().await, Err(Error::Duplicate)));
+		assert!(matches!(held.read_frame().await, Err(Error::MalformedTrack)));
 		drop(group);
 	}
 
-	/// `create_track` leaves a renewal whose info it would change to the handler, as a live track
-	/// holding the name, and fulfils one it would not.
+	/// `create_track` with the info a queued renewal's reader holds fulfils it, so the reader
+	/// reads on.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn create_track_fulfils_only_a_renewal_with_the_same_info() {
+	async fn create_track_fulfils_a_renewal_with_the_same_info() {
 		let producer = Info::new().produce();
 		let _dynamic = producer.requests();
 		let consumer = producer.consume();
@@ -2725,7 +2766,6 @@ mod test {
 		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		drop(track);
 
-		assert!(producer.create_track("video", None).is_none());
 		let next = producer.create_track("video", crate::track::Info::timed()).unwrap();
 		next.append_next().unwrap().finish().unwrap();
 		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);

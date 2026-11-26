@@ -161,7 +161,8 @@ pub enum StreamError {
 	#[error("too far behind")]
 	TooFarBehind,
 
-	/// The track's content could not be parsed.
+	/// The track's content could not be parsed, or a track asked for again was accepted with
+	/// info other than what its readers already hold.
 	#[error("malformed track")]
 	MalformedTrack,
 
@@ -334,8 +335,7 @@ pub enum Error {
 	#[error(transparent)]
 	Path(crate::path::Error),
 
-	/// A duplicate ID was used, or a track asked for again was accepted with info other than
-	/// what its readers already hold.
+	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
 	Duplicate,

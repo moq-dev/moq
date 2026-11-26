@@ -440,9 +440,9 @@ impl MoqBroadcastProducer {
 	/// track properties (priority, max age, timescale); omit for defaults.
 	///
 	/// Errors with `Duplicate` while a live track holds the name, including one whose last
-	/// producer was released while read and whose request handler has not answered its
-	/// renewal, unless that renewal is still queued and `info` is the one the track was
-	/// published with.
+	/// producer was released while read and whose request handler took its renewal. A renewal
+	/// still queued is served by this: with another `info`, its readers end with
+	/// `MalformedTrack` and the new track takes the name.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
@@ -740,7 +740,7 @@ impl MoqTrackRequest {
 	///
 	/// A track asked for again, because its producer was released while read, must be accepted
 	/// with the info it was published with, which its readers hold: another ends the track with
-	/// `Duplicate`, and the returned producer's writes fail with it.
+	/// `MalformedTrack`, and the returned producer's writes fail with it.
 	///
 	/// For media use [`crate::media::MoqMediaTrackProducer::audio`] instead, which lets
 	/// the importer pick the timescale.
