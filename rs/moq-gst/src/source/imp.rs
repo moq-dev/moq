@@ -1922,8 +1922,8 @@ impl Play {
 	}
 }
 
-/// Whether `track` holds nothing but its end, read until a poll parks without waking itself. A
-/// frame still unread, or a failure, is not the end.
+/// Whether `track` holds nothing but its end, polled until one parks without waking itself. Any
+/// item still unread, or a failure, is not the end, so a publisher's input never keeps this going.
 fn drained(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> bool {
 	/// Records a wake of the poll that called it.
 	struct Woken(AtomicBool);
@@ -1939,9 +1939,6 @@ fn drained(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Cont
 	loop {
 		match track.poll_read(&waiter) {
 			std::task::Poll::Ready(Ok(None)) => return true,
-			std::task::Poll::Ready(Ok(Some(
-				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. },
-			))) => {}
 			std::task::Poll::Ready(_) => return false,
 			std::task::Poll::Pending if woken.0.swap(false, Ordering::AcqRel) => {}
 			std::task::Poll::Pending => return false,
