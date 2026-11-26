@@ -13,7 +13,7 @@ recipe in `rs/moq-video/examples/encode-presets.rs`. moq-boy's encoding looks
 bad, and nobody knows how each backend or GPU compares on the same input.
 
 Non-goals: per-viewer adaptation, which nothing plans, and live bitrate control, which
-[capped VBR](/quest/m1/video-rate/README.md) owns; browser playback quality, which belongs to
+each encoder backend's capped VBR owns; browser playback quality, which belongs to
 `just test media`.
 
 ## Plan
