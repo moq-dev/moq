@@ -1285,6 +1285,43 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.done();
 	}
 
+	/// `peer`'s link now costs `cost`: every route it offers and every claim it gave
+	/// re-ranks over the new price, and what this node advertises of them carries it.
+	pub fn reprice(&mut self, peer: N, cost: Metric) {
+		let Some(state) = self.peers.get_mut(&peer) else {
+			return;
+		};
+		let old = std::mem::replace(&mut state.port.cost, cost);
+		if old == cost {
+			return;
+		}
+		// A claim was charged the old price as it was adopted, saturating like it.
+		let repriced = |claim: &mut Claim<A>| {
+			if claim.cost < MAX_COST {
+				claim.cost = (claim.cost.saturating_sub(old).saturating_add(cost)).min(MAX_COST);
+			}
+		};
+		state.given.values_mut().for_each(repriced);
+		let broadcasts: Vec<Broadcast<I>> = state.given.keys().cloned().collect();
+		for broadcast in &broadcasts {
+			if let Some(claim) = self.givers.get_mut(broadcast).and_then(|givers| givers.get_mut(&peer)) {
+				repriced(claim);
+			}
+		}
+		// A heard route is priced over its port as it is used.
+		let origins: Vec<NodeId> = (self.heard.iter())
+			.filter(|(_, by)| by.contains_key(&peer))
+			.map(|(origin, _)| *origin)
+			.collect();
+		for origin in origins {
+			self.reselect(origin);
+		}
+		for broadcast in broadcasts {
+			self.restate(broadcast, Change::Lost);
+		}
+		self.done();
+	}
+
 	/// `peer` edited what it asks this node for. The edit takes effect behind the marker
 	/// this node sends first: both sides drop what the removed prefixes covered there, and
 	/// what the added prefixes cover follows, closed by SYNCED for each. A routing neighbour asks for the whole
@@ -4144,6 +4181,39 @@ mod tests {
 		};
 		router.recv(3, announce).unwrap();
 		assert_eq!(router.own().1[&(p("near"), 7)].cost, MAX_COST, "an endpoint's claim");
+	}
+
+	/// A repriced link re-ranks what came over it in place: an endpoint's claims and a
+	/// routing neighbour's routes. A claim at the ceiling stays there.
+	#[test]
+	fn a_repriced_link_reranks_what_it_gave() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Endpoint);
+		let announce = Msg::Announce {
+			changes: vec![
+				((p("live"), 7), claim(run(0), 5)),
+				((p("far"), 7), claim(run(0), Metric::MAX)),
+			],
+		};
+		router.recv(2, announce).unwrap();
+		let cost = |router: &Router<usize, u64, Run>, path: &str| router.own().1[&(p(path), 7)].cost;
+		assert_eq!(cost(&router, "live"), 6);
+		router.reprice(2, 40);
+		assert_eq!((cost(&router, "live"), cost(&router, "far")), (45, MAX_COST));
+		router.reprice(2, 1);
+		assert_eq!((cost(&router, "live"), cost(&router, "far")), (6, MAX_COST));
+
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(3, route(5, 3, 2)).unwrap();
+		router.recv(4, route(5, 4, 3)).unwrap();
+		assert_eq!(router.best(node(5)).map(|(via, offer)| (via, offer.cost)), Some((3, 3)));
+		router.reprice(3, 10);
+		assert_eq!(
+			router.best(node(5)).map(|(via, offer)| (via, offer.cost)),
+			Some((4, 4)),
+			"the dearer link loses its route"
+		);
 	}
 
 	/// A route that moves onto another path at the same rank changes no way to its claims,

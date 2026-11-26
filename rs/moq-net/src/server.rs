@@ -257,6 +257,10 @@ impl Server {
 
 	/// Start a lite session on an accepted transport: wire the origins, answer
 	/// with our SETUP, and return the session and its driver.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	fn start_lite(
 		&self,
 		runtime: Deadlines,
@@ -265,6 +269,7 @@ impl Server {
 		client_setup: Option<lite::AcceptedSetup>,
 		peer_node: Option<crate::Hop>,
 		auth: crate::auth::Link,
+		price: crate::session::Price,
 	) -> Result<(Session, crate::Driver), Error> {
 		let (publish, subscribe) = self.stat_tagged_origins();
 
@@ -305,6 +310,7 @@ impl Server {
 			our_setup,
 			peer_setup: client_setup,
 			auth,
+			price: price.clone(),
 		})?;
 
 		Ok(Session::new(
@@ -324,6 +330,7 @@ impl Server {
 				viewers,
 				peer_implementation: start.peer_implementation,
 				datagrams_unrouted: start.datagrams_unrouted,
+				price,
 			},
 		))
 	}
@@ -372,6 +379,7 @@ impl Server {
 			assigned_hop: crate::Hop::random(),
 			timer: Timer::new(None),
 			auth: crate::auth::Link::new(version.has_auth()),
+			price: Default::default(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -452,6 +460,7 @@ impl Server {
 			timer: Timer::new(None),
 			// Lite 01/02 carry no AUTH.
 			auth: crate::auth::Link::new(false),
+			price: Default::default(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -487,6 +496,7 @@ impl Server {
 			timer: Timer::new(None),
 			// moq-transport carries no AUTH: a token rides the requests that name it.
 			auth: crate::auth::Link::ietf(),
+			price: Default::default(),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -866,6 +876,8 @@ pub struct Handshake {
 	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
 	/// take the peer's token requests before any arrive.
 	auth: crate::auth::Link,
+	/// What this side charges the peer's announcements, settable before any arrive.
+	price: crate::session::Price,
 	/// The accept deadline, which bounds admission and the reply.
 	timer: Timer,
 	// Taken by `ok`/`close`, or by the deadline; `Drop` rejects the handshake if none ran.
@@ -916,6 +928,7 @@ impl PausedIetf {
 		runtime: Deadlines,
 		peer_node: Option<crate::Hop>,
 		auth: crate::auth::Link,
+		price: crate::session::Price,
 	) -> Result<(Session, crate::Driver), Error> {
 		let Self {
 			session,
@@ -938,8 +951,9 @@ impl PausedIetf {
 			publish,
 			subscribe,
 			peer_node,
-			// Only the dialing side prices a link.
-			cost: None,
+			// moq-transport charges each route as it arrives, so it reads the price once.
+			// A server declares none: only the dialing side prices a link on the wire.
+			cost: price.fix(),
 			version,
 			path: None,
 			authority: None,
@@ -970,6 +984,7 @@ impl PausedIetf {
 				viewers: Default::default(),
 				peer_implementation,
 				datagrams_unrouted: None,
+				price,
 			},
 		))
 	}
@@ -994,6 +1009,7 @@ impl PausedNegotiated {
 		runtime: Deadlines,
 		peer_node: Option<crate::Hop>,
 		auth: crate::auth::Link,
+		price: crate::session::Price,
 	) -> Result<NegotiatedReply, Error> {
 		let Self {
 			session,
@@ -1017,6 +1033,7 @@ impl PausedNegotiated {
 			version,
 			peer_node,
 			auth,
+			price,
 			publish,
 			subscribe,
 		})))
@@ -1046,6 +1063,7 @@ struct NegotiatedStart {
 	version: lite::Version,
 	peer_node: Option<crate::Hop>,
 	auth: crate::auth::Link,
+	price: crate::session::Price,
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 }
@@ -1060,6 +1078,7 @@ impl NegotiatedStart {
 			version,
 			peer_node,
 			auth,
+			price,
 			publish,
 			subscribe,
 		} = self;
@@ -1082,6 +1101,7 @@ impl NegotiatedStart {
 			our_setup: lite::Setup::default(),
 			peer_setup: None,
 			auth,
+			price: price.clone(),
 		})?;
 
 		Ok(Session::new(
@@ -1101,6 +1121,7 @@ impl NegotiatedStart {
 				viewers,
 				peer_implementation: start.peer_implementation,
 				datagrams_unrouted: start.datagrams_unrouted,
+				price,
 			},
 		))
 	}
@@ -1154,6 +1175,13 @@ impl Handshake {
 	/// The session's auth handle, the same one [`Session::auth`] returns once accepted.
 	pub fn auth(&self) -> crate::auth::Handle {
 		self.auth.handle().clone()
+	}
+
+	/// What this side charges the client's announcements, the same handle
+	/// [`Session::price`] returns once accepted. Set it here to price the link before the
+	/// session learns any route.
+	pub fn price(&self) -> crate::session::Price {
+		self.price.clone()
 	}
 
 	/// Answer every token the client presents yourself, instead of the default acceptor:
@@ -1356,9 +1384,10 @@ impl Answer {
 			}
 			let peer_node = Some(self.handshake.assigned_hop);
 			let auth = self.handshake.auth.clone();
+			let price = self.handshake.price.clone();
 			let started = match paused {
 				PausedHandshake::LiteBare { session, version } => {
-					server.start_lite(runtime, session, version, None, peer_node, auth)
+					server.start_lite(runtime, session, version, None, peer_node, auth, price)
 				}
 				PausedHandshake::LiteSetup {
 					session,
@@ -1366,10 +1395,10 @@ impl Answer {
 					client_setup,
 				} => {
 					server.stats.control(stats::Message::Session, client_setup.size, true);
-					server.start_lite(runtime, session, version, Some(client_setup), peer_node, auth)
+					server.start_lite(runtime, session, version, Some(client_setup), peer_node, auth, price)
 				}
-				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_node, auth),
-				PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_node, auth) {
+				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_node, auth, price),
+				PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_node, auth, price) {
 					Ok(reply) => {
 						self.reply = Some(Box::new(reply));
 						return self.poll_reply(waiter);
@@ -2319,6 +2348,7 @@ mod tests {
 			peer_implementation: None,
 			assigned_hop: Hop::random(),
 			auth: crate::auth::Link::ietf(),
+			price: Default::default(),
 			timer: Timer::new(None),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),

@@ -99,6 +99,9 @@ struct Running {
 	answer: Answer,
 	/// The subscribe permit's epoch last applied.
 	epoch: u64,
+	/// What the link is charged now, and the price's epoch last applied.
+	link_cost: u64,
+	price_epoch: u64,
 	stall: Stall,
 	/// Passes before the machine yields, so a busy node cannot hold the task.
 	budget: kio::coop::Budget,
@@ -271,6 +274,8 @@ impl RouteStream {
 			routed,
 			answer,
 			epoch: 0,
+			link_cost,
+			price_epoch: 0,
 			stall: Stall {
 				session: subscriber.session.clone(),
 				runtime: subscriber.runtime.clone(),
@@ -287,6 +292,14 @@ impl Running {
 		// Idempotent, since the signal stays set.
 		if subscriber.going_away.poll(waiter).is_ready() {
 			self.routed.goaway();
+		}
+		// A repriced link re-ranks every route and claim the peer gave, in place.
+		while subscriber.price.poll_changed(&mut self.price_epoch, waiter).is_ready() {}
+		if let Poll::Ready(link_cost) = subscriber.poll_link_cost(waiter)
+			&& link_cost != self.link_cost
+		{
+			self.routed.reprice(link_cost);
+			self.link_cost = link_cost;
 		}
 		let direction = crate::auth::Direction::Subscribe;
 		while let Poll::Ready(permit) = subscriber.auth.poll_permit(direction, &mut self.epoch, waiter) {

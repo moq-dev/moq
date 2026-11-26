@@ -32,7 +32,12 @@ before the server is asked: a URL transport resolves those away, but a SETUP
 path arrives verbatim. The grant answers with `publish` and
 `subscribe` prefix lists, each optionally [capped](#bitrate-caps), and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and a `link` (`peer` or
-`upstream`) to mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+`upstream`) to mark another relay and an [upstream link](/bin/relay/cluster#upstream-links), and a
+`cost` that prices the session's link: the relay adds it to the cost of every route the session's peer
+announces, as a dialer's `with_cost` does, in place of the price the peer declares in its SETUP. It is a
+positive integer: zero is refused. Only the connection credential's grant prices the link; an
+[in-band](#in-band-renewal) credential's `cost` is ignored, and once the connection credential ends the link
+falls back to the peer's price.
 A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
 because it becomes a metrics label: a grant naming any other tier is an auth server error, and a refusal naming one reads as unattributed.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
@@ -49,7 +54,8 @@ which every relay reads as the subtree. It also reads `peer: true` in place of
 relay admits an upstream as a plain peer, which can carry traffic between two upstreams.
 Where that matters, refuse the session when the request has no `relay` (or one older than 0.22),
 and check that any auth proxy forwards `relay` to the backend that decides. Alone, `peer: true` reads as `link: "peer"`, and a
-grant naming a `link` beside `peer: false` is refused.
+grant naming a `link` beside `peer: false` is refused. A relay that predates `cost` refuses a grant
+with a `cost`, so send it only to a relay whose `relay` reads it.
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
 over plaintext and for an IP-literal dial, and
@@ -94,7 +100,10 @@ SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
 changed `root`, `mounts`, or `link`, a grant the relay cannot read or accept, or a 401 or 403, ends that
 credential's grant, which closes the session unless an
 [in-band](#in-band-renewal) credential still holds it. A changed `tier` or
-`label` keeps the session and moves its later stats. Any other failure retries with backoff and the session lives
+`label` keeps the session and moves its later stats. A changed `cost` reprices the link in place: the
+routes the session already announced re-rank, and the relay re-advertises them at the new cost. A
+moq-transport session prices its routes as they arrive and cannot, so a changed `cost` ends it, and its
+reconnect takes the new price. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
 with `revalidate` must set `expires` for that reason. A session that
 reaches `expires` closes as `Expired` rather than `Unauthorized`, which also

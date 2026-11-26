@@ -401,13 +401,15 @@ impl Lease {
 	}
 
 	/// Take AUTH decisions before the protocol driver chooses its default acceptor.
+	/// The connection credential's grant prices the link through `price`.
 	pub(crate) fn preparing(
 		mut self,
 		handle: moq_net::auth::Handle,
 		requests: moq_net::auth::Requests,
 		role: Option<moq_net::setup::Role>,
+		price: moq_net::session::Price,
 	) -> Result<Self, moq_net::Error> {
-		let refresh = refresh::Refresh::new(&mut self, handle, requests, role)?;
+		let refresh = refresh::Refresh::new(&mut self, handle, requests, role, price)?;
 		self.refresh = Some(refresh);
 		Ok(self)
 	}

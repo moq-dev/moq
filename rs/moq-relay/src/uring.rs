@@ -847,6 +847,10 @@ impl crate::incoming::Sealed for Request {
 		self.handshake.role()
 	}
 
+	fn price(&self) -> moq_net::session::Price {
+		self.handshake.price()
+	}
+
 	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
 		self.handshake.peer_node()
 	}

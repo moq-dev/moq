@@ -489,6 +489,16 @@ impl Cost {
 	pub(crate) fn charged(self, link_cost: u64) -> Self {
 		Self::new(self.0.saturating_add(link_cost))
 	}
+
+	/// This price charged `new` for the link in place of the `old` it was charged. One at
+	/// the ceiling stays there, since saturating lost what it was charged on.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn repriced(self, old: u64, new: u64) -> Self {
+		match self == Self::MAX {
+			true => self,
+			false => Self::new(self.0.saturating_sub(old).saturating_add(new)),
+		}
+	}
 }
 
 impl From<u64> for Cost {

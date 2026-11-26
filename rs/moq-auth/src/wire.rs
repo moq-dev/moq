@@ -344,6 +344,9 @@ pub(crate) struct Grant {
 	// Delete it at the next version migration, once no relay that predates `link` runs.
 	#[serde(deserialize_with = "present")]
 	peer: Option<bool>,
+	// Zero refuses the grant, as `NonZeroU64` reads it.
+	#[serde(deserialize_with = "present")]
+	cost: Option<std::num::NonZeroU64>,
 }
 
 impl From<crate::Grant> for Grant {
@@ -360,6 +363,7 @@ impl From<crate::Grant> for Grant {
 			link: grant.link,
 			// TEMPORARY(0.22): every link is a peer to a relay that predates `link`.
 			peer: grant.link.map(|_| true),
+			cost: grant.cost,
 		}
 	}
 }
@@ -385,6 +389,7 @@ impl TryFrom<Grant> for crate::Grant {
 			tier: wire.tier,
 			label: wire.label,
 			link,
+			cost: wire.cost,
 		})
 	}
 }

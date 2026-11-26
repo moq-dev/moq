@@ -44,11 +44,10 @@ pub struct Config {
 	/// declares its own, which wins.
 	pub peer_node: Option<Hop>,
 
-	/// What crossing this link costs. Declared in our SETUP (see
-	/// [`cluster::RELAY_COST`]) for the peer to charge, and charged locally on what the
-	/// peer sends us. `None` declares nothing and charges whatever the peer declared,
-	/// falling back to 1; that is what a server accepting a connection passes, since it
-	/// has no per-peer configuration of its own.
+	/// What crossing this link costs. A client declares it in its SETUP (see
+	/// [`cluster::RELAY_COST`]) for the peer to charge, and either side charges it locally
+	/// on what the peer sends us. `None` declares nothing and charges whatever the peer
+	/// declared, falling back to 1.
 	///
 	/// A peer that does not negotiate the MoQ Cluster extension carries no route cost, so
 	/// its routes cost this link alone.
@@ -334,7 +333,8 @@ impl Launch {
 			version,
 			setup,
 			self_origin,
-			cost,
+			// Only the dialing side prices a link on the wire; a server's price is its own.
+			cost.filter(|_| client),
 			goaway.clone(),
 			control.clone(),
 			stats.clone(),

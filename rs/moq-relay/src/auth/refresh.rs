@@ -46,6 +46,11 @@ pub(super) struct Refresh {
 	pacer: Option<Pacer>,
 	/// The caps of the union of every live credential, which the connection holds.
 	caps: Caps,
+	/// What the session charges the peer's announcements: the connection credential's
+	/// `cost`, or the peer's SETUP price without one.
+	price: moq_net::session::Price,
+	/// Why the session must end at the next turn: a new price it cannot apply.
+	unpriced: Option<lease::Reason>,
 }
 
 type Verified = (auth::Request, Result<lease::Consumer, super::Error>);
@@ -127,6 +132,7 @@ impl Refresh {
 		handle: auth::Handle,
 		requests: auth::Requests,
 		role: Option<Role>,
+		price: moq_net::session::Price,
 	) -> Result<Self, moq_net::Error> {
 		let mut initial = Credential::new(lease.consumer.clone());
 		// Admission and protocol setup can observe different live grant versions, so
@@ -158,6 +164,8 @@ impl Refresh {
 			next: 0,
 			pacer: lease.pacer.clone(),
 			caps,
+			price,
+			unpriced: None,
 		};
 		// The same root, mounts, link, role, and cap checks a refreshed grant passes.
 		if !this.valid(&initial.grant) {
@@ -277,6 +285,27 @@ impl Refresh {
 			tracing::info!(%caps, "bitrate caps changed");
 			pacer.pace(caps);
 			self.caps = caps;
+		}
+		self.reprice();
+	}
+
+	/// Price the link at the connection credential's `cost`, the newest one's when it
+	/// was presented again. A request token's grant never prices it, so refreshing one
+	/// cannot reprice the routes the connection carries. Without a connection
+	/// credential the link charges what the peer declared.
+	fn reprice(&mut self) {
+		let cost = (self.credentials.values().rev())
+			.find(|credential| credential.initial)
+			.and_then(|credential| credential.grant.cost);
+		let cost = cost.map(|cost| moq_net::origin::Cost::from(cost.get()));
+		if self.price.get() == cost {
+			return;
+		}
+		tracing::info!(cost = ?cost.map(moq_net::origin::Cost::value), "link cost changed");
+		if let Err(err) = self.price.set(cost) {
+			// The session cannot reprice what it already learned; a reconnect takes the new price.
+			self.unpriced
+				.get_or_insert_with(|| format!("link cost changed: {err}").into());
 		}
 	}
 
@@ -421,6 +450,9 @@ impl Refresh {
 
 	pub(super) async fn ended(&mut self) -> lease::Reason {
 		loop {
+			if let Some(reason) = self.unpriced.take() {
+				return reason;
+			}
 			enum Event {
 				Request(Option<auth::Request>),
 				Verified(Option<Verified>, Option<Settling>),
@@ -648,7 +680,7 @@ mod tests {
 				.await
 				.unwrap();
 			let lease = lease
-				.preparing(request.auth(), request.requests(), request.role())
+				.preparing(request.auth(), request.requests(), request.role(), request.price())
 				.unwrap();
 			let (session, driver) = request.ok().await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
@@ -788,7 +820,7 @@ mod tests {
 			change(&mut changed);
 			producer.update(changed);
 			let error = lease
-				.preparing(request.auth(), request.requests(), request.role())
+				.preparing(request.auth(), request.requests(), request.role(), request.price())
 				.err()
 				.expect("setup must refuse the grant");
 			assert_eq!(SessionError::from(&error), expected);
@@ -1159,6 +1191,55 @@ mod tests {
 		assert!(token.closed().now_or_never().is_none());
 		drop(token);
 		assert_eq!(supervising.await.unwrap(), lease::Reason::Dropped);
+	}
+
+	/// Only the connection credential's grant prices the link: before the session learns a
+	/// route, and again in place on a re-check. A request token's grant never does, and once
+	/// the connection credential ends the link charges what the peer declared.
+	#[tokio::test(start_paused = true)]
+	async fn the_connection_credential_prices_the_link() {
+		let clock = manual();
+		let priced = |seconds, cost| {
+			let mut grant = grant("a", seconds);
+			grant.cost = std::num::NonZeroU64::new(cost);
+			grant
+		};
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let (owner, consumer) = lease::Producer::new(priced(3, 7));
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let (client, session, mut lease) = connect(lease.unwrap()).await;
+		let cost = || session.price().get().map(moq_net::origin::Cost::value);
+		assert_eq!(cost(), Some(7), "priced before the session learns a route");
+
+		owner.update(priced(3, 9));
+		assert!(settles_pending(lease.ended()).await);
+		assert_eq!(cost(), Some(9), "a re-check reprices the link in place");
+
+		let handle = client.auth();
+		let (token, ()) = tokio::join!(
+			async {
+				tokio::select! {
+					reason = lease.ended() => panic!("the lease ended while presenting: {reason}"),
+					token = added(&handle, "request") => token.unwrap(),
+				}
+			},
+			async {
+				let fixed = lease::Consumer::fixed(priced(20, 1_000));
+				admissions.next().await.unwrap().grant(fixed);
+			},
+		);
+		assert_eq!(cost(), Some(9), "a request token never prices the link");
+
+		clock.advance(Duration::from_secs(4));
+		assert!(
+			settles_pending(lease.ended()).await,
+			"the request token holds the session"
+		);
+		assert_eq!(cost(), None, "the link falls back to the peer's price");
+		drop((token, owner));
 	}
 
 	/// A session whose owner lease expires in three seconds, recording its stats, with a

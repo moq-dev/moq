@@ -207,6 +207,10 @@ cost of 0 is refused. Each relay adds the price of the link an announcement
 arrived on before forwarding it, so a route's cost is the sum of what it
 crossed.
 
+A relay accepting a session can price it too: an auth server's grant may carry a
+[`cost`](/bin/relay/auth#the-contract) for the session's link, and a re-check that
+changes it reprices the link in place, re-ranking its routes without a reconnect.
+
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
 hop list. Remaining ties hash the requested path with the publisher's

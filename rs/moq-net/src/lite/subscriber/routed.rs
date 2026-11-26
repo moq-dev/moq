@@ -821,6 +821,12 @@ impl Routed {
 		self.stream.goaway();
 	}
 
+	/// The link now costs `link_cost`.
+	pub(in crate::lite) fn reprice(&mut self, link_cost: u64) {
+		// A forwarding node needs every link to cost something, as `new` charges it.
+		self.stream.reprice(link_cost.max(1));
+	}
+
 	/// The session's permit changed. A routing neighbour's must stay whole. For any
 	/// other, a new limit changes which of the peer's claims the node holds, and what
 	/// the peer granted changes the prefixes asked of it.

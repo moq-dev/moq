@@ -45,8 +45,9 @@ pub(super) struct SubscriberConfig {
 	/// declare one itself. See `Client::with_peer_node`.
 	pub peer_node: Option<crate::Hop>,
 	/// Local policy for what pulling from this peer costs, overriding whatever it
-	/// declared in its SETUP. `None` charges the peer's declared price.
-	pub cost: Option<u64>,
+	/// declared in its SETUP. `None` charges the peer's declared price. It may change
+	/// while the session runs, which reprices every route learned here.
+	pub price: crate::session::Price,
 	/// Set once the peer sends a GOAWAY; this session's routes then rank below every
 	/// available route (draining), so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
@@ -103,7 +104,7 @@ pub(super) struct Subscriber {
 	/// GROUP streams parked until their subscription's TRACK_INFO says how to read them.
 	park_waits: Arc<atomic::AtomicUsize>,
 	/// Local policy overriding the peer's declared egress price. See `poll_link_cost`.
-	cost: Option<u64>,
+	pub(super) price: crate::session::Price,
 	/// Sources minted by the announce half, drained by the driver into
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<MintedSource>,
@@ -550,7 +551,7 @@ impl Subscriber {
 			peer_setup: config.peer_setup,
 			setup_waits: Default::default(),
 			park_waits: Default::default(),
-			cost: config.cost,
+			price: config.price,
 			sources: kio::Queue::new(),
 			announce_streams: kio::Queue::new(),
 			going_away: config.going_away,
@@ -594,7 +595,7 @@ impl Subscriber {
 		if !self.version.has_route_cost() {
 			return Poll::Ready(0);
 		}
-		match self.cost {
+		match self.price.cost() {
 			Some(cost) => Poll::Ready(cost),
 			None => self
 				.peer_setup
@@ -2357,10 +2358,12 @@ impl kio::Task for AnnouncePrefix {
 /// The announce-decode loop's state.
 struct PrefixRun {
 	responder_origin: Option<crate::Hop>,
-	/// What we charge every announcement arriving on this stream. Resolved once:
-	/// it comes from the connect config or the peer's SETUP, neither of which
-	/// changes for the life of the session.
+	/// What we charge every announcement arriving on this stream: the session's
+	/// [`Price`](crate::session::Price), or else the peer's SETUP. Every route is
+	/// recharged when the price changes.
 	link_cost: u64,
+	/// The price's epoch last applied.
+	price_epoch: u64,
 	announced: Announced,
 	// Lite06+: announce ids. Each received `active` implicitly assigns the next
 	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
@@ -2447,6 +2450,7 @@ impl AnnouncePrefix {
 		let mut run: PrefixRun = PrefixRun {
 			responder_origin,
 			link_cost,
+			price_epoch: 0,
 			announced: Announced::new(self.subscriber.announces.clone(), self.subscriber.minted.clone()),
 			decoder: lite::AnnounceDecoder::default(),
 			auth_epoch: 0,
@@ -2494,6 +2498,14 @@ impl AnnouncePrefix {
 			// since the signal stays set.
 			if self.subscriber.going_away.poll(waiter).is_ready() {
 				run.announced.drain();
+			}
+			// A repriced link recharges every route it carries, re-ranking each in place.
+			while self.subscriber.price.poll_changed(&mut run.price_epoch, waiter).is_ready() {}
+			if let Poll::Ready(link_cost) = self.subscriber.poll_link_cost(waiter)
+				&& link_cost != run.link_cost
+			{
+				run.announced.reprice(run.link_cost, link_cost);
+				run.link_cost = link_cost;
 			}
 			// A new limit holds back what the peer may no longer publish to us,
 			// and brings back what it may again. The peer still holds each
@@ -4756,7 +4768,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -4789,7 +4801,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -4825,7 +4837,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -4887,7 +4899,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -4972,7 +4984,7 @@ mod tests {
 				version,
 				peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -5042,7 +5054,7 @@ mod tests {
 					version,
 					peer_setup: peer_setup.clone(),
 					peer_node: None,
-					cost: None,
+					price: Default::default(),
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
 				});
@@ -5099,7 +5111,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -5230,7 +5242,7 @@ mod tests {
 			version,
 			peer_setup,
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -5512,7 +5524,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -5670,7 +5682,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -5740,7 +5752,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -5830,7 +5842,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -5958,7 +5970,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -6031,7 +6043,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -6105,7 +6117,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -6215,7 +6227,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -6302,7 +6314,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -6716,7 +6728,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -7184,7 +7196,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -7265,7 +7277,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: auth.clone(),
 		});
@@ -7340,7 +7352,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -7413,7 +7425,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -7529,7 +7541,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -7600,7 +7612,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -7694,7 +7706,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -7759,7 +7771,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -7812,7 +7824,7 @@ mod tests {
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-				cost: Some(1),
+				price: crate::session::Price::new(Some(1)),
 				peer_node: None,
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
@@ -7843,7 +7855,7 @@ mod tests {
 					version,
 					peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 					peer_node: None,
-					cost: None,
+					price: Default::default(),
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
 				});
@@ -7916,7 +7928,7 @@ mod tests {
 				version: VERSION,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -7970,7 +7982,7 @@ mod tests {
 			version,
 			peer_setup,
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		})
@@ -8425,7 +8437,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -8559,7 +8571,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth,
 		});
@@ -8698,7 +8710,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth,
 		});
@@ -8759,7 +8771,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -8828,7 +8840,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: auth.clone(),
 		});
@@ -8897,7 +8909,7 @@ mod tests {
 				version: Version::Lite07,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -8996,7 +9008,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -9062,7 +9074,7 @@ mod tests {
 				version: Version::Lite07,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -9180,7 +9192,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -9262,7 +9274,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -9336,7 +9348,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -9412,7 +9424,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -9506,7 +9518,7 @@ mod tests {
 					version,
 					peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 					peer_node: None,
-					cost: None,
+					price: Default::default(),
 					going_away: Default::default(),
 					auth: crate::auth::Link::new(false),
 				});
@@ -9626,7 +9638,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -9695,7 +9707,7 @@ mod tests {
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 				peer_node: None,
-				cost: None,
+				price: Default::default(),
 				going_away: Default::default(),
 				auth: crate::auth::Link::new(false),
 			});
@@ -9760,7 +9772,7 @@ mod tests {
 			version,
 			peer_setup,
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -10197,7 +10209,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10290,7 +10302,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10344,7 +10356,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10413,7 +10425,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10469,7 +10481,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: Version::Lite03,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10528,7 +10540,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10587,7 +10599,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10659,7 +10671,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10720,7 +10732,7 @@ mod tests {
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: Some(assigned),
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -10766,7 +10778,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: Version::Lite03,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: Some(assigned),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10851,7 +10863,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10877,7 +10889,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: None,
+			price: Default::default(),
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -10980,7 +10992,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: Some(1),
+			price: crate::session::Price::new(Some(1)),
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -11119,7 +11131,7 @@ mod tests {
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: Some(1),
+			price: crate::session::Price::new(Some(1)),
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -11265,7 +11277,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: Some(1),
+			price: crate::session::Price::new(Some(1)),
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -11770,7 +11782,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			cost: Some(1),
+			price: crate::session::Price::new(Some(1)),
 			peer_node: None,
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
@@ -11809,7 +11821,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			peer_node: None,
-			cost: None,
+			price: Default::default(),
 			going_away: Default::default(),
 			auth: crate::auth::Link::new(false),
 		});
@@ -12801,6 +12813,17 @@ impl Announced {
 		}
 	}
 
+	/// Charge every route `new` for the link in place of the `old` it was charged.
+	fn reprice(&mut self, old: u64, new: u64) {
+		for held in self.routes.values_mut() {
+			match held {
+				Held::Attached(entry) => entry.reprice(old, new),
+				Held::Withheld(route) => route.cost = route.cost.repriced(old, new),
+				Held::Declined => {}
+			}
+		}
+	}
+
 	/// Rank every attached route last (the peer sent a GOAWAY).
 	fn drain(&mut self) {
 		for held in self.routes.values_mut() {
@@ -12907,6 +12930,12 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 			return;
 		}
 		self.route.draining = true;
+		let _ = self.dynamic.update(self.route.clone());
+	}
+
+	/// Charge the route `new` for the link in place of `old`, re-ranking it in place.
+	fn reprice(&mut self, old: u64, new: u64) {
+		self.route.cost = self.route.cost.repriced(old, new);
 		let _ = self.dynamic.update(self.route.clone());
 	}
 }

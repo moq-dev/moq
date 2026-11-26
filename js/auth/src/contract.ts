@@ -235,6 +235,13 @@ export const GrantSchema = z
 		 * `link` while this is `false` is refused. Removed at the next version migration.
 		 */
 		peer: z.optional(z.boolean()),
+		/**
+		 * What crossing the session's link costs: the relay adds it to every route the session's peer
+		 * announces, and a re-check reprices the link in place. It wins over the price the peer declares
+		 * in its SETUP. Never zero. Only the connection credential's grant prices the link. Send it only
+		 * to a relay that reads it (check `relay` on the request), since an older one refuses the grant.
+		 */
+		cost: z.optional(z.int().check(z.positive())),
 	})
 	.check(
 		z.refine((grant) => paths(grant.publish).length > 0 || paths(grant.subscribe).length > 0, {

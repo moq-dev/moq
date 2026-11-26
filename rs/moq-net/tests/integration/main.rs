@@ -53,6 +53,7 @@ mod instance;
 mod late_lower_group;
 mod late_tail_reader;
 mod lazy_discovery;
+mod link_price;
 mod lite06_fill_walk;
 mod mesh_sweep;
 mod mesh_withdraw;

@@ -350,6 +350,7 @@ impl Client {
 
 		// One registry, which the subscriber sends and the session hands out.
 		let viewers = self.viewers();
+		let price = crate::session::Price::new(self.cost);
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
 			stats: self.stats.clone(),
@@ -365,6 +366,7 @@ impl Client {
 			our_setup,
 			peer_setup: None,
 			auth: self.link(version.has_auth(), false)?,
+			price: price.clone(),
 		})?;
 
 		Ok(Session::new(
@@ -384,6 +386,7 @@ impl Client {
 				viewers,
 				peer_implementation: start.peer_implementation,
 				datagrams_unrouted: start.datagrams_unrouted,
+				price,
 			},
 		))
 	}
@@ -434,6 +437,8 @@ impl Client {
 				// moq-transport carries no AUTH: a token rides the requests that name it.
 				let auth = self.link(false, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
+				let price = crate::session::Price::new(self.cost);
+				// moq-transport charges each route as it arrives, so it reads the price once.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
@@ -443,7 +448,7 @@ impl Client {
 					publish,
 					subscribe,
 					peer_node: Some(peer_node),
-					cost: self.cost,
+					cost: price.fix(),
 					version: draft,
 					path: self.setup_path(session.address()),
 					authority: self.setup_authority(session.address()),
@@ -475,6 +480,7 @@ impl Client {
 						viewers: self.viewers(),
 						peer_implementation,
 						datagrams_unrouted: None,
+						price,
 					},
 				))));
 			}
@@ -541,6 +547,7 @@ impl Client {
 		let stream = stream.with_version(version);
 		// One registry, which the subscriber sends and the session hands out.
 		let viewers = self.viewers();
+		let price = crate::session::Price::new(self.cost);
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
 			stats: self.stats.clone(),
@@ -558,6 +565,7 @@ impl Client {
 			peer_setup: None,
 			// Lite 01/02 carry no AUTH.
 			auth: self.link(version.has_auth(), false)?,
+			price: price.clone(),
 		})?;
 
 		Ok(Session::new(
@@ -577,6 +585,7 @@ impl Client {
 				viewers,
 				peer_implementation: start.peer_implementation,
 				datagrams_unrouted: start.datagrams_unrouted,
+				price,
 			},
 		))
 	}

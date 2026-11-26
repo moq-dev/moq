@@ -653,6 +653,16 @@ impl Stream {
 		state.flush(&self.node);
 	}
 
+	/// The link now costs `cost`: what the peer gave re-ranks over it.
+	pub fn reprice(&self, cost: Metric) {
+		let mut state = self.node.lock();
+		let now = self.now(&state);
+		state.router.clock(now);
+		state.router.reprice(self.key, cost);
+		state.note(Some(self.key));
+		state.flush(&self.node);
+	}
+
 	/// The session is leaving: nothing more is queued for the peer.
 	pub fn mute(&self) {
 		let _state = self.node.lock();

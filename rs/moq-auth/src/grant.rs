@@ -2,6 +2,7 @@ use kio::clock::Wall;
 use moq_pattern::Prefixes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use crate::Access;
@@ -63,6 +64,15 @@ pub struct Grant {
 	/// even for an upstream: refuse a request with no [`Request::relay`](crate::Request::relay)
 	/// when that matters. A grant that names a link while its `peer` is false is refused.
 	pub link: Option<Link>,
+
+	/// What crossing the session's link costs: the relay adds it to every route the
+	/// session's peer announces, as a dialer's `Client::with_cost` does, and a re-check
+	/// reprices the link in place. It wins over the price the peer declares in its SETUP,
+	/// which applies when this is absent. Never zero, since moq-lite-07 routing needs every
+	/// link to cost something.
+	///
+	/// Only the connection credential's grant prices the link; one a request presents never does.
+	pub cost: Option<NonZeroU64>,
 }
 
 /// How a cluster peer (another relay) links to this one.
@@ -184,6 +194,7 @@ mod tests {
 			tier: Some("websocket".into()),
 			label: Some("project/key/123".into()),
 			link: Some(Link::Upstream),
+			cost: NonZeroU64::new(40),
 		}
 	}
 
@@ -218,6 +229,7 @@ mod tests {
 		);
 		assert_eq!(json["subscribe"], serde_json::json!(["**"]));
 		assert_eq!(json["link"], "upstream");
+		assert_eq!(json["cost"], 40);
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
 
@@ -227,7 +239,7 @@ mod tests {
 	fn serializes_to_the_cross_language_vector() {
 		assert_eq!(
 			serde_json::to_string(&full()).unwrap(),
-			r#"{"publish":{"path":["alice/**"],"rate":8000000},"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}"#
+			r#"{"publish":{"path":["alice/**"],"rate":8000000},"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true,"cost":40}"#
 		);
 	}
 
@@ -240,6 +252,9 @@ mod tests {
 			r#"{"publish":[""],"upstream":true}"#,
 			r#"{"publish":[""],"future":{}}"#,
 			r#"{"publish":[""],"link":"downstream"}"#,
+			r#"{"publish":[""],"cost":0}"#,
+			r#"{"publish":[""],"cost":-1}"#,
+			r#"{"publish":[""],"cost":null}"#,
 		] {
 			assert!(serde_json::from_str::<Grant>(json).is_err(), "{json}");
 		}

@@ -217,6 +217,9 @@ pub struct Config {
 	pub limits: crate::session::Limits,
 	/// The viewers whose sum the session sends as its PROBE target.
 	pub viewers: bandwidth::Viewers,
+	/// What this side charges the peer's announcements, which may change while the
+	/// session runs. A client's starts at the price its SETUP declares.
+	pub price: crate::session::Price,
 }
 
 /// Start a lite session.
@@ -238,6 +241,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		auth,
 		limits,
 		viewers,
+		price,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -338,9 +342,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// name a redirect URI.
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
-	// Read out before the setup machine takes ownership below.
-	let our_cost = our_setup.cost;
-
 	// Present the connection's own credential (the empty token) right away, so
 	// both sides learn their grant without waiting on the app.
 	let setup_token = match version.has_auth() {
@@ -375,7 +376,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		// Local policy for what pulling from this peer costs. Set only when we
 		// configured a price; otherwise the subscriber charges what the peer declared
 		// for its own egress.
-		cost: our_cost,
+		price,
 		going_away: goaway.going_away.clone(),
 		auth: auth.clone(),
 	});
@@ -1005,6 +1006,7 @@ mod tests {
 			our_setup: Setup::default(),
 			peer_setup: None,
 			auth: crate::auth::Link::new(true),
+			price: Default::default(),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -1051,6 +1053,7 @@ mod tests {
 			our_setup: Setup::default(),
 			peer_setup: None,
 			auth: crate::auth::Link::attach(&handle, true, false).unwrap(),
+			price: Default::default(),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -1132,6 +1135,7 @@ mod tests {
 				our_setup: Setup::default(),
 				peer_setup: None,
 				auth: crate::auth::Link::new(true),
+				price: Default::default(),
 			})
 			.unwrap();
 			let mut driver = start.driver;
@@ -1220,6 +1224,7 @@ mod tests {
 			our_setup,
 			peer_setup: None,
 			auth: crate::auth::Link::new(true),
+			price: Default::default(),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -1293,6 +1298,7 @@ mod tests {
 					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
 					viewers: Default::default(),
+					price: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1349,6 +1355,7 @@ mod tests {
 					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
 					viewers: Default::default(),
+					price: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1383,6 +1390,7 @@ mod tests {
 			auth: crate::auth::Link::new(version.has_auth()),
 			limits: Default::default(),
 			viewers: Default::default(),
+			price: Default::default(),
 		})
 		.unwrap()
 	}

@@ -229,6 +229,7 @@ pub struct Session {
 	work: Work,
 	/// What [`Stats::datagrams_unrouted`] reads.
 	datagrams_unrouted: Option<Arc<AtomicU64>>,
+	price: Price,
 }
 
 /// Two handles are equal when they are clones of the same session.
@@ -497,6 +498,12 @@ impl Session {
 		self.auth.clone()
 	}
 
+	/// What this side charges the routes the peer announces, which it may reprice while the
+	/// session runs.
+	pub fn price(&self) -> Price {
+		self.price.clone()
+	}
+
 	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
 	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
 		self.credential.as_ref()
@@ -542,6 +549,8 @@ pub(super) struct Handles {
 	/// The driver's count of datagrams it routed to no datagram track, for a version that
 	/// carries datagrams.
 	pub datagrams_unrouted: Option<Arc<AtomicU64>>,
+	/// What this side charges the peer's announcements.
+	pub price: Price,
 }
 
 impl Session {
@@ -564,6 +573,7 @@ impl Session {
 			peer_target,
 			peer_implementation,
 			datagrams_unrouted,
+			price,
 		} = handles;
 		let goaway = Arc::new(goaway);
 		auth.drain_with(goaway.clone());
@@ -640,6 +650,7 @@ impl Session {
 			credential,
 			work,
 			datagrams_unrouted,
+			price,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -1206,6 +1217,92 @@ impl Default for Limits {
 			announces: 100_000,
 			live_edges: None,
 		}
+	}
+}
+
+/// What crossing a session's link costs this side, changeable while the session runs.
+///
+/// Added to the route cost of every announcement the peer sends, as
+/// [`Client::with_cost`](crate::Client::with_cost) prices a dialed link. `None` charges
+/// what the peer declared in its SETUP, and `1` when it declared nothing. A change
+/// re-ranks every route the session already learned in place, and what this node
+/// re-advertises from them carries the new cost. Nothing is sent to the peer: a client
+/// keeps declaring the price it dialed with.
+///
+/// Take it from [`Session::price`], or from
+/// [`server::Handshake::price`](crate::server::Handshake::price) to price a session before
+/// it learns any route.
+#[derive(Clone, Default)]
+pub struct Price(kio::Shared<PriceState>);
+
+#[derive(Default)]
+struct PriceState {
+	cost: Option<u64>,
+	/// Bumped on every change, so a reader can tell one from a spurious wake.
+	epoch: u64,
+	/// Read once by a session that charges its routes as they arrive (moq-transport),
+	/// which can no longer reprice them.
+	fixed: bool,
+}
+
+impl std::fmt::Debug for Price {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("Price").field(&self.0.read().cost).finish()
+	}
+}
+
+impl Price {
+	pub(crate) fn new(cost: Option<u64>) -> Self {
+		Self(kio::Shared::new(PriceState {
+			cost,
+			..Default::default()
+		}))
+	}
+
+	/// Price the link at `cost`, or at what the peer declared for `None`.
+	///
+	/// Fails with [`Error::Unsupported`] once a moq-transport session started, which
+	/// prices its routes as they arrive and cannot reprice them: reconnect instead.
+	pub fn set(&self, cost: Option<crate::origin::Cost>) -> Result<(), Error> {
+		let cost = cost.map(crate::origin::Cost::value);
+		let mut state = self.0.lock();
+		if state.cost == cost {
+			return Ok(());
+		}
+		if state.fixed {
+			return Err(Error::Unsupported);
+		}
+		state.cost = cost;
+		state.epoch += 1;
+		Ok(())
+	}
+
+	/// The price set now, or `None` to charge what the peer declared.
+	pub fn get(&self) -> Option<crate::origin::Cost> {
+		self.0.read().cost.map(crate::origin::Cost::new)
+	}
+
+	/// The price a session reads once, refusing every later change.
+	pub(crate) fn fix(&self) -> Option<u64> {
+		let mut state = self.0.lock();
+		state.fixed = true;
+		state.cost
+	}
+
+	/// The price as a session charges it.
+	pub(crate) fn cost(&self) -> Option<u64> {
+		self.0.read().cost
+	}
+
+	/// Ready once the price changed since `seen`, which it then moves past. Loop until
+	/// pending to wait for the next change.
+	pub(crate) fn poll_changed(&self, seen: &mut u64, waiter: &kio::Waiter) -> Poll<()> {
+		let state = ready!(self.0.poll(waiter, |state| match state.epoch > *seen {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}));
+		*seen = state.epoch;
+		Poll::Ready(())
 	}
 }
 

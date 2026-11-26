@@ -84,6 +84,8 @@ pub trait Sealed: Sized {
 	fn auth(&self) -> moq_net::auth::Handle;
 	fn requests(&mut self) -> moq_net::auth::Requests;
 	fn role(&self) -> Option<moq_net::setup::Role>;
+	/// What the session charges the peer's announcements, priced before any arrive.
+	fn price(&self) -> moq_net::session::Price;
 	/// The identity the peer declared in its SETUP, if any: its Hop ID, or from moq-lite-07 its Node ID.
 	fn peer_node(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
@@ -145,6 +147,10 @@ impl Sealed for moq_tokio::server::Request {
 
 	fn role(&self) -> Option<moq_net::setup::Role> {
 		moq_tokio::server::Request::role(self)
+	}
+
+	fn price(&self) -> moq_net::session::Price {
+		moq_tokio::server::Request::price(self)
 	}
 
 	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
@@ -215,6 +221,10 @@ impl Sealed for Accepted {
 
 	fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
+	}
+
+	fn price(&self) -> moq_net::session::Price {
+		self.handshake.price()
 	}
 
 	fn peer_node(&self) -> Option<std::num::NonZeroU64> {

@@ -150,6 +150,7 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 export type Grant = infer<typeof GrantSchema>;
 
 export const GrantSchema: ZodMiniObject<{
+	cost: ZodMiniOptional<ZodMiniInt>;
 	expires: ZodMiniOptional<ZodMiniInt>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
 	link: ZodMiniOptional<ZodMiniEnum<{

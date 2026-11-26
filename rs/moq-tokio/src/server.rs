@@ -1644,6 +1644,12 @@ impl Request {
 		self.handshake.requests()
 	}
 
+	/// What this side charges the client's announcements; see
+	/// [`moq_net::server::Handshake::price`].
+	pub fn price(&self) -> moq_net::session::Price {
+		self.handshake.price()
+	}
+
 	/// The identity the peer declared in its SETUP (moq-lite-05+).
 	///
 	/// A peer declares this when it attaches a publish or subscribe origin:
