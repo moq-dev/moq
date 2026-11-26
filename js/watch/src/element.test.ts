@@ -46,8 +46,8 @@ test("importing the entrypoint registers <moq-sync>, which refuses an instant de
 	expect(group.delay).toBe("auto");
 	expect(() => group.attributeChangedCallback("delay", null, "instant")).toThrow('delay="instant"');
 	expect(() => group.attributeChangedCallback("delay", null, "soon")).toThrow('moq-sync: invalid delay="soon"');
-	group.attributeChangedCallback("cap", null, "1s");
-	expect(group.cap.asMillis()).toBe(1000);
+	group.attributeChangedCallback("cap", null, "2s");
+	expect(group.cap.asMillis()).toBe(2000);
 	expect(() => group.attributeChangedCallback("cap", null, "soon")).toThrow('cap="soon"');
 	group.sync.close();
 });

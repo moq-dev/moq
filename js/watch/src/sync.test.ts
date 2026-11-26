@@ -966,7 +966,7 @@ describe("group", () => {
 
 	it("refuses members of a group whose fixed delay is past its cap", async () => {
 		const delay = new Signal<Delay>(Duration.secs(2));
-		const group = new Sync({ delay, cap: Duration.secs(1) });
+		const group = new Sync({ delay, cap: Duration.millis(500) });
 		const a = member(group, 1000);
 		await flush();
 		expect(a.sync.out.error.peek()?.message).toContain("can't exceed its cap");

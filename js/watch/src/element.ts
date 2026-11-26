@@ -809,7 +809,7 @@ function parseCap(value: string | null): Duration {
 	if (value === null) return DELAY_MAX;
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
-	throw new Error(`moq-sync: invalid cap="${value}", expected a duration like "1s"`);
+	throw new Error(`moq-sync: invalid cap="${value}", expected a duration like "10s"`);
 }
 
 /**

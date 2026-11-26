@@ -111,7 +111,7 @@ broadcast is placed on one timeline through its catalog's
 and each publisher must advertise one.
 
 ```html
-<moq-sync cap="1s" style="display: grid; grid-template-columns: 1fr 1fr">
+<moq-sync style="display: grid; grid-template-columns: 1fr 1fr">
     <moq-watch url="https://relay.example.com/anon" name="site/gate.hang" muted><canvas></canvas></moq-watch>
     <moq-watch url="https://relay.example.com/anon" name="site/yard.hang" muted><canvas></canvas></moq-watch>
 </moq-sync>
@@ -148,8 +148,7 @@ whose `sync.clock` runs ahead by less than the cap stays in step by holding its
 frames that much longer, so it shows images that much older while looking in
 sync: on real cameras, a clock 2 s ahead showed frames about 2.6 s old with the
 default cap. One whose clock runs behind by less than the cap holds the whole
-group back by as much. A cap a little above the delays your network needs, such
-as `1s`, makes such a member play alone and flagged instead.
+group back by as much.
 
 Without the element, pass one shared `Watch.Sync` as `sync` to each
 [`Player`](#without-the-element). `player.sync` stays the player's own clock,

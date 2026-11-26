@@ -104,9 +104,8 @@ through every broadcast's catalog `sync.clock`. It takes `delay` (`auto` or a du
 `auto`) and `cap` (a duration, default `10s`); a member that can't stay in step within the cap,
 or has no `sync.clock`, plays alone and carries an `out-of-sync` attribute. A member with
 `delay="instant"` or a `lookahead` is refused. A camera clock off by less than the cap stays in
-step: one ahead shows images that much older, one behind holds the whole group back; a lower `cap`
-(such as `1s`) makes it play alone instead. In JavaScript, pass one shared `Sync` as each
-`Player`'s `sync`.
+step: one ahead shows images that much older, one behind holds the whole group back. In
+JavaScript, pass one shared `Sync` as each `Player`'s `sync`.
 
 ## JavaScript API
 
