@@ -17,7 +17,10 @@ since it is additive (rejected: m3 beside the cluster-routing epic). Kixel
 routes its mesh by link quality and needs a JS endpoint to price and rank
 its own links, as a Rust one can. A link's cost is declared in SETUP as Rust
 declares it. A price we set wins over the one the peer declares. Zero is
-refused on moq-lite-07, as in Rust.
+refused on moq-lite-07, as in Rust. The same order, our price, then the
+peer's SETUP price, then `1`, applies on lite-06 too. That version's announce
+path reads the advertised cost apart from `#candidate`, so the change and
+its test cover both versions.
 
 Rust sets a link's priority on the origin handle given to the session
 (`origin::Producer::with_priority` in `rs/moq-net/src/model/origin.rs`), not
@@ -25,7 +28,7 @@ on the client, and its server has no `with_cost`. `@moq/net`'s origin has no
 priority. So the decided `connect()`/`accept()` placement breaks moq's rule
 that API names mirror across Rust and JS. See Waiting.
 
-Test it with two links to one Instance: the lower-cost one wins, a
+Test it on lite-06 and lite-07 with two links to one Instance: the lower-cost one wins, a
 higher-priority one wins despite its cost, and on lite-07 the route ranks by
 the lowest priority on its path.
 

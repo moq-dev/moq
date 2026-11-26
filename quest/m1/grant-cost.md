@@ -25,6 +25,11 @@ reprices it as quality moves.
 
 Guidance:
 
+- Only the connection credential's grant prices the link. A request-only
+  grant on the same session never does, so refreshing one cannot reprice
+  unrelated routes. When the connection credential ends while the session
+  stays up, the link falls back to the peer's SETUP price, then to the
+  default.
 - A grant's cost wins over the cost the peer declares in SETUP, the way a
   price the dialer sets does. Zero is refused at validation, since
   moq-lite-07 routing needs every link to cost something.

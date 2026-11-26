@@ -51,8 +51,11 @@ Guidance:
   A backend that can't ping or report a reply refuses the option when the
   session opens, so it never passes silently. That covers moq-tokio and
   moq-uring (on `moq-quic`), iroh (upstream noq), qmux, and moq-webrtc. qmux
-  already pings over WebSocket (`qmux::ws::KeepAlive`) and can serve the
-  same signal.
+  already pings over WebSocket (`qmux::ws::KeepAlive`), but its probes are
+  spaced by the idle timeout (a third of 30 s), so a quiet, healthy session
+  would go `Stale` first. With the option, qmux schedules its probes from
+  `soft` on its existing timers, and a qmux version that can't do that
+  refuses the option.
 - `Stale` is session-wide evidence, never a track's: a quiet track on a live
   session stays `Live`. [Route health](/quest/m3/route-health/README.md)
   keeps judging tracks by comparison, and a node can use `Stale` to demote a
