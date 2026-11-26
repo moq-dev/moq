@@ -1615,9 +1615,18 @@ export class Publisher {
 		const hold = new AbortController();
 		const holding = AbortSignal.any([signal, hold.signal]);
 		let fetched: group.Consumer | undefined;
+		let released = false;
+		let abandon: Error | undefined;
+		const releaseFetched = (reason: Error) => {
+			if (fetched && !released) {
+				released = true;
+				hooks.releaseGroupReader(fetched, reason);
+			}
+		};
 		let givenUp: GivenUp | undefined;
 		const onAbort = () => {
-			if (fetched) hooks.releaseGroupReader(fetched, error(signal.reason ?? new StreamError(StreamCode.Cancel)));
+			abandon ??= error(signal.reason ?? new StreamError(StreamCode.Cancel));
+			releaseFetched(abandon);
 		};
 		signal.addEventListener("abort", onAbort, { once: true });
 		try {
@@ -1631,8 +1640,15 @@ export class Publisher {
 				held: true,
 			};
 			const groupPromise = front.track(msg.track).fetchGroup(req.group, options);
-			// Prevent unhandled rejection if info fails before groupPromise settles.
-			groupPromise.catch(() => {});
+			// Track the resolved group immediately so a failure, revoke, or abort before
+			// `await groupPromise` still releases it without unhandled rejections.
+			groupPromise.then(
+				(group) => {
+					fetched = group;
+					if (abandon) releaseFetched(abandon);
+				},
+				() => {},
+			);
 
 			let info: TrackInfoMessage;
 			try {
@@ -1640,7 +1656,11 @@ export class Publisher {
 			} finally {
 				hold.abort();
 			}
-			if (watch.revoked()) return;
+			if (watch.revoked()) {
+				abandon ??= unauthorized(msg.broadcast);
+				releaseFetched(abandon);
+				return;
+			}
 
 			try {
 				fetched = await groupPromise;
@@ -1663,7 +1683,8 @@ export class Publisher {
 			}
 
 			if (watch.revoked() || signal.aborted) {
-				hooks.releaseGroupReader(fetched, error(signal.reason ?? unauthorized(msg.broadcast)));
+				abandon ??= error(signal.reason ?? unauthorized(msg.broadcast));
+				releaseFetched(abandon);
 				return;
 			}
 
@@ -1727,7 +1748,8 @@ export class Publisher {
 		} catch (err: unknown) {
 			closeViolation(this.#quic, err);
 			const e = error(err);
-			if (fetched) hooks.releaseGroupReader(fetched, e);
+			abandon ??= e;
+			releaseFetched(e);
 			stream.abort(e);
 		} finally {
 			signal.removeEventListener("abort", onAbort);

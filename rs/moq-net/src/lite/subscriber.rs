@@ -13227,7 +13227,7 @@ impl TrackServe {
 					Sub::None => None,
 				};
 				let (probes, reasked) = wanted_probes(active, asks, joins, &demand_ranges);
-				let fill_ranges: Vec<_> = FillAsk::wire_starts(&groups, &range_fills.ask.starts).collect();
+				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
 				let reasked = fitted_reasks(active, reasked, &probes);
 				(
@@ -13257,7 +13257,7 @@ impl TrackServe {
 			Some((demand, demand_ranges, probes, reasked, max_age)) => {
 				let mut ranges = demand_ranges.clone();
 				ranges.extend(probes.iter().copied());
-				ranges.extend(FillAsk::wire_starts(&groups, &fills.starts));
+				ranges.extend(FillAsk::wire(&groups));
 				Some(Wire {
 					subscription: fills.merge(demand.clone()),
 					demand: Some(demand),
@@ -13275,7 +13275,7 @@ impl TrackServe {
 				demand_ranges: Vec::new(),
 				probes: 0,
 				reasked: Default::default(),
-				ranges: FillAsk::wire_starts(&groups, &fills.starts).collect(),
+				ranges: FillAsk::wire(&groups).collect(),
 				max_age: fills.subscription().max_age(),
 			}),
 		};
@@ -14438,12 +14438,13 @@ impl TrackServeRun {
 						started = self.serve.pipeline(pref).map(|subscribing| *pipelined = subscribing);
 					}
 					// A fetch needs nothing from TRACK_INFO to go out, only to read its answer.
-					// On lite-07, hold multi-group fills (so they go out as one bounded SUBSCRIBE
-					// via RangeFills once TRACK_INFO lands) and whole-group fills when a pipelined
-					// SUBSCRIBE is already opening (so they deduplicate onto it).
+					// On lite-07, hold whole-group multi-group fills (so they go out as one bounded
+					// SUBSCRIBE via RangeFills once TRACK_INFO lands) and single whole-group fills
+					// when a pipelined SUBSCRIBE is already opening (so they deduplicate onto it).
 					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
 						if self.serve.subscriber.version.has_ranges()
-							&& (multi_group_fill(&fill) || (pipelined.is_some() && whole_groups(&fill)))
+							&& whole_groups(&fill)
+							&& (spans_groups(&fill) || pipelined.is_some())
 						{
 							pending_fills.push(fill);
 						} else {
@@ -15113,7 +15114,7 @@ impl ServeLoop {
 				.serving
 				.largest()
 				.is_some_and(|largest| fill.end() <= largest.group.saturating_add(1));
-			if multi_group_fill(&fill) || (whole_groups(&fill) && has_active_sub && within_live) {
+			if whole_groups(&fill) && (spans_groups(&fill) || (has_active_sub && within_live)) {
 				self.range_fills.push(fill);
 			} else {
 				let info = FetchInfo::Known(self.serving.info().clone());
@@ -16078,18 +16079,10 @@ fn spans_groups(fill: &track::FillGroups) -> bool {
 }
 
 /// Lite-07: whether `fill` asks for one or more whole groups (not a flight, frame slice, or
-/// mid-group start), so it can union into an active SUBSCRIBE.
+/// mid-group start), so it can union into an active SUBSCRIBE or ride `RangeFills`.
 fn whole_groups(fill: &track::FillGroups) -> bool {
 	let last = fill.end().saturating_sub(1);
 	!fill.is_flight() && fill.start().frame == 0 && fill.group(last).frame_end().is_none()
-}
-
-/// Lite-07: whether `fill` spans more than one group (including a mid-group start `[Position(G, f),
-/// Position(end, 0))`), so it goes out as one bounded SUBSCRIBE through `RangeFills`/`Recovery`
-/// rather than sequential single-group `FillServeRun` requests.
-fn multi_group_fill(fill: &track::FillGroups) -> bool {
-	let last = fill.end().saturating_sub(1);
-	!fill.is_flight() && fill.start().group < last && fill.group(last).frame_end().is_none()
 }
 
 /// Serves one group of a fill: wire `FETCH` on lite-05/06, or one-shot `SUBSCRIBE` + FIN on

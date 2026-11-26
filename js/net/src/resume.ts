@@ -3015,6 +3015,9 @@ class Recover implements GroupRecover {
 	}
 
 	#replacement(group: GroupConsumer, copy: Copy): Replacement {
+		// Capture the route generation at selection time: `Reader.sync` may rewrite
+		// `copy.generation` in place on a switch-back before `adopt` runs.
+		const generation = copy.generation;
 		return {
 			group,
 			expiry: hooks.staleAt(copy.sub, this.key, undefined, this.#reader.within),
@@ -3025,7 +3028,7 @@ class Recover implements GroupRecover {
 				copy.lease++;
 				this.#release();
 				this.#copy = copy;
-				this.#generation = copy.generation;
+				this.#generation = generation;
 			},
 			discard: () => group.close(),
 		};

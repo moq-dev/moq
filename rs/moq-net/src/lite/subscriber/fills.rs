@@ -22,9 +22,6 @@ use crate::{
 pub(super) struct FillAsk {
 	/// The groups to ask for, empty when no fill is held.
 	pub groups: RangeSet<u64>,
-	/// Optional non-zero starting frame per run's start group (lite-07 mid-group multi-group
-	/// fills); absent or `0` means frame 0.
-	pub starts: BTreeMap<u64, u64>,
 	/// The most urgent priority a held fill asks with.
 	pub priority: i8,
 	pub order: Order,
@@ -34,7 +31,6 @@ impl Default for FillAsk {
 	fn default() -> Self {
 		Self {
 			groups: Default::default(),
-			starts: Default::default(),
 			priority: i8::MIN,
 			order: Order::Ascending,
 		}
@@ -54,36 +50,12 @@ impl FillAsk {
 		}
 	}
 
-	/// Record the minimum starting frame required for `group` across overlapping fills.
-	fn add_start(&mut self, group: u64, frame: u64) {
-		self.starts
-			.entry(group)
-			.and_modify(|current| *current = (*current).min(frame))
-			.or_insert(frame);
-	}
-
 	/// The bounded ranges `groups` take on the wire, each ending before a group's first
 	/// frame, as `wire_ranges` ends an absolute one.
-	#[cfg(test)]
 	pub fn wire(groups: &RangeSet<u64>) -> impl Iterator<Item = lite::Range> + '_ {
 		groups.iter().map(|groups| lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
-		})
-	}
-
-	/// Like [`Self::wire`], honoring any non-zero starting frame recorded in `starts` for a
-	/// run's first group.
-	pub fn wire_starts<'a>(
-		groups: &'a RangeSet<u64>,
-		starts: &'a BTreeMap<u64, u64>,
-	) -> impl Iterator<Item = lite::Range> + 'a {
-		groups.iter().map(move |groups| {
-			let frame = starts.get(&groups.start).copied().unwrap_or(0);
-			lite::Range {
-				start: Some(lite::Anchor::Absolute(Position::new(groups.start, frame))),
-				end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
-			}
 		})
 	}
 
@@ -140,27 +112,15 @@ pub(super) struct RangeFills {
 	draining: RangeSet<u64>,
 	/// Groups the subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
-	/// Refusals from mid-group suffix recoveries (`frame_start > 0`) on their starting group,
-	/// scoped by `(min_frame_start, refusal)` so a suffix failure never poisons a concurrent
-	/// whole-group fill or recovery for the same group.
-	suffix_refused: BTreeMap<u64, (u64, Refusal)>,
 	/// Groups below where a fill's range starts, by the asked run that range carries, which
 	/// stand only while that range is live.
 	skipped: RangeMap<u64, Range<u64>>,
 	/// Groups dropped as stale, which a [`Recovery`] has yet to ask for.
 	recover: RangeSet<u64>,
-	/// Groups a [`Recovery`] asks for now from frame 0, which the subscription leaves out
-	/// meanwhile.
+	/// Groups a [`Recovery`] asks for now, which the subscription leaves out meanwhile.
 	recovering: RangeSet<u64>,
-	/// First groups of active mid-group suffix recoveries (`frame_start > 0`) that are not
-	/// covered from frame 0, mapped to the lowest active recovery starting frame.
-	recovering_starts: BTreeMap<u64, u64>,
-	/// Groups already recovered once from frame 0, which a second stale drop refuses.
+	/// Groups already recovered once, which a second stale drop refuses.
 	recovered: RangeSet<u64>,
-	/// First groups already recovered as a mid-group suffix (`frame_start > 0`), mapped to
-	/// the lowest starting frame recovered so an unholdable suffix is not re-recovered forever
-	/// while whole-group fills from frame 0 still recover once.
-	suffix_recovered: BTreeMap<u64, u64>,
 	/// The subscriptions recovering them.
 	recoveries: Vec<Recovery>,
 	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: fills handed back to FETCH, one key at a time.
@@ -246,117 +206,36 @@ impl RangeFills {
 	/// A fresh subscription may deliver what the last one refused.
 	pub fn forget_refused(&mut self) {
 		self.refused = Default::default();
-		self.suffix_refused.clear();
 		self.skipped = Default::default();
 	}
 
 	/// What the recoveries still out cover: each its groups less what it refused and handed
-	/// over. A suffix recovery (`frame_start > 0`) covers its first group only for fills
-	/// starting at or past `frame_start`, never suppressing a whole-group fill from frame 0.
+	/// over.
 	fn cover(&mut self) {
 		let mut still = RangeSet::new();
-		let mut starts = BTreeMap::<u64, u64>::new();
 		for recovery in &self.recoveries {
 			for gap in recovery.released.gaps(&recovery.groups) {
-				if recovery.frame_start > 0 && gap.start == recovery.groups.start {
-					starts
-						.entry(gap.start)
-						.and_modify(|current| *current = (*current).min(recovery.frame_start))
-						.or_insert(recovery.frame_start);
-					let tail = gap.start.saturating_add(1)..gap.end;
-					if !tail.is_empty() {
-						still.insert(tail);
-					}
-				} else {
-					still.insert(gap);
-				}
+				still.insert(gap);
 			}
 		}
-		starts.retain(|group, _| !still.contains(group));
 		self.recovering = still;
-		self.recovering_starts = starts;
-	}
-
-	/// Trim any leading group already covered by an active suffix recovery or suffix refusal
-	/// at or before `frame`.
-	fn trim_suffix_covered(&self, gap: Range<u64>, frame: u64) -> Option<Range<u64>> {
-		let covered = self
-			.recovering_starts
-			.get(&gap.start)
-			.is_some_and(|&rec_frame| rec_frame <= frame)
-			|| self
-				.suffix_refused
-				.get(&gap.start)
-				.is_some_and(|&(rec_frame, _)| rec_frame <= frame);
-		if !covered {
-			return Some(gap);
-		}
-		let tail = gap.start.saturating_add(1)..gap.end;
-		(!tail.is_empty()).then_some(tail)
-	}
-
-	/// Record a refusal from a recovery whose first group started at `frame_start`: when
-	/// `frame_start > 0`, keep any refusal on `start_group` scoped to suffix fills at or past
-	/// `frame_start` (and passing, so it never marks whole `start_group` lost on the track) so
-	/// a concurrent whole-group fill or recovery for `start_group` is unaffected.
-	fn record_recovery_refusal(&mut self, start_group: u64, frame_start: u64, groups: Range<u64>, refusal: Refusal) {
-		if frame_start > 0 && groups.start == start_group {
-			let start_refusal = if refusal.lost {
-				Refusal::passing(refusal.err.clone())
-			} else {
-				refusal.clone()
-			};
-			self.suffix_refused
-				.entry(start_group)
-				.and_modify(|(existing_frame, existing_refusal)| {
-					if frame_start <= *existing_frame {
-						*existing_frame = frame_start;
-						*existing_refusal = start_refusal.clone();
-					}
-				})
-				.or_insert((frame_start, start_refusal));
-			let tail = start_group.saturating_add(1)..groups.end;
-			if !tail.is_empty() {
-				self.refused.insert(tail, refusal);
-			}
-		} else {
-			self.refused.insert(groups, refusal);
-		}
 	}
 
 	/// Take the refusals a recovery made since the last poll, once: each answers the fills
 	/// owing its groups now, and [`Self::forget_answered`] ends it with them, so a later request
 	/// for the same groups asks again rather than reading it back.
 	/// The groups taken leave the recovery's coverage in `released`.
-	fn take_refused(
-		&mut self,
-		start_group: u64,
-		frame_start: u64,
-		fresh: &mut RangeMap<u64, Refusal>,
-		released: &mut RangeSet<u64>,
-	) {
+	fn take_refused(&mut self, fresh: &mut RangeMap<u64, Refusal>, released: &mut RangeSet<u64>) {
 		for (groups, refusal) in std::mem::take(fresh) {
 			released.insert(groups.clone());
-			if frame_start == 0 || groups.start > start_group {
-				self.recovering.remove(groups.clone());
-			} else {
-				let tail = start_group.saturating_add(1)..groups.end;
-				if !tail.is_empty() {
-					self.recovering.remove(tail);
-				}
-			}
-			self.record_recovery_refusal(start_group, frame_start, groups, refusal);
+			self.recovering.remove(groups.clone());
+			self.refused.insert(groups, refusal);
 		}
 	}
 
 	/// A refusal answers only the fills owing it now: once no held fill covers its groups, a
 	/// later request asks again, and a loss it named stays recorded on the track alone.
 	fn forget_answered(&mut self) {
-		self.suffix_refused.retain(|&group, (frame, _)| {
-			self.held
-				.iter()
-				.any(|fill| fill.start().group <= group && group < fill.end() && fill.frame_start(group) >= *frame)
-		});
 		// Trimmed to the groups a held fill still covers.
 		let mut covered = RangeSet::new();
 		for fill in &self.held {
@@ -411,15 +290,10 @@ impl RangeFills {
 		owed.iter().cloned().collect()
 	}
 
-	/// Why the subscription will not deliver the run of groups from `first` at `frame`, if it said so.
-	fn refusal(&self, first: u64, frame: u64) -> Option<(Range<u64>, Refusal)> {
+	/// Why the subscription will not deliver the run of groups from `first`, if it said so.
+	fn refusal(&self, first: u64) -> Option<(Range<u64>, Refusal)> {
 		if let Some((groups, refusal)) = self.refused.get_key_value(&first) {
 			return Some((groups.clone(), refusal.clone()));
-		}
-		if let Some((rec_frame, refusal)) = self.suffix_refused.get(&first)
-			&& frame >= *rec_frame
-		{
-			return Some((first..first.saturating_add(1), refusal.clone()));
 		}
 		// The subscriber's own range starting past them says nothing of the source.
 		let (groups, _) = self.skipped.get_key_value(&first)?;
@@ -467,14 +341,8 @@ impl RangeFills {
 			// to hold again: as `unholdable` says of the groups whose eviction the track still
 			// records, kept with the fill so neither a grace nor a debt forgets it.
 			let mut unfit = RangeSet::new();
-			let mut asked_starts = BTreeMap::<u64, u64>::new();
 			for fill in self.held.iter().filter(|fill| !fill.is_paced()) {
 				if let Some(run) = fill.next_run() {
-					let frame = fill.frame_start(run.start);
-					asked_starts
-						.entry(run.start)
-						.and_modify(|current| *current = (*current).min(frame))
-						.or_insert(frame);
 					asked.insert(run);
 				}
 				unfit.extend(fill.unfit());
@@ -497,26 +365,7 @@ impl RangeFills {
 								}
 							}
 							for fresh in self.refused.gaps(&owed).collect::<Vec<_>>() {
-								let frame = asked_starts.get(&fresh.start).copied().unwrap_or(0);
-								if frame > 0
-									&& self
-										.suffix_recovered
-										.get(&fresh.start)
-										.is_some_and(|&rec_frame| rec_frame <= frame)
-									&& (!serving
-										.unholdable(fresh.start..fresh.start.saturating_add(1))
-										.is_empty() || unfit.contains(&fresh.start))
-								{
-									self.record_recovery_refusal(
-										fresh.start,
-										frame,
-										fresh.start..fresh.start.saturating_add(1),
-										Refusal::passing(StreamError::NotFound),
-									);
-								}
-								if let Some(fresh) = self.trim_suffix_covered(fresh, frame) {
-									self.recover.insert(fresh);
-								}
+								self.recover.insert(fresh);
 							}
 						}
 					}
@@ -530,47 +379,11 @@ impl RangeFills {
 			.iter()
 			.map(|fill| fill.priority())
 			.fold(self.ask.priority, i8::max);
-		let plain = !serving.info().compressed();
 		for run in std::mem::take(&mut self.recover).iter() {
-			let frame_start = if plain && serve.subscriber.version.has_ranges() {
-				self.held
-					.iter()
-					.filter(|fill| fill.start().group == run.start)
-					.map(|fill| fill.frame_start(run.start))
-					.min()
-					.unwrap_or(0)
-			} else {
-				0
-			};
-			let Some(run) = self.trim_suffix_covered(run.clone(), frame_start) else {
-				continue;
-			};
-			let frame_start = if plain && serve.subscriber.version.has_ranges() {
-				self.held
-					.iter()
-					.filter(|fill| fill.start().group == run.start)
-					.map(|fill| fill.frame_start(run.start))
-					.min()
-					.unwrap_or(0)
-			} else {
-				0
-			};
-			if frame_start == 0 {
-				self.recovered.insert(run.clone());
-				self.recovering.insert(run.clone());
-			} else {
-				self.suffix_recovered
-					.entry(run.start)
-					.and_modify(|current| *current = (*current).min(frame_start))
-					.or_insert(frame_start);
-				let tail = run.start.saturating_add(1)..run.end;
-				if !tail.is_empty() {
-					self.recovered.insert(tail.clone());
-					self.recovering.insert(tail);
-				}
-			}
+			self.recovered.insert(run.clone());
+			self.recovering.insert(run.clone());
 			self.recoveries
-				.push(Recovery::new(serve, serving, run, frame_start, priority));
+				.push(Recovery::new(serve, serving, run.clone(), priority));
 		}
 		// What a finished recovery did not deliver stands refused.
 		let mut done = Vec::new();
@@ -578,7 +391,7 @@ impl RangeFills {
 		let mut violation = None;
 		self.recoveries.retain_mut(|recovery| match recovery.poll(waiter) {
 			Poll::Ready(Ok(refused)) => {
-				done.push((recovery.groups.start, recovery.frame_start, refused));
+				done.push(refused);
 				for keys in recovery.walk.iter() {
 					walk.insert(keys.clone());
 				}
@@ -593,21 +406,16 @@ impl RangeFills {
 		if let Some(err) = violation {
 			return Err(err);
 		}
-		for (start_group, frame_start, refused) in done {
+		for refused in done {
 			for (groups, refusal) in refused.iter() {
-				self.record_recovery_refusal(start_group, frame_start, groups.clone(), refusal.clone());
+				self.refused.insert(groups.clone(), refusal.clone());
 			}
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
 		// rather than waiting on its other streams, including a fill handed to FETCH below.
 		let mut recoveries = std::mem::take(&mut self.recoveries);
 		for recovery in &mut recoveries {
-			self.take_refused(
-				recovery.groups.start,
-				recovery.frame_start,
-				&mut recovery.fresh,
-				&mut recovery.released,
-			);
+			self.take_refused(&mut recovery.fresh, &mut recovery.released);
 		}
 		self.recoveries = recoveries;
 		// TEMPORARY MIGRATION, see [`Recovery::walk`]: a fill owing keys a stalled recovery left
@@ -633,7 +441,6 @@ impl RangeFills {
 		// again rather than counted recovered.
 		if self.per_run {
 			self.recovered = self.recovering.clone();
-			self.suffix_recovered = self.recovering_starts.clone();
 		}
 
 		let mut ask = FillAsk::default();
@@ -664,7 +471,7 @@ impl RangeFills {
 					Order::Ascending => run.start,
 					Order::Descending => run.end - 1,
 				};
-				if let Some((groups, refusal)) = this.refusal(first, fill.frame_start(first)) {
+				if let Some((groups, refusal)) = this.refusal(first) {
 					let groups = run.start.max(groups.start)..run.end.min(groups.end);
 					refusal.answer(fill, groups);
 					continue;
@@ -683,20 +490,6 @@ impl RangeFills {
 				};
 				for run in asked {
 					for gap in waiting.gaps(&run) {
-						let frame = if plain && serve.subscriber.version.has_ranges() {
-							fill.frame_start(gap.start)
-						} else {
-							0
-						};
-						let Some(gap) = this.trim_suffix_covered(gap, frame) else {
-							continue;
-						};
-						let frame = if plain && serve.subscriber.version.has_ranges() {
-							fill.frame_start(gap.start)
-						} else {
-							0
-						};
-						ask.add_start(gap.start, frame);
 						ask.groups.insert(gap);
 					}
 				}
@@ -741,9 +534,6 @@ impl RangeFills {
 		let mut draining = RangeSet::new();
 		for run in self.ask.groups.iter() {
 			if ask.groups.overlaps(run) {
-				if let Some(&frame) = self.ask.starts.get(&run.start) {
-					ask.add_start(run.start, frame);
-				}
 				groups.insert(run.clone());
 				continue;
 			}
@@ -761,9 +551,6 @@ impl RangeFills {
 				}
 			}
 			if self.reading.range(run.clone()).next().is_some() {
-				if let Some(&frame) = self.ask.starts.get(&run.start) {
-					ask.add_start(run.start, frame);
-				}
 				groups.insert(run.clone());
 				draining.insert(run.clone());
 			}
@@ -775,9 +562,6 @@ impl RangeFills {
 		for run in self.recovering.iter() {
 			groups.remove(run.clone());
 		}
-		// Keep only non-zero start frames matching an actual run start in `groups`.
-		ask.starts
-			.retain(|&group, &mut frame| frame > 0 && groups.iter().any(|run| run.start == group));
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
 			ask.priority = self.ask.priority;
@@ -887,8 +671,6 @@ pub(super) struct Recovery {
 	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
-	/// Starting frame requested for `groups.start` (`0` for whole-group recoveries).
-	frame_start: u64,
 	/// Whether its range is final. Before lite-07 the subscription proves only the keys below
 	/// its start, so it asks open, then caps once at the first group that arrives.
 	capped: bool,
@@ -933,13 +715,7 @@ enum RecoveryState {
 }
 
 impl Recovery {
-	pub(super) fn new(
-		serve: &TrackServe,
-		serving: &track::Producer,
-		groups: Range<u64>,
-		frame_start: u64,
-		priority: i8,
-	) -> Self {
+	pub(super) fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
 		// Before lite-07 the start is the answer, which the publisher gives only once a group in
 		// range can start it, so the range stays open until the start caps it: only upstream
 		// knows which group it still holds past the run.
@@ -949,24 +725,11 @@ impl Recovery {
 			.with_ranges(track::Range::span(Some(groups.start), end))
 			.with_priority(priority)
 			.with_order(Order::Ascending);
-		let start_pos = if serve.subscriber.version.has_ranges() {
-			Position::new(groups.start, frame_start)
-		} else {
-			Position::group(groups.start)
-		};
 		let ranges = vec![lite::Range {
-			start: Some(lite::Anchor::Absolute(start_pos)),
+			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
 		}];
-		Self::open(
-			serve,
-			serving,
-			groups,
-			start_pos.frame,
-			subscription,
-			ranges,
-			!one_start,
-		)
+		Self::open(serve, serving, groups, subscription, ranges, !one_start)
 	}
 
 	/// Lite-07: a one-shot time-containment probe `[Time(time), Time(time)]` on a finished copy.
@@ -983,14 +746,13 @@ impl Recovery {
 			start: Some(lite::Anchor::Time(time)),
 			end: Some(lite::Anchor::Time(time)),
 		}];
-		Self::open(serve, serving, groups, 0, subscription, ranges, true)
+		Self::open(serve, serving, groups, subscription, ranges, true)
 	}
 
 	fn open(
 		serve: &TrackServe,
 		serving: &track::Producer,
 		groups: Range<u64>,
-		frame_start: u64,
 		subscription: Subscription,
 		ranges: Vec<lite::Range>,
 		capped: bool,
@@ -1000,7 +762,7 @@ impl Recovery {
 			producer: serving.clone(),
 			framing: lite::Framing::new(serving.info(), serve.subscriber.version),
 		};
-		tracing::debug!(track = %serve.name, ?groups, frame_start, one_shot, "recovering groups");
+		tracing::debug!(track = %serve.name, ?groups, one_shot, "recovering groups");
 		// No max age: the groups it recovers are the ones a max age dropped.
 		let request = super::Request {
 			subscription,
@@ -1014,7 +776,6 @@ impl Recovery {
 			serving: serving.clone(),
 			id: establish.id,
 			groups,
-			frame_start,
 			capped,
 			one_shot,
 			stall: None,
@@ -1438,7 +1199,7 @@ mod tests {
 		let mut fresh = RangeMap::new();
 		let mut released = RangeSet::new();
 		fresh.insert(1..3, Refusal::passing(StreamError::Cancel));
-		fills.take_refused(1, 0, &mut fresh, &mut released);
+		fills.take_refused(&mut fresh, &mut released);
 		assert!(fills.refused.get(&1).is_some(), "handed over");
 		// No longer covered, so a later request asks again rather than waiting on the rest.
 		assert!(!fills.recovering.contains(&1), "released");
@@ -1447,7 +1208,7 @@ mod tests {
 
 		// No fill owes it any more, and the recovery is still out.
 		fills.forget_answered();
-		fills.take_refused(1, 0, &mut fresh, &mut released);
+		fills.take_refused(&mut fresh, &mut released);
 		assert!(fills.refused.is_empty(), "not read back");
 	}
 
@@ -1559,74 +1320,20 @@ mod tests {
 		fills.ask.groups.insert(8..10);
 		fills.skip(2..6, 2..4);
 		fills.skip(8..10, 8..9);
-		assert_eq!(
-			fills.refusal(3, 0),
-			Some((2..4, Refusal::passing(StreamError::NotFound)))
-		);
+		assert_eq!(fills.refusal(3), Some((2..4, Refusal::passing(StreamError::NotFound))));
 
 		// Asking 2..6 whole keeps its range; asking 8..12 retires the range for 8..10.
 		let mut asked = RangeSet::new();
 		asked.insert(2..6);
 		asked.insert(8..12);
 		fills.retire_skipped(&asked);
-		assert_eq!(
-			fills.refusal(3, 0),
-			Some((2..4, Refusal::passing(StreamError::NotFound)))
-		);
-		assert_eq!(fills.refusal(8, 0), None, "the new range says where it starts");
+		assert_eq!(fills.refusal(3), Some((2..4, Refusal::passing(StreamError::NotFound))));
+		assert_eq!(fills.refusal(8), None, "the new range says where it starts");
 
 		// A drop stands whatever is asked.
 		fills.refuse(4..5, StreamError::NotFound);
 		fills.retire_skipped(&RangeSet::new());
-		assert_eq!(fills.refusal(3, 0), None);
-		assert_eq!(
-			fills.refusal(4, 0),
-			Some((4..5, Refusal::dropped(StreamError::NotFound)))
-		);
-	}
-
-	/// A suffix recovery refusal on its starting group answers only suffix fills at or past
-	/// that frame, leaving concurrent whole-group fills and recoveries on the same group intact.
-	#[test]
-	fn suffix_recovery_refusal_does_not_poison_whole_group() {
-		let mut fills = RangeFills::default();
-		fills.recovering.insert(5..8);
-		let mut fresh = RangeMap::new();
-		let mut released = RangeSet::new();
-		fresh.insert(5..7, Refusal::dropped(StreamError::NotFound));
-		fills.take_refused(5, 3, &mut fresh, &mut released);
-
-		assert!(
-			fills.recovering.contains(&5),
-			"whole-group recovery coverage on start_group stays intact"
-		);
-		assert!(!fills.recovering.contains(&6), "tail group released");
-		assert_eq!(fills.refusal(5, 0), None, "whole-group fill is not refused");
-		assert_eq!(fills.refusal(5, 2), None, "earlier suffix fill is not refused");
-		assert_eq!(
-			fills.refusal(5, 3),
-			Some((5..6, Refusal::passing(StreamError::NotFound))),
-			"matching suffix fill is refused without marking whole group lost"
-		);
-		assert_eq!(
-			fills.refusal(5, 5),
-			Some((5..6, Refusal::passing(StreamError::NotFound))),
-			"later suffix fill is refused without marking whole group lost"
-		);
-		assert_eq!(
-			fills.refusal(6, 0),
-			Some((6..7, Refusal::dropped(StreamError::NotFound))),
-			"subsequent whole group is refused"
-		);
-		assert_eq!(
-			fills.trim_suffix_covered(5..8, 3),
-			Some(6..8),
-			"refused suffix start is not re-asked or re-recovered"
-		);
-		assert_eq!(
-			fills.trim_suffix_covered(5..8, 0),
-			Some(5..8),
-			"whole-group fill still asks for group 5"
-		);
+		assert_eq!(fills.refusal(3), None);
+		assert_eq!(fills.refusal(4), Some((4..5, Refusal::dropped(StreamError::NotFound))));
 	}
 }

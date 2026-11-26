@@ -4088,13 +4088,13 @@ impl Recover {
 					Cause::Cut | Cause::Failed(_) => {}
 				}
 			}
+			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
 			// A delayed Position-cut FIN arriving while the front stages a replacement route
-			// waits for that stage to splice or withdraw rather than letting the current route's
-			// refusal end the read early.
-			if matches!(cause, Cause::Cut) && staged.is_some() && !done {
+			// still polls the serving route so an already-available suffix does not stall,
+			// deferring only a terminal refusal until the staged route splices or withdraws.
+			if matches!(cause, Cause::Cut) && staged.is_some() && !done && matches!(res, Poll::Ready(Err(_))) {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
 			// The serving route failed too, or will not fetch the rest while its subscription
 			// will not deliver it either, and no front is left to replace it.
 			if res.is_pending() && settled && done && (copy_failed(&serving) || self.refused(generation, &serving)) {
@@ -4165,7 +4165,7 @@ impl Recover {
 			Poll::Ready(Ok(Some(group))) if !same && !serving.same_channel(&self.copy) => {
 				lend_head(&self.handoff, self.key, serving, &group);
 				let group = group.with_range(index..);
-				if group.index() == index {
+				if group.index() == index && !group.past_cut(index as usize) {
 					return Poll::Ready(Ok(Replacement {
 						group,
 						generation,

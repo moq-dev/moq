@@ -437,6 +437,9 @@ export class Subscriber {
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
+	// Shared signal set once `#quic.closed` settles so per-fetch waits can subscribe and dispose
+	// without retaining closures on the session-lifetime promise.
+	#quicClosed = new Signal(false);
 
 	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
 	// answers, and forever on a version without AUTH, which allows everything.
@@ -468,6 +471,10 @@ export class Subscriber {
 		auth?: AuthSession,
 	) {
 		this.#quic = quic;
+		void quic?.closed?.then(
+			() => this.#quicClosed.set(true),
+			() => this.#quicClosed.set(true),
+		);
 		this.#announces = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.version = version;
 		this.hop = hop;
@@ -2234,8 +2241,11 @@ export class Subscriber {
 			const cancel = () => {
 				if (stop.peek() === undefined) stop.set(null);
 			};
+			const unsubSession = this.#quicClosed.subscribe((closed) => {
+				if (closed) cancel();
+			});
+			if (this.#quicClosed.peek()) cancel();
 			void target.producer.closed.then(cancel, cancel);
-			void this.#quic.closed.then(cancel, cancel);
 			try {
 				if (!target.taken && refused === undefined) {
 					const covered = () => target.taken || entry.tail.covers(key, key + 1n);
@@ -2245,6 +2255,7 @@ export class Subscriber {
 					await entry.tail.settle(() => true, stop);
 				}
 			} finally {
+				unsubSession();
 				cancel();
 			}
 			if (!target.taken) {
