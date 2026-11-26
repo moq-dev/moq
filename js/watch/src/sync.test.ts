@@ -901,6 +901,29 @@ describe("group", () => {
 		for (const { sync } of [a, b, c, d, { sync: group }]) sync.close();
 	});
 
+	it("starts a member moved to another group without the margin it owed the last one", async () => {
+		const first = new Sync({ cap: Duration.millis(480) });
+		const second = new Sync({ cap: Duration.millis(500) });
+		const groupSignal = new Signal<Sync | undefined>(first);
+		const x = new Sync({ sync: groupSignal, clock: zero(1000) });
+		const video = x.track({ target: new Signal<Duration | undefined>(Duration.millis(20)) });
+		const others = [first, first, second, second].map((group) => member(group, 1000));
+		await flush();
+		video.received(Duration.millis(1000), at(5000));
+		for (const other of others) other.video.received(Duration.millis(1000), at(5470));
+		await flush();
+		// 490ms is past the first group's 480ms cap: X plays alone, and owes a margin to rejoin it.
+		expect(x.out.outOfSync.peek()).toBe(true);
+
+		// The second group's cap fits 490ms, which a newcomer needs no margin for.
+		groupSignal.set(second);
+		await flush();
+		expect(x.out.outOfSync.peek()).toBe(false);
+		expect(x.out.delay.peek()).toEqual(Duration.millis(490));
+
+		for (const sync of [x, ...others.map((other) => other.sync), first, second]) sync.close();
+	});
+
 	it("keeps the member that sets the playhead in step, however large its clock and odd its target", async () => {
 		// PTS zero 7 years after the moq epoch, and a target with a fraction of a millisecond.
 		const group = new Sync();

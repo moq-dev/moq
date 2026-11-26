@@ -554,8 +554,10 @@ export class Sync {
 	// As a group: who plays in step, and the playhead offset on the group's timeline.
 	#members = new Signal<Member[]>([]);
 	#playhead = new Signal<number | undefined>(undefined);
-	// As a member: out of step at its last check, kept across re-registering with its group.
+	// As a member: out of step at its last check, kept across re-registering with its group, and
+	// dropped for another group, which it owes nothing.
 	#margin = new Signal(false);
+	#marginGroup: Sync | undefined;
 
 	/**
 	 * Whether this member's video is playing. Only such members place the group's playhead; one with
@@ -687,6 +689,10 @@ export class Sync {
 		const group = effect.get(this.in.sync);
 		// A closed shared sync places no playhead: its members play alone, as if unlinked.
 		if (!group || effect.get(group.#clock.closed)) return;
+		if (group !== this.#marginGroup) {
+			this.#marginGroup = group;
+			this.#margin.set(false);
+		}
 
 		const error = this.#refusal(
 			group,
