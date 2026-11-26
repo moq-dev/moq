@@ -835,8 +835,10 @@ impl Recovery {
 						tracing::debug!(%err, "recovery subscribe write failed");
 					}
 					// Lite-07: a group stream discarded before its end leaves the rest of its span
-					// unnamed, which only the publisher can name, as on the subscription.
+					// unnamed, which only the publisher can name, as on the subscription. Once the
+					// last update is out, so the lost groups wait in the billed tail meanwhile.
 					if !*finished
+						&& active.stream.writer.is_flushed()
 						&& matches!(
 							active.tail.poll_ref(waiter, |tail| match tail.has_lost() {
 								true => Poll::Ready(()),
