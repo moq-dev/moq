@@ -7651,6 +7651,40 @@ mod test {
 		assert_eq!(dropped(&mut sub), []);
 	}
 
+	/// A switch caps the copy it replaces, which narrows that copy's ranges, so its record
+	/// retires the gaps left between the group it handed out and the drops it reported, past
+	/// one per run. Returning to the route hands out a group landing in one all the same.
+	#[test]
+	fn a_returning_route_hands_out_a_group_its_capped_copy_retired() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = history(&logical);
+		write(&a, 0);
+		a.drop_groups(2..3, StreamError::DeliveryTimeout);
+		a.drop_groups(6..7, StreamError::DeliveryTimeout);
+		// Still read, so the copy it came from is kept once replaced.
+		let held = recv(&mut sub);
+		assert_eq!(held.start, 0);
+		assert_eq!(
+			dropped(&mut sub),
+			[
+				(2..3, StreamError::DeliveryTimeout),
+				(6..7, StreamError::DeliveryTimeout)
+			]
+		);
+
+		let b = copy();
+		write(&b, 0);
+		routes.serve(b.consume());
+		assert!(drain(&mut sub, false).is_empty());
+		routes.serve(a.consume());
+		write(&a, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+		drop(held);
+	}
+
 	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed
 	/// reader reports it again, as a skip, and only once.
 	#[kio::test]
