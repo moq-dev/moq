@@ -2,12 +2,16 @@
 
 ## Goal
 
-`Instance` is renamed to `Identity` across the lite-07 draft, Rust (`moq-net`,
-`moq-hls`, `moq-relay`, `moq-cli`, `moq-ffi`), JS (`@moq/net`), and language
-bindings; `moq-lite-07` enforces a wire bound of 1 to 256 UTF-8 bytes on
-`Identity` (empty, non-UTF-8, or longer than 256 bytes is a
-`PROTOCOL_VIOLATION`); and `moq-hls` hashes `Identity` into a short fixed-length
-URL token instead of embedding raw percent-encoded text in every playlist URL.
+`Instance` is renamed to `Identity` across the lite-07 draft (every message
+that carries it: `ANNOUNCE_START`, `SUBSCRIBE`, `TRACK`, `TRACKS`, `DATAGRAMS`,
+and `FETCH` if still present), Rust (`moq-net`, `moq-hls`, `moq-relay`,
+`moq-cli`, `moq-ffi`, `libmoq`), JS (`@moq/net`), and language bindings;
+`moq-lite-07` enforces a 256-byte UTF-8 ceiling on `Identity` everywhere
+(rejecting non-UTF-8 or >256 bytes as `PROTOCOL_VIOLATION` in all messages,
+rejecting empty in `ANNOUNCE_START` and whenever `Minted = 1`, while keeping
+empty-with-`Minted = 0` legal in request messages); and `moq-hls` hashes
+`Minted` together with the `Identity` text into a short fixed-length URL token
+instead of embedding raw percent-encoded text in every playlist URL.
 
 ## Plan
 
@@ -28,23 +32,31 @@ Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
 Scope:
 
 1. **Draft and wire (`drafts/draft-lcurley-moq-lite.md`, `rs/moq-net`, `js/net`):**
-   - Rename `Instance` to `Identity` in `ANNOUNCE_START`, prose, changelog, and
-     wire fixtures (`rs/moq-net/fixtures/lite.json`).
-   - Enforce `1..=256` UTF-8 bytes in `Identity::from_str`, `TryFrom<String>`,
-     and both lite-07 codecs (Rust and JS), returning `PROTOCOL_VIOLATION` on
-     empty, non-UTF-8, or over-length values.
+   - Rename `Instance` to `Identity` in every message that carries it
+     (`ANNOUNCE_START`, `SUBSCRIBE`, `TRACK`, `TRACKS`, `DATAGRAMS`, and
+     `FETCH` if not yet removed), plus prose, changelog, and wire fixtures
+     (`rs/moq-net/fixtures/lite.json`).
+   - Enforce the 256-byte UTF-8 ceiling in `Identity::from_str`,
+     `TryFrom<String>`, and both lite-07 codecs (Rust and JS) across all six
+     messages (`PROTOCOL_VIOLATION` on non-UTF-8 or >256 bytes). Keep
+     empty-with-`Minted = 0` legal in request messages (`SUBSCRIBE`, `TRACK`,
+     `TRACKS`, `DATAGRAMS`, `FETCH`) for "whichever wins the path"; empty is a
+     `PROTOCOL_VIOLATION` in `ANNOUNCE_START` and whenever `Minted = 1`.
    - Update `just test interop --all` and `just drafts check`.
 2. **Rust, JS, and bindings:**
    - Rename `Instance` types, fields, methods, and errors (`InvalidInstance`,
-     `Route::instance`, CLI flags/output, `moq-ffi`, `moq-c`, Go/Python/Dart/Swift/Kotlin
-     bindings) to `Identity`.
+     `Route::instance`, CLI flags/output, `moq-ffi`, `libmoq` (`rs/libmoq`,
+     `c/`), and Go/Python/Dart/Swift/Kotlin bindings) to `Identity`.
    - Keep `Minted` and `Epoch` unchanged beside `Identity`.
 3. **`moq-hls` URL hashing (`rs/moq-hls`):**
-   - Hash `Identity` into a short fixed-length URL-safe token (matching
-     `init.{hash}.mp4` and `seg/{tag}.{n}.m4s`) for the `@{token}` path segment
-     in `master.rs`, `mpd.rs`, `route.rs`, and `server/routes.rs`.
+   - Hash the `Minted` flag together with the `Identity` text (matching
+     `Server`'s `by_id` key so a minted identity and a named identity with the
+     same text never collide) into a short fixed-length URL-safe token
+     (matching `init.{hash}.mp4` and `seg/{tag}.{n}.m4s`) for the `@{token}`
+     path segment in `master.rs`, `mpd.rs`, `route.rs`, and `server/routes.rs`.
    - Update `MIGRATE.md`, `doc/bin/hls.md`, and integration tests.
 
 Public API: breaking rename `Instance` to `Identity` across Rust, JS, and
-bindings, plus `moq-hls` URL token format. Wire: `moq-lite-07-wip` enforces a
-256-byte UTF-8 ceiling on `Identity` (`ANNOUNCE_START`).
+bindings, plus `moq-hls` URL token format. Wire: `moq-lite-07-wip` renames
+`Instance` to `Identity` and enforces a 256-byte UTF-8 ceiling across
+`ANNOUNCE_START`, `SUBSCRIBE`, `TRACK`, `TRACKS`, `DATAGRAMS`, and `FETCH`.

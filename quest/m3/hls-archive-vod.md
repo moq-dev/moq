@@ -27,10 +27,16 @@ Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS audit):
 Scope:
 
 1. **`moq-archive` group-timestamp index (`rs/moq-archive`):**
-   - Persist lightweight group start/end metadata (and frame header timestamps
-     if needed for grid placement) alongside archived tracks so `moq-archive`'s
-     consumer answers metadata-only subscriptions without fetching media
-     payload objects from object storage.
+   - Persist lightweight per-group metadata alongside archived tracks so
+     `moq-archive`'s consumer answers metadata-only subscriptions without
+     fetching media payload objects from object storage. Include every fact
+     `moq-hls` needs to render an accurate playlist without payload probing:
+     group start and `GROUP_END` extent, first muxed sample PTS (for DASH
+     `S@t` and HLS `EXT-X-PROGRAM-DATE-TIME`), discontinuity/empty-group
+     markers (so pauses are not listed as media), and codec/config or keyframe
+     dimension boundaries (so resized video groups bind to the right init
+     segment). Fall back to reading media objects only for older archives that
+     lack the index.
 2. **`moq-hls` VOD and range playlist mode (`rs/moq-hls`):**
    - Restore VOD/history and `[start, end)` range playlist rendering on
      `Broadcaster` / `Rendition` / `Server` (emitting `#EXT-X-PLAYLIST-TYPE:VOD`

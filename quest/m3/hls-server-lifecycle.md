@@ -24,9 +24,29 @@ Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS audit):
 Scope in `rs/moq-hls`:
 
 1. **Metadata-only live indexing (`src/export/rendition.rs`):**
-   - Switch `WatchMedia` from a payload subscription to a metadata-only
-     subscription so opening `master.m3u8` or watching one rung pulls zero
-     media payload bytes for other renditions across the relay mesh.
+   - Switch `WatchMedia` to a metadata-only subscription on timed lite-07
+     tracks where wire headers and catalog updates supply everything the
+     watcher needs, so opening `master.m3u8` or watching one rung avoids
+     pulling full media payloads for unwatched renditions across the relay
+     mesh.
+   - Account explicitly for every payload-derived fact `WatchMedia` currently
+     decodes so nothing regresses:
+     - **Sample PTS & `Reach` (`rendition.rs:2552-2558, 2638-2640`):** on timed
+       tracks, use wire frame timestamps and `GROUP_END` (`group.end()`) for
+       group start/end and reach; keep a payload subscription on scale-less or
+       legacy (`lite-06` / `moq-transport`) tracks that carry no wire
+       timestamps.
+     - **Discontinuity markers (`rendition.rs:2472, 2646`):** a container
+       discontinuity frame can be non-zero bytes on the wire and empty only
+       after container decoding; handle via a targeted frame-0 payload probe
+       (or container-level empty-group signal) so pauses never become media
+       segments.
+     - **Resized video hand-over:** when a resized video group arrives before
+       its catalog update, `WatchMedia` currently inspects keyframe picture
+       dimensions to assign the group to the new init segment. Retain a
+       targeted frame-0 payload probe (or payload probing on inline-parameter-set
+       / resizable video renditions where headers and catalog data do not
+       suffice) so a resized group is never listed under the old init segment.
 2. **Idle eviction and embedder hooks on `moq_hls::Server` (`src/server/`):**
    - Add configurable idle eviction to `Server`'s broadcaster pool so
      long-lived streams tear down subscriptions when no HTTP requests arrive.

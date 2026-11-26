@@ -26,28 +26,34 @@ Fixes in `rs/moq-hls`:
    before subscribing in `Hold` (matching `WatchMedia`), so metered origins
    never count media bytes that no HTTP client requested before `sync.interval`
    is declared.
-2. **`Row.pts` actual media PTS (`src/export/rendition.rs`):** preserve
-   `grid::Slot::Media`'s actual first-group `pts` alongside grid `start`
-   (the `EXTINF` anchor). Use actual media `pts` (and actual media duration)
-   for DASH `S@t`/`S@d` (matching CMAF `tfdt`) and for HLS
-   `EXT-X-PROGRAM-DATE-TIME` and `segments::Segment.program_date_time`.
+2. **`Row` first-sample PTS (`src/export/segments.rs`, `src/export/rendition.rs`):**
+   `Row` lives in `src/export/segments.rs:143` (with wall-clock callers at
+   `segments.rs:614, 672` and `rendition.rs:1302`). When a timed group starts
+   before its first frame, the grid stores the group start while CMAF `tfdt`
+   uses the first muxed sample's PTS. Carry the first muxed sample's PTS
+   separately on `Row` for DASH `S@t`/`S@d` and HLS
+   `EXT-X-PROGRAM-DATE-TIME` / `segments::Segment.program_date_time`, keeping
+   grid placement for segment numbering and `EXTINF`.
 3. **NTSC / slight-overrun gap spam (`src/export/grid.rs`):** absorb sub-frame
    or NTSC GOP jitter (e.g. 29.97fps 60-frame GOP = 2,002 ms on a 2,000 ms
    grid) without inserting spurious millisecond `#EXT-X-GAP` segments or
    bumping the playlist to `#EXT-X-VERSION:8`. Keep live
    `EXT-X-TARGETDURATION = 2 * segment_length`.
-4. **Immediate segment closure on `GROUP_END` (`src/export/rendition.rs`):**
-   read lite-07 `group.end()` in `WatchMedia` so a finished group settles its
-   segment immediately (before a pause or at track end) without waiting for a
-   subsequent group or decoding trailing frames.
+4. **Settle group extent on `GROUP_END` (`src/export/rendition.rs`):**
+   read lite-07 `group.end()` in `WatchMedia` to settle each finished group's
+   extent without waiting for a subsequent group or decoding trailing frames.
+   Publish a segment only once that extent or another boundary proves the
+   entire grid slot is complete, so multi-group segments (such as four audio
+   groups packed into one HLS segment) are never published incomplete after
+   the first group's `GROUP_END` or mutated at an already-published URL.
 5. **Bounded `SUBSCRIBE` for multi-group segments (`src/export/rendition.rs`):**
    replace `Fetching::Groups`'s serial per-group `track.fetch_group()` loop
    with one bounded `SUBSCRIBE` range `[first..=last]` (eliminating N serial
    round trips for multi-group audio segments on cold caches or archives).
 6. **Master/media playlist tags (`src/export/master.rs`, `src/export/playlist.rs`):**
    lower `master.rs`'s hardcoded `#EXT-X-VERSION:9` to match the tags actually
-   emitted, and emit `#EXT-X-INDEPENDENT-SEGMENTS` when non-warmup segments
-   open on keyframes.
+   emitted, and emit `#EXT-X-INDEPENDENT-SEGMENTS` when every listed segment
+   opens on a group and every group opens on a keyframe.
 7. **Multi-codec HLS import (`src/import.rs`):** extend `select_variants`
    beyond H.264 (`avc1.`/`avc3.`) to recognize HEVC (`hvc1.`/`hev1.`), AV1
    (`av01.`), and VP9 (`vp09.`) master playlists, matching `moq-mux` fMP4
