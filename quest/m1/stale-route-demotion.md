@@ -95,6 +95,5 @@ Guidance:
 
 ## Related
 
-- [JS sessions take a link cost and priority](/quest/m1/js-session-cost.md) - static link pricing and priority
 - [Cluster routing](/quest/m3/cluster-routing/README.md) - multi-hop `lite-07` route propagation and draining convergence
 - [Route health](/quest/m3/route-health/README.md) - per-track failover complementary to session-wide stale demotion

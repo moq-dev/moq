@@ -71,6 +71,9 @@ export interface ConnectionProps {
 	/** The origin fed with the peer's announced broadcasts, spanning reconnects. Implies a private loop. */
 	consume?: Origin.Producer;
 
+	/** Price each session's link; see {@link ConnectProps.cost}. Implies a private loop. */
+	cost?: Origin.Cost;
+
 	/** Backoff settings for the reconnect loop; an unset field uses its default. */
 	backoff?: BackoffType;
 
@@ -363,6 +366,7 @@ export class Connection {
 				websocket: props.websocket,
 				backoff: props.backoff,
 				timeout: props.timeout,
+				cost: props.cost,
 				goaway: props.goaway,
 				tokens: props.tokens,
 				urlAuth: props.urlAuth,
@@ -573,6 +577,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.goaway !== undefined) {
 		throw new Error("goaway cannot be shared; pass share: false");
 	}
+	if (props.cost !== undefined) {
+		throw new Error("cost cannot be shared; pass share: false");
+	}
 }
 
 /** Options tied to one handle cannot be represented by a URL-keyed shared entry. */
@@ -585,6 +592,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.urlAuth === true ||
 		props.timeout !== undefined ||
 		props.goaway !== undefined ||
+		props.cost !== undefined ||
 		props.publish !== undefined ||
 		props.consume !== undefined
 	);
