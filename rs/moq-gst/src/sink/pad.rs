@@ -153,8 +153,9 @@ impl Media {
 			let end = duration
 				.map(|duration| hang::container::Timestamp::from_micros(micros.saturating_add(duration.useconds())))
 				.transpose()?;
-			if self.join.fill(start, end.unwrap_or(start)) {
-				self.track.cut(end)?;
+			if let Some(reach) = self.join.fill(start, end.unwrap_or(start)) {
+				// The group ends past its furthest media, which a rewound buffer's own end can fall below.
+				self.track.cut(end.map(|_| reach))?;
 			}
 		}
 		Ok(true)

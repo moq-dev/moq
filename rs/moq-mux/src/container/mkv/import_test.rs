@@ -1286,6 +1286,35 @@ async fn unlaced_audio_bitrate_counts_the_default_duration() {
 	let _finished = importer.finish().unwrap();
 }
 
+/// An audio block a rewind puts before its group's start closes the group past its furthest frame,
+/// rather than failing the import by cutting it below its own frames.
+#[tokio::test(start_paused = true)]
+async fn a_rewound_audio_block_closes_past_its_group() {
+	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(20_000_000));
+	let payload = [0xf8; 4];
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.cluster(0, || {
+			[100, 120, 140, 90, 160]
+				.map(|at| simple_block(1, at, true, &payload))
+				.into()
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	let _finished = importer.finish().unwrap();
+}
+
 /// An unlaced block's duration follows its cadence, not an unparsed track default.
 #[tokio::test(start_paused = true)]
 async fn unlaced_block_duration_does_not_use_track_default() {

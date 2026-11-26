@@ -46,9 +46,11 @@ impl codec::Bridge for Bridge {
 		// resumes, so that packet closes the group too.
 		let dtx = frame.payload.len() <= 2;
 		self.import.decode(&frame.payload, Some(pts))?;
-		if self.join.fill(pts, end.unwrap_or(pts)) || dtx {
+		let full = self.join.fill(pts, end.unwrap_or(pts));
+		if full.is_some() || dtx {
 			self.join.reset();
-			self.import.cut(end)?;
+			// A full group ends past its furthest packet, which a rewound packet's own end can fall below.
+			self.import.cut(end.map(|end| full.unwrap_or(end)))?;
 		}
 		Ok(())
 	}

@@ -618,7 +618,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
 			})?;
-			if stream.join.fill(timestamp, end.unwrap_or(timestamp)) {
+			if stream.join.fill(timestamp, end.unwrap_or(timestamp)).is_some() {
 				stream.track.cut(None)?;
 			}
 			Ok(())

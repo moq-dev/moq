@@ -1014,7 +1014,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// frames stay in one group and the relay sees it finish without waiting for the next.
 			let start = Timestamp::from_nanos(ended.pts_ns)?;
 			let end = Timestamp::from_nanos(ended.pts_ns.saturating_add(duration.unwrap_or_default()))?;
-			if track.join.fill(start, end) {
+			if let Some(end) = track.join.fill(start, end) {
 				// The frames were shifted onto the catalog clock, so their end is too.
 				let end = duration.map(|_| self.timebase.shift(end)).transpose()?;
 				track.track.cut(end)?;

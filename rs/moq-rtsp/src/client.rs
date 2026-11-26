@@ -515,7 +515,7 @@ impl Ingest {
 				let end = length
 					.and_then(|length| pts.checked_add(length))
 					.map_err(moq_mux::Error::from)?;
-				if join.fill(pts, end) {
+				if let Some(end) = join.fill(pts, end) {
 					import.cut(Some(end))?;
 				}
 			}
