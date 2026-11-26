@@ -2239,7 +2239,8 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 	try {
 		hooks.receiveTrack(sub.track);
 		// The copy still waits on its upstream's answer for the demand from 1000.
-		hooks.startTrack(sub.track, { requested: 1000n });
+		// Its upstream subscription is still unanswered when the track finishes.
+		hooks.startTrack(sub.track, { requested: 0n });
 		hooks.timeStarts(sub.track, [[5000n, 5000n]]);
 		sub.serve(5000n);
 		const placed = await decodeSubscribeResponse(sub.client.reader, version);
@@ -2254,6 +2255,42 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 		const older = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in older)) throw new Error("expected SUBSCRIBE_START");
 		expect([older.start.id, older.start.start]).toEqual([0n, 1000n]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A relay's copy that finished holding only groups past a range's time answers that range only once
+// its upstream placed the time, never empty for want of history it doesn't hold: a subscriber reads
+// an empty answer as no group at or before the time. Mirrors the Rust
+// `lite07_a_finished_copy_answers_a_time_only_once_placed`.
+test("lite draft-07: a finished copy answers a time only once placed", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 1000n } }],
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { requested: 1000n });
+		sub.serve(5000n);
+		sub.serve(6000n);
+		sub.track.finish();
+		const messages: Awaited<ReturnType<typeof decodeSubscribeResponse>>[] = [];
+		const reading = (async () => {
+			for (;;) {
+				const msg = await decodeSubscribeResponse(sub.client.reader, version);
+				messages.push(msg);
+				if ("start" in msg) return msg.start;
+			}
+		})();
+		for (let i = 0; i < 20; i++) await flush();
+		expect(messages.filter((msg) => "start" in msg)).toEqual([]);
+
+		hooks.timeStarts(sub.track, [[1000n, 1000n]]);
+		const start = await reading;
+		expect([start.id, start.start]).toEqual([0n, 1000n]);
 	} finally {
 		await sub.close();
 	}
@@ -2516,9 +2553,10 @@ test.each([Version.DRAFT_01, Version.DRAFT_02])(
 		const sub = await servedSubscription({ version, pending: true });
 		try {
 			await sub.accept([0n, 3n, 7n]);
-			expect(await sub.servedHeader()).toBe(0n);
-			expect(await sub.servedHeader()).toBe(3n);
+			// Newest first, the default Group Order these versions cannot change.
 			expect(await sub.servedHeader()).toBe(7n);
+			expect(await sub.servedHeader()).toBe(3n);
+			expect(await sub.servedHeader()).toBe(0n);
 		} finally {
 			await sub.close();
 		}
@@ -2541,6 +2579,26 @@ test("lite draft-05: an update dropping the floor on an empty track serves the n
 
 // Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
 // That is a floor, so a later group 0 is still served.
+// A held group missing its head, which no fill can bring, cannot be where the feed starts either.
+// Mirrors the Rust `track::Subscriber::delivery_start`.
+test("lite draft-06: START advances past a held group it cannot serve", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 5n });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 5n, requested: 5n });
+		const tail = hooks.receiveGroup(sub.track, { start: 5n, offset: 1 });
+		tail.writeFrame(textFrame("tail", Timestamp.fromMillis(5)));
+		tail.finish();
+		sub.serve(6n);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.start).toBe(6n);
+		expect(await sub.servedSequence()).toBe(6n);
+	} finally {
+		await sub.close();
+	}
+});
+
 test("lite draft-06: an omitted group start still serves a group below the first one", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06 });
 	try {

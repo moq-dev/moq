@@ -18,6 +18,10 @@ export interface Counted {
 	 * waits for it at most the grace. Idempotent.
 	 */
 	excuse(): void;
+	/** Stop holding the end open while it waits, unread, on a copy another stream delivers. Idempotent. */
+	park(): void;
+	/** Hold the end open again once it reads the group itself. Idempotent. */
+	resume(): void;
 }
 
 /**
@@ -76,21 +80,37 @@ export class Tail {
 		this.#active += 1;
 		this.#account(key, key + 1n);
 
-		let state: "held" | "excused" | "done" = "held";
+		// Parked holds nothing, excused or not: an excuse made while parked applies once it resumes.
+		let state: "held" | "excused" | "parked" | "parked-excused" | "done" = "held";
 		const token = {};
 		return {
 			done: () => {
-				if (state === "done") return;
 				if (state === "held") this.#active -= 1;
-				else this.#excused.delete(token);
+				else if (state === "excused") this.#excused.delete(token);
+				else if (state === "done") return;
 				state = "done";
 				this.#bump();
 			},
 			excuse: () => {
+				if (state === "parked") state = "parked-excused";
 				if (state !== "held") return;
 				state = "excused";
 				this.#active -= 1;
 				this.#excused.add(token);
+				this.#bump();
+			},
+			park: () => {
+				if (state === "held") this.#active -= 1;
+				else if (state === "excused") this.#excused.delete(token);
+				else return;
+				state = state === "held" ? "parked" : "parked-excused";
+				this.#bump();
+			},
+			resume: () => {
+				if (state === "parked") this.#active += 1;
+				else if (state === "parked-excused") this.#excused.add(token);
+				else return;
+				state = state === "parked" ? "held" : "excused";
 				this.#bump();
 			},
 		};

@@ -1671,12 +1671,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
+				moq_net::track::Subscription::default()
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
-					},
-				)]),
+					})])
+					.with_order(moq_net::track::Order::Ascending),
 			)
 			.await
 			.unwrap();

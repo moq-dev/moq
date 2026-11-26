@@ -794,6 +794,9 @@ struct Copy {
 	/// Whether it may still deliver a group the reader lacks, as [`Reader::let_go`] last
 	/// judged: a drop under its bound waits for it.
 	feeds: bool,
+	/// The track's [`track::Consumer::evicted`] count when [`Reader::backfill_gaps`] last left
+	/// it a group the reader lacks to drain, so an eviction since asks the serving route again.
+	drains: Option<u64>,
 }
 
 // Boxed: a copy holds one for its whole life, and neither arm should pad every copy.
@@ -1264,8 +1267,8 @@ impl Mirror {
 }
 
 impl Subscriber {
-	/// Reserve the lowest next group not in `delivered` across copies, without handing it
-	/// out: in arrival order, or in key order for `ordered`.
+	/// Reserve the next group not in `delivered` across copies, without handing it out: the
+	/// first any copy holds in the subscription's Group Order, or the lowest for `ordered`.
 	/// Unless it `parks`, a bounded reader ends once its window has nothing left on any copy;
 	/// see [`Reader::exhausted`].
 	///
@@ -1298,7 +1301,7 @@ impl Subscriber {
 			// even on a path that parks without looking at the route.
 			reader.route.register(waiter);
 			let polled = loop {
-				if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
+				if let Some(result) = reader.poll_first(ordered, parks, delivered, waiter) {
 					break result;
 				}
 			};
@@ -1382,29 +1385,67 @@ impl Subscriber {
 			.collect()
 	}
 
-	/// Forget the gaps in `delivered` below each group past the reader's budget, judged on
-	/// the newest copy that answered; see [`track::Subscriber::forget_past_budget`].
+	/// Forget the gaps in `delivered` below each group past the reader's budget, as
+	/// [`Self::forget_past`] does; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
 		let budget = self.reader().budget();
-		self.forget_past(delivered, budget);
+		self.forget_past(delivered, budget, None);
 	}
 
 	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	/// `delivered` this is, judged on the newest copy that answered.
-	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget) {
+	/// `delivered` this is, judged on the newest copy that answered, but never past a group a
+	/// replaced copy the reader still reads holds unread: as one cursor keeps what it owes,
+	/// since a late group there may be fresh by its own successor on that copy. Nor past `keep`,
+	/// an outer reader's own such group.
+	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
-			Sub::Ready(sub) => Some(sub),
+			Sub::Ready(sub) => Some((copy, sub)),
 			Sub::Pending(_) => None,
 		});
-		if let Some(sub) = ready.next() {
-			sub.forget_past_budget(delivered, budget);
-		}
+		let Some((_, newest)) = ready.next() else {
+			return;
+		};
+		let unread = |sub: &track::Subscriber| {
+			let mut from = delivered.floor();
+			while let Some(group) = sub.lowest_unread(from) {
+				if !delivered.contains(group.start) {
+					return Some(group.start);
+				}
+				from = group.start.checked_add(1)?;
+			}
+			None
+		};
+		// Judged as the pick judges a copy now, not by the verdict letting it go last made: a
+		// widened budget reads an expired copy again.
+		let widest = reader.mirrored.widest();
+		let kept = ready
+			.filter(|(copy, _)| copy.replaced && reader.reads(copy, widest, delivered, &kio::Waiter::noop()).is_some())
+			.filter_map(|(_, sub)| unread(sub))
+			.chain(keep)
+			.min();
+		newest.forget_past_budget(delivered, budget, kept);
 	}
 
 	/// Poll for the track's declared exclusive end.
 	pub(super) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.reader().poll_finished(waiter)
+	}
+
+	/// The lowest group at or above `from` any copy's arrival read holds unread; see
+	/// [`track::Subscriber::lowest_unread`]. Of the copies holding it, the one serving the
+	/// most of it, so which copy holds a group never decides whether it can be served: one
+	/// that can fetch its head serves any frame, and below its first frame a copy that can't
+	/// fetches nothing, so the lowest first frame serves the rest.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn lowest_unread(&self, from: u64) -> Option<group::Consumer> {
+		let reader = self.reader();
+		(reader.copies.iter())
+			.filter_map(|copy| match &copy.sub {
+				Sub::Ready(sub) => sub.lowest_unread(from),
+				Sub::Pending(_) => None,
+			})
+			.min_by_key(|group| (group.start, !group.fetches_from(0), group.first_frame()))
 	}
 
 	/// Poll for where the serving copy's live feed starts; see
@@ -2489,6 +2530,7 @@ impl Reader {
 			let capped = copy.cap.take().is_some();
 			copy.since = None;
 			copy.done = None;
+			copy.drains = None;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// boundary, is the capped copies' to deliver.
 			copy.floor = copy.floor.max(boundary);
@@ -2536,6 +2578,7 @@ impl Reader {
 			since: None,
 			lease: Arc::new(()),
 			feeds: true,
+			drains: None,
 		});
 		self.learn_end(None);
 	}
@@ -2696,7 +2739,7 @@ impl Reader {
 				owed.remove(run.clone());
 			}
 			for copy in &self.copies {
-				// Only a copy `poll_lowest` still reads delivers: not ran out, failed, or past
+				// Only a copy `poll_first` still reads delivers: not ran out, failed, or past
 				// the budget.
 				if copy.done.is_some() || copy.expired(budget, waiter) {
 					continue;
@@ -2890,9 +2933,32 @@ impl Reader {
 		Ok(self.hand_out(index, group))
 	}
 
-	/// Choose without consuming a candidate, so a newer copy cannot overtake a lower
-	/// group still buffered on an older one. A tie favors the newer copy.
-	fn poll_lowest(
+	/// Whether [`Self::poll_first`] reads `copy` now, given the reader's [`Mirrored::widest`]
+	/// budget: `Some(true)` when it ran out cleanly but a late group reopened it.
+	fn reads(&self, copy: &Copy, widest: Duration, delivered: &Delivered, waiter: &kio::Waiter) -> Option<bool> {
+		// A fully handed-out bounded copy still backs groups being read, but cannot
+		// supply another one. Keep its recovery lease without polling its empty range.
+		let spent = copy.end().is_some_and(|end| delivered.covers(self.groups.0..end));
+		// A copy that ran out cleanly still takes a group in flight below its end while the
+		// read stays open, as a cursor still reading it would.
+		let ran_out = match &copy.done {
+			None => false,
+			Some(Ok(drained)) if !spent && copy.track.poll_arrived(*drained, waiter).is_ready() => true,
+			Some(_) => return None,
+		};
+		// What a replaced copy holds is past the reader's budget once a newer group superseded
+		// it a full budget ago. A copy is let go as a whole, so it waits out the widest budget
+		// any group gets.
+		if spent || copy.expired(widest, waiter) {
+			return None;
+		}
+		Some(ran_out)
+	}
+
+	/// Choose without consuming a candidate, so a newer copy cannot overtake a group still
+	/// buffered on an older one that goes first: the lowest for an `ordered` read, else the
+	/// first in the subscription's Group Order. A tie favors the newer copy.
+	fn poll_first(
 		&mut self,
 		ordered: bool,
 		parks: bool,
@@ -2903,28 +2969,16 @@ impl Reader {
 		self.groups_read = true;
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
-		// A copy is let go as a whole, so it waits out the widest budget any group gets.
-		let budget = self.mirrored.widest();
+		let widest = self.mirrored.widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
-		let mut lowest: Option<Candidate> = None;
+		let ascending = ordered || self.mirrored.order == track::Order::Ascending;
+		let mut first: Option<Candidate> = None;
 		let mut held = false;
 		for index in 0..self.copies.len() {
-			let copy = &mut self.copies[index];
-			// What a replaced copy holds is past the reader's budget once a newer group
-			// superseded it a full budget ago.
-			// A fully handed-out bounded copy still backs groups being read, but cannot
-			// supply another one. Keep its recovery lease without polling its empty range.
-			let spent = copy.end().is_some_and(|end| delivered.covers(groups.0..end));
-			// A copy that ran out cleanly still takes a group in flight below its end while the
-			// read stays open, as a cursor still reading it would.
-			let ran_out = match &copy.done {
-				None => false,
-				Some(Ok(drained)) if !spent && copy.track.poll_arrived(*drained, waiter).is_ready() => true,
-				Some(_) => continue,
-			};
-			if spent || copy.expired(budget, waiter) {
+			let Some(ran_out) = self.reads(&self.copies[index], widest, delivered, waiter) else {
 				continue;
-			}
+			};
+			let copy = &mut self.copies[index];
 			if ran_out {
 				copy.done = None;
 			}
@@ -3002,8 +3056,12 @@ impl Reader {
 							}
 							continue;
 						}
-						if lowest.as_ref().is_none_or(|lowest| key <= lowest.key()) {
-							lowest = Some(Candidate {
+						let goes_first = |first: &Candidate| match ascending {
+							true => key <= first.key(),
+							false => key >= first.key(),
+						};
+						if first.as_ref().is_none_or(goes_first) {
+							first = Some(Candidate {
 								lease: self.copies[index].lease.clone(),
 								reserved,
 							});
@@ -3050,18 +3108,26 @@ impl Reader {
 			// fill let go while that copy still fed it would otherwise leave it unasked.
 			let ran_short =
 				copy.replaced && !copy.fills && matches!(copy.done, Some(Ok(_))) && self.window.end().is_some();
-			if (late && serving && copy.floor.is_some()) || failed || ran_short {
-				self.resumed
-					.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
+			// A group the switch left this copy to drain may be gone from its cache since: the
+			// serving route is asked for it after all, as a cursor on the track would ask again.
+			let lost = copy.replaced && copy.drains.is_some_and(|at| copy.track.evicted() != at);
+			let rearm = (late && serving && copy.floor.is_some()) || failed || ran_short || lost;
+			if lost {
+				self.copies[index].drains = None;
+			}
+			// A walk of the whole route: one an edit queued for its own ranges starts above what
+			// this copy was left to drain.
+			if rearm && !matches!(self.resumed, Some(Resumed::Route(..))) {
+				self.resumed = Some(Resumed::Route(None, BTreeMap::new()));
 			}
 		}
-		// A later copy placed the window this pass: a group held back above may now be the lowest.
+		// A later copy placed the window this pass: a group held back above may now go first.
 		if held && !self.window().is_pending() {
-			drop(lowest);
-			return self.poll_lowest(ordered, parks, delivered, waiter);
+			drop(first);
+			return self.poll_first(ordered, parks, delivered, waiter);
 		}
-		if let Some(lowest) = lowest {
-			return Some(Poll::Ready(Ok(Some(lowest))));
+		if let Some(first) = first {
+			return Some(Poll::Ready(Ok(Some(first))));
 		}
 		// A copy answering this pass may have placed the ranges the switch's backfill waits
 		// for: ask for it now, since no later group is sure to wake the read.
@@ -3543,6 +3609,7 @@ impl Reader {
 			done: None,
 			lease: Arc::new(()),
 			feeds: true,
+			drains: None,
 		};
 		// The last copy stays the newest route's own.
 		self.copies.insert(self.copies.len() - 1, copy);
@@ -3643,6 +3710,11 @@ impl Reader {
 		// does one still unanswered, whose ranges are not placed yet.
 		let start = self.groups.0;
 		let budget = self.mirrored.widest();
+		// Each replaced copy's evictions so far, counted before the walk looks at what it holds,
+		// so a group it is left to drain and loses after is asked of the serving route then.
+		let evicted: Vec<Option<u64>> = (self.copies.iter())
+			.map(|copy| copy.replaced.then(|| copy.track.evicted()))
+			.collect();
 		// Each answered copy's staleness verdict, taken once for the whole walk.
 		let taking: Vec<Option<track::Taking<'_>>> = (self.copies.iter())
 			.map(|copy| match &copy.sub {
@@ -3650,8 +3722,9 @@ impl Reader {
 				Sub::Pending(_) => None,
 			})
 			.collect();
+		// The copy left to drain group `key`, if any.
 		let drains = |key: u64| {
-			self.copies.iter().zip(&taking).any(|(copy, taking)| {
+			self.copies.iter().zip(&taking).position(|(copy, taking)| {
 				copy.replaced
 					&& copy.done.is_none()
 					&& !copy.expired(budget, waiter)
@@ -3662,8 +3735,26 @@ impl Reader {
 					&& copy.track.peek_group(key).is_some_and(|group| group.first_frame() == 0)
 			})
 		};
-		let lowest =
-			(delivered.gaps(from..resumed).into_iter()).find_map(|gap| gap.into_iter().find(|key| !drains(*key)));
+		let mut left = vec![false; self.copies.len()];
+		let lowest = (delivered.gaps(from..resumed).into_iter()).find_map(|gap| {
+			gap.into_iter().find(|key| match drains(*key) {
+				Some(index) => {
+					left[index] = true;
+					false
+				}
+				None => true,
+			})
+		});
+		drop(taking);
+		// Ranges an edit added are walked only from their own starts, which rechecks none of the
+		// groups below: a watch set there stands until a walk of the whole route renews it.
+		let partial = matches!(resumed_by, Resumed::Ranges(_));
+		for ((copy, left), evicted) in self.copies.iter_mut().zip(left).zip(evicted) {
+			copy.drains = match copy.drains {
+				Some(at) if partial => Some(at),
+				_ => evicted.filter(|_| left),
+			};
+		}
 		// A raised start is asked from its time whatever the local floor, so the backfill
 		// places it, and the group holding it is read once the floor lets it.
 		if let Some(start) = lowest.into_iter().chain(owed.into_values()).min() {
@@ -4931,13 +5022,13 @@ mod test {
 		let mut last = source.create_group(group::Info { start: 2 }).unwrap();
 		last.write_frame(ts(2), b"c".as_ref()).unwrap();
 		source.finish_at(Position { group: 2, frame: 1 }).unwrap();
+		let mut capped = recv(&mut sub);
+		assert_eq!(read(&mut capped), Some(b"c".to_vec()));
+		assert_eq!(read(&mut capped), None);
 		let mut first = recv(&mut sub);
 		assert_eq!(read(&mut first), Some(b"a".to_vec()));
 		assert_eq!(read(&mut first), Some(b"b".to_vec()));
 		assert_eq!(read(&mut first), None);
-		let mut capped = recv(&mut sub);
-		assert_eq!(read(&mut capped), Some(b"c".to_vec()));
-		assert_eq!(read(&mut capped), None);
 	}
 
 	#[kio::test]
@@ -5593,7 +5684,7 @@ mod test {
 		routes.serve(b.consume());
 		write(&b, 10);
 		write(&b, 20);
-		assert_eq!(drain(&mut sub, false), [10, 20]);
+		assert_eq!(drain(&mut sub, false), [20, 10]);
 
 		routes.serve(a.consume());
 		write(&a, 30);
@@ -5622,7 +5713,7 @@ mod test {
 		routes.serve(b.consume());
 		write(&b, 10);
 		write(&b, 20);
-		assert_eq!(drain(&mut sub, false), [10, 20]);
+		assert_eq!(drain(&mut sub, false), [20, 10]);
 		write(&a, 15);
 		assert_eq!(copies(&routes), 2, "the held group keeps the first route");
 		routes.serve(a.consume());
@@ -5798,7 +5889,7 @@ mod test {
 			for sequence in 0..4 {
 				write(&a, sequence);
 			}
-			assert_eq!(drain(&mut sub, false), [0, 1, 2, 3], "routed={routed}");
+			assert_eq!(drain(&mut sub, false), [3, 2, 1, 0], "routed={routed}");
 			// It reaches back to the oldest group rather than naming one.
 			assert_eq!(sub.floor(), None, "routed={routed}");
 			assert_eq!(
@@ -7535,7 +7626,7 @@ mod test {
 		assert_eq!(dropped(&mut sub), []);
 		write(&a, 3);
 		write(&a, 4);
-		assert_eq!(drain(&mut sub, false), [3, 4]);
+		assert_eq!(drain(&mut sub, false), [4, 3]);
 		assert_eq!(dropped(&mut sub), []);
 	}
 
@@ -7979,7 +8070,7 @@ mod test {
 			write(&c, key);
 		}
 		routes.serve(c.consume());
-		assert_eq!(drain(&mut sub, false), (1..9).collect::<Vec<_>>());
+		assert_eq!(drain(&mut sub, false), (1..9).rev().collect::<Vec<_>>());
 
 		open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
 			.unwrap();
@@ -8006,8 +8097,8 @@ mod test {
 			}
 		}
 
-		assert_eq!(recv(&mut sub).start, 0);
 		assert_eq!(recv(&mut sub).start, 1);
+		assert_eq!(recv(&mut sub).start, 0);
 		routes.serve(b.consume());
 		assert_eq!(recv(&mut sub).start, 2);
 		assert!(sub.recv_group().now_or_never().is_none());
@@ -8573,7 +8664,7 @@ mod test {
 		for key in 0..6 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), vec![4, 5]);
+		assert_eq!(drain(&mut sub, false), vec![5, 4]);
 
 		let mut sub = sub.with_range(1..);
 		assert_eq!(drain(&mut sub, false), vec![3, 2, 1], "passed below the floor");
@@ -8644,7 +8735,8 @@ mod test {
 			for key in 0..6 {
 				write(&a, key);
 			}
-			assert_eq!(drain(&mut sub, ordered), [4, 5]);
+			let held: &[u64] = if ordered { &[4, 5] } else { &[5, 4] };
+			assert_eq!(drain(&mut sub, ordered), held, "{case}");
 
 			let b = copy();
 			if cached {
@@ -8668,7 +8760,7 @@ mod test {
 					write(&b, key);
 				}
 			}
-			let lowered: &[u64] = if ordered { &[] } else { &[1, 2, 3] };
+			let lowered: &[u64] = if ordered { &[] } else { &[3, 2, 1] };
 			assert_eq!(drain(&mut sub, ordered), lowered, "{case}");
 			write(&b, 7);
 			assert_eq!(drain(&mut sub, ordered), [7], "{case}");
@@ -8687,7 +8779,7 @@ mod test {
 		for key in 0..6 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4, 5]);
+		assert_eq!(drain(&mut sub, false), [5, 4, 3, 2, 1, 0]);
 		let b = copy();
 		for key in 0..6 {
 			write(&b, key);
@@ -8725,7 +8817,7 @@ mod test {
 		for key in 0..6 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [4, 5]);
+		assert_eq!(drain(&mut sub, false), [5, 4]);
 		let b = copy();
 		for key in 0..6 {
 			write(&b, key);
@@ -8773,7 +8865,7 @@ mod test {
 		for key in [0, 2, 4, 6] {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [4, 6]);
+		assert_eq!(drain(&mut sub, false), [6, 4]);
 		let b = copy();
 		for key in [0, 2, 4, 6] {
 			write(&b, key);
@@ -8819,7 +8911,7 @@ mod test {
 		for key in [0, 2, 4, 6] {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [4, 6]);
+		assert_eq!(drain(&mut sub, false), [6, 4]);
 		let b = copy();
 		for key in [0, 2, 4, 6] {
 			write(&b, key);
@@ -8864,7 +8956,7 @@ mod test {
 		for key in 0..6 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [4, 5]);
+		assert_eq!(drain(&mut sub, false), [5, 4]);
 		a.clone().abort(Error::Cancel).unwrap();
 
 		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
@@ -8978,7 +9070,8 @@ mod test {
 			};
 			write(&a, 0);
 			write(&a, 1);
-			assert_eq!(drain(&mut sub, ordered), [0, 1], "ordered={ordered}");
+			let held: &[u64] = if ordered { &[0, 1] } else { &[1, 0] };
+			assert_eq!(drain(&mut sub, ordered), held, "ordered={ordered}");
 			assert!(
 				poll(&mut sub).is_pending(),
 				"ordered={ordered}: group 2 is still to come"
@@ -9015,7 +9108,7 @@ mod test {
 			.unwrap();
 		write(&a, 3);
 		write(&a, 7);
-		assert_eq!(drain(&mut sub, false), [3, 7], "5 is missing");
+		assert_eq!(drain(&mut sub, false), [7, 3], "5 is missing");
 
 		// b resumes at 7, placing the range's start there, and lacks 5 too.
 		let b = received_copy();
@@ -9227,8 +9320,8 @@ mod test {
 			.unwrap();
 		write(&a, 0);
 		write(&a, 1);
-		assert_eq!(recv(&mut sub).start, 0);
 		assert_eq!(recv(&mut sub).start, 1);
+		assert_eq!(recv(&mut sub).start, 0);
 		routes.park();
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 		routes.serve(a.consume());
@@ -9297,7 +9390,7 @@ mod test {
 			for sequence in [0, 1, 3] {
 				write(&a, sequence);
 			}
-			assert_eq!(drain(&mut sub, false), [0, 1, 3], "{case}");
+			assert_eq!(drain(&mut sub, false), [3, 1, 0], "{case}");
 			let b = copy();
 			routes.serve(b.consume());
 			write(&b, 4);
@@ -9316,7 +9409,7 @@ mod test {
 	}
 
 	/// A replaced copy is bounded only once the new copy delivers its first group: a group
-	/// buffered on it must be read before a later group on the serving copy.
+	/// buffered on it is still read, before a later group on the serving copy in key order.
 	#[test]
 	fn key_reads_take_a_replaced_copys_lower_buffered_group() {
 		replaced_copy_reads_lowest(true);
@@ -9339,7 +9432,10 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		write(&b, 2);
-		assert_eq!(drain(&mut sub, ordered), [1, 2]);
+		// An arrival read takes the newer group first, in Group Order, but still reads the
+		// replaced copy's.
+		let read: &[u64] = if ordered { &[1, 2] } else { &[2, 1] };
+		assert_eq!(drain(&mut sub, ordered), read);
 	}
 
 	/// An ordered read after arrival reads passes a group the new copy replays that an arrival
@@ -9353,7 +9449,7 @@ mod test {
 		let mut sub = subscribe(&logical, HOUR);
 		write(&a, 0);
 		write(&a, 2);
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let b = copy();
 		write(&b, 2);
 		write(&b, 3);
@@ -9372,7 +9468,17 @@ mod test {
 				outer_routes.serve(inner.consume());
 				let a = copy();
 				routes.serve(a.consume());
-				let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
+				// Oldest first, so the arrival read reserves group 1 too.
+				let subscription = Subscription::default()
+					.with_max(HOUR)
+					.with_order(track::Order::Ascending);
+				let logical = if nested { &outer } else { &inner };
+				let mut sub = logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.unwrap()
+					.unwrap();
 				let mut one = a.create_group(group::Info { start: 1 }).unwrap();
 				one.write_frame(ts(1), b"x".as_ref()).unwrap();
 				let one = one.finish().unwrap();
@@ -9538,7 +9644,7 @@ mod test {
 			let b = copy();
 			routes.serve(b.consume());
 			write(&b, 3);
-			assert_eq!(drain(&mut sub, false), [2, 3]);
+			assert_eq!(drain(&mut sub, false), [3, 2]);
 			let held = |routes: &Producer| {
 				let readers = routes.readers.lock().unwrap();
 				let reader = readers.iter().find_map(Weak::upgrade).unwrap();
@@ -9622,7 +9728,7 @@ mod test {
 			write(&a, 1);
 			// Still read, so the replaced copy stays.
 			let _reading = recv(&mut sub);
-			assert_eq!(drain(&mut sub, false), [1]);
+			assert_eq!(drain(&mut sub, false), [0]);
 			let b = copy();
 			routes.serve(b.consume());
 			write(&b, 2);
@@ -9659,7 +9765,7 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		// Group 2 is the replaced copy's to drain, group 1 the serving route's to fill.
-		assert_eq!(drain(&mut sub, false), [2, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 2]);
 		{
 			let readers = routes.readers.lock().unwrap();
 			let reader = readers.iter().find_map(Weak::upgrade).unwrap();
@@ -9674,6 +9780,83 @@ mod test {
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 		write(&b, 4);
 		assert_eq!(drain(&mut sub, false), [4]);
+	}
+
+	/// A group the switch left to a replaced copy to drain, which that copy's cache then loses,
+	/// is asked of the serving route after all: what the reader gets never depends on what a
+	/// copy happens to hold.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_a_draining_copy_loses_is_backfilled() {
+		for debt in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, false), [0]);
+			write(&a, 1);
+			write(&a, 2);
+			write(&a, 3);
+			let b = copy();
+			routes.serve(b.consume());
+			// The switch leaves groups 1 and 2 to the replaced copy, so it asks the serving route
+			// for neither.
+			assert_eq!(peek(&mut sub, false).key(), 3);
+			match debt {
+				true => a.evict_for_debt(2),
+				false => a.evict(2),
+			}
+			assert_eq!(drain(&mut sub, false), [3, 1], "debt {debt}");
+			// Parked with group 2 lost to a reader that already waits on the rest.
+			let wake = Arc::new(Wake::default());
+			let waiter = kio::Waiter::new(wake.clone().into());
+			assert!(sub.poll_recv_group(&waiter).is_pending());
+			write(&b, 2);
+			assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "debt {debt}");
+			assert_eq!(drain(&mut sub, false), [2], "debt {debt}");
+		}
+	}
+
+	/// A range an edit adds above the resume point rechecks none of the groups below it, so a
+	/// group the switch left to a replaced copy to drain is still asked of the serving route
+	/// once that copy's cache loses it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_range_added_above_the_resume_point_keeps_the_drain_watched() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		write(&a, 1);
+		write(&a, 2);
+		write(&a, 3);
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(peek(&mut sub, false).key(), 3);
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: crate::track::Start::Time(10),
+					end: None,
+				},
+			)],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(peek(&mut sub, false).key(), 3);
+		a.evict(2);
+		assert_eq!(drain(&mut sub, false), [3, 1]);
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
 	}
 
 	/// A replaced copy holding a group without its head gives it up under a bounded window, so
@@ -9820,7 +10003,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::from_secs(1));
 		write(&a, 0);
 		write(&a, 2);
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 
 		// The new route has only the group already handed out, and ends there.
 		let b = copy();
@@ -9853,7 +10036,7 @@ mod test {
 				let mut sub = subscribe(&logical, budget);
 				write(&a, 0);
 				write(&a, 2);
-				assert_eq!(drain(&mut sub, false), [0, 2]);
+				assert_eq!(drain(&mut sub, false), [2, 0]);
 
 				pool.poll(opened.saturating_add(budget / 2), &noop);
 				let b = copy();
@@ -9905,7 +10088,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::from_secs(1));
 		write(&a, 0);
 		write(&a, 2);
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 
 		let b = copy();
 		write(&b, 2);
@@ -10429,7 +10612,7 @@ mod test {
 		for key in 2..=2000 {
 			write(&b, key);
 		}
-		assert_eq!(drain(&mut sub, false), (2..=2000).collect::<Vec<_>>());
+		assert_eq!(drain(&mut sub, false), (2..=2000).rev().collect::<Vec<_>>());
 		assert_eq!(sub.delivered_runs(), 2, "the gap at 1 is within the budget");
 
 		// The replacement's copies of groups 1 and 0 land last: 1 is new, 0 is not.
@@ -10471,7 +10654,7 @@ mod test {
 		let mut sub = subscribe(&logical, HOUR);
 		write(&a, 0);
 		let open = a.create_group(group::Info { start: 1 }).unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 1]);
+		assert_eq!(drain(&mut sub, false), [1, 0]);
 
 		open.abort(Error::Cancel).unwrap();
 		write(&a, 1);
@@ -10623,7 +10806,7 @@ mod test {
 		}
 
 		sub.set_range(..);
-		assert_eq!(drain(&mut sub, false), [2, 6]);
+		assert_eq!(drain(&mut sub, false), [6, 2]);
 	}
 
 	/// A serving copy that ran out at its session's settled end still hands out a group in
@@ -10708,7 +10891,8 @@ mod test {
 		];
 		let subscription = Subscription::default()
 			.with_ranges(ranges)
-			.with_max(Duration::from_secs(30));
+			.with_max(Duration::from_secs(30))
+			.with_order(track::Order::Ascending);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -11159,7 +11343,7 @@ mod test {
 		while let Some(Ok(Some(group))) = sub.recv_group().now_or_never() {
 			rest.push(group.start);
 		}
-		assert_eq!(rest, vec![0, 1000, 2000, 3000, 4000, 6000]);
+		assert_eq!(rest, vec![6000, 4000, 3000, 2000, 1000, 0]);
 	}
 
 	/// A reader that moves its start to exactly the replacement's resume point, while that
@@ -11203,7 +11387,9 @@ mod test {
 				got.extend(drain(&mut sub, ordered));
 				write(&b, 9);
 				got.extend(drain(&mut sub, ordered));
-				assert_eq!(got, [5, 6, 8, 9], "fail={fail} ordered={ordered}");
+				// An arrival read takes the groups it holds newest first.
+				let expected = if ordered { [5, 6, 8, 9] } else { [8, 6, 5, 9] };
+				assert_eq!(got, expected, "fail={fail} ordered={ordered}");
 			}
 		}
 	}
@@ -11595,7 +11781,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let b = received_copy();
 		b.anchored();
 		routes.serve(b.consume());
@@ -11716,7 +11902,7 @@ mod test {
 		write(&a, 8);
 		routes.serve(a.consume());
 		let mut sub = subscribe(&front, HOUR);
-		assert_eq!(drain(&mut sub, false), [6, 8]);
+		assert_eq!(drain(&mut sub, false), [8, 6]);
 		let inner_routes = Producer::new();
 		let inner = logical(&inner_routes);
 		let b = received_copy();
@@ -12046,7 +12232,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(recv(&mut sub).start, 8);
+		assert_eq!(recv(&mut sub).start, 10);
 
 		let (b, _requests) = pending_copy();
 		routes.serve(b.consume());
@@ -12435,7 +12621,9 @@ mod test {
 			};
 			let placed = |ranges: Vec<track::Range>| Subscription {
 				placed: [(0, 3)].into(),
-				..Subscription::default().with_ranges(ranges)
+				..Subscription::default()
+					.with_ranges(ranges)
+					.with_order(track::Order::Ascending)
 			};
 			let preferences = track::Preferences::from(placed(vec![join]));
 			let mut sub = routes.consume().subscribe(preferences.clone());
@@ -12491,7 +12679,7 @@ mod test {
 		else {
 			panic!("a group to reserve")
 		};
-		assert_eq!(sub.take(candidate).unwrap().start, 5);
+		assert_eq!(sub.take(candidate).unwrap().start, 10);
 		for sequence in 11..=20 {
 			write(&a, sequence);
 		}
@@ -12527,10 +12715,12 @@ mod test {
 			max: None,
 		};
 		let ranges = |back| {
-			Subscription::default().with_ranges([track::Range {
-				start: join(back),
-				end: Some(1_000_000 + back),
-			}])
+			Subscription::default()
+				.with_ranges([track::Range {
+					start: join(back),
+					end: Some(1_000_000 + back),
+				}])
+				.with_order(track::Order::Ascending)
 		};
 		let preferences = track::Preferences::from(ranges(5));
 		let mut sub = routes.consume().subscribe(preferences.clone());
@@ -12575,7 +12765,11 @@ mod test {
 				false => vec![first],
 				true => vec![first, past],
 			};
-			let preferences = track::Preferences::from(Subscription::default().with_ranges(ranges));
+			let preferences = track::Preferences::from(
+				Subscription::default()
+					.with_ranges(ranges)
+					.with_order(track::Order::Ascending),
+			);
 			let mut sub = routes.consume().subscribe(preferences.clone());
 			let mut delivered = Delivered::default();
 			let Poll::Ready(Ok(Some(candidate))) =
@@ -12597,7 +12791,11 @@ mod test {
 			match switched {
 				// Not yet mirrored into the copies: group 8 holds time 100.
 				false => preferences
-					.update(Subscription::default().with_ranges([first, past]))
+					.update(
+						Subscription::default()
+							.with_ranges([first, past])
+							.with_order(track::Order::Ascending),
+					)
 					.unwrap(),
 				// The new copy answered, holding nothing yet.
 				true => {
@@ -12640,7 +12838,11 @@ mod test {
 				},
 				end: Some(1_000_000),
 			};
-			let preferences = track::Preferences::from(Subscription::default().with_ranges([join]));
+			let preferences = track::Preferences::from(
+				Subscription::default()
+					.with_ranges([join])
+					.with_order(track::Order::Ascending),
+			);
 			let mut sub = routes.consume().subscribe(preferences.clone());
 			let mut delivered = Delivered::default();
 			let mut next = |sub: &mut Subscriber| {
@@ -12659,11 +12861,13 @@ mod test {
 			for _ in 0..40 {
 				let add = track::Edit {
 					add: vec![(1, track::Range::ALL)],
+					order: track::Order::Ascending,
 					..Default::default()
 				};
 				preferences.edit(add).unwrap();
 				let retire = track::Edit {
 					retire: vec![1],
+					order: track::Order::Ascending,
 					..Default::default()
 				};
 				preferences.edit(retire).unwrap();
@@ -12671,6 +12875,7 @@ mod test {
 			if let Some(range) = left {
 				let add = track::Edit {
 					add: vec![(2, range)],
+					order: track::Order::Ascending,
 					..Default::default()
 				};
 				preferences.edit(add).unwrap();
@@ -12691,7 +12896,7 @@ mod test {
 		for key in (0..=50).step_by(10) {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [0, 10, 20, 30, 40, 50]);
+		assert_eq!(drain(&mut sub, false), [50, 40, 30, 20, 10, 0]);
 		assert_eq!(sub.delivered_runs(), 6, "every gap is still owed");
 		sub.update(Subscription::default().with_range(50..=50)).unwrap();
 		assert_eq!(sub.delivered_runs(), 2, "0 through 40, then 50");
@@ -12859,9 +13064,8 @@ mod test {
 				let mut group = a.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(ts(ms), b"x".as_ref()).unwrap();
 				group.finish().unwrap();
+				assert_eq!(recv(&mut sub).start, key);
 			}
-			assert_eq!(recv(&mut sub).start, 0);
-			assert_eq!(recv(&mut sub).start, 1);
 			let mut open = a.create_group(group::Info { start: 2 }).unwrap();
 			open.write_frame(ts(2000), b"held".as_ref()).unwrap();
 			let mut group = recv(&mut sub);
@@ -13203,7 +13407,7 @@ mod test {
 		for key in 0..=4 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		assert_eq!(drain(&mut sub, false), [4, 3, 2, 1, 0]);
 		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
 		open.write_frame(ts(5), b"x".as_ref()).unwrap();
 		let reading = recv(&mut sub);
@@ -13249,7 +13453,7 @@ mod test {
 		for key in 0..=4 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		assert_eq!(drain(&mut sub, false), [4, 3, 2, 1, 0]);
 		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
 		open.write_frame(ts(5), b"x".as_ref()).unwrap();
 		let reading = recv(&mut sub);
@@ -13315,7 +13519,7 @@ mod test {
 		for key in 0..=4 {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		assert_eq!(drain(&mut sub, false), [4, 3, 2, 1, 0]);
 		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
 		open.write_frame(ts(5), b"x".as_ref()).unwrap();
 		let reading = recv(&mut sub);
@@ -13352,8 +13556,8 @@ mod test {
 			for key in 0..=4 {
 				write(&a, key);
 			}
-			assert_eq!(drain(&mut first, false), [0, 1, 2, 3, 4]);
-			assert_eq!(drain(&mut second, false), [0, 1, 2, 3, 4]);
+			assert_eq!(drain(&mut first, false), [4, 3, 2, 1, 0]);
+			assert_eq!(drain(&mut second, false), [4, 3, 2, 1, 0]);
 			let mut open = a.create_group(group::Info { start: 5 }).unwrap();
 			open.write_frame(ts(5), b"x".as_ref()).unwrap();
 			let (keeper, other) = match keeper_first {
@@ -14513,7 +14717,7 @@ mod test {
 			.unwrap()
 			.unwrap();
 		let mut sub = sub;
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let b = copy();
 		write(&b, 3);
 		routes.serve(b.consume());
@@ -14542,7 +14746,7 @@ mod test {
 			end: Some(3),
 		}]);
 		let mut sub = front.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let inner_routes = Producer::new();
 		let inner = logical(&inner_routes);
 		let b = copy();
@@ -14582,7 +14786,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 0]);
 		let b = copy();
 		write(&b, 4);
 		routes.serve(b.consume());
@@ -14624,7 +14828,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 4]);
+		assert_eq!(drain(&mut sub, false), [4, 0]);
 		let b = copy();
 		b.skip_groups(1..2);
 		write(&b, 5);
@@ -14662,7 +14866,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 5]);
+		assert_eq!(drain(&mut sub, false), [5, 0]);
 		let b = copy();
 		write(&b, 6);
 		routes.serve(b.consume());
@@ -14693,7 +14897,11 @@ mod test {
 		write(&a, 1);
 		routes.serve(a.consume());
 		let budget = Duration::from_secs(1);
-		let mut sub = subscribe(&logical, budget);
+		// Oldest first, so group 1 is left unread.
+		let ascending = Subscription::default()
+			.with_max(budget)
+			.with_order(track::Order::Ascending);
+		let mut sub = logical.consume().subscribe(ascending).now_or_never().unwrap().unwrap();
 		assert_eq!(recv(&mut sub).start, 0);
 		sub.set_range(..1);
 		let b = copy();
@@ -14702,6 +14910,77 @@ mod test {
 		assert!(sub.poll_recv_group(&fresh()).is_pending(), "group 1 is still unread");
 		kio::clock::sleep(2 * budget).await;
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// Late groups a replaced copy holds unread, fresh by their own successors there, outlive
+	/// the serving copy's old arrival above them making the gap below it stale, as they do on
+	/// one track: a cursor never forgets what it still holds to hand out.
+	#[kio::test]
+	async fn a_replaced_copys_unread_late_groups_outlive_the_serving_copys_stale_verdict() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let budget = Duration::from_secs(1);
+			let mut sub = subscribe(if routed { &logical } else { &a }, budget);
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			if routed {
+				routes.serve(b.consume());
+			}
+			let serving = if routed { &b } else { &a };
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+			// 6 arrives long before the late groups, and the reader looks only once they land:
+			// 4 is stale by 5, while 2 and 1 are fresh by 4 and 2.
+			write(serving, 6);
+			kio::clock::sleep(2 * budget).await;
+			for key in [4, 2, 1] {
+				write(&a, key);
+			}
+			assert_eq!(drain(&mut sub, false), [6, 2, 1], "routed {routed}");
+		}
+	}
+
+	/// A replaced copy past the reader's budget is read again once the budget widens, so its
+	/// late groups outlive the serving copy's stale verdict as they do on one track: compaction
+	/// judges a copy as the pick does now, not by the verdict letting copies go last made.
+	#[kio::test]
+	async fn a_widened_budget_keeps_an_expired_copys_late_groups() {
+		let ms = Duration::from_millis;
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(if routed { &logical } else { &a }, ms(1000));
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed once it expires.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			if routed {
+				routes.serve(b.consume());
+			}
+			write(if routed { &b } else { &a }, 6);
+			// Read within the budget, so no gap below 6 is stale yet.
+			kio::clock::sleep(ms(900)).await;
+			assert_eq!(drain(&mut sub, false), [6]);
+			// A budget past 6 superseding it, the replaced copy expires and goes unread.
+			kio::clock::sleep(ms(1500)).await;
+			assert!(sub.poll_recv_group(&fresh()).is_pending());
+			for key in [4, 2, 1] {
+				write(&a, key);
+			}
+			// Wide enough to read the copy again, not to keep 4: 5 arrived past it.
+			sub.update(Subscription::default().with_max(ms(2000))).unwrap();
+			assert_eq!(drain(&mut sub, false), [2, 1], "routed {routed}");
+		}
 	}
 
 	/// A backfill of the serving route goes once it delivered what it was asked for, when the
@@ -14717,7 +14996,7 @@ mod test {
 		write(&a, 3);
 		routes.serve(a.consume());
 		let mut sub = subscribe_until(&logical, 5);
-		assert_eq!(drain(&mut sub, false), [0, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 0]);
 		let mut sub = sub.with_range(2..6);
 		let b = copy();
 		write(&b, 4);
@@ -14742,7 +15021,7 @@ mod test {
 		write(&a, 3);
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		assert_eq!(drain(&mut sub, false), [0, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 0]);
 		let b = copy();
 		write(&b, 4);
 		routes.serve(b.consume());
@@ -14767,7 +15046,7 @@ mod test {
 		}
 		routes.serve(a.consume());
 		let mut sub = subscribe_until(&logical, 9);
-		assert_eq!(drain(&mut sub, false), [0, 1, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 1, 0]);
 		// Asked from 2, it never gets 3.
 		let b = received_copy();
 		let b_fills = b.requests();
@@ -14810,7 +15089,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 5]);
+		assert_eq!(drain(&mut sub, false), [5, 0]);
 		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
 		let b = track::Producer::new(
 			Arc::new(broadcast::Info {
@@ -14892,7 +15171,7 @@ mod test {
 				.now_or_never()
 				.unwrap()
 				.unwrap();
-			assert_eq!(drain(&mut sub, false), [0, 5]);
+			assert_eq!(drain(&mut sub, false), [5, 0]);
 			let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
 			let b = track::Producer::new(
 				Arc::new(broadcast::Info {
@@ -14966,7 +15245,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let b = copy();
 		write(&b, 3);
 		routes.serve(b.consume());
@@ -15008,7 +15287,7 @@ mod test {
 		routes.serve(a.consume());
 		let window = |start| Subscription::default().with_range(start..14);
 		let mut sub = logical.consume().subscribe(window(10)).now_or_never().unwrap().unwrap();
-		assert_eq!(drain(&mut sub, false), [10, 11]);
+		assert_eq!(drain(&mut sub, false), [11, 10]);
 		let b = copy();
 		write(&b, 12);
 		routes.serve(b.consume());
@@ -15058,9 +15337,9 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(recv(&mut sub).start, 0);
 		let reading = recv(&mut sub);
 		assert_eq!(reading.start, 5);
+		assert_eq!(recv(&mut sub).start, 0);
 		let b = copy();
 		// The route answers fills, so its copy never gives 2 up as unfillable.
 		let _requests = b.requests();
@@ -15105,7 +15384,7 @@ mod test {
 			}])
 			.with_max(HOUR);
 		let mut sub = front.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let b = copy();
 		write(&b, 3);
 		inner_routes.serve(b.consume());
@@ -15145,7 +15424,7 @@ mod test {
 			.unwrap()
 			.unwrap()
 			.with_range(1..3);
-		assert_eq!(drain(&mut sub, false), [1, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 1]);
 		assert!(matches!(
 			sub.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))

@@ -217,17 +217,21 @@ export function union(ranges: readonly Range[]): Range[] {
 	const out: Range[] = runs.map((run) =>
 		run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n },
 	);
-	// A range with no time start can't be placed against the time spans.
+	// A range with no time start can't be placed against the time spans. One from the oldest group
+	// takes in every one from there ending before it.
 	const joins = new Map<string, Range>();
+	let oldest: Range | undefined;
 	for (const range of kept) {
 		const join = joinOf(range);
 		if (join === undefined) {
-			if (rangeTime(range) === undefined) out.push(range);
+			if (rangeTime(range) === undefined && (oldest === undefined || (range.end ?? 0n) > (oldest.end ?? 0n)))
+				oldest = range;
 			continue;
 		}
 		const held = joins.get(join);
 		if (!held || rangeBudget(range) > rangeBudget(held)) joins.set(join, range);
 	}
+	if (oldest !== undefined) out.push(oldest);
 	out.push(...joins.values());
 
 	out.sort(compare);
@@ -980,6 +984,12 @@ export class Window {
 	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a live join waits on a first group. */
 	next(from: bigint): bigint | undefined {
 		return this.pending ? from : this.#groups.next(from);
+	}
+
+	/** The highest group in range below `before`, undefined when none is. The one just below while a live join waits on a first group. */
+	prev(before: bigint): bigint | undefined {
+		if (this.pending) return before > 0n ? before - 1n : undefined;
+		return this.#groups.prev(before);
 	}
 
 	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */

@@ -585,12 +585,15 @@ impl Aged {
 				let track = broadcast
 					.create_track(format!("bench{i}"), moq_net::track::Info::default().with_max_age(None))
 					.unwrap();
-				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
-					track::Start::Live {
-						min: Some(AGED_BUDGET),
-						max: Some(AGED_BUDGET),
-					},
-				)]));
+				// Ascending, so the first read is the held group under the finished ones.
+				let mut sub = track.subscribe(
+					track::Subscription::default()
+						.with_ranges([track::Range::from(track::Start::Live {
+							min: Some(AGED_BUDGET),
+							max: Some(AGED_BUDGET),
+						})])
+						.with_order(track::Order::Ascending),
+				);
 				let mut held = track.append_group(Timestamp::unscaled(0)).unwrap();
 				held.write_frame(moq_net::Timestamp::unscaled(held.start), Bytes::from_static(b"x"))
 					.unwrap();

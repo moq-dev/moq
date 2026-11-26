@@ -70,7 +70,11 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	loop {
 		match consumer.recv_group().await {
 			Ok(Some(group)) => got.push(group.start),
-			Ok(None) => return (got, None),
+			// An arrival read takes what it holds newest first, so reversed it is in key order.
+			Ok(None) => {
+				got.reverse();
+				return (got, None);
+			}
 			Err(err) => return (got, Some(err)),
 		}
 	}

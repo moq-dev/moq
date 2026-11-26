@@ -18,7 +18,7 @@ Those are the caller's.
 
 Decided 2026-10-05 in moq.pro's quest audit: vendor-neutral now, not
 NVIDIA-scoped. Reason: the external GPU surface (#4975),
-[Vulkan encode](/quest/m5/vulkan-encode.md), and
+[Vulkan encode](/quest/m3/vulkan-encode.md), and
 [VA-API import](/quest/m5/vaapi-vulkan-import.md) make AMD and Intel encode
 first-class, so an NVML-shaped API would be rewritten once they land.
 moq.pro's transcode admission and its benchmarks assume NVML today; they
@@ -131,4 +131,4 @@ Public API: a device capacity and health snapshot in moq-video. Wire: none.
 ## Related
 
 - [VA-API encodes an external Vulkan image](/quest/m5/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
-- [Vulkan Video encode on AMD](/quest/m5/vulkan-encode.md) - the AMD backend whose sessions this counts
+- [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - the AMD backend whose sessions this counts

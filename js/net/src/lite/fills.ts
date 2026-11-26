@@ -374,8 +374,8 @@ export class RangeFills {
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription changes once
 		// as a run is asked and once as it is done, and the streams of its answered groups keep
-		// arriving. One no fill owes stays while any of its streams is still arriving, each group
-		// searched for once.
+		// arriving. One no fill owes stays while any of its streams is still arriving and someone
+		// reads the track, each group searched for once.
 		for (const [key, closed] of this.#reading) if (closed.peek() !== undefined) this.#reading.delete(key);
 		const groups = ask.groups.map((run) => ({ ...run }));
 		const draining: Run[] = [];
@@ -384,6 +384,7 @@ export class RangeFills {
 				insertRun(groups, run.start, run.end);
 				continue;
 			}
+			if (!read) continue;
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for (const gap of runGaps(this.#draining, run.start, run.end)) {
 				for (const key of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
@@ -413,12 +414,14 @@ export class RangeFills {
 		return true;
 	}
 
-	/** Resolves once any input {@link poll} reads may have changed. */
-	changed(tail: Tail): Promise<unknown> {
+	/** Resolves once any input {@link poll} reads may have changed, whether `demand` reads among them. */
+	changed(tail: Tail, demand: track.Demand): Promise<unknown> {
 		const wakes: unknown[] = [
 			Signal.race(
 				this.#bumped,
 				tail.changed,
+				demand.wanted,
+				hooks.demandReleased(demand),
 				...[...this.#recoveries].flatMap((recovery) => [
 					recovery.handle.changed,
 					recovery.handle.readingChanged,

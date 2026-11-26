@@ -9022,7 +9022,7 @@ mod group_priority_test {
 			[(0, 0), (1, 0)],
 			"each stream joins the subscription's group"
 		);
-		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert_eq!(log.orders(), [(0, 3), (1, 1)], "newer groups first");
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		serve.set_priority(9).unwrap();
@@ -19315,7 +19315,7 @@ mod tests {
 			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
-		for key in [0, 1] {
+		for key in [1, 0] {
 			let group = subscriber
 				.recv_group()
 				.now_or_never()

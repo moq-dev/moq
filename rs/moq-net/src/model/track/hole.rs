@@ -17,13 +17,21 @@ pub(crate) enum Hole {
 		/// The budget a staleness verdict was judged under, `None` for a drop that does not
 		/// depend on it. Only a widening past it reverses the verdict.
 		stale: Option<Duration>,
+		/// The exclusive group end the upstream subscription judged a staleness verdict within,
+		/// `None` when it followed the live edge or its end is not known to be the one it judged
+		/// under. A reader capped at the same end reads the groups the verdict rests on.
+		cap: Option<u64>,
 	},
 }
 
 impl Hole {
 	/// A drop with `error` that no budget reverses.
 	pub fn drop(error: StreamError) -> Self {
-		Self::Drop { error, stale: None }
+		Self::Drop {
+			error,
+			stale: None,
+			cap: None,
+		}
 	}
 
 	/// A group judged stale under `budget`.
@@ -31,7 +39,17 @@ impl Hole {
 		Self::Drop {
 			error: StreamError::Old,
 			stale: Some(budget),
+			cap: None,
 		}
+	}
+
+	/// This verdict, judged within the exclusive group end `cap`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn capped(mut self, cap: Option<u64>) -> Self {
+		if let Self::Drop { cap: judged, .. } = &mut self {
+			*judged = cap;
+		}
+		self
 	}
 
 	/// A run a reader's misses gave up: stale under `stale` when that is the verdict,
@@ -57,6 +75,16 @@ impl Hole {
 		match self {
 			Self::Drop { stale, .. } => *stale,
 			Self::Skip => None,
+		}
+	}
+
+	/// The exclusive group end a staleness verdict was judged within, if it is one with a cap.
+	pub fn stale_cap(&self) -> Option<u64> {
+		match self {
+			Self::Drop {
+				stale: Some(_), cap, ..
+			} => *cap,
+			_ => None,
 		}
 	}
 }

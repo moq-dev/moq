@@ -49,8 +49,9 @@ function netTrack(name: string, timed = true): NetTrack.Producer {
 	return defined(new Broadcast.Producer().createTrack(name, { timescale, maxAge: null }));
 }
 
+// Every group, oldest first, as the tests read their backlogs in order.
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
-	return net.subscribe({ ranges: [{}] });
+	return net.subscribe({ order: "ascending", ranges: [{}] });
 }
 
 interface Pair {

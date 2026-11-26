@@ -281,8 +281,8 @@ jobs:
         if: ${{ !matrix.uncached }}
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
 
       # Inside the job's hour, so a workload that overruns fails the job, where the
       # failure-based triage sees it, instead of cancelling it, and later steps still run.
@@ -476,8 +476,8 @@ jobs:
       - name: Rust cache
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       - name: Install nightly Rust
         if: matrix.nightly
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -584,8 +584,8 @@ jobs:
       - name: Rust cache
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       - name: Install publisher and player engines
         # Firefox loads libpulse at runtime; Playwright's engine dependencies omit it.
         run: |
@@ -635,8 +635,8 @@ jobs:
         id: setup
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       # Independent checks keep running after a failure; the job still finishes red.
       - name: WebSocket fallback startup benchmark
         run: nix develop --command just js qmux-bench
@@ -828,8 +828,8 @@ jobs:
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       - name: Collect and compare sizes
         id: sizes
         run: nix develop --command just gh size-nightly size-report "$GITHUB_RUN_ID"
