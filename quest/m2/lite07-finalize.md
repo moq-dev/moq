@@ -259,11 +259,11 @@ and peer resets), removes `FETCH` (`0x3`) and `SUBSCRIBE_SKIP` (superseding the
 and exclusive `End` plus one-shot `SUBSCRIBE` + immediate `FIN`, moves
 `Priority` and `Group Order` onto each `Range` and `Retune`, and adds judged
 `Max Age` to `SUBSCRIBE_DROP(OLD)`.
-Superseded 2026-11-26 by [previous-delta.md](/quest/m2/lite07-subscribe/previous-delta.md): no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_SKIP` stays for the rest, and a drop names a group a plain reset may have lost.
+Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
 
 ## Required
 
-- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_SKIP gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 
 ## Related
 

@@ -1553,7 +1553,10 @@ export class Subscriber {
 
 			// Only a received SUBSCRIBE_END, or before lite-05 a FIN, declares the track's end: a
 			// subscription nobody wants anymore is a released copy, not finished content.
-			if (tailSettled && entry.stream.kind === "finished") producer.finish();
+			if (tailSettled) {
+				if (entry.stream.kind === "finished") producer.finish();
+				hooks.settleTail(producer);
+			}
 			// A run recovered on a subscription of its own outlives this one, as in Rust's finished
 			// copy: the copy and its datagrams end now, but releasing it would cancel the run before
 			// upstream answered.
@@ -2492,15 +2495,16 @@ export class Subscriber {
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);
-				this.#dropped(entry, start, end);
-				// Final, so a stream it overtook is told from one whose gap the grace gave up on.
-				entry.tail.drop(start, end);
-				giveUp(start, end, dropped(cause));
-			} else if ("skip" in resp) {
-				// Never produced: final, as the subscription feeding the copy records it.
-				const { start, end } = resp.skip;
-				entry.tail.account(start, end);
-				hooks.skipTrackGroups(entry.track, start, end);
+				if (hasSkip(this.version) && toStreamCode(cause) === StreamCode.Skip) {
+					// Never produced: final, as the subscription feeding the copy records it.
+					entry.tail.account(start, end);
+					hooks.skipTrackGroups(entry.track, start, end);
+				} else {
+					this.#dropped(entry, start, end);
+					// Final, so a stream it overtook is told from one whose gap the grace gave up on.
+					entry.tail.drop(start, end);
+					giveUp(start, end, dropped(cause));
+				}
 			} else if ("end" in resp) {
 				if (finished) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				finished = true;
@@ -2706,24 +2710,25 @@ export class Subscriber {
 				// and the publisher's FIN in reply ends this loop.
 				if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
 			} else if ("drop" in resp) {
-				// The publisher will never send these groups on this subscription, so they are accounted
-				// for without a stream, and a reader of one still arriving ends with the drop's error now.
 				const { start, end } = resp.drop;
 				const error = resp.drop.cause(this.version);
-				// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
-				if (hasSkip(this.version)) entry.tail.drop(start, end);
-				else entry.tail.account(start, end);
-				this.#dropped(entry, start, end);
-				// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
-				// judged under: a reader wider than that does not settle on it, and asks for the group
-				// with a request of its own.
-				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-				const hole = stale ? staleHole(entry.staleBudget, entry.staleCap) : { error };
-				hooks.dropTrackGroups(entry.track, start, end, hole);
-				entry.fills?.refuse(start, end, error);
-			} else if ("skip" in resp) {
-				const { start, end } = resp.skip;
-				this.#skipped(entry, start, end);
+				if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Skip) {
+					this.#skipped(entry, start, end);
+				} else {
+					// The publisher will never send these groups on this subscription, so they are accounted
+					// for without a stream, and a reader of one still arriving ends with the drop's error now.
+					// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
+					if (hasSkip(this.version)) entry.tail.drop(start, end);
+					else entry.tail.account(start, end);
+					this.#dropped(entry, start, end);
+					// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
+					// judged under: a reader wider than that does not settle on it, and asks for the group
+					// with a request of its own.
+					const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+					const hole = stale ? staleHole(entry.staleBudget, entry.staleCap) : { error };
+					hooks.dropTrackGroups(entry.track, start, end, hole);
+					entry.fills?.refuse(start, end, error);
+				}
 			}
 		}
 	}
@@ -2772,9 +2777,9 @@ export class Subscriber {
 			entry.tail.account(entry.requested, served);
 	}
 
-	// The publisher never produced `[start, end)`, as a SUBSCRIBE_SKIP says, so nothing is waited
-	// for and no reader ends. A skip replaces any drop of the same groups; a reader a drop already
-	// ended stays ended.
+	// The publisher never produced `[start, end)`, as a SUBSCRIBE_DROP(SKIP) says, so nothing is
+	// waited for and no reader ends. A skip replaces any drop of the same groups; a reader a drop
+	// already ended stays ended.
 	#skipped(entry: SubscribeEntry, start: bigint, end: bigint): void {
 		entry.tail.account(start, end);
 		// A fill owing them is answered: the source never had them.
@@ -2784,7 +2789,7 @@ export class Subscriber {
 		const [cached] = hooks.skipTrackGroups(entry.track, start, end);
 		if (cached) {
 			console.warn(
-				`protocol error: SUBSCRIBE_SKIP skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
+				`protocol error: SUBSCRIBE_DROP(SKIP) skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
 			);
 		}
 	}

@@ -1595,6 +1595,18 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Finish a raw group with its exclusive `end` in its track's timescale. No more frames can
+	/// be written.
+	pub fn group_finish_at(&mut self, group: Id, end: u64) -> Result<(), Error> {
+		let group = self
+			.groups
+			.remove(group)
+			.and_then(|group| group.inner.take())
+			.ok_or(Error::GroupNotFound)?;
+		group.finish_at(end)?;
+		Ok(())
+	}
+
 	/// Abort a raw group with an application error code.
 	pub fn group_abort(&mut self, group: Id, error_code: u16) -> Result<(), Error> {
 		let group = self

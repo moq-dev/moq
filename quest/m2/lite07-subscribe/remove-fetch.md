@@ -32,7 +32,3 @@ Wire and deduplication changes (fixes audit findings D1, D2, D5, W5c, W6a):
   - Run `just test interop --all`.
 
 Public API: none (public `fetch_group` / `fetch_range` methods stay, backed by `SUBSCRIBE` on lite-07). Wire: breaking lite-07 change (removes `FETCH` `0x3`, changes `Anchor::Position` rules and one-shot `SUBSCRIBE` FIN semantics).
-
-## Required
-
-- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - bounded SUBSCRIBE relies on its gap accounting and clean group stream termination

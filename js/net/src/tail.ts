@@ -1,7 +1,7 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
-import { GRACE, Ledger } from "./ledger.ts";
+import { GRACE, Ledger, MAX_RUNS } from "./ledger.ts";
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
@@ -164,6 +164,7 @@ export class Tail {
 	/** Record `[start, end)` as given up by a drop, accounting for it. */
 	drop(start: bigint, end: bigint): void {
 		insertRun(this.#dropped, start, end);
+		while (this.#dropped.length > MAX_RUNS) this.#dropped.shift();
 		this.#account(start, end);
 	}
 

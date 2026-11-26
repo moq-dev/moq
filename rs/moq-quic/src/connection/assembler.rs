@@ -188,6 +188,21 @@ impl Assembler {
 		end.saturating_sub(self.bytes_read)
 	}
 
+	/// Whether every byte from `bytes_read` up to `end` is buffered without gaps.
+	pub(super) fn is_contiguous_to(&self, end: u64) -> bool {
+		let mut cursor = self.bytes_read;
+		for buffer in &self.data {
+			if buffer.offset > cursor {
+				return false;
+			}
+			cursor = cursor.max(buffer.end());
+			if cursor >= end {
+				return true;
+			}
+		}
+		cursor >= end
+	}
+
 	/// Discard buffered data at or past `end`
 	pub(super) fn truncate(&mut self, end: u64) {
 		let (mut buffered, mut allocated) = (self.buffered, self.allocated);

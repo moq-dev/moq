@@ -4240,6 +4240,18 @@ pub extern "C" fn moq_publish_group_finish(group: u32) -> i32 {
 	})
 }
 
+/// Finish a raw group with its exclusive `end` in its track's timescale. No more frames can be
+/// written, and no other group may start before `end`.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_group_finish_at(group: u32, end: u64) -> i32 {
+	ffi::enter(move || {
+		let group = ffi::parse_id(group)?;
+		State::lock().publish.group_finish_at(group, end)
+	})
+}
+
 /// Wait until a raw group can take a frame of `size` bytes without outrunning its fastest
 /// reader, for backpressure.
 ///

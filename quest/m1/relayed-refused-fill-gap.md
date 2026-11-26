@@ -77,7 +77,3 @@ the later group, before the front-drop fix lands.
 ## Waiting
 
 - moq-dev/moq: [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (lite-07 zero-timer accounting) lands, since the publisher's answer for a range with dropped keys is built on its wire; check that the PR is merged.
-
-## Related
-
-- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - the wire this work builds on, in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626).

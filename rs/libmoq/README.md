@@ -132,6 +132,7 @@ int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_start(uint32_t group, uint64_t *dst);
 int32_t moq_publish_group_finish(uint32_t group);
+int32_t moq_publish_group_finish_at(uint32_t group, uint64_t end);
 int32_t moq_publish_group_ready(uint32_t group, uint64_t size, moq_status_callback on_ready, void *user_data);
 int32_t moq_publish_track_finish(uint32_t track);
 int32_t moq_publish_track_largest(uint32_t track, uint64_t *group, uint64_t *frame, bool *present);

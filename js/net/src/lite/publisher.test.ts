@@ -1258,13 +1258,14 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 	}
 });
 
-// The SUBSCRIBE_DROP ranges a subscribe stream carried up to its FIN.
+// The SUBSCRIBE_DROP ranges a subscribe stream carried up to its FIN (excluding lite-07 SKIP).
 async function drops(reader: Reader, version: Version): Promise<[bigint, bigint][]> {
 	const ranges: [bigint, bigint][] = [];
 	for (;;) {
 		const resp = await decodeSubscribeResponseMaybe(reader, version);
 		if (!resp) return ranges;
-		if ("drop" in resp) ranges.push([resp.drop.start, resp.drop.end]);
+		if ("drop" in resp && !(version === Version.DRAFT_07 && resp.drop.error === StreamCode.Skip))
+			ranges.push([resp.drop.start, resp.drop.end]);
 	}
 }
 
@@ -1382,8 +1383,10 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			for (;;) {
 				const next = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 				if (!next) break;
-				if ("drop" in next) holes.push(["drop", next.drop.start, next.drop.end]);
-				if ("skip" in next) holes.push(["skip", next.skip.start, next.skip.end]);
+				if ("drop" in next) {
+					const kind = version === Version.DRAFT_07 && next.drop.error === StreamCode.Skip ? "skip" : "drop";
+					holes.push([kind, next.drop.start, next.drop.end]);
+				}
 				if ("end" in next && keepsSubscribeOpen(version)) break;
 			}
 			expect(holes).toEqual([]);
@@ -1440,8 +1443,13 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				for (;;) {
 					const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 					if (!resp) break;
-					if ("drop" in resp) codes.push(resp.drop.error);
-					if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
+					if ("drop" in resp) {
+						if (version === Version.DRAFT_07 && resp.drop.error === StreamCode.Skip) {
+							skips.push([resp.drop.start, resp.drop.end]);
+						} else {
+							codes.push(resp.drop.error);
+						}
+					}
 					// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
 					if ("end" in resp && keepsSubscribeOpen(version)) break;
 				}
@@ -1461,16 +1469,17 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
-// The SUBSCRIBE_SKIP and SUBSCRIBE_DROP ranges a lite-07 subscribe stream carried, in order, up to
-// SUBSCRIBE_END, or the first `count` of them.
+// The SUBSCRIBE_DROP ranges a lite-07 subscribe stream carried, split into skips (SKIP) and drops,
+// in order, up to SUBSCRIBE_END, or the first `count` of them.
 async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): Promise<[string, bigint, bigint][]> {
 	const holes: [string, bigint, bigint][] = [];
 	for (;;) {
 		if (holes.length >= count) return holes;
 		const resp = await decodeSubscribeResponseMaybe(reader, Version.DRAFT_07);
 		if (!resp || "end" in resp) return holes;
-		if ("skip" in resp) holes.push(["skip", resp.skip.start, resp.skip.end]);
-		if ("drop" in resp) holes.push(["drop", resp.drop.start, resp.drop.end]);
+		if ("drop" in resp) {
+			holes.push([resp.drop.error === StreamCode.Skip ? "skip" : "drop", resp.drop.start, resp.drop.end]);
+		}
 	}
 }
 
@@ -1672,8 +1681,10 @@ test("lite-07 skips a huge run at once", async () => {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(sub.client.reader, Version.DRAFT_07);
 			if (!resp) break;
-			if ("drop" in resp) codes.push(resp.drop.error);
-			if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
+			if ("drop" in resp) {
+				if (resp.drop.error === StreamCode.Skip) skips.push([resp.drop.start, resp.drop.end]);
+				else codes.push(resp.drop.error);
+			}
 			if ("end" in resp) break;
 		}
 		expect([codes, skips]).toEqual([[], [[1n, FAR]]]);
@@ -1763,8 +1774,9 @@ async function holesToEnd(reader: Reader): Promise<unknown[]> {
 	for (;;) {
 		const next = await decodeSubscribeResponseMaybe(reader, Version.DRAFT_07);
 		if (!next) return holes;
-		if ("drop" in next) holes.push(["drop", next.drop.start, next.drop.end]);
-		if ("skip" in next) holes.push(["skip", next.skip.start, next.skip.end]);
+		if ("drop" in next) {
+			holes.push([next.drop.error === StreamCode.Skip ? "skip" : "drop", next.drop.start, next.drop.end]);
+		}
 		if ("end" in next) return holes;
 	}
 }
@@ -1897,7 +1909,7 @@ test("lite draft-07: a reset that cut a GROUP_END names its span's starts again"
 		await flush();
 		expect(sub.reliable.resets).toEqual([{ offset: await headerSize(version, 1n), code: StreamCode.Old }]);
 		expect(await decodeSubscribeResponse(sub.client.reader, version)).toMatchObject({
-			skip: { start: 2n, end: 3n },
+			drop: { start: 2n, end: 3n, error: StreamCode.Skip },
 		});
 	} finally {
 		await sub.close();
@@ -2170,8 +2182,8 @@ test("lite draft-07: drops wait for the first SUBSCRIBE_START", async () => {
 		if (!("start" in first)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(first)}`);
 		expect(first.start.id).toBe(0n);
 		const second = await decodeSubscribeResponse(sub.client.reader, version);
-		if (!("skip" in second)) throw new Error(`expected SUBSCRIBE_SKIP, got ${Object.keys(second)}`);
-		expect([second.skip.start, second.skip.end]).toEqual([0n, 2n]);
+		if (!("drop" in second)) throw new Error(`expected SUBSCRIBE_DROP, got ${Object.keys(second)}`);
+		expect([second.drop.start, second.drop.end, second.drop.error]).toEqual([0n, 2n, StreamCode.Skip]);
 	} finally {
 		await sub.close();
 	}

@@ -35,7 +35,3 @@ Wire, API, and state-machine changes (fixes audit findings S3, S8, S9, S10, S11,
   - Keep that test passing with relay=true.
 
 Public API: breaking change (moves `priority` and `order` from `Subscription` onto `track::Range` across Rust, JS, and all FFI bindings; PR title uses `!` and `## Impact` includes the migration note). Wire: breaking lite-07 change (per-range `Priority`/`Group Order`, `Max Age` field on `SUBSCRIBE_DROP(OLD)`).
-
-## Required
-
-- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - per-range accounting builds on its GROUP_END and SUBSCRIBE_SKIP gap accounting

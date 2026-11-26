@@ -1635,6 +1635,12 @@ impl Subscriber {
 		self.reader().untell(range)
 	}
 
+	/// Rescan drops on every copy; see [`track::Subscriber::rescan_drops`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn rescan_drops(&mut self) {
+		self.reader().rescan_drops()
+	}
+
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
 	/// `delivered` says which groups a lowered floor newly owes.
 	pub(super) fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
@@ -3505,6 +3511,15 @@ impl Reader {
 		}
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn rescan_drops(&mut self) {
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.rescan_drops();
+			}
+		}
+	}
+
 	/// Forget `run` as queued, received or not.
 	fn remove_drop(&mut self, run: std::ops::Range<u64>) {
 		self.received.remove(run.clone());
@@ -4682,7 +4697,7 @@ mod test {
 			let mut held = recv(&mut sub);
 			assert_eq!(read(&mut held), Some(b"first".to_vec()));
 
-			let b = copy();
+			let b = received_copy();
 			let dynamic = b.requests();
 			let mut newer = b.create_group(group::Info { start: 1 }).unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
@@ -9803,7 +9818,7 @@ mod test {
 			let case = format!("{start}..{end}");
 			let routes = Producer::new();
 			let logical = logical(&routes);
-			let a = copy();
+			let a = received_copy();
 			routes.serve(a.consume());
 			let budget = Duration::from_secs(1);
 			// A live join through group 4, so the copies are given up within its budget.
@@ -9821,7 +9836,7 @@ mod test {
 				write(&a, sequence);
 			}
 			assert_eq!(drain(&mut sub, false), [3, 1, 0], "{case}");
-			let b = copy();
+			let b = received_copy();
 			routes.serve(b.consume());
 			write(&b, 4);
 			assert_eq!(drain(&mut sub, false), [4], "{case}");
@@ -13510,6 +13525,7 @@ mod test {
 					..crate::track::Info::timed()
 				},
 			);
+			b.received();
 			routes.serve(b.consume());
 			let groups = groups
 				.iter()

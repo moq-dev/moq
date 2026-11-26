@@ -5956,6 +5956,9 @@ impl TrackRun {
 		}
 		self.unstarted = waiting;
 		self.start = Start::Resolved(lowest);
+		if lowest < from {
+			self.track.rescan_drops();
+		}
 		Ok(reported)
 	}
 
@@ -6349,13 +6352,14 @@ impl TrackRun {
 	}
 
 	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
-	/// produced, and earlier versions drop it as not found.
+	/// produced with `SKIP`, and earlier versions drop it as not found.
 	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
 		let version = self.ctx.version;
-		match hole {
-			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
-			hole => lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &hole.error(), version)),
-		}
+		let drop = match hole {
+			Hole::Skip if version.has_skip() => lite::SubscribeDrop::new(groups, &StreamError::Skip, version),
+			hole => lite::SubscribeDrop::new(groups, &hole.error(), version),
+		};
+		lite::SubscribeResponse::Drop(drop)
 	}
 
 	/// Send `groups` given up as `hole`, or withhold it until the first SUBSCRIBE_START.
@@ -6663,10 +6667,30 @@ impl TrackRun {
 			}
 			reach = range.start;
 		}
+		// On lite-07, a subscription can also name disjoint history ranges below `reach` whose
+		// groups were already given up before the first group resolved: forward their drops too
+		// so the subscriber settles those ranges with the same verdict as a direct reader.
+		let mut send = rangemap::RangeSet::new();
+		send.insert(reach..u64::MAX);
+		if self.ctx.version.has_ranges() {
+			for range in self.requested.ranges.values() {
+				let track::Start::Time(from) = range.start else {
+					continue;
+				};
+				let to = range.end.map_or(u64::MAX, |end| end.saturating_add(1));
+				if from < to {
+					send.insert(from..to);
+				}
+			}
+		}
 		for (range, hole) in skipped.iter() {
-			let below = range.start..range.end.min(reach);
-			self.track.untell(below);
-			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
+			for below in send.gaps(range) {
+				self.track.untell(below);
+			}
+			for part in send.overlapping(range) {
+				let part = part.start.max(range.start)..part.end.min(range.end);
+				self.forward_range(part, hole, writer)?;
+			}
 		}
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
@@ -7138,8 +7162,6 @@ struct GroupServe {
 	group: group::Consumer,
 	key: u64,
 	frame_start: u64,
-	/// The End its GROUP_END told, once buffered.
-	ended: Option<u64>,
 	/// The frame a range ending partway through the group stops it before, if any. Lite-06
 	/// keeps the one it opened with and FINs there, so its FIN cannot end the group. Lite-07
 	/// follows [`GroupOutcomes::stops`] and parks there with the stream open, for an update
@@ -7182,6 +7204,8 @@ enum GroupState {
 	/// cancel or expiry can still reset the stream.
 	Closed {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
+		/// The End its GROUP_END told, if any.
+		ended: Option<u64>,
 	},
 	/// Finished, or failed in a way the control stream names in a drop.
 	Done,
@@ -7196,8 +7220,8 @@ enum Ending {
 	/// With the group: a FIN once its frames run out, after a GROUP_END on lite-07 if it
 	/// finished whole.
 	Group,
-	/// Lite-07: the GROUP_END is buffered, so the FIN follows once it flushes.
-	Whole,
+	/// Lite-07: the GROUP_END is buffered for this End, so the FIN follows once it flushes.
+	Whole(u64),
 }
 
 impl GroupServe {
@@ -7234,7 +7258,6 @@ impl GroupServe {
 			clock,
 			key,
 			frame_start,
-			ended: None,
 			end,
 			stops,
 			state: GroupState::Open,
@@ -7349,7 +7372,7 @@ impl GroupServe {
 			// the stream is blocked on, including a FIN awaiting its acknowledgement
 			// (the transport still schedules its retransmissions). The rank is re-read
 			// as a send order when handled, since the two conventions are inverted.
-			if let GroupState::Serve { writer, .. } | GroupState::Closed { writer } = &mut self.state {
+			if let GroupState::Serve { writer, .. } | GroupState::Closed { writer, .. } = &mut self.state {
 				if let Rank::Queue(handle) = &mut self.rank {
 					while let Poll::Ready(rank) = handle.poll_next(waiter) {
 						writer.set_priority(PriorityHandle::send_order_of(rank).into());
@@ -7450,7 +7473,7 @@ impl GroupServe {
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
-							} else if *ending == Ending::Whole {
+							} else if matches!(*ending, Ending::Whole(_)) {
 								// Everything flushed after the GROUP_END.
 								break 'serve Ok(());
 							} else if stopped(
@@ -7530,8 +7553,7 @@ impl GroupServe {
 											) {
 												Ok(Some(end)) => {
 													self.ctx.outcomes.whole(self.key, end);
-													self.ended = Some(end);
-													*ending = Ending::Whole;
+													*ending = Ending::Whole(end);
 													continue;
 												}
 												Ok(None) => break 'serve Ok(()),
@@ -7590,8 +7612,7 @@ impl GroupServe {
 											) {
 												Ok(Some(end)) => {
 													self.ctx.outcomes.whole(self.key, end);
-													self.ended = Some(end);
-													*ending = Ending::Whole;
+													*ending = Ending::Whole(end);
 													continue;
 												}
 												Ok(None) => break 'serve Ok(()),
@@ -7606,32 +7627,37 @@ impl GroupServe {
 						}
 					};
 
-					let GroupState::Serve { mut writer, .. } = std::mem::replace(&mut self.state, GroupState::Done)
+					let GroupState::Serve { mut writer, ending, .. } =
+						std::mem::replace(&mut self.state, GroupState::Done)
 					else {
 						unreachable!()
+					};
+					let ended = match ending {
+						Ending::Whole(end) => Some(end),
+						Ending::Group => None,
 					};
 					match outcome {
 						Ok(()) => {
 							// The buffer drained before the final frame resolved, so the
 							// FIN follows the last byte.
 							match writer.finish() {
-								Ok(()) => self.state = GroupState::Closed { writer },
+								Ok(()) => self.state = GroupState::Closed { writer, ended },
 								// The writer drops here: the Drop reset stands in for the
 								// abort, exactly like the old `finish()?`.
 								Err(err) => {
-									self.settle_reset(&mut writer);
+									self.settle_reset(&mut writer, ended);
 									return Poll::Ready(Err(err));
 								}
 							}
 						}
 						Err(err) => {
-							self.settle_reset(&mut writer);
+							self.settle_reset(&mut writer, ended);
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
 					}
 				}
-				GroupState::Closed { writer } => {
+				GroupState::Closed { writer, .. } => {
 					let res = match writer.poll_closed(waiter) {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a group
@@ -7639,12 +7665,12 @@ impl GroupServe {
 						// lite-07 GROUP_END: stale bytes would fill the send window and stall the
 						// streams behind them.
 						Poll::Pending if self.group.poll_expired(waiter) => {
-							let GroupState::Closed { mut writer } =
+							let GroupState::Closed { mut writer, ended } =
 								std::mem::replace(&mut self.state, GroupState::Done)
 							else {
 								unreachable!()
 							};
-							self.settle_reset(&mut writer);
+							self.settle_reset(&mut writer, ended);
 							writer.abort(&Error::Old);
 							return Poll::Ready(Err(Error::Old));
 						}
@@ -7652,11 +7678,12 @@ impl GroupServe {
 					};
 					// The peer acknowledged everything or ended the stream, so the Drop fallback must not
 					// reset it and discard bytes still retransmitting.
-					let GroupState::Closed { mut writer } = std::mem::replace(&mut self.state, GroupState::Done) else {
+					let GroupState::Closed { mut writer, ended } = std::mem::replace(&mut self.state, GroupState::Done)
+					else {
 						unreachable!()
 					};
 					if res.is_err() {
-						self.settle_reset(&mut writer);
+						self.settle_reset(&mut writer, ended);
 					}
 					writer.release();
 					return Poll::Ready(res.map(|()| {
@@ -7701,7 +7728,7 @@ fn accounts(version: Version, writer: &mut Writer<crate::transport::boxed::SendS
 impl GroupServe {
 	/// Leave the machine failed, `Accounted` when the stream on `writer`, failing now, still
 	/// accounts for its group.
-	fn settle_reset(&mut self, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) {
+	fn settle_reset(&mut self, writer: &mut Writer<crate::transport::boxed::SendStream, Version>, ended: Option<u64>) {
 		self.state = match accounts(self.ctx.version, writer) {
 			true => GroupState::Accounted,
 			false => GroupState::Done,
@@ -7709,7 +7736,7 @@ impl GroupServe {
 		// The header arrives, but the reset may cut the GROUP_END after it, so the starts it
 		// told are named again. A drop of a group whose header never arrived names its span.
 		if matches!(self.state, GroupState::Accounted)
-			&& let Some(end) = self.ended
+			&& let Some(end) = ended
 			&& self.key + 1 < end
 		{
 			self.ctx.outcomes.cut.lock().unwrap().push(self.key + 1..end);
@@ -10071,8 +10098,8 @@ mod serve_group_test {
 						start: Some(_),
 						largest: lite::Edge::Largest(_),
 					}),
-					lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
-				] if *groups == (0..2)
+					lite::SubscribeResponse::Drop(drop),
+				] if drop.groups == (0..2) && drop.error(Version::Lite07) == StreamError::Skip
 			),
 			"{answered:?}"
 		);
@@ -10477,10 +10504,12 @@ mod serve_group_test {
 			while !buf.is_empty() {
 				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 				buf = &buf[size..];
-				match msg {
-					lite::SubscribeResponse::Skip(skip) => holes.push(("skip", skip.groups)),
-					lite::SubscribeResponse::Drop(drop) => holes.push(("drop", drop.groups)),
-					_ => {}
+				if let lite::SubscribeResponse::Drop(drop) = msg {
+					let kind = match version.has_skip() && drop.error(version) == StreamError::Skip {
+						true => "skip",
+						false => "drop",
+					};
+					holes.push((kind, drop.groups));
 				}
 			}
 			assert_eq!(holes, [("drop", 1..3)], "{version}");
@@ -10515,10 +10544,12 @@ mod serve_group_test {
 		while !buf.is_empty() {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
 			buf = &buf[size..];
-			match msg {
-				lite::SubscribeResponse::Skip(skip) => skips.push((skip.groups.start, skip.groups.end)),
-				lite::SubscribeResponse::Drop(_) => drops += 1,
-				_ => {}
+			if let lite::SubscribeResponse::Drop(drop) = msg {
+				if drop.error(Version::Lite07) == StreamError::Skip {
+					skips.push((drop.groups.start, drop.groups.end));
+				} else {
+					drops += 1;
+				}
 			}
 		}
 		assert_eq!((skips, drops), (vec![(1, FAR), (FAR + 1, FAR + 5)], 0));
@@ -10616,15 +10647,17 @@ mod serve_group_test {
 		while !buf.is_empty() {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 			buf = &buf[size..];
-			if let lite::SubscribeResponse::Drop(drop) = msg {
+			if let lite::SubscribeResponse::Drop(drop) = msg
+				&& !(version.has_skip() && drop.error(version) == StreamError::Skip)
+			{
 				drops.push((drop.groups.start, drop.groups.end - 1));
 			}
 		}
 		drops
 	}
 
-	/// The lite-07 SUBSCRIBE_SKIP and SUBSCRIBE_DROP a run loop's subscribe stream carried, in
-	/// order, once flushed.
+	/// The lite-07 SUBSCRIBE_DROP messages a run loop's subscribe stream carried, split into
+	/// skips (`SKIP`) and drops, in order, once flushed.
 	async fn holes(
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		log: &Log,
@@ -10633,8 +10666,13 @@ mod serve_group_test {
 			.await
 			.into_iter()
 			.filter_map(|msg| match msg {
-				lite::SubscribeResponse::Skip(skip) => Some(("skip", skip.groups)),
-				lite::SubscribeResponse::Drop(drop) => Some(("drop", drop.groups)),
+				lite::SubscribeResponse::Drop(drop) => {
+					let kind = match drop.error(Version::Lite07) == StreamError::Skip {
+						true => "skip",
+						false => "drop",
+					};
+					Some((kind, drop.groups))
+				}
 				_ => None,
 			})
 			.collect()

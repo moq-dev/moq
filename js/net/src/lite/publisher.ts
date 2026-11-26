@@ -80,7 +80,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 	spanBetween,
@@ -1492,6 +1491,7 @@ export class Publisher {
 				floor,
 				bounds,
 				initial: BigInt(asked.length),
+				requested,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1678,9 +1678,11 @@ export class Publisher {
 			bounds: FrameBounds;
 			// How many ranges the SUBSCRIBE carried, which take Range IDs from 0.
 			initial: bigint;
+			// Live ranges currently requested on this subscription.
+			requested: Requested;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial, requested } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -1878,11 +1880,15 @@ export class Publisher {
 		};
 
 		// The message naming `[start, end)` given up as `hole` says: lite-07 skips what was never
-		// produced, and earlier versions drop it as not found.
-		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
-			hole.skip && hasSkip(this.version)
-				? { skip: new SubscribeSkip({ start, end }) }
-				: { drop: SubscribeDrop.given(start, end, hole.error, this.version) };
+		// produced with `SKIP`, and earlier versions drop it as not found.
+		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse => ({
+			drop: SubscribeDrop.given(
+				start,
+				end,
+				hole.skip && hasSkip(this.version) ? new StreamError(StreamCode.Skip) : hole.error,
+				this.version,
+			),
+		});
 
 		// What the wire is told when `hole` goes out. Every report is final. Mirrors the Rust
 		// `TrackRun::report`.
@@ -2036,16 +2042,38 @@ export class Publisher {
 						if (range.end < reach || range.stale !== undefined) break;
 						reach = range.start;
 					}
+					// On lite-07, a subscription can also name disjoint history ranges below `reach` whose
+					// groups were already given up before the first group resolved: forward their drops too.
+					const send: Run[] = [];
+					const maxEnd = 1n << 64n;
+					insertRun(send, reach, maxEnd);
+					if (hasRanges(this.version)) {
+						for (const askedRange of requested.values()) {
+							const model = requestedRange(askedRange);
+							if (typeof model.start !== "bigint") continue;
+							const to = model.end !== undefined ? model.end + 1n : maxEnd;
+							if (model.start < to) insertRun(send, model.start, to);
+						}
+					}
 					for (const range of skipped.all) {
-						const below = min(range.end, reach);
-						if (range.start < below) record?.untell(range.start, below);
-						if (!(await forward(max(range.start, reach), range.end, range))) return false;
+						for (const below of runGaps(send, range.start, range.end))
+							record?.untell(below.start, below.end);
+						for (const part of send) {
+							const from = max(part.start, range.start);
+							const to = min(part.end, range.end);
+							if (from < to && !(await forward(from, to, range))) return false;
+						}
 					}
 					skipped = new Runs<DropRun>(sameHole);
 				}
 				for (const { start, end } of pendingCuts.splice(0)) {
 					record?.tell(start, end, { kind: "skip" });
-					if (!(await sendHole({ skip: new SubscribeSkip({ start, end }) }))) return false;
+					if (
+						!(await sendHole({
+							drop: SubscribeDrop.given(start, end, new StreamError(StreamCode.Skip), this.version),
+						}))
+					)
+						return false;
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {

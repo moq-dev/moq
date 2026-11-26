@@ -296,7 +296,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and an exclusive
+	/// Whether SUBSCRIBE_DROP carries `Group Start` and an exclusive
 	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
 	pub(crate) fn has_group_span(self) -> bool {
 		!matches!(
@@ -305,9 +305,8 @@ impl Version {
 		)
 	}
 
-	/// Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
-	/// SUBSCRIBE_DROP, for groups that existed. Added in lite-07; earlier versions name every
-	/// hole in SUBSCRIBE_DROP.
+	/// Whether SUBSCRIBE_DROP distinguishes keys declared never produced (`SKIP`) from
+	/// groups that existed. Added in lite-07; earlier versions carry no skip code.
 	pub(crate) fn has_skip(self) -> bool {
 		!matches!(
 			self,

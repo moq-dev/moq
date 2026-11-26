@@ -946,15 +946,17 @@ impl Recovery {
 							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
-							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
-						}
-						// Never produced, such as the keys between two sparse group starts: the copy
-						// records the skip, as the subscription itself does, and a fill owing one
-						// is answered rather than asked again.
-						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
-							if !skipped.groups.is_empty() {
-								self.serving.skip_received(skipped.groups.clone());
-								given_up(skipped.groups, Refusal::skipped());
+							let error = dropped.error(version);
+							if version.has_skip() && error == StreamError::Skip {
+								// Never produced, such as the keys between two sparse group starts: the copy
+								// records the skip, as the subscription itself does, and a fill owing one
+								// is answered rather than asked again.
+								if !dropped.groups.is_empty() {
+									self.serving.skip_received(dropped.groups.clone());
+									given_up(dropped.groups, Refusal::skipped());
+								}
+							} else {
+								given_up(dropped.groups.clone(), Refusal::dropped(error));
 							}
 						}
 						// Nothing at or past the track's end will be produced.

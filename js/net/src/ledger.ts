@@ -19,6 +19,12 @@ export function grace(maxDelay: Duration): Duration {
 	return maxDelay.isZero() ? GRACE : maxDelay;
 }
 
+/**
+ * Maximum number of disjoint runs retained in a single {@link Ledger}, bounding memory even
+ * when no grace expires gaps (such as a lite-07 proven tail moving across many disjoint ranges).
+ */
+export const MAX_RUNS = 4096;
+
 // A run of accounted keys `[start, end)`, and when the gap below it opened, which is
 // when its missing groups became late.
 type Run = { start: bigint; end: bigint; since: Instant };
@@ -46,6 +52,16 @@ export class Ledger {
 	#last?: Run;
 	// Exclude the leading gap, which has no lower run to fold into.
 	#next?: Run;
+	#maxRuns: number;
+
+	constructor(maxRuns = MAX_RUNS) {
+		this.#maxRuns = maxRuns;
+	}
+
+	/** How many disjoint runs the ledger holds. */
+	get size(): number {
+		return this.#runs.size;
+	}
 
 	#insert(run: Run): void {
 		this.#runs.insert(run);
@@ -90,6 +106,21 @@ export class Ledger {
 		if (!below) this.#insert(run);
 		if (!next) this.#last = run;
 		this.#nextExpiry();
+		while (this.#runs.size > this.#maxRuns && this.foldOldest() !== undefined) {}
+	}
+
+	/** Fold the oldest gap into the runs around it however young, returning the keys it held. */
+	foldOldest(): { start: bigint; end: bigint } | undefined {
+		const run = this.#next;
+		if (!run) return undefined;
+		const below = this.#runs.lower(run.start);
+		if (!below) throw new Error("an expiring gap must have a lower run");
+		const gap = { start: below.end, end: run.start };
+		below.end = run.end;
+		this.#remove(run);
+		if (this.#last === run) this.#last = below;
+		this.#nextExpiry();
+		return gap;
 	}
 
 	/** Fold every gap at least `grace` old into the runs around it. */
@@ -97,13 +128,7 @@ export class Ledger {
 		// No grace: a gap is waited for until something accounts for it.
 		if (grace === undefined) return;
 		while (this.#next && at.since(this.#next.since).ge(grace)) {
-			const run = this.#next;
-			const below = this.#runs.lower(run.start);
-			if (!below) throw new Error("an expiring gap must have a lower run");
-			below.end = run.end;
-			this.#remove(run);
-			if (this.#last === run) this.#last = below;
-			this.#nextExpiry();
+			this.foldOldest();
 		}
 	}
 

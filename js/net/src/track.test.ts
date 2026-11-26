@@ -1747,7 +1747,9 @@ test("the producer aggregate is not clamped to the track's maxAge", () => {
 	expect(producer.subscription.peek()).toEqual(before);
 	expect(producer.subscription.peek()?.ranges).toEqual(ranges);
 	expect(track.subscription.peek()?.ranges).toEqual(ranges);
-	// A late group is waited for no longer than the publisher keeps it fresh.
+	// A local track uses no grace timer; a legacy received copy waits no longer than maxAge.
+	expect(hooks.tailGrace(producer)).toBeUndefined();
+	hooks.receiveTrack(producer);
 	expect(hooks.tailGrace(producer)).toEqual(Duration.millis(2_000));
 });
 
@@ -2020,6 +2022,8 @@ test("the default joins live under a zero max, and history sets no limit", async
 	expect((await implicit.recvGroup())?.start).toBe(2000n);
 	expect((await bare.recvGroup())?.start).toBe(2000n);
 	expect(producer.subscription.peek()?.ranges).toEqual([latest]);
+	expect(hooks.tailGrace(producer)).toBeUndefined();
+	hooks.receiveTrack(producer);
 	expect(hooks.tailGrace(producer)).toEqual(GRACE);
 
 	// History leaves the publisher's max age as the only bound.
@@ -7263,4 +7267,93 @@ test("delivery starts at the first group it can serve", () => {
 			},
 		),
 	);
+});
+
+test("disjoint ranges on a proven copy settle at end without waiting on unasked gaps", async () => {
+	for (const err of [undefined, new StreamError(StreamCode.Cancel, { message: "boom" })]) {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+		hooks.receiveTrack(producer);
+		hooks.proveTrack(producer);
+		const sub = producer.subscribe({
+			order: "ascending",
+			ranges: [
+				{ start: 0n, end: 2n },
+				{ start: 10n, end: 12n },
+			],
+		});
+		try {
+			hooks.startTrack(producer, { requested: 0n, start: 0n });
+			for (const key of [0n, 1n, 10n, 11n]) {
+				const group = producer.createGroup(key);
+				group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
+				group.finish();
+			}
+			hooks.endTrack(producer, { group: 12n, frame: 0 }, err);
+			hooks.settleTail(producer);
+			for (const expected of [0n, 1n, 10n, 11n]) {
+				const group = await sub.recvGroup();
+				expect(group?.start).toBe(expected);
+				group?.close();
+			}
+			if (err) {
+				await expect(sub.recvGroup()).rejects.toThrow("boom");
+			} else {
+				expect(await sub.recvGroup()).toBeUndefined();
+			}
+		} finally {
+			sub.close();
+			producer.close();
+		}
+	}
+});
+
+test("local group finishAt skips its span while cached and preserves it on eviction", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const pool = new Pool({ expiry: Duration.millis(100) });
+		const producer = new TrackProducer("test").accept({ maxAge: null });
+		hooks.poolTrack(producer, pool);
+		hooks.startsAtKeys(producer);
+		const requests = producer.requests();
+		const asked: [bigint, bigint][] = [];
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				asked.push([fill.start, fill.end]);
+				fill.refuseGroups(fill.start, fill.end, new Error("unexpected"));
+			}
+		})();
+		try {
+			const group = producer.createGroup(10n);
+			group.writeFrame(textFrame("x", Timestamp.unscaled(10n)));
+			group.finishAt(20n);
+
+			const sub = producer.subscribe({ ranges: [{ start: 10n, end: 19n }] });
+			const got = await sub.recvGroup();
+			expect(got?.start).toBe(10n);
+			got?.close();
+			expect(await sub.recvGroup()).toBeUndefined();
+			expect(asked).toEqual([]);
+			sub.close();
+
+			// A newer group demotes 10 so pool expiry evicts it; its span 11..20 stays skipped.
+			const later = producer.createGroup(20n);
+			later.writeFrame(textFrame("y", Timestamp.unscaled(20n)));
+			later.finish();
+			await clock.advance(Duration.millis(200));
+			const trigger = producer.createGroup(21n);
+			trigger.writeFrame(textFrame("z", Timestamp.unscaled(21n)));
+			trigger.finish();
+
+			const after = producer.subscribe({ ranges: [{ start: 11n, end: 19n }] });
+			expect(await after.recvGroup()).toBeUndefined();
+			expect(asked).toEqual([]);
+			after.close();
+		} finally {
+			requests.close();
+			producer.close();
+		}
+	} finally {
+		installed.close();
+	}
 });

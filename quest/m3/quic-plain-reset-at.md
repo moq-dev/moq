@@ -11,7 +11,3 @@ Picked 2026-11-26 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev/
 The hold exists so a reset still delivers its prefix, but a plain RESET_STREAM lets the peer discard data it has not read, even acknowledged data, so the hold guarantees nothing. Since [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626), `moq-net` holds a GROUP header only when `poll::Session::reliable_reset` is true and names any other reset group in `SUBSCRIBE_DROP`, so nothing relies on the hold.
 
 Change `reset_to` in `rs/moq-quic/src/connection/streams/send.rs` (and the matching QMux path), update the `reset_at` docs there and on `moq_net::transport::poll::SendStream::reset_at`, and replace the tests that assert the hold (`reset_at_retains_prefix_until_acked` and its kin in `streams/state.rs`) with ones asserting the immediate reset. Measure the send state a reset stream holds before and after.
-
-## Required
-
-- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - stops `moq-net` relying on the hold

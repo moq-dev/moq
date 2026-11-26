@@ -4,8 +4,8 @@ use crate::StreamError;
 
 /// Why a group key will not be delivered.
 ///
-/// lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
-/// earlier versions name both in SUBSCRIBE_DROP.
+/// lite-07 distinguishes skips by `SUBSCRIBE_DROP` with `Error Code = SKIP` (`0x3a`);
+/// earlier versions carry other drop codes on `SUBSCRIBE_DROP`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Hole {
 	/// Never produced, as the publisher declared (see `track::Producer::skip_groups`): final,

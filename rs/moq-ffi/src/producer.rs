@@ -1145,6 +1145,22 @@ impl MoqGroupProducer {
 		Ok(())
 	}
 
+	/// Mark the group as complete with its exclusive `end` in its track's timescale.
+	///
+	/// No other group may start before `end`. An `end` below the group's start or below any of
+	/// its frames' timestamps aborts the group and fails with `TimestampMismatch`.
+	/// The handle remains so a later [`abort`](Self::abort) can still run.
+	pub fn finish_at(&self, end: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock();
+		match std::mem::take(&mut *guard) {
+			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.finish_at(end)?),
+			GroupPhase::Finished(group) => *guard = GroupPhase::Finished(group),
+			GroupPhase::Closed => return Err(MoqError::Closed),
+		}
+		Ok(())
+	}
+
 	/// Abort this group with an application error code.
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -1255,5 +1271,20 @@ mod metadata_tests {
 		let model = moq_net::track::Info::default().with_max_age(std::time::Duration::MAX);
 		let max_age = MoqTrackInfo::from(&model).max_age.unwrap();
 		assert_eq!(max_age, std::time::Duration::from_nanos(i64::MAX as u64));
+	}
+
+	#[test]
+	fn group_finish_at_records_whole_end() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
+		let group = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
+		let consumer = group.consume();
+		let binding = MoqGroupProducer::from_inner(group);
+		binding.finish_at(20).unwrap();
+		assert_eq!(consumer.end(), Some(20));
+
+		let bad = track.create_group(moq_net::group::Info { start: 30 }).unwrap();
+		let binding = MoqGroupProducer::from_inner(bad);
+		assert!(binding.finish_at(25).is_err());
 	}
 }

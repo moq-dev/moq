@@ -346,8 +346,8 @@ export function cutRun<R extends Run>(runs: R[], start: bigint, end: bigint): vo
 /**
  * Why a group key will not be delivered. Mirrors the Rust `track::Hole`.
  *
- * lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
- * earlier versions name both in SUBSCRIBE_DROP.
+ * lite-07 distinguishes skips by `SUBSCRIBE_DROP` with `Error Code = SKIP` (`0x3a`);
+ * earlier versions carry other drop codes on `SUBSCRIBE_DROP`.
  */
 export interface Hole {
 	/** The error a reader waiting on the key ends with: NOT_FOUND for a skip. */
@@ -879,6 +879,12 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Position, error?: Error) => void;
+	/**
+	 * Settle a received copy's pending tail once its subscription finishes cleanly, preserving the
+	 * declared end and error. Mirrors the Rust `Producer::finish_shared` on a declared end;
+	 * assigned by `track.ts`.
+	 */
+	settleTail: (producer: Producer) => void;
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
@@ -1559,6 +1565,9 @@ export const hooks: {
 		throw new Error("datagram module not loaded");
 	},
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	settleTail: () => {
 		throw new Error("track.ts not loaded");
 	},
 	releaseTrack: () => {

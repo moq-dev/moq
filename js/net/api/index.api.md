@@ -637,6 +637,7 @@ export const StreamCode: ((code: number) => StreamCode) & {
 	readonly NotFound: StreamCode;
 	readonly Old: StreamCode;
 	readonly SessionClosed: StreamCode;
+	readonly Skip: StreamCode;
 	readonly TimestampMismatch: StreamCode;
 	readonly TooFarBehind: StreamCode;
 	readonly Unauthorized: StreamCode;
