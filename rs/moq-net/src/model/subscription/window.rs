@@ -907,6 +907,21 @@ impl Window {
 		keys
 	}
 
+	/// Whether a range not yet placed may still come to hold group `key`: placed, it starts at
+	/// or below the group its time or live edge falls in, which may be `key` or one below. A
+	/// time at or past `end`, where group `key` is known to end, falls in a later group, however
+	/// far the range got placing it.
+	pub fn may_hold(&self, key: u64, end: Option<u64>) -> bool {
+		let before = |time: u64| end.is_none_or(|end| time < end);
+		let reaches = |k: &u64| {
+			self.ranges
+				.get(k)
+				.is_some_and(|range| range.end.is_none_or(|end| end >= key) && range.time().is_none_or(before))
+		};
+		self.pending.iter().chain(&self.reaching).any(reaches)
+			|| (self.waiting.iter().chain(&self.looking)).any(|(time, k)| before(*time) && reaches(k))
+	}
+
 	/// Each time start that names no group yet, with its range's end: waiting on a first
 	/// group, reaching back past every group held, waiting on one, or looking one up. Costs
 	/// those, nothing once every time start names a group.
@@ -972,6 +987,12 @@ impl Window {
 	/// The groups in range from `from` on, lowest first.
 	pub fn runs(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
 		self.from(&self.groups, from)
+	}
+
+	/// The groups the placed ranges name from `from` on, lowest first: unlike [`Self::runs`],
+	/// a live join still waiting on a first group names none of them.
+	pub fn placed(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.groups.runs(from)
 	}
 
 	/// The groups in range from `from` on that a miss may ask for, lowest first: all of

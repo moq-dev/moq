@@ -852,6 +852,28 @@ export class Window {
 		return keys;
 	}
 
+	/**
+	 * Whether a range not yet placed may still come to hold group `key`: placed, it starts at or below
+	 * the group its time or live edge falls in, which may be `key` or one below. A time at or past
+	 * `end`, where group `key` is known to end, falls in a later group, however far the range got
+	 * placing it. Mirrors the Rust `Window::may_hold`.
+	 */
+	mayHold(key: bigint, end: bigint | undefined): boolean {
+		const reaches = (unsettled: bigint) => {
+			const range = this.#ranges.get(unsettled);
+			if (range === undefined || (range.end !== undefined && range.end < key)) return false;
+			const time = rangeTime(range);
+			return time === undefined || end === undefined || time < end;
+		};
+		for (const unsettled of this.#pending) if (reaches(unsettled)) return true;
+		for (const unsettled of this.#reaching) if (reaches(unsettled)) return true;
+		for (const timed of [this.#waiting, this.#looking]) {
+			const entries = end === undefined ? timed.all() : timed.in(0n, end);
+			for (const entry of entries) for (const unsettled of entry.keys) if (reaches(unsettled)) return true;
+		}
+		return false;
+	}
+
 	/** Whether nothing is left to resolve as groups arrive. */
 	get settled(): boolean {
 		return this.#pending.size === 0 && !this.#unplaced() && this.#looking.size === 0;
@@ -1024,6 +1046,14 @@ export class Window {
 		if (from >= end) return [];
 		if (this.pending) return [{ start: from, end }];
 		return this.#groups.runs(from, end);
+	}
+
+	/**
+	 * The runs the placed ranges name: unlike {@link runs}, a live join still waiting on a first
+	 * group names none of them. Mirrors the Rust `Window::placed`.
+	 */
+	placed(from = 0n, end = UNBOUNDED): Run[] {
+		return from >= end ? [] : this.#groups.runs(from, end);
 	}
 
 	/**

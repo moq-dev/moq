@@ -521,6 +521,158 @@ test("a time start no answer for its own time places asks upstream for it", () =
 	subscriber.close();
 });
 
+// Mirrors the Rust `a_held_group_waits_for_a_time_start_that_may_place_at_it`.
+for (const placed of [2n, 4n]) {
+	test(`a group held behind a gap waits for an update's time start that may place at it (placed at ${placed})`, async () => {
+		const producer = receivedTrack();
+		const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+		put(producer, 0n, false);
+		drop(producer, 1n, 2n);
+		put(producer, 2n, false);
+		expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+		if (placed === 4n) drop(producer, 3n, 4n);
+		// Group 2 may contain time 5 until the start places.
+		ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+		expect(items(ordered)).toEqual([]);
+		const next = ordered.nextItem();
+		hooks.timeStarts(producer, [[5n, placed]]);
+		if (placed === 2n) {
+			expect((await next)?.group?.start).toBe(2n);
+			return;
+		}
+		producer.skipGroups(3n, 4n);
+		put(producer, 4n, false);
+		expect((await next)?.group?.start).toBe(4n);
+	});
+}
+
+test("a held group waiting on a time start keeps a read at its cap waiting for the start", async () => {
+	const producer = receivedTrack();
+	const ordered = producer
+		.subscribe(withMax({ delay: { max: null } }))
+		.withRange({ end: { excluded: 3n } })
+		.ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	const next = ordered.nextItem();
+	// The track ends past the cap, but upstream still places the start.
+	producer.finishAt({ group: 10n, frame: 0 });
+	hooks.timeStarts(producer, [[5n, 2n]]);
+	expect((await next)?.group?.start).toBe(2n);
+});
+
+// Mirrors the Rust `a_closed_track_releases_groups_past_a_held_group_its_join_never_placed`.
+test("a closed track releases the groups past a held group its live join never placed", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	producer.skipGroups(3n, 4n);
+	put(producer, 4n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Lagging further than any group here has aged, so only upstream may place it.
+	const join = { start: { live: { min: Duration.secs(60) } } };
+	ordered.update(withMax({ delay: { max: null }, ranges: [join, { start: 4n }] }));
+	expect(items(ordered)).toEqual([]);
+	producer.finishAt({ group: 5n, frame: 0 });
+	producer.close();
+	expect(items(ordered)).toEqual(["group 4"]);
+});
+
+// Mirrors the Rust `a_held_group_drains_before_the_tracks_abort`.
+test("a held group drains before the track's abort", async () => {
+	const producer = anchoredTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	const error = new StreamError(StreamCode.NotFound);
+	producer.abort(error);
+	expect((await ordered.nextItem())?.group?.start).toBe(2n);
+	await expect(ordered.nextItem()).rejects.toBe(error);
+});
+
+// Mirrors the Rust `a_held_groups_successor_rules_out_a_time_start_past_it`.
+test("a held group's successor rules out a time start past it", () => {
+	const producer = anchoredTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	producer.skipGroups(3n, 4n);
+	put(producer, 4n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 4 starts at time 4, so time 5 lies in it or later, never in group 2.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 4n }, { start: 5n }] }));
+	expect(items(ordered)).toEqual(["group 4"]);
+});
+
+// Mirrors the Rust `a_held_groups_successor_bounds_it_by_key`.
+test("a held group's successor bounds it by key, not by its first frame's time", () => {
+	const producer = anchoredTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	const ten = producer.createGroup(10n);
+	ten.writeFrame(textFrame("x", Timestamp.fromMillis(4)));
+	ten.finish();
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 10 presents from time 4, but time starts resolve by key, so time 5 may lie in group 2.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	expect(items(ordered)).toEqual([]);
+	hooks.timeStarts(producer, [[5n, 2n]]);
+	expect(items(ordered)).toEqual(["group 2"]);
+});
+
+// Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
+test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	const group = producer.createGroup(2n);
+	group.writeFrame(textFrame("x", Timestamp.unscaled(2n)));
+	group.finishAt(3n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 2 ends at time 3, so time 5 lies in a later group.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	expect(items(ordered)).toEqual([]);
+	producer.skipGroups(3n, 10n);
+	put(producer, 10n, false);
+	expect(items(ordered)).toEqual(["group 10"]);
+});
+
+// Mirrors the Rust `a_held_group_an_answered_time_start_placed_past_is_passed`.
+test("a group held behind a gap is passed once upstream answers an update's time start past it", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	// The publisher started the range at 10, so group 2 holds no time it asks for.
+	hooks.timeStarts(producer, [[5n, 10n]]);
+	expect(items(ordered)).toEqual([]);
+	producer.skipGroups(3n, 10n);
+	put(producer, 10n, false);
+	expect(items(ordered)).toEqual(["group 10"]);
+});
+
 test("a waiting time start holds back a gap above its group", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
