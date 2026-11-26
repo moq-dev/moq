@@ -32893,6 +32893,83 @@ mod test {
 		assert_eq!(fill.wanted(), Some(3), "the rest is served newest first");
 	}
 
+	/// A reader with many bounded time ranges below the feed's start asks where each later
+	/// range's time falls, asks that range as a miss once the handler closes the lookup
+	/// unanswered, and its priority update reaches every one of them.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_update_reaches_every_lookup_and_miss_below_the_start() {
+		const RUNS: u64 = 16;
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(RUNS * 2).unwrap();
+		write_group(&producer, RUNS * 2);
+		// One single-group range per run, with a key between each that no range holds.
+		let ranges = (0..RUNS).map(|run| Range {
+			start: Start::Time(run * 2),
+			end: Some(run * 2),
+		});
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_ranges(ranges.chain([Range::from(Start::Time(RUNS * 2))])));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [RUNS * 2]);
+		subscriber.update(subscriber.subscription().with_priority(1)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+
+		let (mut lookups, mut misses) = (0, 0);
+		// The lookups go out first, and the misses they leave behind them.
+		for _ in 0..2 {
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+				assert_eq!(fill.priority(), 1, "the update reached the fill");
+				match fill.floor() < fill.start().group {
+					true => lookups += 1,
+					false => {
+						fill.drop_groups(fill.start().group..fill.end());
+						misses += 1;
+					}
+				}
+			}
+			assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		}
+		assert_eq!((lookups, misses), (RUNS - 1, RUNS));
+	}
+
+	/// A reader with many disjoint ranges below the feed's start reads every group the handler
+	/// fills for them, once it closes each range's time lookup unanswered.
+	#[test]
+	#[cfg(feature = "async")]
+	fn many_ranges_below_the_start_read_every_filled_group() {
+		const RANGES: u64 = 16;
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		// A gap before each single-group range keeps it its own fill.
+		let start = RANGES * 2 + 1;
+		producer.start_at(start).unwrap();
+		write_group(&producer, start);
+		let ranges = (0..RANGES).map(|i| Range {
+			start: Start::Time(i * 2 + 1),
+			end: Some(i * 2 + 1),
+		});
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges(ranges));
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "everything is a miss");
+
+		let mut filled = Vec::new();
+		for _ in 0..2 {
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+				if fill.floor() < fill.start().group {
+					continue;
+				}
+				while let Some(key) = fill.wanted() {
+					write_filled(fill.accept(key, None), key);
+				}
+			}
+			filled.extend(drain_groups(&mut subscriber));
+		}
+		filled.sort();
+		assert_eq!(filled, (0..RANGES).map(|i| i * 2 + 1).collect::<Vec<_>>());
+	}
+
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.
 	#[test]
 	#[cfg(feature = "async")]
