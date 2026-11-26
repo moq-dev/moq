@@ -2576,6 +2576,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 			trackNamespace: Path.from("test"),
 			trackName: "video",
 			subscriberPriority: 0,
+			groupOrder: "ascending",
 			filter: { kind: "absolute", startGroup: 1n, startObject: 1n, endGroup: 2n, endObject: 0n },
 		}),
 	);
@@ -2634,6 +2635,7 @@ test("draft-22: a filter starting past a group's end claims no END_OF_GROUP", as
 			trackNamespace: Path.from("test"),
 			trackName: "video",
 			subscriberPriority: 0,
+			groupOrder: "ascending",
 			filter: { kind: "absolute", startGroup: 0n, startObject: 5n, endGroup: 1n, endObject: 0n },
 		}),
 	);

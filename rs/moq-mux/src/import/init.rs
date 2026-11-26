@@ -76,25 +76,56 @@ impl VideoInit {
 	}
 }
 
-/// What a container importer needs to start: a format and its leading bytes.
+/// What a container importer needs to start: a format, its leading bytes, and an optional shared
+/// timebase.
 ///
 /// A container publishes and describes its own tracks, so there is no label or hint here: a
 /// rendition field would have no single track to land on.
-#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub struct ContainerInit {
+pub struct ContainerInit<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The container format, e.g. `"fmp4"` or `"ts"`.
 	pub format: ContainerFormat,
 	/// The leading chunk of the container, decoded immediately. May be empty.
 	pub data: Bytes,
+	/// The timestamp base the container shifts through, shared with other importers of its source,
+	/// or `None` for a fresh one of its own.
+	pub timebase: Option<crate::catalog::Timebase<E>>,
 }
 
-impl ContainerInit {
-	/// An init with just a format and its leading bytes.
+impl<E: crate::catalog::hang::CatalogExt> ContainerInit<E> {
+	/// An init with just a format and its leading bytes, on a timebase of its own.
 	pub fn new(format: ContainerFormat, data: impl Into<Bytes>) -> Self {
 		Self {
 			format,
 			data: data.into(),
+			timebase: None,
 		}
+	}
+
+	/// Shift through `timebase`, shared with other importers of the same source.
+	pub fn with_timebase(mut self, timebase: impl Into<Option<crate::catalog::Timebase<E>>>) -> Self {
+		self.timebase = timebase.into();
+		self
+	}
+}
+
+// Manual so an init is clonable and printable regardless of whether `E` is.
+impl<E: crate::catalog::hang::CatalogExt> Clone for ContainerInit<E> {
+	fn clone(&self) -> Self {
+		Self {
+			format: self.format,
+			data: self.data.clone(),
+			timebase: self.timebase.clone(),
+		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> std::fmt::Debug for ContainerInit<E> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ContainerInit")
+			.field("format", &self.format)
+			.field("data", &self.data)
+			.field("shared", &self.timebase.is_some())
+			.finish()
 	}
 }

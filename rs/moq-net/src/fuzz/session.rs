@@ -950,6 +950,10 @@ impl poll::Session for Recorder {
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
 	}
+
+	fn reliable_reset(&self) -> bool {
+		self.inner.reliable_reset()
+	}
 }
 
 impl Recorder {

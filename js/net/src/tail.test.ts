@@ -121,12 +121,13 @@ describe("Tail", () => {
 	let installed: Installed | undefined;
 	afterEach(() => installed?.close());
 
-	// A tail on a manual clock, with `at(ms)` moving the clock to an absolute time.
-	function tail(grace = GRACE) {
+	// A tail on a manual clock, with `at(ms)` moving the clock to an absolute time. A `null` grace
+	// is lite-07's, which waits for the wire to account for every start.
+	function tail(grace: Duration | null = GRACE) {
 		const clock = new Manual();
 		installed = clock.install();
 		const at = (to: Duration) => clock.jump(Instant.ZERO.saturatingAdd(to).since(clock.now()));
-		return { at, clock, tail: new Tail({ grace: () => grace }) };
+		return { at, clock, tail: new Tail({ grace: () => grace ?? undefined }) };
 	}
 
 	test("a gap older than the grace folds away", () => {
@@ -209,5 +210,59 @@ describe("Tail", () => {
 		// Read to its end after all, it is let go once.
 		stream.done();
 		stream.done();
+	});
+
+	test("with no grace, a gap is owed until it is accounted for", async () => {
+		const { at, clock, tail: t } = tail(null);
+		t.account(0n, 1n);
+		t.account(2n, 3n);
+		let settled = false;
+		const settling = t
+			.settle(() => t.covers(0n, 3n), new Once<unknown>())
+			.then(() => {
+				settled = true;
+			});
+
+		at(GRACE.mul(100));
+		t.account(4n, 5n);
+		await clock.advance(GRACE.mul(100));
+		expect(t.covers(0n, 3n)).toBe(false);
+		expect(settled).toBe(false);
+
+		t.account(1n, 2n);
+		await settling;
+	});
+
+	test("with no grace, an excused stream is still given up", async () => {
+		const { clock, tail: t } = tail(null);
+		const stream = t.open(0n);
+		stream.excuse();
+		let settled = false;
+		const settling = t
+			.settle(() => true, new Once<unknown>(), Duration.millis(10))
+			.then(() => {
+				settled = true;
+			});
+
+		await clock.advance(Duration.millis(5));
+		expect(settled).toBe(false);
+		await clock.advance(Duration.millis(10));
+		await settling;
+		stream.done();
+	});
+
+	test("a parked stream holds nothing, and an excuse while parked applies once it resumes", () => {
+		const { tail: t } = tail(Duration.millis(10));
+		const stream = t.open(0n);
+		stream.park();
+		stream.park();
+		expect(t.reading).toBe(false);
+		stream.excuse();
+		expect(t.reading).toBe(false);
+		stream.resume();
+		stream.resume();
+		expect(t.reading).toBe(true);
+		stream.done();
+		expect(t.reading).toBe(false);
 	});
 });

@@ -339,6 +339,12 @@ impl Connection {
 		self.shared.probe.clone()
 	}
 
+	/// Whether a reset still delivers its prefix to the peer's reader: the peer accepts
+	/// RESET_STREAM_AT.
+	pub(crate) fn reset_stream_at(&self) -> bool {
+		self.shared.conn.borrow().reset_stream_at()
+	}
+
 	/// The receive windows now in force: the connection's, and the most one stream holds.
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let conn = self.shared.conn.borrow();

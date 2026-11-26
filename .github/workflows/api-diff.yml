@@ -52,8 +52,8 @@ jobs:
       - if: ${{ !steps.mode.outputs.skip }}
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       # The JS baseline is rendered from `release`'s source.
       - name: Fetch release
         if: ${{ !steps.mode.outputs.skip }}

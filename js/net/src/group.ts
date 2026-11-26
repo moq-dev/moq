@@ -320,6 +320,16 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.groupWholeEnd = (group) => (group.#state.closed.peek() === null ? group.#state.end : undefined);
+		hooks.groupSpan = (group) => {
+			const state = group.#state;
+			const closed = state.closed.peek();
+			return {
+				started: state.total.peek() > state.offset || closed !== undefined,
+				failed: closed instanceof Error,
+				first: state.unverified || state.offset !== 0 ? undefined : state.timestamp,
+				latest: state.unverified ? undefined : state.latest,
+			};
+		};
 		hooks.groupUnplacedFrom = (group) => (group.#state.closed.peek() === null ? undefined : group.#highest());
 		hooks.groupWrites = (group) => group.#state.total;
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
@@ -1244,6 +1254,7 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupDone = (group) => group.#done();
+		hooks.groupFinished = (group) => group.#state.closed;
 		hooks.groupClosed = (group) => {
 			group.#quiet ??= group.#makeClosed(false);
 			return group.#quiet;

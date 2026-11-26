@@ -119,13 +119,20 @@ the same tables are still in the receiver's 1,536-byte system buffer, so frequen
 keyframes cost nothing extra, and PAT and PMT of more than two packets together
 repeat only on the 500 ms and keyframe cadence, since a revision must wait for a
 repeat still in that buffer. It pads to the source's constant mux rate when the
-catalog recorded one, or to `--mux-rate`, on a schedule an IRD or groomer can
-lock to, with each PCR within 500 ns of its byte position. A variable-rate
-source exports unpadded, with no mux-rate or system-buffer claim.
+catalog recorded one, plus 60,160 b/s (a packet every 25 ms) for its own clock
+and PES framing, since a source such as FFmpeg's default audio-only output has
+no null packets to make room for them. Below 50 ms of `--delay`, audio can't
+go out a slot ahead, so a padded AAC export runs at least at the rate each slot
+needs for two AAC frames. Or it pads to `--mux-rate`, which is used as given, on a schedule an IRD or groomer can lock to, with each PCR within 500 ns
+of its byte position. A variable-rate source exports unpadded, with no mux-rate
+or system-buffer claim.
 
 Each frame goes out as early as the receiver's buffers admit, up to `--delay`
 (default 1 s) ahead of its decode time, so the output trails the source by
-`--delay`. A frame that cannot arrive in time at the rate fails the export, as
+`--delay`. Audio's decoder buffer fills no faster than the multiplex, so a slow
+padded multiplex sends audio up to half of `--delay` ahead, spreading it across
+slots, and a source that sends its audio only at its decode time adds that much
+latency. A frame that cannot arrive in time at the rate fails the export, as
 does video whose HRD declares a longer buffer delay than `--delay`; the error
 names the delay it needs.
 

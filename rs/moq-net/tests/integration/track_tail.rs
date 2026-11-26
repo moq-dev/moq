@@ -234,10 +234,11 @@ async fn a_group_after_the_end_is_delivered() {
 }
 
 /// A group that never arrives is given up on after the grace, and the track still ends
-/// cleanly without it.
+/// cleanly without it. Lite-07 waits out no grace: its publisher names every start, and a
+/// stream reset keeps its header, so no group goes missing unnamed.
 #[kio::test]
 async fn a_lost_group_ends_the_track_after_the_grace() {
-	for version in VERSIONS {
+	for version in VERSIONS.iter().filter(|version| **version != "moq-lite-07-wip") {
 		let outcome = round(version, Late::Lost, 1, Some(Duration::ZERO)).await;
 		assert!(
 			outcome.err.is_none() && outcome.frames.is_empty(),
@@ -273,7 +274,8 @@ async fn a_session_death_before_the_tail_aborts_the_track() {
 	}
 }
 
-/// Skipped keys have no stream, so lite-05+ publishers name them with SUBSCRIBE_DROP.
+/// Skipped keys have no stream, so lite-05 and lite-06 publishers name them with SUBSCRIBE_DROP,
+/// and lite-07 proves them in the next group's header.
 #[kio::test]
 async fn skipped_groups_end_without_the_grace() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {

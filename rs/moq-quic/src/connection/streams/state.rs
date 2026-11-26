@@ -332,7 +332,7 @@ impl StreamsState {
 		if fin {
 			self.waits.wake_ended();
 		}
-		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 
@@ -428,7 +428,7 @@ impl StreamsState {
 			return Ok(false);
 		};
 		self.waits.wake_ended();
-		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 		let credit = if stopped {
@@ -1473,6 +1473,11 @@ impl StreamsState {
 		diff > 0 && (diff >= threshold || sent.saturating_sub(self.data_recvd) < threshold)
 	}
 
+	/// Whether the peer accepts RESET_STREAM_AT, so a reset still delivers its reliable prefix
+	pub(crate) fn peer_reset_stream_at(&self) -> bool {
+		self.peer_reset_stream_at
+	}
+
 	pub(crate) fn credit_stats(&self) -> CreditStats {
 		CreditStats {
 			leased: self.held,
@@ -1556,7 +1561,7 @@ impl StreamsState {
 	///
 	/// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
 	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: Box<Recv>) -> bool {
-		let evicted = recv.reader == Reader::Evicted;
+		let evicted = recv.reader.is_evicted();
 		let transmit = self.discard_lease(id, &mut recv.lease, evicted);
 		self.unlooked.remove(&id);
 		self.stream_freed(id, StreamHalf::Recv);
@@ -5290,6 +5295,34 @@ mod tests {
 			assert!(!client.recv.contains_key(&id));
 			assert_eq!(client.credit_stats().leased, 0);
 		}
+	}
+
+	/// Evicting a stream whose FIN arrived out of order with a missing gap before FIN still
+	/// emits STOP_SENDING when stopped, because the sender has not finished transmitting.
+	#[test]
+	fn evicted_stop_with_reordered_fin_gap_still_sends_stop_sending() {
+		const WINDOW: u64 = 1000;
+		let (mut client, [low, high]) = stuck(WINDOW);
+		// Low receives 0..900 and a reordered FIN at 950..1000, leaving gap 900..950 before FIN.
+		data(&mut client, low, 0, 900, false);
+		data(&mut client, low, 950, 50, true);
+		// High fills the rest of the 2*WINDOW receive window.
+		data(&mut client, high, 0, WINDOW as usize, false);
+		let mut pending = Retransmits::default();
+		recv(&mut client, &mut pending, low).set_priority(-1);
+		recv(&mut client, &mut pending, high).set_priority(1);
+		assert_eq!(lease(&mut client, low), 900);
+		assert_eq!(lease(&mut client, high), WINDOW as usize);
+		assert!(matches!(wait(&mut client, high, 2000), Poll::Pending));
+		assert_eq!(wait(&mut client, low, 1), Poll::Ready(Err(recv::Error::Evicted)));
+
+		let mut frames = Retransmits::default();
+		frames |= stop(&mut client, low, 7);
+		assert_eq!(
+			frames.stop_sending.len(),
+			1,
+			"reordered FIN with an unreceived gap must still send STOP_SENDING"
+		);
 	}
 
 	/// A group token indexes its own connection's schedule, so another connection refuses it

@@ -61,18 +61,18 @@ test("a run joins every run it touches, leaving the gaps around it", () => {
 	for (const key of [2n, 5n, 9n]) delivered.add(key);
 	delivered.addRun(4n, 9n);
 	expect(delivered.runs).toBe(2);
-	expect(delivered.gaps(0n, 12n)).toEqual([
+	expect([...delivered.gaps(0n, 12n)]).toEqual([
 		{ start: 0n, end: 2n },
 		{ start: 3n, end: 4n },
 		{ start: 10n, end: 12n },
 	]);
 	delivered.addRun(0n, 0n);
 	delivered.addRun(11n, 12n);
-	expect(delivered.gaps(3n, 12n)).toEqual([
+	expect([...delivered.gaps(3n, 12n)]).toEqual([
 		{ start: 3n, end: 4n },
 		{ start: 10n, end: 11n },
 	]);
 	delivered.addRun(0n, 20n);
 	expect(delivered.runs).toBe(1);
-	expect(delivered.gaps(0n, 20n)).toEqual([]);
+	expect([...delivered.gaps(0n, 20n)]).toEqual([]);
 });

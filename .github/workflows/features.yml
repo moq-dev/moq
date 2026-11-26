@@ -30,8 +30,8 @@ jobs:
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       # The workspace-hack unifies third-party features so the gate's builds
       # share a cache, which would hide a crate using a feature it does not
       # declare. Every build here checks declarations, so it runs without it.

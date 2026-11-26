@@ -777,12 +777,16 @@ fi
 # round-trip below still bounds the run.
 
 # SCHEDULE carries the rate pcr-timing.py's schedule check grades against, and gates
-# on it. The generated clip is muxed at $BITRATE, which is the rate the catalog records
-# and the exporter pads to, on a constant-rate schedule from the first PCR:
-# every interval is the bytes the rate implies, to one packet. A --source capture's
-# rate is not known here, so for that the grader estimates it, says so, and only reports.
+# on it. The generated clip is muxed at $BITRATE, which is the rate the catalog records.
+# The exporter pads to that plus one packet per 25 ms slot (60,160 b/s, its room for its
+# own clock), and passthrough carries the source's own rate, on a constant-rate schedule
+# from the first PCR: every interval is the bytes the rate implies, to one packet. A
+# --source capture's rate is not known here, so for that the grader estimates it, says
+# so, and only reports.
+EXPORT_RATE=$((BITRATE + 60160))
+[[ -n "$PASSTHROUGH" ]] && EXPORT_RATE="$BITRATE"
 SCHEDULE=()
-[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE" --schedule-pct-min 99)
+[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$EXPORT_RATE" --schedule-pct-min 99)
 
 # Both halves matter and `wait` can only report one, so record each. The
 # exporter's own status is not incidental here: it decides whether the grader saw
@@ -1236,8 +1240,8 @@ fi
 # TSDuck's pcrverify measures exactly that, including the first PCR interval.
 if [[ ${#SCHEDULE[@]} -gt 0 ]]; then
     echo
-    echo "### PCR accuracy (tsp -P pcrverify, +/-500 ns at ${BITRATE} b/s)"
-    if ! python3 "$DIR/accuracy.py" "$SUB_TS" --bitrate "$BITRATE" --log "$HARNESS_RUN/pcrverify.log"; then
+    echo "### PCR accuracy (tsp -P pcrverify, +/-500 ns at ${EXPORT_RATE} b/s)"
+    if ! python3 "$DIR/accuracy.py" "$SUB_TS" --bitrate "$EXPORT_RATE" --log "$HARNESS_RUN/pcrverify.log"; then
         echo >&2
         echo "error: PCRs stray from their byte position (see $HARNESS_RUN/pcrverify.log)" >&2
         dump_logs

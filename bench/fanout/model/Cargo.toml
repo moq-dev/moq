@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 bytes = "1"
-kio = { path = "../../../rs/kio" }
+kio = { git = "https://github.com/kixel-ai/kio", rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671" }
 moq-net = { path = "../../../rs/moq-net", features = ["async"] }
 
 [profile.release]

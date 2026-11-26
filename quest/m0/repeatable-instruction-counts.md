@@ -7,7 +7,7 @@ A bench whose count cannot be made repeatable leaves `sh/rs/instructions.sh`'s s
 
 ## Plan
 
-Decided 2026-11-24 (maintainer, pick round on [moq-dev/moq#9555](https://github.com/moq-dev/moq/pull/9555)): ✅ keep this quest and move it to `m0`, since noisy series now feed Kixel Quest's regression filing and bisects (rejected: drop it; keep it in `m9`). ✅ land rust2-bench counting every target meanwhile (rejected: leave the 11 noisy targets out until they repeat): "land now, we don't want hosted runners eventually anyway". The counts are expected to move off GitHub-hosted runners, so a fix must hold on any host rust2-bench runs on, not only on `ubuntu-24.04`; that move belongs here or in a quest of its own.
+Decided 2026-11-24 (maintainer, pick round on [moq-dev/moq#9555](https://github.com/moq-dev/moq/pull/9555)): ✅ keep this quest and move it to `m0`, since noisy series now feed Kixel Quest's regression filing and bisects (rejected: drop it; keep it in `m9`). ✅ land rust2-bench counting every target meanwhile (rejected: leave the 11 noisy targets out until they repeat): "land now, we don't want hosted runners eventually anyway". Superseded 2026-11-26 by the org's runner rule, which lets a public repository's jobs outside merge gates, such as these Nightly and bisect counts, stay on GitHub-hosted runners, so no move off them is planned. A fix must still hold in any checkout, as the Goal says, not only on `ubuntu-24.04`.
 
 Measured 2026-11-24 on rust2-bench at kixel-ai/rust2@6ead6d56 (fingerprint `x86_64-3059cd1d9e65`), with no code change between runs:
 

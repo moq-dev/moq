@@ -799,8 +799,8 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A timestamp base for one source, shared by every importer reading it.
 	///
-	/// Mint each importer's reservation from it with [`Timebase::reserve`](super::Timebase::reserve), so
-	/// they all shift by one offset. See [`Timebase`](super::Timebase).
+	/// Hand it to each container importer with its `with_timebase`, or shift a source's timestamps
+	/// through it directly, so they all shift by one offset. See [`Timebase`](super::Timebase).
 	pub fn timebase(&self) -> super::Timebase<E> {
 		super::Timebase::new(self.clone())
 	}
@@ -816,10 +816,10 @@ impl<E: CatalogExt> Producer<E> {
 	/// through [`modify`](Self::modify) is invisible to this check. Producers created directly on a
 	/// catalog that never reserved publish incrementally.
 	///
-	/// Each call is a fresh [`Timebase`](super::Timebase): an importer handed it shifts its timestamps by
-	/// its own offset. Reserve through one timebase instead for importers sharing a timestamp base.
+	/// It only gates: timestamps written through it land verbatim on the catalog's clock (see
+	/// [`Timebase`](super::Timebase) for a source on a timeline of its own).
 	pub fn reserve(&self) -> super::Reserved<E> {
-		self.timebase().reserve()
+		super::Reserved::new(self.clone())
 	}
 
 	/// Take a rendition name without withholding the catalog's initial snapshot.
@@ -2302,7 +2302,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		let timebase = catalog.timebase();
-		let reserved = timebase.reserve();
+		let reserved = catalog.reserve();
 		// Staged on the fresh clock, which reads ten seconds.
 		let staged = catalog.next_timestamp();
 		opus(&mut catalog, "a", staged).unwrap();
@@ -2321,7 +2321,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		let timebase = catalog.timebase();
-		let reserved = timebase.reserve();
+		let reserved = catalog.reserve();
 		let staged = catalog.next_timestamp();
 		opus(&mut catalog, "a", staged).unwrap();
 
@@ -2342,7 +2342,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		let timebase = catalog.timebase();
-		let reserved = timebase.reserve();
+		let reserved = catalog.reserve();
 		let staged = catalog.next_timestamp();
 		opus(&mut catalog, "a", staged).unwrap();
 

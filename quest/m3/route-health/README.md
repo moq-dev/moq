@@ -63,19 +63,19 @@ the 2026-11-16 deferral lacked. Its robot failover
 a camera stuck on a silently dead LAN route through this epic's metadata
 standby and [failover](/quest/m3/route-health/failover.md).
 
-Decided 2026-11-25 (maintainer, /quest-run): ✅ "actually move
-SUBSCRIBE_META entirely to m3 and out of lite-07". The metadata mode's wire
-and serving are [wire.md](/quest/m3/route-health/wire.md), on lite-08-wip
-after the lite-07 cut, and lite-07 freezes without the mode. So failover
-waits on the lite-08 wire, and Kixel's failover with it (rejected, both
-reversed: the wire in lite-07 before the cut so failover is not blocked on
-lite-08, decided 2026-11-23; the serving side in m2 so every lite-07
-publisher and relay serves the mode, decided earlier on 2026-11-25).
-[meta.md](/quest/m3/route-health/meta.md) keeps the subscriber side, and
-everything here stays in m3 (rejected: m2, m1, m0).
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ move both the metadata wire/serving quest
+([subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md)) and the subscriber
+API quest ([subscribe-meta.md](/quest/m2/subscribe-meta.md)) back into `m2` on
+`moq-lite-07-wip`, reversing the 2026-11-25 deferral to `m3` / `lite-08-wip`
+(rejected: moving only the wire into `m2` and keeping the subscriber API in
+`m3`; leaving both in `m3`). `moq-hls` live and archive/VOD indexing is an
+immediate consumer, and moving both avoids breaking the C `moq_subscription`
+ABI after 0.22. [failover.md](/quest/m3/route-health/failover.md) and
+[ietf.md](/quest/m3/route-health/ietf.md) stay here in `m3`.
 
 Decided 2026-11-25 (maintainer, /quest-run): ✅ nothing refuses the mode: a
-relay whose upstream is lite-07 or earlier subscribes for payload and drops
+relay whose upstream is lite-06 or earlier subscribes for payload and drops
 it, and moq-transport gets [an extension](/quest/m3/route-health/ietf.md)
 for the mode (rejected: a NOT_SUPPORTED refusal).
 

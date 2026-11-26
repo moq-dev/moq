@@ -989,10 +989,11 @@ async fn the_same_instance_returning_resumes_the_release() {
 }
 
 /// The same instance returning, while what it last delivered still waits out the delay, with the
-/// group it was reading published again from its start: the release carries on past that group
-/// rather than writing again the objects it already took from it.
+/// group it was reading published again from its start: the release carries on within that group
+/// right after the objects it already took from it, writing none of them again and losing none
+/// after them.
 #[tokio::test(start_paused = true)]
-async fn the_same_instance_returning_skips_the_group_it_was_reading() {
+async fn the_same_instance_returning_carries_on_within_the_group_it_was_reading() {
 	let instance = moq_net::Instance::random();
 	let gone = Ending::Abort(moq_net::Error::Unroutable);
 	let again = Restart {
@@ -1003,7 +1004,8 @@ async fn the_same_instance_returning_skips_the_group_it_was_reading() {
 	};
 	let (released, end, head, tail) = follow(instance, gone, again, false).await;
 	let reading = head.last().unwrap().group;
-	let past: Vec<Object> = tail.into_iter().filter(|object| object.group != reading).collect();
-	assert_paced(&released, &[&head, &past]);
+	let taken = head.iter().filter(|object| object.group == reading).count();
+	assert!(tail[..taken].iter().all(|object| object.group == reading));
+	assert_paced(&released, &[&head, &tail[taken..]]);
 	assert!(matches!(end, Some(Ok(()))), "{end:?}");
 }

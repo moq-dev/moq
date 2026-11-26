@@ -565,7 +565,12 @@ impl Publish {
 	}
 
 	/// Import a container, from `timebase` when shared, or with an independent offset.
-	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit, timebase: Option<Id>) -> Result<Id, Error> {
+	pub fn container(
+		&mut self,
+		broadcast: Id,
+		init: import::ContainerInit<Extra>,
+		timebase: Option<Id>,
+	) -> Result<Id, Error> {
 		let owner = timebase
 			.map(|timebase| self.timebases.get(timebase).copied().ok_or(Error::NotFound))
 			.transpose()?;
@@ -580,12 +585,12 @@ impl Publish {
 			timebases,
 			..
 		} = self.broadcast(broadcast)?;
-		let reserved = match timebase {
+		let init = match timebase {
 			// The owner check above means a missing entry is a broadcast that closed and was reused.
-			Some(timebase) => timebases.get(&timebase).ok_or(Error::NotFound)?.reserve(),
-			None => catalog.reserve(),
+			Some(timebase) => init.with_timebase(timebases.get(&timebase).ok_or(Error::NotFound)?.clone()),
+			None => init,
 		};
-		let container = import::Container::new(broadcast.clone(), reserved, &init)?;
+		let container = import::Container::new(broadcast.clone(), catalog.reserve(), &init)?;
 		let children = children.clone();
 		let container = Container {
 			inner: container,
@@ -1592,6 +1597,18 @@ impl Publish {
 			.and_then(|group| group.inner.take())
 			.ok_or(Error::GroupNotFound)?;
 		group.finish()?;
+		Ok(())
+	}
+
+	/// Finish a raw group with its exclusive `end` in its track's timescale. No more frames can
+	/// be written.
+	pub fn group_finish_at(&mut self, group: Id, end: u64) -> Result<(), Error> {
+		let group = self
+			.groups
+			.remove(group)
+			.and_then(|group| group.inner.take())
+			.ok_or(Error::GroupNotFound)?;
+		group.finish_at(end)?;
 		Ok(())
 	}
 
