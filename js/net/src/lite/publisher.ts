@@ -404,8 +404,6 @@ type Control =
 			kind: "update";
 			update: SubscribeUpdate;
 			applied: Applied;
-			/** Lite-07: every group the coalesced updates reported lost, in order. */
-			lost: bigint[];
 	  }
 	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
 	| { kind: "done" }
@@ -421,6 +419,8 @@ type SubscriptionControlOptions = {
 	live: LiveRanges;
 	/** Apply an update, with the ranges it retired and added by Range ID on lite-07. */
 	apply: (update: SubscribeUpdate, applied: Applied) => void;
+	/** Where the group the track holds whole at `key` ends, which a lost group's span reaches. */
+	wholeEnd: (key: bigint) => bigint | undefined;
 };
 
 /**
@@ -446,8 +446,10 @@ class SubscriptionControls {
 		retired: bigint[];
 		added: Map<bigint, WireRange>;
 		retuned: Map<bigint, WireRange>;
-		lost: bigint[];
 	};
+	// Lite-07: the starts inside the spans of groups the subscriber reported lost, to name again as
+	// a skip. Merged as they decode, so a span reported again costs nothing more.
+	#cuts = new Runs<Run>(() => true);
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#ended: Promise<Error | null>;
@@ -483,7 +485,6 @@ class SubscriptionControls {
 				kind: "update",
 				update: update.update,
 				applied: { retired: update.retired, added: [...update.added], retuned: [...update.retuned] },
-				lost: update.lost,
 			};
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
@@ -514,9 +515,17 @@ class SubscriptionControls {
 		return range && joinBudget(range);
 	}
 
-	/** Whether {@link take} has a control to answer with now. */
+	/** Lite-07: the starts the subscriber's lost reports ask to name again, merged, once each. */
+	takeCuts(): readonly Run[] {
+		if (this.#cuts.size === 0) return [];
+		const cuts = this.#cuts.all;
+		this.#cuts = new Runs<Run>(() => true);
+		return cuts;
+	}
+
+	/** Whether {@link take} or {@link takeCuts} has something to answer with now. */
 	pending(): boolean {
-		return this.#update !== undefined || this.#end !== undefined;
+		return this.#update !== undefined || this.#end !== undefined || this.#cuts.size > 0;
 	}
 
 	/** Calls `fn` once {@link take} may answer differently. */
@@ -558,7 +567,7 @@ class SubscriptionControls {
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode({ reader, version, live, apply, quic }: SubscriptionControlOptions) {
+	async #decode({ reader, version, live, apply, wholeEnd, quic }: SubscriptionControlOptions) {
 		try {
 			// Runs until the peer's half ends, even past our own FIN: a lite-05+ publisher waits
 			// for that end, and every other teardown stops the reader.
@@ -568,17 +577,23 @@ class SubscriptionControls {
 				// Each lite-07 update edits the live ranges, which only the stream's history names.
 				const edit = live.apply(update);
 				apply(update, edit);
+				// The subscriber let these groups' streams go before reading their end, so the starts
+				// inside each one's span go out again as a skip, as for a cut GROUP_END. Only a group the
+				// track still holds whole says where its span ends, which bounds what this holds. Mirrors
+				// the Rust `TrackRun::update`.
+				for (const group of update.lost) {
+					const end = wholeEnd(group);
+					if (end !== undefined && end > group + 1n)
+						this.#cuts.set(group + 1n, end, { start: group + 1n, end });
+				}
 				// The latest one replaces any the loop has yet to take, its edit folded in.
 				const pending = this.#update ?? {
 					update,
 					retired: [] as bigint[],
 					added: new Map<bigint, WireRange>(),
 					retuned: new Map<bigint, WireRange>(),
-					lost: [] as bigint[],
 				};
 				pending.update = update;
-				// Every one reported lost is named again, not just the latest update's.
-				pending.lost.push(...update.lost);
 				for (const id of edit.retired) {
 					pending.retuned.delete(id);
 					if (!pending.added.delete(id)) pending.retired.push(id);
@@ -1430,6 +1445,7 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
+				wholeEnd: (key) => hooks.wholeEnd(track, key),
 				apply: (update, { retired, added, retuned }) => {
 					legacyPriority.set(update.priority);
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
@@ -2010,8 +2026,8 @@ export class Publisher {
 		// whole names its span.
 		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
 		// Lite-07: the starts inside whole groups' spans whose GROUP_END a reset may have cut, to name
-		// again as a skip. Mirrors the Rust `GroupOutcomes::cut`.
-		const pendingCuts: Run[] = [];
+		// again as a skip, merged. Mirrors the Rust `GroupOutcomes::cut`.
+		let pendingCuts = new Runs<Run>(() => true);
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -2054,7 +2070,10 @@ export class Publisher {
 					}
 					skipped = new Runs<DropRun>(sameHole);
 				}
-				for (const { start, end } of pendingCuts.splice(0)) {
+				for (const { start, end } of controls.takeCuts()) pendingCuts.set(start, end, { start, end });
+				const cuts = pendingCuts.all;
+				pendingCuts = new Runs<Run>(() => true);
+				for (const { start, end } of cuts) {
 					record?.tell(start, end, { kind: "skip" });
 					if (!(await sendHole({ skip: new SubscribeSkip({ start, end }) }))) return false;
 				}
@@ -2091,17 +2110,6 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
-							// Lite-07: the subscriber let these groups' streams go before reading their end, so
-							// the starts inside each one's span go out again as a skip, as for a cut GROUP_END.
-							// Only a group the cache still holds whole says where its span ends. Mirrors the
-							// Rust `TrackRun::update`.
-							for (const group of control.lost) {
-								const end = hooks.wholeEnd(track, group);
-								if (end !== undefined && end > group + 1n) {
-									pendingCuts.push({ start: group + 1n, end });
-									drops.update((revision) => revision + 1);
-								}
-							}
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_START.
 								for (const id of control.applied.retired) unstarted.delete(id);
@@ -2262,7 +2270,7 @@ export class Publisher {
 						const drain = keepsSubscribeOpen(this.version) ? await drainedOrControl() : await drained();
 						if (drain === undefined) continue;
 						if (!drain) return false;
-						if (pendingDrops.length > 0 || pendingCuts.length > 0) continue;
+						if (pendingDrops.length > 0 || pendingCuts.size > 0) continue;
 						// Lite-07 keeps the stream open past SUBSCRIBE_END: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing
 						// more.
@@ -2330,7 +2338,7 @@ export class Publisher {
 						if (end > group.start + 1n) record?.tell(group.start + 1n, end, { kind: "settled" });
 					},
 					cut: (start, end) => {
-						pendingCuts.push({ start, end });
+						pendingCuts.set(start, end, { start, end });
 						drops.update((revision) => revision + 1);
 					},
 				};

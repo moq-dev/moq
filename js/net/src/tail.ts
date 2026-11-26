@@ -63,8 +63,8 @@ export class Tail {
 	#dropped: Run[] = [];
 	// With no grace (lite-07): groups whose stream was let go before its end, which leaves the
 	// rest of the span its GROUP_END told unnamed, for a SUBSCRIBE_UPDATE to ask the publisher
-	// to name again.
-	#lost: bigint[] = [];
+	// to name again, once each.
+	#lost = new Set<bigint>();
 	#lostChanged = new Signal(0);
 
 	constructor(options: TailOptions = {}) {
@@ -184,7 +184,7 @@ export class Tail {
 
 	/** Whether a let-go stream left a group for the publisher to name the rest of again. */
 	get hasLost(): boolean {
-		return this.#lost.length > 0;
+		return this.#lost.size > 0;
 	}
 
 	/** Bumped whenever a stream is lost; see {@link takeLost}. */
@@ -194,17 +194,17 @@ export class Tail {
 
 	/** Take the groups a SUBSCRIBE_UPDATE asks the publisher to name the rest of again. */
 	takeLost(): bigint[] {
-		const lost = this.#lost;
-		this.#lost = [];
+		const lost = [...this.#lost];
+		this.#lost.clear();
 		return lost;
 	}
 
 	// The stream of `key` was let go before its end. With no grace, the publisher is asked to name
-	// the rest of its span again, unless the next start is accounted for already, which ends the
-	// span there: no other group starts inside a whole group's span. Mirrors the Rust `Tail::lose`.
+	// the rest of its span again: only it knows where the span ends, as the next start being
+	// accounted for proves nothing when a skip or drop named it. Mirrors the Rust `Tail::lose`.
 	#lose(key: bigint): void {
-		if (this.#grace() !== undefined || this.#ledger.covers(key + 1n, key + 2n)) return;
-		this.#lost.push(key);
+		if (this.#grace() !== undefined || this.#lost.has(key)) return;
+		this.#lost.add(key);
 		this.#lostChanged.update((n) => n + 1);
 	}
 

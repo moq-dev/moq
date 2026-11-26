@@ -2325,6 +2325,21 @@ export class Subscriber {
 						.then((encoded) => opened.writer.write(encoded))
 						.catch(() => undefined);
 				};
+				// Lite-07: a group stream let go before its end leaves the rest of its span unnamed, which only
+				// the publisher can name, as on the subscription. After any cap, which our FIN waits on too.
+				// Mirrors the Rust `Recovery::poll`.
+				const reportLost = () => {
+					const update = new SubscribeUpdate({
+						priority: msg.priority,
+						order: msg.order,
+						maxDelay: msg.maxDelay,
+						lost: entry.tail.takeLost(),
+					});
+					capping = capping
+						.then(() => Writer.collect(this.version, (w) => update.encode(w, this.version)))
+						.then((encoded) => opened.writer.write(encoded))
+						.catch(() => undefined);
+				};
 				// Only a group that arrives proves one, so once started the range stops past the first;
 				// what lies between is named by the publisher's drops, or given up with the grace.
 				const capAtFirst = () => {
@@ -2369,6 +2384,7 @@ export class Subscriber {
 				try {
 					while (!ended && !left.signal.aborted) {
 						capAtFirst();
+						if (entry.tail.hasLost) reportLost();
 						// TEMPORARY MIGRATION, see `walk`: what is still owed once the grace passed with no
 						// progress is left to FETCH.
 						if (stall?.poll(entry.tail) && !covered()) {
@@ -2391,7 +2407,7 @@ export class Subscriber {
 							break;
 						}
 						await race([
-							Signal.race(entry.tail.changed),
+							Signal.race(entry.tail.changed, entry.tail.lostChanged),
 							over,
 							leaving,
 							...(stall === undefined ? [] : [stall.wake]),

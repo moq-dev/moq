@@ -23,6 +23,10 @@ use crate::{
 	track,
 };
 
+/// Heap a lost group holds until an update reports it: its entry, doubled for half-full
+/// `BTreeSet` nodes, as [`RUN_OVERHEAD`] is.
+const LOST_OVERHEAD: u64 = 2 * size_of::<u64>() as u64;
+
 /// The data streams a subscription has received, and the groups they account for.
 #[derive(Debug)]
 pub(crate) struct Tail {
@@ -43,7 +47,9 @@ pub(crate) struct Tail {
 	proven: bool,
 	// Lite-07: groups whose stream was discarded before its end, which leaves the rest of the
 	// span its GROUP_END told unnamed, for a SUBSCRIBE_UPDATE to ask the publisher to name again.
-	lost: Vec<u64>,
+	// Billed with the ledger, since a publisher can keep resetting streams while the update
+	// waits on flow control.
+	lost: std::collections::BTreeSet<u64>,
 }
 
 impl Default for Tail {
@@ -63,7 +69,7 @@ impl Tail {
 			active: 0,
 			ended: false,
 			proven: false,
-			lost: Vec::new(),
+			lost: Default::default(),
 		}
 	}
 
@@ -111,7 +117,8 @@ impl Tail {
 		let Some(bill) = &mut self.bill else {
 			return;
 		};
-		let bytes = |ledger: &Ledger| ledger.len().saturating_sub(1) as u64 * RUN_OVERHEAD;
+		let lost = self.lost.len() as u64 * LOST_OVERHEAD;
+		let bytes = |ledger: &Ledger| ledger.len().saturating_sub(1) as u64 * RUN_OVERHEAD + lost;
 		bill.set(bytes(&self.ledger));
 		while bill.debt() > 0 && self.ledger.fold_oldest().is_some() {
 			bill.set(bytes(&self.ledger));
@@ -171,16 +178,17 @@ impl Tail {
 
 	/// Take the groups a SUBSCRIBE_UPDATE asks the publisher to name the rest of again.
 	pub fn take_lost(&mut self) -> Vec<u64> {
-		std::mem::take(&mut self.lost)
+		let lost = std::mem::take(&mut self.lost).into_iter().collect();
+		self.rebill();
+		lost
 	}
 
 	/// Record that the stream of `group` was discarded before its end. A proven tail asks the
-	/// publisher to name the rest of its span again, unless the next start is accounted for
-	/// already, which ends the span there: no other group starts inside a whole group's span.
+	/// publisher to name the rest of its span again: only the publisher knows where it ends, as
+	/// the next start being accounted for proves nothing when a skip or drop named it.
 	fn lose(&mut self, group: u64) {
-		let next = group.saturating_add(1);
-		if self.proven && !self.ledger.covers(next..next.saturating_add(1)) {
-			self.lost.push(group);
+		if self.proven && self.lost.insert(group) {
+			self.rebill();
 		}
 	}
 
@@ -402,6 +410,27 @@ mod tests {
 		graced.account(2..3, now);
 		graced.retire(&rangemap::RangeSet::new(), now);
 		assert!(!graced.covers(1..2));
+	}
+
+	/// A proven tail reports a stream discarded before its end even when the next start is
+	/// accounted for: a skip naming it says nothing about where the group's span ends.
+	#[kio::test]
+	async fn a_stream_lost_before_its_end_is_reported_past_a_skipped_start() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::proven());
+		let reading = Reading::open(&tail, Some(0), runtime.now());
+		// Start 1 was skipped while group 0 was open, which then finished at 3.
+		if let Ok(mut tail) = tail.write() {
+			tail.account(1..2, runtime.now());
+		}
+		drop(reading);
+		drop(Reading::open(&tail, Some(0), runtime.now()));
+		assert_eq!(tail.write().ok().unwrap().take_lost(), [0], "reported once");
+
+		// A tail with a grace reports none: the grace gives up on what it owes.
+		let graced = kio::Producer::new(Tail::new(GRACE));
+		drop(Reading::open(&graced, Some(0), runtime.now()));
+		assert!(!graced.read().has_lost());
 	}
 
 	/// A stream that outlives the grace still reaches `complete` once it finishes.

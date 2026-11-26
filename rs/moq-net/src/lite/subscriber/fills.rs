@@ -834,6 +834,20 @@ impl Recovery {
 					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
 						tracing::debug!(%err, "recovery subscribe write failed");
 					}
+					// Lite-07: a group stream discarded before its end leaves the rest of its span
+					// unnamed, which only the publisher can name, as on the subscription.
+					if !*finished
+						&& matches!(
+							active.tail.poll_ref(waiter, |tail| match tail.has_lost() {
+								true => Poll::Ready(()),
+								false => Poll::Pending,
+							}),
+							Poll::Ready(Ok(()))
+						) {
+						let ranges = active.live.unchanged();
+						super::buffer_update(active, ranges)?;
+						continue;
+					}
 					// The publisher is done, so only its streams still landing are waited for,
 					// at most the grace, before what is left is refused.
 					if let Some(settle) = draining {

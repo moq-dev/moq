@@ -1731,12 +1731,12 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 /// A SUBSCRIBE_UPDATE resolved by Range ID.
 type LiveUpdate = lite::SubscribeUpdate<lite::Applied>;
 
-/// `earlier` followed by `later`: the later's preferences, and both edits and lost lists as one.
+/// `earlier` followed by `later`: the later's preferences, and both edits as one. Updates wait
+/// only while no group has gone out on the subscription, so no stream was lost yet: neither lost
+/// list is kept.
 fn then(earlier: LiveUpdate, mut later: LiveUpdate) -> LiveUpdate {
 	let ranges = std::mem::replace(&mut later.ranges, lite::Applied::Replace(Vec::new()));
-	let mut lost = earlier.lost;
-	lost.append(&mut later.lost);
-	later.lost = lost;
+	later.lost = Vec::new();
 	later.with_ranges(earlier.ranges.then(ranges))
 }
 
@@ -5270,8 +5270,9 @@ struct GroupOutcomes {
 	whole: Mutex<Vec<Range<u64>>>,
 	/// Lite-07: the starts strictly inside a whole group's span whose GROUP_END a reset may
 	/// have cut after its header arrived, or whose stream the subscriber reported lost, which
-	/// the control stream names again.
-	cut: Mutex<Vec<Range<u64>>>,
+	/// the control stream names again. Merged, so it holds at most one run per cached span
+	/// however often a span is reported.
+	cut: Mutex<rangemap::RangeSet<u64>>,
 	/// Lite-07: the frame each group a range ends partway through stops before, by group
 	/// ([`Frames::stops`]), which a group already streaming follows as an update moves it.
 	stops: kio::Producer<Vec<(u64, u64)>>,
@@ -5614,7 +5615,7 @@ impl TrackRun {
 			let next = group.saturating_add(1);
 			let end = self.track.span_end(next);
 			if next < end {
-				self.ctx.outcomes.cut.lock().unwrap().push(next..end);
+				self.ctx.outcomes.cut.lock().unwrap().insert(next..end);
 			}
 		}
 		// The update moves the cursor and the bounds the track side judges against, which
@@ -6064,7 +6065,7 @@ impl TrackRun {
 		// already, and the producer did declare it empty.
 		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
 		if !cut.is_empty() && self.start.emits_range() {
-			for inner in cut {
+			for inner in cut.into_iter() {
 				self.track.record_mut().tell(inner.clone(), Report::Skip);
 				self.buffer_hole(inner, Hole::Skip, writer)?;
 			}
@@ -7727,7 +7728,7 @@ impl GroupServe {
 			&& let Some(end) = self.ended
 			&& self.key + 1 < end
 		{
-			self.ctx.outcomes.cut.lock().unwrap().push(self.key + 1..end);
+			self.ctx.outcomes.cut.lock().unwrap().insert(self.key + 1..end);
 		}
 	}
 
@@ -10478,9 +10479,30 @@ mod serve_group_test {
 			order: Order::Descending,
 			lost,
 		};
+		// Reported again before the run takes it, the span is still named once.
 		run.update(lost(vec![0, 3]));
+		run.update(lost(vec![0]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3)]);
+	}
+
+	/// Updates wait only while no group has gone out on the subscription, so the lost lists
+	/// they carry fold into none.
+	#[test]
+	fn updates_waiting_to_start_keep_no_lost_groups() {
+		let update = |lost: Vec<u64>| LiveUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: None,
+			ranges: lite::Applied::Edit {
+				retired: Vec::new(),
+				added: Vec::new(),
+				retuned: Vec::new(),
+			},
+			order: Order::Descending,
+			lost,
+		};
+		assert_eq!(then(update(vec![1]), update(vec![2])).lost, Vec::<u64>::new());
 	}
 
 	/// A whole group whose stream fails before its GROUP_END names its span in its drop, which

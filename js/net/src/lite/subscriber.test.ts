@@ -3482,11 +3482,10 @@ test("a lite-07 group stream lost before its end is named upstream", async () =>
 		expect(update.lost).toEqual([4n]);
 		expect(update.ranges).toEqual([]);
 
-		// The next start accounted for already ends the span there, so nothing is left to name.
+		// A skip naming the next start says nothing about where the span ends, so it is named still.
 		entry.tail.account(9n, 10n);
 		entry.tail.open(8n).done();
-		entry.tail.open(12n).done();
-		expect((await SubscribeUpdate.decode(sent, version)).lost).toEqual([12n]);
+		expect((await SubscribeUpdate.decode(sent, version)).lost).toEqual([8n]);
 	} finally {
 		responses.mockRestore();
 		track.close();

@@ -1632,7 +1632,8 @@ A Range ID that is not live after the removals, names a Range whose `Start` is n
 **Lost Count** and **Group Start**:
 The Groups whose Group Stream the subscriber discarded after reading its GROUP message but before reading to its end, such as one its transport discarded after the FIN to free flow control credit.
 That loses any GROUP_END it carried, and no STOP_SENDING tells the publisher once the FIN arrived, so the subscriber names each such Group here once, in its next SUBSCRIBE_UPDATE.
-A subscriber MAY leave out a Group whose next start is already accounted for, since no other Group starts inside a Group's span.
+A subscriber MAY leave out a Group whose next start arrived as a Group Stream, since no other Group starts inside a Group's span.
+A next start a SUBSCRIBE_SKIP or SUBSCRIBE_DROP named proves nothing about where the span ends.
 A publisher that holds a named Group finished, with a GROUP_END whose `End` is past the next start, names the starts inside its span again in a [SUBSCRIBE_SKIP](#subscribe-skip), as for a GROUP_END a reset may have cut, and ignores any other.
 A start this re-tell names was skipped already, so it ends no reader and delivers nothing.
 

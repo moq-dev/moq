@@ -225,14 +225,15 @@ struct Accepted {
 /// stream then takes its own.
 #[derive(Default)]
 struct Parked {
-	/// The headers still waiting on the accept, by ticket, in arrival order.
-	waiting: Vec<(u64, lite::Group)>,
+	/// The headers still waiting on the accept, by ticket, which is arrival order.
+	waiting: std::collections::BTreeMap<u64, lite::Group>,
 	/// What the accept opened for each, until its stream takes it.
 	opened: HashMap<u64, Result<Open, Error>>,
-	/// Waiting headers whose stream failed before the accept, such as one its transport
-	/// evicted, by ticket: the accept still opens each group and ends it, so the copy and the
-	/// tail learn of a group the publisher served.
-	failed: std::collections::HashSet<u64>,
+	/// The groups whose parked stream failed before the accept, such as one its transport
+	/// evicted: the tail accounted for each already, and the accept opens and ends each, so the
+	/// copy learns of a group the publisher served. Merged, so it keeps no more runs than the
+	/// tail's ledger and the streams still parked between them.
+	failed: rangemap::RangeSet<u64>,
 	next: u64,
 }
 
@@ -321,7 +322,7 @@ impl TrackEntry {
 			Ok(mut state) => {
 				let ticket = state.next;
 				state.next += 1;
-				state.waiting.push((ticket, hdr.clone()));
+				state.waiting.insert(ticket, hdr.clone());
 				ticket
 			}
 			Err(_) => unreachable!("open while the entry holds it"),
@@ -345,16 +346,20 @@ impl TrackEntry {
 		};
 		let mut opened = Vec::new();
 		for (ticket, hdr) in waiting {
-			let open = self.open(&hdr, version, now);
-			match (failed.contains(&ticket), open) {
-				// Its stream is gone, so the group, which no stream takes, ends as cancelled, as one
-				// the subscription drops does, and its reader, dropped unread, asks the publisher to
-				// name the rest of its span again.
-				(true, Ok(Open::Group(group))) => {
-					let _ = group.group.abort(Error::Cancel);
-				}
-				(true, _) => {}
-				(false, open) => opened.push((ticket, open)),
+			opened.push((ticket, self.open(&hdr, version, now)));
+		}
+		// Each failed stream is gone, so its group, which no stream takes, ends as cancelled, as
+		// one the subscription drops does. Its withdrawal asked the publisher to name the rest of
+		// its span already. Only the key is read from the header.
+		for key in failed.iter().flat_map(|keys| keys.clone()) {
+			let hdr = lite::Group {
+				subscribe: 0,
+				key,
+				frame_start: 0,
+			};
+			if let Ok(Open::Group(mut group)) = self.open(&hdr, version, now) {
+				group.reading.finish();
+				let _ = group.group.abort(Error::Cancel);
 			}
 		}
 		if let Ok(mut state) = parked.write() {
@@ -382,21 +387,28 @@ impl TrackEntry {
 
 	/// Withdraw the parked stream `ticket`, which failed before taking its group: a group the
 	/// accept already opened ends with `err`, and one it opens later ends as cancelled, rather
-	/// than waiting for a writer.
-	fn withdraw(&mut self, ticket: u64, err: &Error) {
+	/// than waiting for a writer. One still waiting is accounted for now, its stream dropped
+	/// before its end.
+	fn withdraw(&mut self, ticket: u64, err: &Error, now: crate::time::Instant) {
 		let Some(parked) = &self.parked else {
 			return;
 		};
-		let (opened, done) = match parked.write() {
+		let (opened, failed, done) = match parked.write() {
 			Ok(mut state) => {
-				if state.waiting.iter().any(|(waiting, _)| *waiting == ticket) {
-					state.failed.insert(ticket);
+				let failed = state.waiting.remove(&ticket).map(|hdr| hdr.key);
+				if let Some(key) = failed {
+					state.failed.insert(key..key.saturating_add(1));
 				}
 				let opened = state.opened.remove(&ticket);
-				(opened, state.opened.is_empty() && state.waiting.is_empty())
+				// The failed groups stay for the accept to end.
+				let done = state.opened.is_empty() && state.waiting.is_empty() && state.failed.is_empty();
+				(opened, failed, done)
 			}
 			Err(_) => return,
 		};
+		if let Some(key) = failed {
+			drop(Reading::open(&self.tail, Some(key), now));
+		}
 		if let Some(Ok(Open::Group(opened))) = opened {
 			let _ = opened.group.abort(err.clone());
 		}
@@ -1471,7 +1483,7 @@ impl GroupRecv {
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
-			entry.withdraw(*ticket, err);
+			entry.withdraw(*ticket, err, self.subscriber.runtime.now());
 		}
 		accepted?;
 
@@ -6625,8 +6637,8 @@ mod tests {
 		}
 	}
 
-	/// A lite-06 copy over `session` whose reader owes `missing`, its run already recovered on a
-	/// SUBSCRIBE of its own.
+	/// A copy over a `version` `session` whose reader owes `missing`, its run already recovered
+	/// on a SUBSCRIBE of its own.
 	struct Recovering {
 		serve: TrackServe,
 		copy: crate::track::Producer,
@@ -6639,8 +6651,11 @@ mod tests {
 		),
 	}
 
-	fn recovering(session: crate::lite::test_transport::ScriptedSession, missing: Missing) -> Recovering {
-		let version = Version::Lite06;
+	fn recovering(
+		version: Version,
+		session: crate::lite::test_transport::ScriptedSession,
+		missing: Missing,
+	) -> Recovering {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -6689,7 +6704,8 @@ mod tests {
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("the read is a miss");
 		};
-		let mut fills = fills::RangeFills::new(version);
+		// Each run on a subscription of its own, as any version carries a fill once its own is over.
+		let mut fills = fills::RangeFills::per_run();
 		fills.push(fill);
 		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
 		assert!(fills.recovering(), "the miss is recovered on its own subscription");
@@ -6713,6 +6729,47 @@ mod tests {
 		bytes
 	}
 
+	/// A lite-07 recovery names a group stream it discarded before its end upstream, as its
+	/// subscription does: only the publisher can name the rest of that group's span.
+	#[kio::test]
+	async fn a_recovery_names_a_group_stream_lost_before_its_end_upstream() {
+		let version = Version::Lite07;
+		let mut responses = Vec::new();
+		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			id: 0,
+			start: Some(2),
+			largest: lite::Edge::Unknown,
+		})
+		.encode(
+			&mut crate::coding::Encoder::new(&mut responses, version.into()),
+			version,
+		)
+		.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::new(responses);
+		let log = session.log.clone();
+		let Recovering {
+			serve,
+			copy,
+			mut fills,
+			held: _held,
+		} = recovering(version, session, Missing::evicted());
+		let waiter = kio::Waiter::noop();
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		let subscribed = log.writes.lock().unwrap().len();
+
+		{
+			let subscribes = serve.subscriber.subscribes.lock();
+			let (_, entry) = subscribes.iter().next().expect("the recovery subscribed");
+			drop(Reading::open(&entry.tail, Some(2), serve.subscriber.runtime.now()));
+		}
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		let writes = log.writes.lock().unwrap()[subscribed..].to_vec();
+		let mut wire = writes.as_slice();
+		let update = crate::coding::decode_buf(&mut wire, version, |r, v| lite::SubscribeUpdate::decode(r, v)).unwrap();
+		assert_eq!(update.lost, [2]);
+		assert!(fills.recovering(), "group 2's span is still owed");
+	}
+
 	/// TEMPORARY MIGRATION, delete with `fills::Recovery::walk`: a relay of the previous release
 	/// starts a lite-06 recovery at its floor, sends the next group it holds, and never accounts
 	/// for the keys between. Once the grace passes, the fill owing them goes to FETCH instead.
@@ -6729,6 +6786,7 @@ mod tests {
 			mut fills,
 			held: _held,
 		} = recovering(
+			Version::Lite06,
 			crate::lite::test_transport::ScriptedSession::new(responses),
 			Missing::evicted(),
 		);
@@ -6771,6 +6829,7 @@ mod tests {
 			mut fills,
 			held: _held,
 		} = recovering(
+			Version::Lite06,
 			crate::lite::test_transport::ScriptedSession::eof(responses),
 			Missing::evicted(),
 		);
@@ -8289,7 +8348,13 @@ mod tests {
 		let (_early_wait, early) = entry.park(&header(1));
 		let (_late_wait, late) = entry.park(&header(2));
 		let (_kept_wait, kept) = entry.park(&header(3));
-		entry.withdraw(early, &Error::Cancel);
+		let now = crate::time::sim().now();
+		entry.withdraw(early, &Error::Cancel, now);
+		assert!(
+			tail.read().covers(1..2),
+			"the withdrawn header's group is accounted for at once"
+		);
+		assert!(entry.parked.is_some(), "kept for the accept to end its group");
 
 		let track = crate::track::Producer::new(
 			Arc::new(crate::broadcast::Info::default()),
@@ -8308,7 +8373,7 @@ mod tests {
 				framing,
 			},
 			version,
-			crate::time::sim().now(),
+			now,
 		);
 		let mut opened: Vec<u64> = match entry.parked.as_ref().unwrap().write() {
 			Ok(state) => state.opened.keys().copied().collect(),
@@ -8320,12 +8385,8 @@ mod tests {
 			[late, kept],
 			"the withdrawn header's group is not the stream's to take"
 		);
-		assert!(
-			tail.read().covers(1..2),
-			"the withdrawn header's group is accounted for"
-		);
 
-		entry.withdraw(late, &Error::Evicted);
+		entry.withdraw(late, &Error::Evicted, now);
 		let opened = match entry.parked.as_ref().unwrap().write() {
 			Ok(state) => state.opened.keys().copied().collect::<Vec<_>>(),
 			Err(_) => panic!("the entry holds the parked streams"),
@@ -8344,8 +8405,8 @@ mod tests {
 		}
 		assert_eq!(keys, [3]);
 		assert!(entry.parked.is_none(), "released once the last stream took its group");
-		// Both failed before their end, but group 3 arrived, which ends group 2's span.
-		assert_eq!(tail.write().ok().unwrap().take_lost(), [1]);
+		// Both failed before their end, so the publisher names the rest of each span again.
+		assert_eq!(tail.write().ok().unwrap().take_lost(), [1, 2]);
 	}
 
 	/// TRACK opens its stream before the fetches sent alongside it: TRACK fails fast without
@@ -10067,13 +10128,13 @@ mod tests {
 		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
 		assert_eq!(lost(&h), [4], "only the stream dropped unread");
 
-		// The next start accounted for already ends the span there, so nothing is left to name.
+		// A skip naming the next start says nothing about where the span ends, so it is named.
 		if let Ok(mut tail) = tail.write() {
 			tail.account(9..10, now);
 		}
 		drop(Reading::open(&tail, Some(8), now));
 		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
-		assert_eq!(lost(&h), [4]);
+		assert_eq!(lost(&h), [4, 8]);
 	}
 
 	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
