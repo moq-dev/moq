@@ -1,5 +1,6 @@
 import { Duration, Instant, now, sleep } from "@moq/clock";
 import { Container } from "@moq/hang";
+import type * as Catalog from "@moq/hang/catalog";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
@@ -60,6 +61,27 @@ export type SyncInput = {
 	 * pad. Video is unaffected either way: it stays on the clock.
 	 */
 	stretch: Getter<Duration>;
+
+	/**
+	 * The shared {@link Sync} to play in step with, or none to play alone (the default).
+	 *
+	 * Members of one group present the same capture instant together, placed on one timeline through
+	 * each one's {@link SyncInput.clock}. The group's `delay` and {@link SyncInput.cap} apply instead
+	 * of this one's: an `"auto"` group holds each member's own measured target, a fixed group delay
+	 * replaces it. A member with no clock, or whose target would exceed the cap, plays alone and reads
+	 * {@link SyncOutput.outOfSync}. A member set to `"instant"` or a nonzero lookahead is refused with
+	 * {@link SyncOutput.error}, since a shared timeline can honor neither.
+	 */
+	group: Getter<Sync | undefined>;
+
+	/** The broadcast's catalog `sync.clock`, which places this member on its group's timeline. */
+	clock: Getter<Catalog.Clock | undefined>;
+
+	/**
+	 * As a group: the most a member may trail its own fastest arrival to stay in step (default: 10 s).
+	 * Members that can't fit within it play alone rather than slow the others down.
+	 */
+	cap: Getter<Duration>;
 };
 
 /** Signals the sync derives. */
@@ -94,6 +116,16 @@ export type SyncOutput = {
 	// Derived: `delay + lookahead`, the furthest a held frame may sit ahead of the playhead. Feeds the
 	// transport subscription and the container consumer, which bound the same span. Always finite.
 	maxDelay: Signal<Duration>;
+
+	/**
+	 * Whether this belongs to a {@link SyncInput.group} yet plays alone: it has no `clock`, the group
+	 * refused it, or the group's timeline sits outside the delay it can hold within the cap. It
+	 * rejoins on its own once it fits again. False when not grouped.
+	 */
+	outOfSync: Signal<boolean>;
+
+	/** Why the group refused this member, as for an `"instant"` delay or a nonzero lookahead. */
+	error: Signal<Error | undefined>;
 };
 
 /**
@@ -150,6 +182,8 @@ export class Clock {
 		timestamp: new Signal<Duration | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
 		maxDelay: new Signal<Duration>(Duration.ZERO),
+		outOfSync: new Signal<boolean>(false),
+		error: new Signal<Error | undefined>(undefined),
 	};
 
 	readonly parts = new Signal<Part[]>([]);
@@ -176,6 +210,9 @@ export class Clock {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			lookahead: getter(props?.lookahead ?? Duration.ZERO),
 			stretch: getter(props?.stretch ?? STRETCH),
+			group: getter(props?.group),
+			clock: getter(props?.clock),
+			cap: getter(props?.cap ?? DELAY_MAX),
 		};
 	}
 
@@ -461,6 +498,26 @@ export class Track {
 	}
 }
 
+/**
+ * What a group member offers its group: its earliest arrival on the group's timeline (its
+ * reference less its clock's PTS zero), and the delay it needs held behind that.
+ */
+type Member = { reference: Getter<number | undefined>; target: Getter<Duration> };
+
+/**
+ * The group's playhead offset: the latest each member wants to trail is `reference + cap`, the
+ * earliest `reference + target`. Picks the offset inside the most members' spans, the earliest on a
+ * tie, so one member whose clock is far off is the one left out rather than everyone else.
+ */
+function playhead(spans: { lo: number; hi: number }[]): number | undefined {
+	let best: { at: number; count: number } | undefined;
+	for (const { lo: at } of spans) {
+		const count = spans.filter(({ lo, hi }) => lo <= at && at <= hi).length;
+		if (!best || count > best.count || (count === best.count && at < best.at)) best = { at, count };
+	}
+	return best?.at;
+}
+
 /** The playback clock: decides when each frame plays so audio and video stay together at the configured delay. */
 export class Sync {
 	/** The wired inputs, read-only. */
@@ -472,15 +529,29 @@ export class Sync {
 	/** Whether buffered startup has released the media consumers. @internal */
 	readonly playing: Getter<boolean>;
 
-	#signals = new Effect();
+	// The largest registered playout target, at most DELAY_MAX: the "auto" delay alone, and what this
+	// asks of a group.
+	#target = new Signal<Duration>(Duration.ZERO);
+	// As a member: the delay the group's playhead puts this at, or undefined while playing alone.
+	#joined = new Signal<Duration | undefined>(undefined);
+	// As a group: who plays in step, and the playhead offset on the group's timeline.
+	#members = new Signal<Member[]>([]);
+	#playhead = new Signal<number | undefined>(undefined);
+
+	// Created after the clock, which refuses a renamed input before anything needs closing.
+	#signals: Effect;
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.#clock = new Clock(props);
+		this.#signals = new Effect();
 		this.in = this.#clock.in;
 		this.out = readonlys(this.#clock.out);
 		this.playing = this.#clock.playing;
 
 		this.#signals.run(this.#runInstant.bind(this));
+		this.#signals.run(this.#runTarget.bind(this));
+		this.#signals.run(this.#runMember.bind(this));
+		this.#signals.run(this.#runPlayhead.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxDelay.bind(this));
 		this.#signals.run(this.#runStartup.bind(this));
@@ -553,24 +624,104 @@ export class Sync {
 		out.maxDelay.set(delay.add(lookahead));
 	}
 
+	// The deepest track's target. See doc/concept/audio-jitter.md for how a target is measured.
+	#runTarget(effect: Effect): void {
+		let target = Duration.ZERO;
+		for (const { props } of effect.get(this.#clock.parts)) {
+			target = target.max(effect.get(props.target) ?? Duration.ZERO);
+		}
+		// Capped once, on the resolved delay, so audio and video stay on one clock. The
+		// subscription's live join max follows it.
+		this.#target.set(target.min(DELAY_MAX));
+	}
+
 	// A fixed delay is taken literally and "auto" holds the deepest track's target, so every track
-	// plays from one clock. See doc/concept/audio-jitter.md for how a target is measured.
+	// plays from one clock. A member in step with its group holds the group's playhead instead.
 	#runDelay(effect: Effect): void {
+		const joined = effect.get(this.#joined);
 		const mode = effect.get(this.in.delay);
 
 		let delay = Duration.ZERO;
-		if (mode instanceof Duration) {
+		if (joined) {
+			delay = joined;
+		} else if (mode instanceof Duration) {
 			delay = mode;
 		} else if (mode === "auto") {
-			for (const { props } of effect.get(this.#clock.parts)) {
-				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
-			}
-			// Capped once, on the resolved delay, so audio and video stay on one clock. The
-			// subscription's live join max follows it.
-			delay = delay.min(DELAY_MAX);
+			delay = effect.get(this.#target);
 		}
 
 		this.#clock.out.delay.set(delay);
+	}
+
+	// Join the group, if any: offer this member's place on the group's timeline, then hold whatever
+	// delay puts its frames at the group's playhead, or play alone when that is outside its reach.
+	#runMember(effect: Effect): void {
+		const out = this.#clock.out;
+		const group = effect.get(this.in.group);
+		if (!group) return;
+
+		const error = this.#refusal(group, effect.get(this.in.delay), effect.get(this.in.lookahead));
+		effect.set(out.error, error, undefined);
+		// Without a clock, this broadcast has no place on the group's timeline.
+		const clock = effect.get(this.in.clock);
+		effect.set(out.outOfSync, true, false);
+		if (error || !clock) return;
+
+		// PTS zero on the group's timeline. Only differences between members matter, so the
+		// viewer's own wall clock never enters, and a step in it moves nothing.
+		const zero = (clock.wall * 1000) / clock.timescale;
+		const reference = new Derived([out.reference], (reference) =>
+			reference === undefined ? undefined : reference - zero,
+		);
+		const member: Member = { reference, target: this.#target };
+		group.#members.update((members) => [...members, member]);
+		effect.cleanup(() => group.#members.update((members) => members.filter((other) => other !== member)));
+
+		effect.run((nested) => {
+			const at = nested.get(group.#playhead);
+			const ours = nested.get(reference);
+			// Nothing received yet: nothing to align, and nothing out of step either.
+			if (at === undefined || ours === undefined) {
+				nested.set(out.outOfSync, false, true);
+				return;
+			}
+			const delay = at - ours;
+			const target = group.#memberTarget(nested, member);
+			if (delay < target || delay > nested.get(group.in.cap).asMillis()) return;
+			nested.set(this.#joined, Duration.millis(delay), undefined);
+			nested.set(out.outOfSync, false, true);
+		});
+	}
+
+	// Why `group` won't take this member, if it won't.
+	#refusal(group: Sync, delay: Delay, lookahead: Duration): Error | undefined {
+		if (group === this) return new Error("Watch.Sync: a sync can't be its own group");
+		if (delay === "instant") return new Error('Watch.Sync: a grouped member can\'t use delay "instant"');
+		if (!lookahead.isZero()) return new Error("Watch.Sync: a grouped member can't hold a lookahead");
+		if (group.in.delay.peek() === "instant") return new Error('Watch.Sync: a group can\'t use delay "instant"');
+		return undefined;
+	}
+
+	// The delay a member needs held behind its earliest arrival: its own measured target in "auto",
+	// or the group's fixed delay, which replaces it as it would for a sync playing alone.
+	#memberTarget(effect: Effect, member: Member): number {
+		const mode = effect.get(this.in.delay);
+		return (mode instanceof Duration ? mode : effect.get(member.target)).asMillis();
+	}
+
+	// As a group: place the playhead where the most members can play in step.
+	#runPlayhead(effect: Effect): void {
+		if (effect.get(this.in.delay) === "instant") {
+			this.#playhead.set(undefined);
+			return;
+		}
+		const cap = effect.get(this.in.cap).asMillis();
+		const spans = effect.get(this.#members).flatMap((member) => {
+			const reference = effect.get(member.reference);
+			if (reference === undefined) return [];
+			return [{ lo: reference + this.#memberTarget(effect, member), hi: reference + cap }];
+		});
+		this.#playhead.set(playhead(spans));
 	}
 
 	/**
