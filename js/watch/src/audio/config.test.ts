@@ -71,13 +71,16 @@ test("AAC and MP3 frame durations follow their codec frame sizes", () => {
 	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toEqual(Duration.millis(24));
 });
 
-test("an mp4a.40.2 config signaling SBR behind a sync extension doubles the frame", () => {
-	// A 48 kHz AAC-LC core with SBR at 96 kHz: 2048 output samples per frame, as at the core rate.
-	const sbr = config({ codec: "mp4a.40.2", sampleRate: 96000, description: "119056e580" });
-	expect(frameDuration(sbr)?.asMillis()).toBeCloseTo(21.333, 3);
-	// Plain AAC-LC keeps 1024 samples.
-	const lc = config({ codec: "mp4a.40.2", sampleRate: 48000, description: "1190" });
-	expect(frameDuration(lc)?.asMillis()).toBeCloseTo(21.333, 3);
+test("an AAC frame with an AudioSpecificConfig runs 1024 samples at its core's rate", () => {
+	// A 48 kHz core with SBR at 96 kHz, SBR at the core's own 48 kHz, and plain AAC-LC.
+	for (const [description, sampleRate] of [
+		["119056e580", 96000],
+		["119056e598", 48000],
+		["1190", 48000],
+	] as const) {
+		const aac = config({ codec: "mp4a.40.2", sampleRate, description });
+		expect(frameDuration(aac)?.asMillis()).toBeCloseTo(21.333, 3);
+	}
 });
 
 test("Opus and unknown codecs have no constant frame duration", () => {

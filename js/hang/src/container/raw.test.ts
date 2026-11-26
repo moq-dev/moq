@@ -30,7 +30,7 @@ test("raw decodes payload with transport timestamp and audio packet duration", (
 	expect(frame.duration).toEqual(Duration.millis(20));
 });
 
-test("raw states no AAC packet duration when a sync extension signals SBR", () => {
+test("raw times AAC packets at the AudioSpecificConfig's core rate", () => {
 	const format = (description: string) =>
 		new Raw.Format({
 			codec: "mp4a.40.2",
@@ -40,10 +40,12 @@ test("raw states no AAC packet duration when a sync extension signals SBR", () =
 			container: { kind: "raw" },
 		});
 	const ts = new Time.Timestamp(0, Time.Timescale(90_000));
-	// A 48 kHz AAC-LC core with SBR at 96 kHz decodes 2048 samples a packet, not 1024.
-	expect(format("119056e580").decode(new Uint8Array([1]), ts)[0].duration).toBeUndefined();
-	// Plain AAC-LC keeps 1024 samples.
-	expect(format("1190").decode(new Uint8Array([1]), ts)[0].duration).toEqual(Duration.micros((1024 * 1e6) / 96_000));
+	const core48k = Duration.micros((1024 * 1e6) / 48_000);
+	// A 48 kHz AAC-LC core with SBR at 96 kHz still codes 1024 samples at 48 kHz.
+	expect(format("119056e580").decode(new Uint8Array([1]), ts)[0].duration).toEqual(core48k);
+	// SBR at the core's own rate, and plain AAC-LC, likewise.
+	expect(format("119056e598").decode(new Uint8Array([1]), ts)[0].duration).toEqual(core48k);
+	expect(format("1190").decode(new Uint8Array([1]), ts)[0].duration).toEqual(core48k);
 });
 
 test("raw rejects untimed tracks and handles empty markers", () => {

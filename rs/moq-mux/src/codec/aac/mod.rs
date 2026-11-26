@@ -322,6 +322,19 @@ pub(crate) const CONFIG_MAX_LEN: usize = CONFIG_MAX_BITS.div_ceil(8);
 
 /// Read an AudioSpecificConfig's leading fields: the audioObjectType, sample rate, and
 /// channelConfiguration.
+/// The rate an AAC-LC, SBR, or PS AudioSpecificConfig's core codes its 1024-sample frames at,
+/// which SBR may double on output, or `None` for another object type or a config that doesn't
+/// parse.
+pub(crate) fn core_sample_rate(asc: &[u8]) -> Option<u32> {
+	let config = Config::parse(&mut &asc[..]).ok()?;
+	if !matches!(config.profile, OBJECT_TYPE_LC | OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
+		return None;
+	}
+	// The leading rate is the core's: explicit SBR and PS name their output rate after it.
+	let mut asc = asc;
+	read_header(&mut BitReader::new(&mut asc)).ok().map(|(_, rate, _)| rate)
+}
+
 fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
 	if reader.remaining().is_none_or(|remaining| remaining < 2) {
 		return Err(Error::ConfigTooShort);

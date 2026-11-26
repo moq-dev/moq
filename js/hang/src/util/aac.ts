@@ -64,17 +64,6 @@ export function objectType(codec: string): 2 | 5 | 29 | undefined {
 	return OBJECT_TYPES.get(codec);
 }
 
-/**
- * The AAC profile a track's packets carry, given its codec string and AudioSpecificConfig: the
- * codec's {@link objectType}, except that an AAC-LC string whose config signals SBR or PS behind a
- * sync extension carries that profile. Undefined for any other codec.
- */
-export function profile(codec: string, asc: Uint8Array | undefined): number | undefined {
-	const named = objectType(codec);
-	if (named !== 2 || !asc) return named;
-	return parseConfig(asc)?.profile ?? named;
-}
-
 // Map a channel count to its AAC channelConfiguration (ISO 14496-3 Table 1.19). Configs 1..=6 are
 // identity (5.1 is config 6 / 6 channels); 8 channels is config 7 (7.1). Anything else has no
 // config, and describing it as stereo would mislabel every channel past the first two.
@@ -107,8 +96,8 @@ const CHANNEL_COUNTS: Readonly<Record<number, number>> = {
 
 /** The output an AudioSpecificConfig decodes to. */
 export interface Config {
-	/** The leading audioObjectType, raised to 5 (SBR) or 29 (PS) when a sync extension signals them. */
-	profile: number;
+	/** The core's rate, which codes each frame's samples: SBR plays them at up to twice it. */
+	coreSampleRate: number;
 	/** The decoded rate: under SBR, the extension rate rather than the core's. */
 	sampleRate: number;
 	/** The decoded channels: two under PS, which a mono core carries. */
@@ -162,6 +151,7 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 
 	const type = objectType();
 	let rate = sampleRate();
+	const coreSampleRate = rate;
 	const channelConfiguration = read(4);
 	let numberOfChannels = CHANNEL_COUNTS[channelConfiguration];
 	// Explicit SBR (5) or PS (29) plays at the extension rate that follows, over a core object type.
@@ -176,8 +166,10 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 		// names, which isn't parsed here; a reserved channelConfiguration is still refused.
 		if (type === 29 && (channelConfiguration === 0 || numberOfChannels !== undefined)) numberOfChannels = 2;
 	}
-	if (truncated || rate === undefined || numberOfChannels === undefined) return undefined;
-	const config = { profile: type, sampleRate: rate, numberOfChannels };
+	if (truncated || rate === undefined || coreSampleRate === undefined || numberOfChannels === undefined) {
+		return undefined;
+	}
+	const config = { coreSampleRate, sampleRate: rate, numberOfChannels };
 	if (explicit || !GENERAL_AUDIO.has(core)) return config;
 
 	// The rest of the GASpecificConfig: frameLengthFlag, dependsOnCoreCoder (then a 14-bit
@@ -206,10 +198,8 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 	const extensionRate = sampleRate();
 	if (truncated || extensionRate === undefined) return config;
 	config.sampleRate = extensionRate;
-	if (extensionType === 5) config.profile = 5;
 	// psPresentFlag, which ER BSAC (22) doesn't carry.
 	if (extensionType === 5 && bits - bit >= 12 && read(11) === SYNC_EXTENSION_PS && read(1) === 1) {
-		config.profile = 29;
 		config.numberOfChannels = 2;
 	}
 	return config;

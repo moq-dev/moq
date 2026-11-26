@@ -73,12 +73,15 @@ export function decoderDescription(codec: string, description: Uint8Array | unde
 }
 
 /**
- * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it.
+ * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it. AAC
+ * with an AudioSpecificConfig is reckoned at its core's rate instead, which SBR may double.
  *
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
 export function frameDuration(config: FrameConfig): Duration | undefined {
+	const core = aacCoreRate(config);
+	if (core !== undefined) return Duration.millis((AAC_LC_FRAME_SAMPLES * 1000) / core);
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -104,15 +107,13 @@ type FrameConfig = {
 };
 
 function frameSamples(config: FrameConfig): number | undefined {
-	switch (aacProfile(config)) {
-		case undefined:
-			break;
+	switch (Util.Aac.objectType(config.codec)) {
+		case 2:
+			return AAC_LC_FRAME_SAMPLES;
 		// HE-AAC (v1 and v2) doubles the output rate of its AAC-LC core.
 		case 5:
 		case 29:
 			return AAC_HE_FRAME_SAMPLES;
-		default:
-			return AAC_LC_FRAME_SAMPLES;
 	}
 	if (config.codec === "mp3") {
 		// MPEG-1 Layer III has 1152 samples per frame; MPEG-2/2.5 have 576.
@@ -121,16 +122,15 @@ function frameSamples(config: FrameConfig): number | undefined {
 	return undefined;
 }
 
-// The AAC profile the frames carry, reading an `mp4a.40.2` codec's description for SBR or PS.
-function aacProfile(config: FrameConfig): number | undefined {
+// The rate an AAC track's AudioSpecificConfig codes its frames at, or undefined without one.
+function aacCoreRate(config: FrameConfig): number | undefined {
 	const description = config.description;
+	if (!description || Util.Aac.objectType(config.codec) === undefined) return undefined;
 	const bytes =
-		description === undefined
-			? undefined
-			: typeof description === "string"
-				? Util.Hex.toBytes(description)
-				: ArrayBuffer.isView(description)
-					? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
-					: new Uint8Array(description);
-	return Util.Aac.profile(config.codec, bytes);
+		typeof description === "string"
+			? Util.Hex.toBytes(description)
+			: ArrayBuffer.isView(description)
+				? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+				: new Uint8Array(description);
+	return Util.Aac.parseConfig(bytes)?.coreSampleRate;
 }

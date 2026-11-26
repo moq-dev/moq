@@ -5,8 +5,8 @@ import { Signals } from "@moq/hang";
 
 export namespace Aac {
 	export interface Config {
+		coreSampleRate: number;
 		numberOfChannels: number;
-		profile: number;
 		sampleRate: number;
 	}
 	export const SAMPLE_RATES: readonly number[];
@@ -14,7 +14,6 @@ export namespace Aac {
 	export function objectType(codec: string): 2 | 5 | 29 | undefined;
 	export function parseConfig(asc: Uint8Array): Aac.Config | undefined;
 	export function pickRate(rate: number): number;
-	export function profile(codec: string, asc: Uint8Array | undefined): number | undefined;
 	export function supportsRate(rate: number): boolean;
 }
 
