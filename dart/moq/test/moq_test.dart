@@ -468,8 +468,8 @@ void main() {
     },
   );
 
-  test('an announced instance pins request and follow', () async {
-    // moq-lite-06 carries no instance, so the session mints one for the route.
+  test('an announced identity pins request and follow', () async {
+    // moq-lite-06 carries no identity, so the session mints one for the route.
     const version = ['moq-lite-06'];
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -502,19 +502,19 @@ void main() {
 
     final announced = client.announced();
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    final minted = present.announce.route.instance;
+    final minted = present.announce.route.identity;
     expect(minted.isMinted(), isTrue);
 
-    await client.request('live', instance: minted).timeout(timeout);
-    final following = client.follow('live', instance: minted);
+    await client.request('live', identity: minted).timeout(timeout);
+    final following = client.follow('live', identity: minted);
     expect(await following.available().timeout(timeout), isNotNull);
 
-    // The same text, parsed, names another instance that nothing serves.
-    final named = Instance.parse(text: minted.text());
+    // The same text, parsed, names another identity that nothing serves.
+    final named = Identity.parse(text: minted.text());
     expect(named.isMinted(), isFalse);
     expect(named, isNot(minted));
     await expectLater(
-      client.request('live', instance: named).timeout(timeout),
+      client.request('live', identity: named).timeout(timeout),
       throwsA(isA<ProtocolMoqException>()),
     );
 
@@ -854,7 +854,7 @@ void main() {
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventPresent>());
     expect((first as AnnounceEventPresent).announce.prefix, 'live');
-    expect(first.announce.route.instance, route.instance());
+    expect(first.announce.route.identity, route.identity());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
@@ -868,7 +868,7 @@ void main() {
     // Announcing again continues the same stream.
     route.announce();
     final again = await nextRoute(announced) as AnnounceEventPresent;
-    expect(again.announce.route.instance, route.instance());
+    expect(again.announce.route.identity, route.identity());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
@@ -918,31 +918,31 @@ void main() {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final consumer = origin.consume();
     final announced = consumer.announced(config: MoqAnnounceConfig());
-    final following = consumer.follow(path: 'instance');
-    final first = origin.route(path: 'instance', options: RouteOptions());
+    final following = consumer.follow(path: 'identity');
+    final first = origin.route(path: 'identity', options: RouteOptions());
 
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    expect(present.announce.route.instance, first.instance());
+    expect(present.announce.route.identity, first.identity());
     (await following.available().timeout(timeout))!.dispose();
 
-    final camera = Instance.parse(text: 'camera');
+    final camera = Identity.parse(text: 'camera');
     expect(camera.isMinted(), isFalse);
     final second = origin.route(
-      path: 'instance',
-      options: RouteOptions(instance: camera, epoch: 1),
+      path: 'identity',
+      options: RouteOptions(identity: camera, epoch: 1),
     );
-    expect(second.instance(), camera);
+    expect(second.identity(), camera);
     (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
     first.withdraw();
     second.withdraw();
     final absent = await nextRoute(announced) as AnnounceEventAbsent;
-    expect(absent.announce.route.instance, camera);
+    expect(absent.announce.route.identity, camera);
 
     expect(
-      () => Instance.parse(text: ''),
-      throwsA(isA<InvalidInstanceMoqException>()),
+      () => Identity.parse(text: ''),
+      throwsA(isA<InvalidIdentityMoqException>()),
     );
     first.cancel();
     second.cancel();
@@ -997,10 +997,10 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
-    // A hidden job route answers nobody until it announces, under the instance its
+    // A hidden job route answers nobody until it announces, under the identity its
     // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instance(), dynamic.instance());
+    expect(served.identity(), dynamic.identity());
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.

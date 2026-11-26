@@ -109,9 +109,9 @@ The config is generated, so nothing names this package for you: set
 `ClientConfig::implementation` (and `ServerConfig::implementation`) to `moq::IMPLEMENTATION`,
 after any product tokens of your own, and moq-ffi appends its own.
 
-Call `available()` again to wait for the next publisher instance at that path, such as a
+Call `available()` again to wait for the next publisher identity at that path, such as a
 restarted publisher. It returns null once the path goes offline, then the next
-broadcast when something serves it again. Drop what was read from the previous instance
+broadcast when something serves it again. Drop what was read from the previous identity
 on either: its tracks end when its session does.
 
 `MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
@@ -148,7 +148,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::h264(), std::nullopt, std::nullo
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::rgba(), 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
-ok(route->announce()); // each route mints a fresh instance, route->instance_id()
+ok(route->announce()); // each route mints a fresh identity, route->identity()
 ok(broadcast->close()); // keep the producer alive while publishing, then close explicitly
 ```
 

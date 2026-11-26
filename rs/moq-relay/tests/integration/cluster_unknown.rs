@@ -171,7 +171,7 @@ async fn read_first_frame(relay: &cluster::Cluster, auth: &auth::Auth) -> Result
 		.await
 		.map_err(|_| "never announced".to_string())?
 		.map_err(|err| format!("broadcast unroutable: {err}"))?
-		.ok_or("the first change is an instance")?;
+		.ok_or("the first change is an identity")?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the

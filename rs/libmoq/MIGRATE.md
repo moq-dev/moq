@@ -26,10 +26,10 @@ separately. No wire format changes.
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `moq_announce_kind` is `MOQ_ANNOUNCE_KIND_PRESENT` (0) or `MOQ_ANNOUNCE_KIND_ABSENT` (1), and `moq_announce_event` loses `predecessor` and `predecessor_len`, changing the C ABI.
-Another instance taking a path over keeps it present, and a route's cost changing is not reported.
-Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new instance.
+Another identity taking a path over keeps it present, and a route's cost changing is not reported.
+Map `_START` to `_PRESENT` and `_END` to `_ABSENT`, and drop `_UPDATE` handling. Where you requested the path again on `_RESTART` or `_TAKEOVER`, call `moq_origin_follow`, whose callback delivers a broadcast handle for each new identity.
 
-`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an instance, another instance taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
+`moq_origin_follow` takes a `moq_follow_callback`, `(void *user_data, moq_follow_event event, int32_t code)`, instead of a `moq_status_callback`. `MOQ_FOLLOW_EVENT_ONLINE` carries each broadcast handle (where a positive code did), `MOQ_FOLLOW_EVENT_OFFLINE` reports the path going offline (or, for a follow pinned to an identity, another identity taking it over) with code `0`, and `MOQ_FOLLOW_EVENT_END` is the terminal callback, with `0` or a negative error that `moq_error()` explains (where a code `<= 0` was). Release `user_data` on `MOQ_FOLLOW_EVENT_END`.
 
 ### Publishing goes through one route handle
 
@@ -39,9 +39,9 @@ A route handle replaces the publication, the prepared answer, and the request ha
 - `moq_publication_announce(publication, route)` is `moq_route_announce(route)`, and re-pricing is `moq_route_set_cost(route, cost)`. `moq_publication_unannounce` is `moq_route_withdraw`, and `moq_publication_free` is `moq_route_free`.
 - `moq_origin_requests(origin, prefix, len, on_request, user_data)` is `moq_origin_route_prefix(origin, prefix, len, options, on_request, user_data)`, and `moq_origin_requests_cancel` is `moq_route_free`.
 - `moq_broadcast_request_prepare(request, &broadcast)` then `moq_broadcast_prepared_publish` is `moq_broadcast_request_route(request, options)`: create it hidden to fill it first, then `moq_route_announce`. `moq_broadcast_prepared_free` is `moq_route_free`.
-- `moq_route_instance(route, &dst)` reads the stream's instance, minted at creation and kept across withdraw and announce.
+- `moq_route_identity(route, &dst)` reads the stream's identity, minted at creation and kept across withdraw and announce.
 
-`moq_announce_route` is `moq_route_options`, given once at creation, and gains a trailing `hidden`. A zeroed or NULL `moq_route_options` is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+`moq_announce_route` is `moq_route_options`, given once at creation, and gains a trailing `hidden`. A zeroed or NULL `moq_route_options` is visible at once, so set `hidden` and call `moq_route_announce` after filling the catalog to keep the old create-then-announce order. A stable `identity` is fixed for the route's lifetime: announcing another one is a new route.
 
 Hold the route for as long as the broadcast should stay announced. `moq_route_free` now retracts it, while `moq_publish_close` still ends both; the broadcast handle alone no longer keeps it announced.
 
@@ -159,11 +159,11 @@ With deltas on, the track carries a refresh ratio of 8 and the producer restates
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
-### `moq_origin_follow` replaces `moq_origin_announced_broadcast`, and both resolutions take an instance ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
+### `moq_origin_follow` replaces `moq_origin_announced_broadcast`, and both resolutions take an identity ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
 
 Rename `moq_origin_announced_broadcast` and `moq_origin_announced_broadcast_cancel` to `moq_origin_follow` and `moq_origin_follow_cancel`.
-`moq_origin_request` and `moq_origin_follow` take `instance, instance_len` after `path_len`: pass `NULL, 0` to accept whichever publisher instance serves the path, or an instance to refuse every other.
-`moq_origin_request` resolves one publisher instance: it retries as the routes covering the path change, and fails as unroutable only once discovery has synced with no covering route. `moq_origin_follow` hands out each instance that serves the path in turn.
+`moq_origin_request` and `moq_origin_follow` take `identity, identity_len` after `path_len`: pass `NULL, 0` to accept whichever publisher identity serves the path, or an identity to refuse every other.
+`moq_origin_request` resolves one publisher identity: it retries as the routes covering the path change, and fails as unroutable only once discovery has synced with no covering route. `moq_origin_follow` hands out each identity that serves the path in turn.
 
 ### A client asks only about what it watches (#6165)
 
@@ -190,7 +190,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 ### A claim answers by publishing (#5678)
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
-`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh identity of its own.
 To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
@@ -257,9 +257,9 @@ if (consumer > 0) {
 }
 ```
 
-### `moq_origin_follow` delivers every publisher instance (#5700)
+### `moq_origin_follow` delivers every publisher identity (#5700)
 
-Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
+Its callback gets a new broadcast handle each time another identity takes over the path or the broadcast returns, and its terminal `0` only on cancel.
 Free each handle with `moq_consume_close` once its successor arrives.
 
 ### A timed track refuses a group that rewinds (#5803)
@@ -274,7 +274,7 @@ A panic in a background task reports `MOQ_ERROR_PANIC`, and other handles keep r
 ### Announcements carry a kind (#4266, #4384, #5087)
 
 `moq_announce_update` is `moq_announce_event`, and its `active` flag is a `kind`: `MOQ_ANNOUNCE_KIND_START`, `_UPDATE`, `_END`, or `_RESTART`.
-`_RESTART` means another publisher instance now serves the prefix: request the path again.
+`_RESTART` means another publisher identity now serves the prefix: request the path again.
 Subscribe on `MOQ_ANNOUNCE_KIND_START` or `_RESTART` where you checked `active`.
 
 ### `moq_origin_announced` takes a config (#4111)

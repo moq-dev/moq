@@ -35,10 +35,10 @@ Add `--passthrough` to keep publishing CMAF.
 
 ### `export archive` records a prefix (#6160)
 
-`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<instance>`, until the connection ends, instead of one broadcast at `<url>`.
+`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each identity under `<url>/<broadcast>/@<identity>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
 Untimed tracks record, and `--retention` works on them.
-`import archive` replays one recorded broadcast in the new layout, `<url>/<broadcast>/@<instance>`, and no longer reads recordings made by older `moq` versions.
+`import archive` replays one recorded broadcast in the new layout, `<url>/<broadcast>/@<identity>`, and no longer reads recordings made by older `moq` versions.
 
 ### `--cluster-lan-secret` is a file path only (#5910)
 
@@ -53,9 +53,9 @@ If your auth server can take longer than the handshake timeout allows, raise `--
 ### `--epoch` is removed (#5967)
 
 Remove `--epoch` and `MOQ_EPOCH`: either stops startup as an unknown flag or environment variable.
-Every `moq` run mints its own instance, so two importers fed one stream publish two instances. `moq` has no flag to name a stable one.
+Every `moq` run mints its own identity, so two importers fed one stream publish two identities. `moq` has no flag to name a stable one.
 To fail over between them, follow restarts: `export ts --stitch` switches programs, and players follow the announced restart.
-Other consumers, such as `export ts --passthrough`, end with the instance they read.
+Other consumers, such as `export ts --passthrough`, end with the identity they read.
 
 ### Key logging is opt-in (#5907)
 
@@ -89,7 +89,7 @@ Rename `--max-age` to `--max-delay` on those exports.
 Each frame is written that long after its decode time; the older staleness spellings are refused with `--delay` named.
 Rename `--max-age` to `--delay`.
 
-### `moq export ts --linger` is `--follow`, and follows only the same publisher instance
+### `moq export ts --linger` is `--follow`, and follows only the same publisher identity
 
 Rename `export ts --linger` to `--follow`; the old spelling stops the run naming it. `export srt` takes the same `--follow`.
 A restarted publisher exits 1 unless `--stitch` follows it as a program switch, and a stitched replacement's first catalog is awaited until it arrives or the replacement goes, so `--follow 0s` no longer refuses a cold one.
@@ -112,7 +112,7 @@ Pass `--delay 100ms` to keep the old fixed delay.
 
 ### `--hop` is removed (#4969)
 
-Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own instance.
+Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own identity.
 Redundant importers switch as a restart; use `export ts --stitch` to follow them.
 A node that pinned its cluster id with `--hop` passes `--cluster-id` instead.
 

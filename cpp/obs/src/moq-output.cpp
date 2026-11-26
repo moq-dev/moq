@@ -264,7 +264,7 @@ bool MoQOutput::Start()
 
 	// Route the broadcast on an origin of our own, visible at once so subscribers can
 	// discover it. Stop() closes it, so each Start creates a fresh route, under a fresh
-	// instance it mints and keeps across reconnects. The route is held until Reset():
+	// identity it mints and keeps across reconnects. The route is held until Reset():
 	// releasing it would retract the broadcast.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
@@ -321,7 +321,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		instance = (*next_route)->instance_id()->text();
+		identity = (*next_route)->identity()->text();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -463,7 +463,7 @@ void MoQOutput::Reset()
 		session.reset();
 		link = Link::kPending;
 		url.clear();
-		instance.clear();
+		identity.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -528,10 +528,10 @@ void MoQOutput::Reset()
 		SetBitrate(r.encoder, r.key, r.bitrate_bps, r.average_kbps);
 }
 
-std::string MoQOutput::GetInstance()
+std::string MoQOutput::GetIdentity()
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return instance;
+	return identity;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)

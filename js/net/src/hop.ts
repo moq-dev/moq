@@ -8,7 +8,7 @@
  * @module
  */
 import type { Credential } from "./auth.ts";
-import type * as Instance from "./instance.ts";
+import type * as Identity from "./identity.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
@@ -98,11 +98,11 @@ export const Cost = {
  */
 export interface RouteInfo {
 	/**
-	 * The stream the route serves: routes with one instance serve one continuous sequence
+	 * The stream the route serves: routes with one identity serve one continuous sequence
 	 * space, so a subscription resumes from one to another. Pass it to an origin `request` to
 	 * pin this stream.
 	 */
-	readonly instance?: Instance.Valid;
+	readonly identity?: Identity.Valid;
 	/** What pulling content via this route costs; lower wins. */
 	readonly cost: Cost;
 	/**
@@ -123,7 +123,7 @@ export interface RouteInfo {
  */
 export function routeInfo(route: WireRoute): RouteInfo {
 	return {
-		instance: route.instance,
+		identity: route.identity,
 		cost: route.cost,
 		available: route.available ?? true,
 	};
@@ -131,17 +131,17 @@ export function routeInfo(route: WireRoute): RouteInfo {
 
 /**
  * A route as the origin and sessions carry it: the {@link RouteInfo} facts plus the epoch that
- * orders an instance's incarnations, the hop chain it took, the credential that advertises it,
+ * orders an identity's incarnations, the hop chain it took, the credential that advertises it,
  * and whether it drains, which applications never see.
  *
  * @internal
  */
 export interface WireRoute {
-	/** See {@link RouteInfo.instance}. Always set on a route the origin delivers. */
-	readonly instance?: Instance.Valid;
+	/** See {@link RouteInfo.identity}. Always set on a route the origin delivers. */
+	readonly identity?: Identity.Valid;
 	/**
-	 * Which incarnation of {@link instance} this is: among its routes at one prefix only the
-	 * highest epoch is eligible, cheaper or not. Never compared across instances.
+	 * Which incarnation of {@link identity} this is: among its routes at one prefix only the
+	 * highest epoch is eligible, cheaper or not. Never compared across identities.
 	 */
 	readonly epoch?: bigint;
 	/**
@@ -169,7 +169,7 @@ export interface WireRoute {
 	/** See {@link RouteInfo.available}; unset means available. */
 	readonly available?: boolean;
 	/**
-	 * A claim a lite-07 peer sent, one per instance at a path, which a reader asking for every
+	 * A claim a lite-07 peer sent, one per identity at a path, which a reader asking for every
 	 * claim reports as a route of its own. Unset on a route announced here and on every other
 	 * version. Local: readers never see it.
 	 */
@@ -199,8 +199,8 @@ export const WireRoute = {
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;
 		return {
-			instance: route.instance,
-			epoch: route.instance === undefined ? undefined : (route.epoch ?? 0n),
+			identity: route.identity,
+			epoch: route.identity === undefined ? undefined : (route.epoch ?? 0n),
 			hops: route.hops ? [...route.hops] : [],
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
@@ -227,7 +227,7 @@ export function isAnonymous(route: WireRoute): boolean {
 }
 
 /**
- * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
+ * Whether two routes name the same identity, epoch, hop chain, cost, auth, drain state,
  * availability, whether a lite-07 peer claimed it, priority, and how far above its path a claim is.
  *
  * @internal
@@ -236,7 +236,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
-		a.instance === b.instance &&
+		a.identity === b.identity &&
 		a.epoch === b.epoch &&
 		a.cost === b.cost &&
 		a.auth === b.auth &&

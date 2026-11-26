@@ -63,14 +63,14 @@ What that means for you:
 - **The target duration is twice the segment.** Every media playlist keeps one `EXT-X-TARGETDURATION` while its rendition stays in the catalog, even across a reconfigure: twice the segment length, rounded up to whole seconds (twice the interval for a GOP of a second or more, 2 s for 20 ms audio groups), since the GOP containing a grid line starts at most one interval before it, and a gap ends under two segment lengths after its line. Only a final GOP longer than that is listed past it, against RFC 8216's rule: hls.js plays it, but Apple's `mediastreamvalidator` flags it, so keep keyframe intervals within the declared interval.
 - **A reconfigure keeps the playlist.** A rendition whose decoder config changes (its resolution, say) keeps its media playlist: the segments already listed stay, under the init they were muxed for, and the new config's segments follow behind an `EXT-X-DISCONTINUITY` and a new `EXT-X-MAP`, as RFC 8216 requires. The old config's segments end at the keyframe declaring the new size, even when that group reaches the export before the catalog update. A resize that opens a segment lists that segment under the new init. One partway through a segment cuts the old config's last segment short there, and the new config lists from the next segment, so the media between them is never listed. The DASH manifest lists only the new config's segments.
 - **Disabled renditions are hidden.** A rendition the catalog marks `enabled: false` leaves the multivariant playlist and DASH manifest until it re-enables. Its media playlist keeps serving, so a player already on it is not ended with `EXT-X-ENDLIST`.
-- **URLs name the stream.** Every URL the multivariant playlist and DASH manifest list sits under `@<instance>`, the stream's instance, so every edge and every reload derive the same URLs and a CDN in front of export caches them. A restarted publisher gets URLs of its own, whose numbering starts over. The multivariant playlist and manifest switch to it at once, while the old stream's playlists end at the segments they listed before the switch, even if its publisher keeps sending; a player already on it plays those out and then has to reload the multivariant playlist. A stream that reached export over moq-lite-06 or older, or moq-transport, has an instance its session minted, so only that export serves its URLs.
+- **URLs name the stream.** Every URL the multivariant playlist and DASH manifest list sits under `@<token>`, a short hash of the stream's identity and whether its session minted it, so every edge and every reload derive the same URLs and a CDN in front of export caches them. A restarted publisher gets URLs of its own, whose numbering starts over. The multivariant playlist and manifest switch to it at once, while the old stream's playlists end at the segments they listed before the switch, even if its publisher keeps sending; a player already on it plays those out and then has to reload the multivariant playlist. A stream that reached export over moq-lite-06 or older, or moq-transport, has an identity its session minted, so only that export serves its URLs.
 - **Only a clean finish ends a playlist.** `EXT-X-ENDLIST` and a `static` DASH manifest mean the media tracks finished, or, on a replaced stream's media playlists, that another publisher took the broadcast over. A rendition whose media track fails instead, such as a publisher dropping its session, answers HTTP 500 with `Cache-Control: no-store`, so a truncated recording never looks complete, and leaves the multivariant playlist and DASH manifest so players switch to a sibling. With none left, the DASH manifest answers the error too.
 
 Include URLs nest under the served broadcast's (see
 [`Include`](https://docs.rs/moq-hls/latest/moq_hls/export/struct.Include.html)), so
 access middleware sees the parent broadcast's path, while the server resolves each
 [include](/draft/moq-hang#include) through its own scoped origin and leaves out
-one it may not read. They follow include restarts unless the entry pins an `instance`;
+one it may not read. They follow include restarts unless the entry pins an `identity`;
 an unavailable include leaves the multivariant playlist until it returns. DASH and
 `--output` include only the broadcast's own renditions; record an include as its own
 broadcast.
@@ -83,7 +83,7 @@ recording needs moq-lite 07 on every network hop for track discovery; see
 
 ```bash
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<instance>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<identity>
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --hls-listen '[::]:8089'
 ```
 

@@ -24,7 +24,7 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
-import type * as Instance from "../instance.ts";
+import type * as Identity from "../identity.ts";
 import {
 	type DropRun,
 	datagramTrackInfo,
@@ -53,7 +53,7 @@ import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import { isEmpty, type Resolved, rangeKey } from "../window.ts";
-import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
@@ -917,7 +917,7 @@ export class Publisher {
 	#heldDatagrams = new Set<datagram.Consumer>();
 
 	/**
-	 * Creates a new Publisher instance.
+	 * Creates a new Publisher identity.
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
 	 * @param origin - Hop id shared with the Subscriber
@@ -1003,7 +1003,7 @@ export class Publisher {
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Keyed by suffix, valued by identity plus route, so a republish diffs as a restart
+		// Keyed by suffix, valued by ref plus route, so a republish diffs as a restart
 		// and a re-price as an update.
 		let active = new Map<Path.Valid, Advertised>();
 
@@ -1026,11 +1026,11 @@ export class Publisher {
 			auth: undefined,
 		});
 
-		// Another instance is another stream, which these versions announce as an end and a start.
-		const restarted = (prev: Advertised, next: Advertised): boolean => !sameInstance(prev, next);
+		// Another identity is another stream, which these versions announce as an end and a start.
+		const restarted = (prev: Advertised, next: Advertised): boolean => !sameIdentity(prev, next);
 
 		const announce = async (suffix: Path.Valid, route: WireRoute) => {
-			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
+			console.debug(`announce: broadcast=${suffix} active=true identity=${route.identity}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
@@ -1058,7 +1058,7 @@ export class Publisher {
 			);
 		};
 
-		// Another instance: an end and a start.
+		// Another identity: an end and a start.
 		const restart = async (suffix: Path.Valid, route: WireRoute) => {
 			await retract(suffix);
 			await announce(suffix, route);
@@ -1190,12 +1190,12 @@ export class Publisher {
 
 	/** The broadcast a request names, from this session's origin. */
 	async #resolve(
-		msg: { broadcast: Path.Valid; instance?: Instance.Valid },
+		msg: { broadcast: Path.Valid; identity?: Identity.Valid },
 		signal: AbortSignal,
 	): Promise<broadcast.Consumer | undefined> {
 		const origin = this.#publish && wireOf(this.#publish);
 		if (!origin) return undefined;
-		return origin.local(msg.broadcast, msg.instance) ?? (await origin.demand(msg.broadcast, msg.instance, signal));
+		return origin.local(msg.broadcast, msg.identity) ?? (await origin.demand(msg.broadcast, msg.identity, signal));
 	}
 
 	/**

@@ -1,6 +1,6 @@
 import { Duration as ClockDuration } from "@moq/clock";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
-import type * as Instance from "../instance.ts";
+import type * as Identity from "../identity.ts";
 import { NO_MAX_DELAY } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -9,7 +9,7 @@ import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY, liveMillis, rangeBudget, rangeTime } from "../window.ts";
 import * as Duration from "./duration.ts";
-import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
+import { decodeNode, decodePin, encodeNode, encodePin } from "./identity.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import {
@@ -1101,8 +1101,8 @@ export class SubscribeUpdate {
 export class Subscribe {
 	id: bigint;
 	broadcast: Path.Valid;
-	/** The publisher instance the subscriber expects. Lite-07+. */
-	instance?: Instance.Valid;
+	/** The publisher identity the subscriber expects. Lite-07+. */
+	identity?: Identity.Valid;
 	track: string;
 	priority: number;
 	/**
@@ -1143,7 +1143,7 @@ export class Subscribe {
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
-		instance?: Instance.Valid;
+		identity?: Identity.Valid;
 		track: string;
 		priority: number;
 		order?: Order;
@@ -1156,7 +1156,7 @@ export class Subscribe {
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
-		this.instance = props.instance;
+		this.identity = props.identity;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -1171,7 +1171,7 @@ export class Subscribe {
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
-		await encodePin(w, version, this.instance);
+		await encodePin(w, version, this.identity);
 		await encodeNode(w, version);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
@@ -1191,7 +1191,7 @@ export class Subscribe {
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
-		const instance = await decodePin(r, version);
+		const identity = await decodePin(r, version);
 		await decodeNode(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
@@ -1207,7 +1207,7 @@ export class Subscribe {
 				return new Subscribe({
 					id,
 					broadcast,
-					instance,
+					identity,
 					track,
 					priority,
 					order,

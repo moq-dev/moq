@@ -266,7 +266,7 @@ pub fn numbers(playlist: &str) -> Vec<u64> {
 		.collect()
 }
 
-/// The media playlist URI the master playlist of `path` lists for [`TRACK`], under its instance.
+/// The media playlist URI the master playlist of `path` lists for [`TRACK`], under its identity.
 pub async fn media_uri(app: &axum::Router, path: &str) -> String {
 	let master = listed(app, &format!("/{path}/master.m3u8"), TRACK).await;
 	let line = master

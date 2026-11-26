@@ -28,7 +28,7 @@ use std::sync::{
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Instance, Timestamp, Version, group, origin, track};
+use moq_net::{Identity, Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// How often a publisher writes a group.
@@ -243,17 +243,17 @@ pub(super) struct Source {
 }
 
 impl Source {
-	/// Publish [`PATH`] on a fresh origin `hop`, under `instance` at epoch 0 when given, or a
+	/// Publish [`PATH`] on a fresh origin `hop`, under `identity` at epoch 0 when given, or a
 	/// minted one.
-	pub fn new(hop: u64, instance: Option<&Instance>) -> Self {
-		Self::on(produce_origin(hop), PATH, instance)
+	pub fn new(hop: u64, identity: Option<&Identity>) -> Self {
+		Self::on(produce_origin(hop), PATH, identity)
 	}
 
-	/// Publish `path` on `origin`, under `instance` at epoch 0 when given.
-	pub fn on(origin: origin::Producer, path: &str, instance: Option<&Instance>) -> Self {
+	/// Publish `path` on `origin`, under `identity` at epoch 0 when given.
+	pub fn on(origin: origin::Producer, path: &str, identity: Option<&Identity>) -> Self {
 		let mut options = origin::RouteOptions::hidden();
-		if let Some(instance) = instance {
-			options = options.with_instance(instance.clone(), 0);
+		if let Some(identity) = identity {
+			options = options.with_identity(identity.clone(), 0);
 		}
 		let route = origin.route(path, options).unwrap();
 		let track = route.broadcast().create_track(TRACK, timed()).unwrap();
@@ -320,7 +320,7 @@ pub(super) struct Got {
 	pub at: kio::clock::Instant,
 	/// Which broadcast the reader was on, counting from 1: a new one is a restart.
 	pub run: usize,
-	pub instance: Option<Instance>,
+	pub identity: Option<Identity>,
 	pub key: u64,
 	pub tag: String,
 	/// When the publisher wrote it.
@@ -350,7 +350,7 @@ impl Reader {
 					Err(_) => return,
 				};
 				run += 1;
-				let instance = broadcast.info().instance.clone();
+				let identity = broadcast.info().identity.clone();
 				// From the live edge, and never skipping a group however late. Oldest first, so a
 				// backlog held across a failure reads in key order, as the report counts it.
 				let prefs = track::Subscription::default()
@@ -373,7 +373,7 @@ impl Reader {
 						let got = Got {
 							at: kio::clock::now(),
 							run,
-							instance: instance.clone(),
+							identity: identity.clone(),
 							key: key.parse().unwrap(),
 							tag: tag.to_string(),
 							written: kio::clock::Instant::ZERO.saturating_add(micros),
@@ -432,7 +432,7 @@ impl Reader {
 				std::cmp::Ordering::Greater => report.missed.extend(before.key + 1..after.key),
 				std::cmp::Ordering::Equal => {}
 			}
-			if before.tag != after.tag || before.instance != after.instance {
+			if before.tag != after.tag || before.identity != after.identity {
 				report.spliced.push(after.key);
 			}
 		}
@@ -464,7 +464,7 @@ pub(super) struct Report {
 	pub missed: Vec<u64>,
 	/// Groups read again within one broadcast.
 	pub repeated: Vec<u64>,
-	/// Groups read within one broadcast from another publisher or Instance.
+	/// Groups read within one broadcast from another publisher or Identity.
 	pub spliced: Vec<u64>,
 }
 
@@ -485,7 +485,7 @@ impl Report {
 pub(super) struct Shown {
 	pub available: bool,
 	pub cost: u64,
-	pub instance: Instance,
+	pub identity: Identity,
 }
 
 /// What `node` shows at [`PATH`] now, or `None` when it shows nothing.
@@ -507,7 +507,7 @@ pub(super) async fn shown_at(node: &origin::Producer, path: &str) -> Option<Show
 			origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart => Some(Shown {
 				available: route.available(),
 				cost: route.cost().value(),
-				instance: route.instance().clone(),
+				identity: route.identity().clone(),
 			}),
 			origin::RouteKind::End | origin::RouteKind::Offline => None,
 			kind => panic!("unexpected route kind {kind:?}"),
@@ -521,7 +521,7 @@ pub(super) async fn shown_at(node: &origin::Producer, path: &str) -> Option<Show
 pub(super) struct Seen {
 	pub kind: support::Kind,
 	pub available: bool,
-	pub instance: Instance,
+	pub identity: Identity,
 	pub at: kio::clock::Instant,
 }
 
@@ -550,7 +550,7 @@ impl Watch {
 				let seen = Seen {
 					kind,
 					available: event.announce.route.available(),
-					instance: event.announce.route.instance().clone(),
+					identity: event.announce.route.identity().clone(),
 					at: kio::clock::now(),
 				};
 				if tx.unbounded_send(seen).is_err() {

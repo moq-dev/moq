@@ -17,35 +17,35 @@ Socket now exposes TCP group halves and reliably subscribed track halves beside 
 ### `Following.available()` returns nil once the path goes offline
 
 `try await following.available()` returns `BroadcastConsumer?`.
-After the first call, it returns nil once the followed path goes offline, or, for a `follow(path:instance:)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns nil.
+After the first call, it returns nil once the followed path goes offline, or, for a `follow(path:identity:)` pinned to an identity, once another identity takes it over; the next call returns whatever serves the path next. The first call never returns nil.
 Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!`.
 
 ### Announcements are a listing
 
 `AnnounceConsumer` yields `.present` when a path becomes present and `.absent` when it goes, each carrying an `Announce`.
 `.start` is `.present` and `.end` is `.absent`.
-`.update`, `.restart`, and `.takeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
-Where you requested the path again on a restart, hold `follow(path:)` instead; each `available()` returns the next instance's broadcast.
+`.update`, `.restart`, and `.takeover` are gone: a path whose route or publisher identity changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path:)` instead; each `available()` returns the next identity's broadcast.
 
 ```swift
 let following = try session.consume.follow(path: "live/camera")
 while true {
-    guard let broadcast = try await following.available() else { continue } // offline until the next instance
+    guard let broadcast = try await following.available() else { continue } // offline until the next identity
     play(broadcast)
 }
 ```
 
 ### Publishing goes through one `Route`
 
-`OriginProducer.createBroadcast(path:)` is `route(path:hidden:cost:instance:epoch:)`, and `requests(prefix:)` is `routePrefix(prefix:hidden:cost:instance:epoch:)`. Both return a `Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+`OriginProducer.createBroadcast(path:)` is `route(path:hidden:cost:identity:epoch:)`, and `requests(prefix:)` is `routePrefix(prefix:hidden:cost:identity:epoch:)`. Both return a `Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
 
 - `Publication.broadcast` is `Route.broadcast`, which now throws on a prefix route.
 - `Publication.announce(route: AnnounceRoute(...))` is `announce()`, and re-pricing is `setCost(_:)`. `unannounce()` is `withdraw()`.
 - `OriginRequests.requestedBroadcast()` is `Route.requested()`, which returns `nil` once the origin closes. A prefix `Route` is the `AsyncSequence` of requests, and cancelling the iterating task still cancels the route.
-- `BroadcastRequest.prepare()` then `BroadcastPrepared.publish()` is `BroadcastRequest.route(hidden:cost:instance:epoch:)`: create it hidden to fill it first, then `announce()`.
-- `Route.instance` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+- `BroadcastRequest.prepare()` then `BroadcastPrepared.publish()` is `BroadcastRequest.route(hidden:cost:identity:epoch:)`: create it hidden to fill it first, then `announce()`.
+- `Route.identity` is the stream's identity, minted at creation and kept across `withdraw` and `announce`.
 
-`AnnounceRoute` is gone: pass its `cost`, `instance`, and `epoch`, plus `hidden`, as labeled arguments when creating the route. A route is visible at once unless `hidden: true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+`AnnounceRoute` is gone: pass its `cost`, `identity`, and `epoch`, plus `hidden`, as labeled arguments when creating the route. A route is visible at once unless `hidden: true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `identity` is fixed for the route's lifetime: announcing another one is a new route.
 
 Hold the `Route` for as long as the broadcast should stay announced: releasing or cancelling it retracts it, while `BroadcastProducer.close()` still ends both. A `BroadcastProducer` alone no longer keeps it announced.
 
@@ -145,8 +145,8 @@ the matching generated bindings and native library.
 
 ### `announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:instance:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
-`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream; leave `instance` unset to keep the one the broadcast minted.
+`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:identity:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `identity` only when forwarding that same stream; leave `identity` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -178,8 +178,8 @@ To keep a value's moq-lite byte, subtract 128 from it, widening first so it does
 ### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
 
 Rename `OriginConsumer.requestBroadcast(path:)` to `request(path:)`, `announcedBroadcast(path:)` to `follow(path:)`, and `AnnouncedBroadcast` to `Following`.
-Both take an optional `instance:` to refuse every other publisher instance.
-`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+Both take an optional `identity:` to refuse every other publisher identity.
+`request` resolves one publisher identity: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each identity that serves the path in turn.
 
 ### A client asks only about what it watches (#6165)
 
@@ -192,11 +192,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
 
-### Catalog references carry their instance
+### Catalog references carry their identity
 
-`Media.Video` and `Media.Audio` gain `instance`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(_:)` takes the catalog `Media.Rendition` instead of its reference, and reads its `broadcast` and `instance` from it.
-Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another instance.
+`Media.Video` and `Media.Audio` gain `identity`, the publisher identity their `broadcast` reference names.
+`BroadcastConsumer.resolve(_:)` takes the catalog `Media.Rendition` instead of its reference, and reads its `broadcast` and `identity` from it.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another identity.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -212,7 +212,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.
-Replace `request.accept(broadcast:)` with `let prepared = try request.prepare()`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
+Replace `request.accept(broadcast:)` with `let prepared = try request.prepare()`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under a fresh identity of its own and returns its producer.
 To answer with a broadcast you already hold, `try request.serve(broadcast: producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
@@ -266,10 +266,10 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and drop it to stop.
 It returns `nil` when the version has no PROBE.
 
-### `Following.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher identity (#5700)
 
 The first call returns the broadcast serving the path, as before.
-Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
+Each later call waits for the next identity to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)
 
@@ -310,7 +310,7 @@ A panic in a background task throws `MoqError.Task` with the panic message as `r
 
 `AnnounceConsumer` yields an `AnnounceEvent`: `.start`, `.update`, `.end`, or `.restart`, each carrying an `Announce`.
 `AnnounceUpdate` is gone.
-A restart means another publisher instance now serves the prefix: request the path again.
+A restart means another publisher identity now serves the prefix: request the path again.
 
 ```swift
 for try await event in try session.consume.announced(prefix: "live/") {

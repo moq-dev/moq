@@ -132,8 +132,8 @@ if (read is video.ReadFrame) {
 
 ```dart
 // Publish already-encoded frames. bytes comes from your encoder or application source.
-final route = moq.route('live/camera'); // visible at once, under a fresh instance
-print(route.instance());
+final route = moq.route('live/camera'); // visible at once, under a fresh identity
+print(route.identity());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup(start: Timestamp.unscaled(0));
@@ -154,7 +154,7 @@ one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`, `RouteOptions`) as aliases, so the generated names still work. `MoqContainer`, `MoqRoute`, and the exceptions keep it, since Flutter owns those names.
-- **Routes.** `route(path)` publishes a broadcast, returning a `MoqRoute` whose `broadcast()` you fill, and `claim(prefix)` answers requests beneath a prefix, returning a `Claim` whose `requested()` yields each one. Hold either: cancelling or disposing it retracts it, while a broadcast handle alone does not keep a route announced. A `route(path)` keeps its instance across `withdraw()` and `announce()`, so a new run is a new route. Unless one is named, a request's own route (`request.route(options: ...)`) takes its claim's instance (on moq-lite 07; older wires mint another, restarting readers resolved through the claim), and the claim moves to a fresh one each time such a route holding its current one ends.
+- **Routes.** `route(path)` publishes a broadcast, returning a `MoqRoute` whose `broadcast()` you fill, and `claim(prefix)` answers requests beneath a prefix, returning a `Claim` whose `requested()` yields each one. Hold either: cancelling or disposing it retracts it, while a broadcast handle alone does not keep a route announced. A `route(path)` keeps its identity across `withdraw()` and `announce()`, so a new run is a new route. Unless one is named, a request's own route (`request.route(options: ...)`) takes its claim's identity (on moq-lite 07; older wires mint another, restarting readers resolved through the claim), and the claim moves to a fresh one each time such a route holding its current one ends.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: a `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: media.DecodeStart.latest` in its decoder output, which joins at the newest group and skips the cached backlog.

@@ -5761,8 +5761,8 @@ impl Producer {
 	///
 	/// The same broadcast, track, and group start always name the same content, and nothing
 	/// checks it: the broadcast remembers nothing of an earlier producer of the name. A
-	/// recreated track, or a restarted publisher keeping its instance, keeps its starts moving
-	/// forward, as its media time does, or uses a new track name or instance. Reusing a start
+	/// recreated track, or a restarted publisher keeping its identity, keeps its starts moving
+	/// forward, as its media time does, or uses a new track name or identity. Reusing a start
 	/// only corrupts this broadcast for its readers. Datagram sequences name no cached content
 	/// and are exempt.
 	pub fn append_group(&self, start: Timestamp) -> Result<group::Producer> {
@@ -8235,7 +8235,7 @@ impl Consumer {
 		routes.serving()
 	}
 
-	/// Ask the instance this handle reads for a new group; see [`Subscriber::ask`].
+	/// Ask the identity this handle reads for a new group; see [`Subscriber::ask`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn ask(&self, ask: Ask) {
 		if let Some(serving) = self.serving() {
@@ -8248,7 +8248,7 @@ impl Consumer {
 		});
 	}
 
-	/// Request a new group from the instance this handle reads; see [`Subscriber::refresh`].
+	/// Request a new group from the identity this handle reads; see [`Subscriber::refresh`].
 	fn request(&self) -> Refreshing {
 		self.with_state(|state| match state {
 			Some(state) if state.read().routes.is_some() => Refreshing::front(state),
@@ -8528,7 +8528,7 @@ impl Consumer {
 	}
 
 	/// Poll for a largest frame within `bounds` newer than `seen`, recording it there. A
-	/// front's logical track follows the route serving it. Reads the instance served now
+	/// front's logical track follows the route serving it. Reads the identity served now
 	/// without asking for it, so a broadcast serving nothing under the name ends the stream.
 	pub(super) fn poll_largest_after(
 		&self,
@@ -12840,7 +12840,7 @@ impl Subscriber {
 	/// tolerates is skipped rather than handed over, so a single read walks off a whole
 	/// backlog. The default [`Start::LATEST`] takes the live edge and writes the rest off;
 	/// a history range (a time, position, or oldest start) reads every group it covers. [`Consumer::fetch_group`] is the way to ask for one old group outright.
-	/// Across same-instance route copies, the first group any copy holds in that order is
+	/// Across same-identity route copies, the first group any copy holds in that order is
 	/// delivered first.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].

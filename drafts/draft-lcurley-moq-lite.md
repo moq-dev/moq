@@ -132,13 +132,13 @@ This corresponds to a MoqTransport's "track namespace".
 A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with a separator or contains two in a row; the empty path has no segments and prefixes every path.
 A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION.
 A segment is the text between two `/` that no `\` escapes, so `a\/b` is one segment, one namespace field holding a `/`; every rule that counts, matches, or compares segments reads them this way, and a prefix never ends inside an escape.
-A continuous stream is named by an Instance, carried on its claims (see [ANNOUNCE_START](#announce-start)): a path and an Instance name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
-Within one Instance, a Group start never names two different Groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
-A publisher whose Group starts could go back, such as a restarted process with a new clock, uses a new Instance, while replicas of the same content share one.
-A publisher MAY keep an Instance across restarts only if its Group starts keep moving forward and it announces a higher Epoch each time.
-A Track recreated within one Instance likewise starts past every Group its predecessor published.
+A continuous stream is named by an Identity, carried on its claims (see [ANNOUNCE_START](#announce-start)): a path and an Identity name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
+Within one Identity, a Group start never names two different Groups, so claims sharing it serve the same bytes; two Identities are independent streams, never stitched together.
+A publisher whose Group starts could go back, such as a restarted process with a new clock, uses a new Identity, while replicas of the same content share one.
+A publisher MAY keep an Identity across restarts only if its Group starts keep moving forward and it announces a higher Epoch each time.
+A Track recreated within one Identity likewise starts past every Group its predecessor published.
 A receiver does not detect a publisher that breaks this, which corrupts only that Broadcast for its subscribers.
-The Epoch is a counter within one Instance that picks its live incarnation while a stale claim lingers; it is never compared across Instances.
+The Epoch is a counter within one Identity that picks its live incarnation while a stale claim lingers; it is never compared across Identities.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a claim covering every broadcast path beneath it.
 A claim is the only shape an advertisement takes: a publisher that serves only some of the paths beneath a prefix, such as a transcoder for any broadcast's derivative, advertises the covering prefix and refuses the requests it will not serve (see [Resolution](#resolution)); no message narrows a claim.
@@ -458,7 +458,7 @@ An edit that empties the set drops every route on the stream, and every claim un
 
 ### Claims {#claims}
 On a session that does not exchange routes, a publisher sends the claims its own requests would resolve, and nothing of how it reaches them.
-For each path and Instance its peer's prefixes present, it sends at most one claim: the one it would serve a request there from (see [Resolution](#resolution)), and never one it learned from that peer.
+For each path and Identity its peer's prefixes present, it sends at most one claim: the one it would serve a request there from (see [Resolution](#resolution)), and never one it learned from that peer.
 The claim carries the publisher's cost to it, the lowest priority and any drain on the way, and its chain (see [ANNOUNCE_START](#announce-start)).
 It sets the claim's `Marked` flag when a marked session lies on the way to it, and never sends such a claim over a marked session.
 
@@ -469,7 +469,7 @@ It presents a claim no higher than where it is filed, so a relay passes on what 
 When the publisher's way to a claim changes, it sends an ANNOUNCE_UPDATE.
 While it has no way to a claim it still holds, it sets the claim's `Unavailable` flag rather than withdrawing it, and fails requests for it with UNROUTABLE; it sends an ANNOUNCE_END with `Lost` once it has shown the claim unavailable for 800 milliseconds.
 A receiver takes `Unavailable` only as a change to a claim it already holds at that Epoch and Above: it does not hold a claim it is first told unavailable until an ANNOUNCE_UPDATE clears the flag.
-Another Instance at a path is another claim: the publisher sends its ANNOUNCE_START before the ANNOUNCE_END of the one it replaces, so the subscriber sees the broadcast restart rather than go.
+Another Identity at a path is another claim: the publisher sends its ANNOUNCE_START before the ANNOUNCE_END of the one it replaces, so the subscriber sees the broadcast restart rather than go.
 
 A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the claim's cost, and takes the lower of the claim's priority and its own local priority for the session.
 A routing node that receives a claim this way announces it to its routing neighbours as its own, under its marked Node ID when the session is marked or the claim's `Marked` flag is set (see [Routing](#routing)).
@@ -544,11 +544,11 @@ A subscriber that names none lets the publisher select one (see [Resolution](#re
 A relay forwards a request naming a routing node, never back to the requester, only along a route to that node through a neighbour that sent it the claim, its selected route when that neighbour did, along its selected route to that node when it holds no claim of that node covering the path, or to the endpoint whose claim it announces when the request names the relay itself, and resets it with UNROUTABLE when it has none of these.
 A route can arrive before the claims behind it, so while a relay routes to the named node other than through the requester and holds its claim available and eligible (see [Resolution](#resolution)) but no neighbour other than the requester with a route there has sent it yet, it holds the request until one does or the claim stops being available and eligible, rather than reset a request for a claim it still shows available.
 
-Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
-A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
+Claims with the same Identity serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+A relay MUST NOT move a subscription to a claim with a different Identity: it stays on its Identity's claims and ends with the last of them.
 When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the claim goes; new requests resolve the winner.
-A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance with `Minted` set, so a reader can tell it names an announcement rather than the publisher's stream.
-A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
+A version before this one carries no Identity, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Identity with `Minted` set, so a reader can tell it names an announcement rather than the publisher's stream.
+A minted Identity is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
 
 ### Closed Sessions and Drains {#closed-sessions}
 A node that loses a session to a routing neighbour names the hop it lost: its own Node ID and that session's Session Number, with the Node ID of the node at the far end.
@@ -577,16 +577,16 @@ A claim strictly inside another's paths always ranks above it, and a broadcast's
 The winning tier is the whole answer: a refusal from it never falls through to a less specific claim, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
 Nor is a refusal retried at another claim of the same prefix.
 
-Within the tier, a claim is ineligible while another claim of the tier carries its Instance at a higher Epoch, however cheap it is and whether a route reaches it, so an older Epoch never stands in for an unavailable newer one: a request that selects that Instance fails with UNROUTABLE until its newest Epoch is available again.
+Within the tier, a claim is ineligible while another claim of the tier carries its Identity at a higher Epoch, however cheap it is and whether a route reaches it, so an older Epoch never stands in for an unavailable newer one: a request that selects that Identity fails with UNROUTABLE until its newest Epoch is available again.
 Among the eligible claims, the receiver SHOULD prefer one that is not `Unavailable`, then one that is not draining, then the highest priority, then the lowest cost, the claim's cost plus the cost of the route to the node announcing it, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
-The Rendezvous Hash is the 64-bit FNV-1a hash, with the standard offset basis `0xCBF29CE484222325` and prime, of the requested path's UTF-8 bytes followed by the claim's Instance.
-Every node that knows the same claims ranks them the same, so equal-cost Instances of one prefix share its paths and every relay sends one path to the same Instance.
-The one exception is a claim shown at exactly the requested path that the receiver got on a session exchanging no routes, such as its own publisher's: it skips the Rendezvous Hash and ranks ahead of the claims it otherwise ties with, so between two such claims the most recently received wins, and a publisher that restarts under a new Instance takes over from the session it replaced at once.
+The Rendezvous Hash is the 64-bit FNV-1a hash, with the standard offset basis `0xCBF29CE484222325` and prime, of the requested path's UTF-8 bytes followed by the claim's Identity.
+Every node that knows the same claims ranks them the same, so equal-cost Identities of one prefix share its paths and every relay sends one path to the same Identity.
+The one exception is a claim shown at exactly the requested path that the receiver got on a session exchanging no routes, such as its own publisher's: it skips the Rendezvous Hash and ranks ahead of the claims it otherwise ties with, so between two such claims the most recently received wins, and a publisher that restarts under a new Identity takes over from the session it replaced at once.
 When choosing which claim to advertise for a prefix, the requested path is the prefix itself.
 
 A claim resolved this way serves the request like any other, and the claim is not consumed by it.
 A relay MUST NOT announce a path merely because it resolved it: the covering claim stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
-The advertiser MAY announce the path under the claim's Instance, so subscriptions resolved through the claim continue on it (see [Routing](#routing)); when that announcement ends, a claim still serving its Instance restarts under a new one, so a restarted answer is another Broadcast.
+The advertiser MAY announce the path under the claim's Identity, so subscriptions resolved through the claim continue on it (see [Routing](#routing)); when that announcement ends, a claim still serving its Identity restarts under a new one, so a restarted answer is another Broadcast.
 
 An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
 Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
@@ -661,7 +661,7 @@ Because a subscriber cannot parse buffered group frames until TRACK_INFO arrives
 A subscriber opens a Tracks Stream (0x8) to list the Tracks of one Broadcast.
 A listing is discovery, not delivery: the subscriber SUBSCRIBEs to each Track it wants as usual, and a Track's groups reach a late SUBSCRIBE from the publisher's cache while they are retained.
 
-The subscriber sends a [TRACKS](#tracks) message naming the broadcast path and Instance.
+The subscriber sends a [TRACKS](#tracks) message naming the broadcast path and Identity.
 The publisher replies with listing events, then FINs the stream once the Broadcast ends, or resets it on error:
 
 - [TRACKS_ADD](#tracks-add): a Track is listed, with its kind and its TRACK_INFO or DATAGRAMS_INFO.
@@ -693,7 +693,7 @@ A subscriber MAY skip the Track Stream for a Track it learned from TRACKS_ADD, s
 ### Datagrams {#datagrams-stream}
 A subscriber opens a Datagrams Stream (0x9) to subscribe to a datagram Track (see [Datagrams](#datagrams)).
 
-The subscriber sends a [DATAGRAMS](#datagrams-message) message naming the broadcast path, Instance, and Track name, with its priority and a Subscribe ID.
+The subscriber sends a [DATAGRAMS](#datagrams-message) message naming the broadcast path, Identity, and Track name, with its priority and a Subscribe ID.
 The publisher replies with [DATAGRAMS_INFO](#datagrams-info) once it serves the Track, then sends the Track's datagrams, each carrying that Subscribe ID.
 The subscription is live: it has no start, end, order, or age, and receives only datagrams the Track produces after the publisher answers.
 The subscriber MAY send any number of [DATAGRAMS_UPDATE](#datagrams-update) messages, each replacing its priority.
@@ -1320,7 +1320,7 @@ ANNOUNCE_START Message {
   Path Base (i),
   Path Keep (i),
   Claim Prefix Suffix (s),
-  Instance (b),
+  Identity (b),
   Minted (8),
   Epoch (i),
   Claim (..),
@@ -1346,19 +1346,19 @@ The claim's prefix begins with the first `Path Keep` segments of the prefix clai
 The remaining segments of the claim's prefix.
 A claim covering more than the requested prefix it lies in presents at that requested prefix (see [Announce](#announce)).
 
-**Instance**:
-The stream the claim serves (see [Broadcast](#broadcast)): non-empty UTF-8 text.
-An empty or non-UTF-8 Instance is a PROTOCOL_VIOLATION.
-A relay forwards the Instance unchanged, and a claim never changes it.
+**Identity**:
+The stream the claim serves (see [Broadcast](#broadcast)): non-empty UTF-8 text of at most 256 bytes, room for a public key in any common text encoding.
+An empty Identity, one longer than 256 bytes, or one not UTF-8 is a PROTOCOL_VIOLATION.
+A relay forwards the Identity unchanged, and a claim never changes it.
 
 **Minted**:
-1 when a receiver minted the Instance for a version that carries none (see [Routing](#routing)), 0 when the publisher named it.
+1 when a receiver minted the Identity for a version that carries none (see [Routing](#routing)), 0 when the publisher named it.
 Any other value is a PROTOCOL_VIOLATION.
 A relay forwards it unchanged.
-An Instance minted and one named with the same text are different Instances.
+An Identity minted and one named with the same text are different Identities.
 
 **Epoch**:
-Which incarnation of the Instance the claim serves: a counter the publisher raises within one Instance, 0 unless it keeps an Instance across restarts.
+Which incarnation of the Identity the claim serves: a counter the publisher raises within one Identity, 0 unless it keeps an Identity across restarts.
 A relay forwards the Epoch unchanged.
 
 **Cost**:
@@ -1417,7 +1417,7 @@ A relay forwards which of the two it was.
 
 ## ANNOUNCE_UPDATE {#announce-update}
 A publisher sends an ANNOUNCE_UPDATE message when a claim changes, referencing its Announce ID.
-The claim's prefix and Instance are unchanged and the id stays live.
+The claim's prefix and Identity are unchanged and the id stays live.
 In-flight subscriptions under the claim are undisturbed, and continue onto a higher Epoch.
 
 ~~~
@@ -1470,7 +1470,7 @@ SUBSCRIBE Message {
   Message Length (i)
   Subscribe ID (i)
   Broadcast Path (s)
-  Instance (b)
+  Identity (b)
   Minted (8)
   Node (..)
   Track Name (s)
@@ -1499,7 +1499,7 @@ Anchor {
 A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
 
-**Instance**, **Minted**, and **Node**:
+**Identity**, **Minted**, and **Node**:
 As in [TRACK](#track).
 
 **Subscriber Priority**:
@@ -1629,7 +1629,7 @@ It is the first message on a Track Stream (0x6).
 TRACK Message {
   Message Length (i)
   Broadcast Path (s)
-  Instance (b)
+  Identity (b)
   Minted (8)
   Node (..)
   Track Name (s)
@@ -1639,10 +1639,11 @@ TRACK Message {
 **Broadcast Path**:
 The broadcast path of the track.
 
-**Instance** and **Minted**:
-The stream the subscriber expects, encoded as in [ANNOUNCE_START](#announce-start), or an empty Instance with Minted 0 for whichever wins the path; an empty Instance with Minted 1 is a PROTOCOL_VIOLATION.
-A publisher MUST refuse a request with UNROUTABLE when no claim of that Instance serves the path, so a request is never answered by a different stream than the one it named.
-A relay fills in the Instance and Minted of the claim it resolved when forwarding a request upstream; TRACKS, SUBSCRIBE, and DATAGRAMS carry them the same way.
+**Identity** and **Minted**:
+The stream the subscriber expects, encoded as in [ANNOUNCE_START](#announce-start), or an empty Identity with Minted 0 for whichever wins the path; an empty Identity with Minted 1 is a PROTOCOL_VIOLATION.
+An Identity longer than 256 bytes or not UTF-8 is a PROTOCOL_VIOLATION here as in ANNOUNCE_START.
+A publisher MUST refuse a request with UNROUTABLE when no claim of that Identity serves the path, so a request is never answered by a different stream than the one it named.
+A relay fills in the Identity and Minted of the claim it resolved when forwarding a request upstream; TRACKS, SUBSCRIBE, and DATAGRAMS carry them the same way.
 
 **Node**:
 The routing node that announces the claim serving the request (see [Routing](#routing)), as a [Node ID](#node-id-parameter) that may be marked: its Relay, followed by its Marked unless the Relay is 0, which names none and leaves the publisher to select one.
@@ -1724,7 +1725,7 @@ It is the first message on a Tracks Stream (0x8).
 TRACKS Message {
   Message Length (i)
   Broadcast Path (s)
-  Instance (b)
+  Identity (b)
   Minted (8)
   Node (..)
 }
@@ -1733,7 +1734,7 @@ TRACKS Message {
 **Broadcast Path**:
 The path of the Broadcast to list.
 
-**Instance**, **Minted**, and **Node**:
+**Identity**, **Minted**, and **Node**:
 As in [TRACK](#track).
 The listing is pinned to the stream that answers it and ends with that stream.
 
@@ -1800,7 +1801,7 @@ DATAGRAMS Message {
   Message Length (i)
   Subscribe ID (i)
   Broadcast Path (s)
-  Instance (b)
+  Identity (b)
   Minted (8)
   Node (..)
   Track Name (s)
@@ -2219,16 +2220,16 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field. An escaped `/` never splits a segment, so one namespace field is one segment wherever segments are counted or matched.
 - Hid claims with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Replaced ANNOUNCE_OK Active Count with an ordered SYNCED event (0x4), marking the initial set of the prefix it names without retaining claims that end before delivery.
-- Added `Instance` and `Epoch` to ANNOUNCE_START, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and DATAGRAMS. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance, which ANNOUNCE_UPDATE may raise. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
-- Another Instance at a path is another claim, started before the one it replaces ends.
-- An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
-- A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance says whether a receiver minted it, so no Instance text is reserved for minting.
+- Added `Identity` and `Epoch` to ANNOUNCE_START, and `Identity` to TRACK, TRACKS, SUBSCRIBE, and DATAGRAMS. The Identity is non-empty UTF-8 text of at most 256 bytes naming one continuous stream, and a path and an Identity name one Broadcast; the Epoch is a counter within one Identity, which ANNOUNCE_UPDATE may raise. A relay MAY move a subscription between claims with the same Identity, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Identities. Within one Identity only its highest Epoch is eligible. A request's Identity is empty when it pins none. Replaces the first-hop identity.
+- Another Identity at a path is another claim, started before the one it replaces ends.
+- An advertiser MAY announce a path it answers through a claim under the claim's Identity, so subscriptions resolved through the claim continue, and a claim still serving that Identity when the announcement ends restarts under a new one.
+- A receiver mints an Identity for each announcement a session of an earlier version delivers, and a `Minted` field beside every Identity says whether a receiver minted it, so no Identity text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session, unless the transport cannot tell the reset from the session closing. A finished Announce Stream means its endpoint is leaving.
 - ANNOUNCE_REQUEST (0x5) edits a set of prefixes, none at or below another, and ANNOUNCE_OK (0x6) marks where each edit takes effect; a subscriber sends one edit at a time. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints drop the claims within a removed prefix at the ANNOUNCE_OK. SYNCED names the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix.
 - Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays the claim entered or left a routing domain by: the announcing relay, then each scoped grant's sender and receiver. A relay takes no claim whose chain, with it appended, names a relay twice. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, the 0x2 flag one behind a draining node, and the 0x4 flag one behind a marked session, which a routing node announces under its marked Node ID, whose route is marked.
 - ANNOUNCE_END carries `Lost`: whether the claim's publisher withdrew it or the sender only lost its way to it.
-- Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay ID naming one run of a relay and a Marked byte that only a routing node's marked Node ID sets, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.
+- Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay ID naming one run of a relay and a Marked byte that only a routing node's marked Node ID sets, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Identity. Removed ANNOUNCE_OK's Hop ID.
 - Added ROUTE (0x7) and ROUTE_END (0x8): a routing node's route to another, a path vector of at most 32 hops, each a Node ID and the Session Number that node learned the route on, with a marked bit, a draining bit, a priority, and an additive cost. A node never uses a route whose Path names its relay, and ranks routes by drain, then priority, then cost.
 - Added DEAD (0x9): a node that loses a session names that hop once to each neighbour it sent a route through it, which ends those routes, unless a lower session it numbered to the same relay is still open, in which case it is never named. A node never uses a route through a session at or below the highest it knows closed between the same two relays, and may forget that floor once no route it holds names the pair.
 - Added DRAIN (0xA): names a node that sent a GOAWAY once per neighbour, and every route through it ranks draining.
@@ -2242,7 +2243,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.
 - Added `Above` to ANNOUNCE_START and ANNOUNCE_UPDATE: how many segments broader than the requested prefix a presented claim is. A claim presented at the requested prefix from above otherwise looked exactly like a claim at the prefix, so a broadcast nested under another's path could lose to the broader claim covering it, depending on the order a relay listed them in. Receivers take a claim to cover its path less its Above, and rank the claims of one prefix as one tier wherever each is shown.
-- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the claim's unavailability, then its drain, then its priority, its cost, and a Rendezvous Hash of the requested path and the claim's Instance, a standard FNV-1a. A claim shown at exactly the requested path, got on a session exchanging no routes, skips the hash, so the most recently received of those wins.
+- Replaced the shortest-path, Hop ID, Identity Hash, and Chain Hash tie-breaks with the claim's unavailability, then its drain, then its priority, its cost, and a Rendezvous Hash of the requested path and the claim's Identity, a standard FNV-1a. A claim shown at exactly the requested path, got on a session exchanging no routes, skips the hash, so the most recently received of those wins.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 
 ### Tracks {#changelog-07-tracks}

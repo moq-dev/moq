@@ -779,7 +779,7 @@ async fn rejoined_quiet_catalog_survives_cache_expiry() {
 /// A quiet track's latest group outlives the cache window across a publisher takeover.
 ///
 /// The publisher reconnects while a reader holds the catalog. A late reader through the
-/// new connection still needs the quiet catalog, even on a wire without instances where
+/// new connection still needs the quiet catalog, even on a wire without identities where
 /// the old reader ends with its route.
 #[kio::test]
 async fn taken_over_quiet_catalog_survives_cache_expiry() {

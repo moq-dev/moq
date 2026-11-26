@@ -49,7 +49,7 @@ mod idle_cancel_refetch;
 mod idle_session;
 mod ietf_keys;
 mod implementation;
-mod instance;
+mod identity;
 mod late_lower_group;
 mod late_tail_reader;
 mod lazy_discovery;

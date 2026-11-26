@@ -1,4 +1,4 @@
-//! [`Follower`]: an [`Export`] or a [`Release`](super::Release) driven by the publisher instances
+//! [`Follower`]: an [`Export`] or a [`Release`](super::Release) driven by the publisher identities
 //! serving its path, as a player is.
 
 use std::pin::Pin;
@@ -12,7 +12,7 @@ use super::{Export, catalog};
 use crate::catalog::CatalogFormat;
 use crate::container::Frame;
 
-/// What a [`Follower`] carries across its path's instances: an [`Export`], or a
+/// What a [`Follower`] carries across its path's identities: an [`Export`], or a
 /// [`Release`](super::Release) of a passthrough track.
 pub trait Followed: sealed::Followed {}
 
@@ -35,20 +35,20 @@ pub(super) mod sealed {
 		/// The source the export reads.
 		fn source(&self) -> &crate::Source;
 
-		/// The instance of the broadcast being exported, `None` for one not resolved through
+		/// The identity of the broadcast being exported, `None` for one not resolved through
 		/// an origin.
-		fn instance(&self) -> Option<&moq_net::Instance>;
+		fn identity(&self) -> Option<&moq_net::Identity>;
 
 		/// Why the publisher left, while the export still plays out what it buffered before
 		/// reporting it.
 		fn departed(&self) -> Option<&crate::Error>;
 
-		/// The instance carried on into while playing out went before serving: stop reading it,
+		/// The identity carried on into while playing out went before serving: stop reading it,
 		/// and report `err` once what was buffered has gone out.
 		fn depart(&mut self, err: crate::Error) -> crate::Result<()>;
 
 		/// Carry on into `broadcast`, whose `catalog` is subscribed, waiting up to `follow` for
-		/// another instance's program to become usable.
+		/// another identity's program to become usable.
 		fn followed(
 			&mut self,
 			broadcast: &moq_net::broadcast::Consumer,
@@ -75,8 +75,8 @@ pub(super) mod sealed {
 			Export::source(self)
 		}
 
-		fn instance(&self) -> Option<&moq_net::Instance> {
-			Export::instance(self)
+		fn identity(&self) -> Option<&moq_net::Identity> {
+			Export::identity(self)
 		}
 
 		fn departed(&self) -> Option<&crate::Error> {
@@ -102,49 +102,49 @@ pub(super) mod sealed {
 	}
 }
 
-/// What the instances say serves the exported path.
+/// What the identities say serves the exported path.
 enum Serving {
-	/// The instance being exported, with no change since the export carried on into it.
+	/// The identity being exported, with no change since the export carried on into it.
 	Ours,
-	/// Nothing: the instance handed out last went.
+	/// Nothing: the identity handed out last went.
 	Gone,
-	/// The instance being exported, handed out again since: it came back after a gap.
+	/// The identity being exported, handed out again since: it came back after a gap.
 	Return(moq_net::broadcast::Consumer),
-	/// Another stream: a broadcast of another instance.
+	/// Another stream: a broadcast of another identity.
 	Other(moq_net::broadcast::Consumer),
 	/// A return or another stream that refused its catalog: nothing is followed until the
 	/// next change.
 	Refused,
 }
 
-/// Subscribing to an instance's catalog, to carry the export on into it.
+/// Subscribing to an identity's catalog, to carry the export on into it.
 struct Subscription<E: catalog::Catalog> {
 	target: moq_net::broadcast::Consumer,
 	catalog: crate::catalog::Subscribing<E>,
 }
 
-/// Why the export awaits the first catalog snapshot of the instance it carried on into.
+/// Why the export awaits the first catalog snapshot of the identity it carried on into.
 enum Missing {
-	/// Carried on after the export ended with `end`: an instance that ends before it serves
+	/// Carried on after the export ended with `end`: an identity that ends before it serves
 	/// leaves the export waiting for another until `deadline`.
 	Ended { end: crate::Result<()>, deadline: Instant },
 	/// A replacement switched to mid-stream, which ending before it serves is a failure.
 	Switch,
-	/// The same instance returned while the export played out what it buffered after the
+	/// The same identity returned while the export played out what it buffered after the
 	/// publisher left with this error, which an end before it serves reports after all.
 	Return(crate::Error),
 }
 
 enum State<E: catalog::Catalog> {
 	/// Exporting, while switching to a replacement when stitching one, and awaiting the
-	/// catalog's first snapshot after carrying on into an instance.
+	/// catalog's first snapshot after carrying on into an identity.
 	Running {
 		awaiting: Option<Missing>,
 		switching: Option<Subscription<E>>,
 	},
-	/// The export ended with `end`, waiting until `deadline` for an instance to carry on into.
+	/// The export ended with `end`, waiting until `deadline` for an identity to carry on into.
 	Settling { end: crate::Result<()>, deadline: Instant },
-	/// The export ended with `end`, and an instance serving the path is being subscribed.
+	/// The export ended with `end`, and an identity serving the path is being subscribed.
 	Resuming {
 		subscription: Subscription<E>,
 		end: crate::Result<()>,
@@ -155,11 +155,11 @@ enum State<E: catalog::Catalog> {
 }
 
 /// Carries an [`Export`], or a [`Release`](super::Release) of a passthrough track, across its
-/// broadcast's returns, following the publisher instances serving its path through
+/// broadcast's returns, following the publisher identities serving its path through
 /// [`Following`](moq_net::origin::Following).
 ///
-/// The same stream (the same instance) returning within the [follow](Self::with_follow)
-/// continues the export. Another instance taking the path fails with
+/// The same stream (the same identity) returning within the [follow](Self::with_follow)
+/// continues the export. Another identity taking the path fails with
 /// [`Error::Replaced`](crate::Error::Replaced), unless [stitching](Self::with_stitch), which
 /// switches the program to it at once. Subscriptions are sticky, so without stitching a
 /// replaced publisher that stays up keeps the export until it ends.
@@ -170,17 +170,17 @@ enum State<E: catalog::Catalog> {
 /// PUBLISH_DONE has none for a lost route. Any other failure is the export's own and fails
 /// here at once.
 ///
-/// An instance that comes back is awaited until its catalog serves a first snapshot, with no
+/// An identity that comes back is awaited until its catalog serves a first snapshot, with no
 /// deadline but its own end. A return that refuses its catalog waits for the next change, and
 /// the follow running out reports that refusal. A refusal to resolve the path at all fails at
 /// once, as it does for every [`Following`](moq_net::origin::Following) reader.
 pub struct Follower<T: Followed = Export<crate::catalog::Consumer<()>>> {
 	export: T,
 	state: State<T::Ext>,
-	instances: moq_net::origin::Following,
+	identities: moq_net::origin::Following,
 	path: moq_net::Path,
 	serving: Serving,
-	/// Taking the instances on hand when built, which replay the route the export resolved.
+	/// Taking the identities on hand when built, which replay the route the export resolved.
 	priming: bool,
 	/// The origin closed, so nothing more is announced.
 	closed: bool,
@@ -197,7 +197,7 @@ impl<T: Followed> Follower<T> {
 	/// Fails when the export's origin can never cover its path.
 	pub fn new(export: T) -> crate::Result<Self> {
 		let source = export.source();
-		let instances = source.origin().follow(source.path(), None)?;
+		let identities = source.origin().follow(source.path(), None)?;
 		let mut follower = Self {
 			path: source.path().clone(),
 			export,
@@ -205,7 +205,7 @@ impl<T: Followed> Follower<T> {
 				awaiting: None,
 				switching: None,
 			},
-			instances,
+			identities,
 			serving: Serving::Ours,
 			priming: true,
 			closed: false,
@@ -214,22 +214,22 @@ impl<T: Followed> Follower<T> {
 			stitch: false,
 			timer: None,
 		};
-		// Take the instance on hand now, before a gap can fold into it: one handed out at once is
+		// Take the identity on hand now, before a gap can fold into it: one handed out at once is
 		// the route the export resolved, so only a later one is a return.
-		follower.poll_instances(&kio::Waiter::noop())?;
+		follower.poll_identities(&kio::Waiter::noop())?;
 		follower.priming = false;
 		Ok(follower)
 	}
 
-	/// Wait up to `follow` after the broadcast ends for the same instance, or with
+	/// Wait up to `follow` after the broadcast ends for the same identity, or with
 	/// [stitching](Self::with_stitch) a replacement, to come back. Defaults to
-	/// [`Duration::ZERO`], which carries on only into an instance already serving the path.
+	/// [`Duration::ZERO`], which carries on only into an identity already serving the path.
 	pub fn with_follow(mut self, follow: Duration) -> Self {
 		self.follow = follow;
 		self
 	}
 
-	/// Follow another publisher instance taking the path, as a full program switch (see
+	/// Follow another publisher identity taking the path, as a full program switch (see
 	/// [`Export::follow`]). Defaults to `false`.
 	pub fn with_stitch(mut self, stitch: bool) -> Self {
 		self.stitch = stitch;
@@ -259,7 +259,7 @@ impl<T: Followed> Follower<T> {
 					mut awaiting,
 					mut switching,
 				} => {
-					self.poll_instances(waiter)?;
+					self.poll_identities(waiter)?;
 					if let Some(missing) = self.poll_switch(waiter, &mut switching)? {
 						awaiting = Some(missing);
 					}
@@ -276,7 +276,7 @@ impl<T: Followed> Follower<T> {
 						}
 						Poll::Ready(end) => end.map(|_| ()),
 						Poll::Pending => {
-							// An instance that goes with its catalog still open never served.
+							// An identity that goes with its catalog still open never served.
 							if let Some(missing) = awaiting.take_if(|_| matches!(self.serving, Serving::Gone)) {
 								self.state = self.withdrawn(missing)?;
 								continue;
@@ -294,7 +294,7 @@ impl<T: Followed> Follower<T> {
 							return Poll::Pending;
 						}
 					};
-					// Ending abandons the catalog switch; a return of this instance reuses its source.
+					// Ending abandons the catalog switch; a return of this identity reuses its source.
 					if switching.is_some() {
 						self.export.source().priority(0)?;
 					}
@@ -320,7 +320,7 @@ impl<T: Followed> Follower<T> {
 					};
 				}
 				State::Settling { end, deadline } => {
-					self.poll_instances(waiter)?;
+					self.poll_identities(waiter)?;
 					let target = match &self.serving {
 						Serving::Return(target) => Some(target.clone()),
 						Serving::Other(target) if self.stitch => Some(target.clone()),
@@ -346,10 +346,10 @@ impl<T: Followed> Follower<T> {
 					end,
 					deadline,
 				} => {
-					// Whatever the subscription waits on, the instances say what serves the path
+					// Whatever the subscription waits on, the identities say what serves the path
 					// now: rather than sit out one that went, decide afresh from there.
-					if self.poll_instances(waiter)? {
-						tracing::debug!(path = %self.path, "instance changed while subscribing, deciding again");
+					if self.poll_identities(waiter)? {
+						tracing::debug!(path = %self.path, "identity changed while subscribing, deciding again");
 						self.state = State::Settling { end, deadline };
 						continue;
 					}
@@ -361,7 +361,7 @@ impl<T: Followed> Follower<T> {
 								switching: None,
 							};
 						}
-						// Refused, or gone before the instances say so: nothing is followed until
+						// Refused, or gone before the identities say so: nothing is followed until
 						// the next change. Only the follow running out reports a refusal.
 						Poll::Ready(Err(err)) => {
 							tracing::warn!(path = %self.path, %err, "catalog subscription failed, still waiting");
@@ -386,10 +386,10 @@ impl<T: Followed> Follower<T> {
 	}
 
 	/// Drive a switch to the replacement serving the path when stitching, or a carry on into the
-	/// same instance returning while the export plays out what it buffered after the publisher
+	/// same identity returning while the export plays out what it buffered after the publisher
 	/// left, returning why the export awaits the first snapshot once it carried on.
 	///
-	/// When stitching, the old instance keeps playing until the replacement's catalog is
+	/// When stitching, the old identity keeps playing until the replacement's catalog is
 	/// subscribed, however long that takes, and a replacement that goes first is no switch. The
 	/// old program's track subscriptions yield priority while acquiring the replacement.
 	///
@@ -421,7 +421,7 @@ impl<T: Followed> Follower<T> {
 					self.export.source().priority(0)?;
 				}
 				None => {
-					tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+					tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new identity");
 					self.export.source().priority(-1)?;
 				}
 			}
@@ -434,9 +434,9 @@ impl<T: Followed> Follower<T> {
 				self.carry_on(&subscription.target, catalog)?;
 				Ok(Some(missing.map_or(Missing::Switch, Missing::Return)))
 			}
-			// Gone before the instances say so: no switch until the next change.
+			// Gone before the identities say so: no switch until the next change.
 			Poll::Ready(Err(err)) if left(&err) => {
-				tracing::warn!(path = %self.path, %err, "instance went before its catalog subscribed");
+				tracing::warn!(path = %self.path, %err, "identity went before its catalog subscribed");
 				self.serving = Serving::Refused;
 				self.abandon(switching)
 			}
@@ -474,25 +474,25 @@ impl<T: Followed> Follower<T> {
 		self.failed = None;
 		tracing::info!(
 			path = %self.path,
-			instance = ?self.export.instance(),
+			identity = ?self.export.identity(),
 			"exporting broadcast"
 		);
 		Ok(())
 	}
 
 	/// Apply every change on hand, returning whether any came through.
-	fn poll_instances(&mut self, waiter: &kio::Waiter) -> crate::Result<bool> {
+	fn poll_identities(&mut self, waiter: &kio::Waiter) -> crate::Result<bool> {
 		let mut any = false;
 		while !self.closed {
-			match self.instances.poll_available(waiter) {
+			match self.identities.poll_available(waiter) {
 				Poll::Ready(Ok(Some(broadcast))) => {
-					self.serving = match self.export.instance() {
-						// A broadcast not resolved through an origin has no instance to match,
+					self.serving = match self.export.identity() {
+						// A broadcast not resolved through an origin has no identity to match,
 						// so only the broadcast being exported is its own.
 						None if broadcast.is_clone(&self.export.source().broadcast()) => Serving::Ours,
 						// Even the same broadcast handed out again is a return: the origin hands
 						// one out only for an announcement that brings it.
-						Some(instance) if broadcast.info().instance.as_ref() == Some(instance) => match self.priming {
+						Some(identity) if broadcast.info().identity.as_ref() == Some(identity) => match self.priming {
 							true => Serving::Ours,
 							false => Serving::Return(broadcast),
 						},
@@ -517,7 +517,7 @@ impl<T: Followed> Follower<T> {
 		}
 	}
 
-	/// Where the export goes once the instance it carried on into ends before its first snapshot.
+	/// Where the export goes once the identity it carried on into ends before its first snapshot.
 	fn withdrawn(&mut self, missing: Missing) -> crate::Result<State<T::Ext>> {
 		tracing::warn!(path = %self.path, "broadcast ended before serving its catalog");
 		Ok(match missing {

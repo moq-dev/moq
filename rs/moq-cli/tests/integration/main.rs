@@ -6,7 +6,7 @@
 mod auth_serve;
 mod export;
 mod import;
-mod instances;
+mod identities;
 mod listen;
 mod report;
 mod rtsp;

@@ -105,7 +105,7 @@ export class Connection implements Session {
 	readonly peerImplementation: Promise<string | undefined>;
 
 	/**
-	 * Creates a new Connection instance.
+	 * Creates a new Connection identity.
 	 * @param url - The URL of the connection
 	 * @param quic - The WebTransport session
 	 * @param control - The SETUP stream, which then carries GOAWAY

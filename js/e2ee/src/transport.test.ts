@@ -48,7 +48,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 	}
 }
 
-// Whether the wire carries the route's instance, and whether a frame's time is its group's
+// Whether the wire carries the route's identity, and whether a frame's time is its group's
 // key, as on moq-transport, rather than its own timestamp. Neither is authenticated, so the
 // frames open either way.
 const transports = [
@@ -65,7 +65,7 @@ for (const [name, protocol, routed, keyed] of transports) {
 		const path = await cred.path("meeting.hang");
 		const broadcastRoute = publisher.route(path, {
 			hidden: true,
-			instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
+			identity: { id: Epoch.identity(generation.epoch), epoch: 0n },
 		});
 		const broadcast = broadcastRoute.broadcast;
 		const video = defined(
@@ -126,7 +126,7 @@ for (const [name, protocol] of [
 		const path = await cred.path("meeting.hang");
 		const broadcastRoute = publisher.route(path, {
 			hidden: true,
-			instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
+			identity: { id: Epoch.identity(generation.epoch), epoch: 0n },
 		});
 		const broadcast = broadcastRoute.broadcast;
 		const audio = defined(

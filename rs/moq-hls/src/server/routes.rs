@@ -48,22 +48,22 @@ impl Server {
 			Resource::Master => master(self, broadcast, query).await,
 			Resource::Manifest => manifest(self, broadcast, query).await,
 			Resource::Media {
-				instance,
+				identity,
 				kind,
 				rendition,
-			} => media(self, At::new(route, instance, *kind, rendition), query).await,
+			} => media(self, At::new(route, identity, *kind, rendition), query).await,
 			Resource::Init {
-				instance,
+				identity,
 				kind,
 				rendition,
 				hash,
-			} => init(self, At::new(route, instance, *kind, rendition), hash).await,
+			} => init(self, At::new(route, identity, *kind, rendition), hash).await,
 			Resource::Segment {
-				instance,
+				identity,
 				kind,
 				rendition,
 				segment: id,
-			} => segment(self, At::new(route, instance, *kind, rendition), id).await,
+			} => segment(self, At::new(route, identity, *kind, rendition), id).await,
 		}
 	}
 }
@@ -188,20 +188,20 @@ impl http_body::Body for Demanded {
 	}
 }
 
-/// A rendition of one publisher instance, as an instance-scoped URL names it.
+/// A rendition of one publisher identity, as an identity-scoped URL names it.
 #[derive(Clone, Copy)]
 struct At<'a> {
 	route: &'a Route,
-	instance: &'a str,
+	identity: &'a str,
 	kind: Kind,
 	rendition: &'a str,
 }
 
 impl<'a> At<'a> {
-	fn new(route: &'a Route, instance: &'a str, kind: Kind, rendition: &'a str) -> Self {
+	fn new(route: &'a Route, identity: &'a str, kind: Kind, rendition: &'a str) -> Self {
 		Self {
 			route,
-			instance,
+			identity,
 			kind,
 			rendition,
 		}
@@ -210,7 +210,7 @@ impl<'a> At<'a> {
 
 /// Resolve a rendition, waiting for the catalog to populate.
 async fn rendition_for(server: &Server, at: At<'_>) -> crate::Result<Option<Arc<Rendition>>> {
-	let Some(broadcaster) = server.instance(&at.route.broadcast, at.instance).await else {
+	let Some(broadcaster) = server.identity(&at.route.broadcast, at.identity).await else {
 		return Ok(None);
 	};
 	if let Some(include) = &at.route.include {
@@ -248,7 +248,7 @@ fn media_result(result: crate::Result<Option<Bytes>>, server: &Server) -> Respon
 
 fn media_bytes(body: Bytes, server: &Server) -> Response {
 	// Init/segment bytes never change while their URL is listed, but a run spliced into one
-	// instance without a generation (see `Broadcaster::set_generation`) can repeat the old run's
+	// identity without a generation (see `Broadcaster::set_generation`) can repeat the old run's
 	// segment numbers and pts with different media. Cap shared caching at the playlist window -
 	// every concurrent viewer of the live window still hits the cache, while a stale run's bytes
 	// age out as fast as the window that stopped listing them.
@@ -293,11 +293,11 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	/// The instance each test's catalog broadcast announces, and so the instance its URLs name.
+	/// The identity each test's catalog broadcast announces, and so the identity its URLs name.
 	const RUN: &str = "01920000-0000-7000-8000-000000000000";
 
 	fn run() -> moq_net::origin::RouteOptions {
-		moq_net::origin::RouteOptions::default().with_instance(RUN.parse().unwrap(), 0)
+		moq_net::origin::RouteOptions::default().with_identity(RUN.parse().unwrap(), 0)
 	}
 
 	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
@@ -492,8 +492,8 @@ mod tests {
 	}
 
 	/// A restarted publisher gets URLs of its own, whose numbering starts over: the master lists
-	/// the replacement, while a player already on the old instance keeps its playlist until that
-	/// instance's broadcast closes.
+	/// the replacement, while a player already on the old identity keeps its playlist until that
+	/// identity's broadcast closes.
 	#[tokio::test(start_paused = true)]
 	async fn a_restart_lists_the_replacement_under_its_own_urls() {
 		let origin = moq_tokio::origin::spawn();
@@ -510,11 +510,11 @@ mod tests {
 		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
 		wait_listed(&app, &old_playlist, "seg/8343e7cd.0.m4s").await;
 
-		let next = moq_net::Instance::random();
+		let next = moq_net::Identity::random();
 		let new = origin
 			.route(
 				"live",
-				moq_net::origin::RouteOptions::default().with_instance(next.clone(), 0),
+				moq_net::origin::RouteOptions::default().with_identity(next.clone(), 0),
 			)
 			.expect("publish");
 		let (_new_catalog, _, _new_track, mut new_media) =
@@ -534,14 +534,14 @@ mod tests {
 		drop((old_catalog, old_track, old_media, old));
 		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
-			assert!(kio::clock::now() < deadline, "the closed instance kept serving");
+			assert!(kio::clock::now() < deadline, "the closed identity kept serving");
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 		assert_eq!(status(&app, &old_segment).await, StatusCode::NOT_FOUND);
 		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
 	}
 
-	/// A replaced instance's recording ends at the segments it listed before the takeover, even
+	/// A replaced identity's recording ends at the segments it listed before the takeover, even
 	/// while its publisher keeps sending, and the replacement records at once without waiting
 	/// on that drain.
 	#[tokio::test(start_paused = true)]
@@ -563,11 +563,11 @@ mod tests {
 		// Held, not read, until the replacement has recorded.
 		let mut old_segments = old_rendition.segments();
 
-		let next = moq_net::Instance::random();
+		let next = moq_net::Identity::random();
 		let new = origin
 			.route(
 				"live",
-				moq_net::origin::RouteOptions::default().with_instance(next.clone(), 0),
+				moq_net::origin::RouteOptions::default().with_identity(next.clone(), 0),
 			)
 			.expect("publish");
 		let (_new_catalog, _, _new_track, mut new_media) =
@@ -577,7 +577,7 @@ mod tests {
 		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		let successor = loop {
 			let current = server.broadcaster("live").await.expect("announced");
-			if current.instance().as_ref() == next.as_str() {
+			if *current.token() == crate::export::token(&next) {
 				break current;
 			}
 			assert!(kio::clock::now() < deadline, "the replacement was never served");

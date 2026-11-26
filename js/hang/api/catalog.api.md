@@ -59,7 +59,7 @@ export const AudioConfigSchema: ZodMiniObject<{
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	description: ZodMiniOptional<ZodMiniString<string>>;
 	enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
 	layout: ZodMiniOptional<ZodMiniString<string>>;
@@ -91,7 +91,7 @@ export const AudioSchema: ZodMiniObject<{
 		delay?: number & $brand<"u53"> | undefined;
 		description?: string | undefined;
 		enabled?: boolean | undefined;
-		instance?: ReferenceInstance | undefined;
+		identity?: ReferenceIdentity | undefined;
 		jitter?: number & $brand<"u53"> | undefined;
 		label?: string | undefined;
 		layout?: string | undefined;
@@ -110,7 +110,7 @@ export const BinaryConfigSchema: ZodMiniObject<{
 	bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	mime: ZodMiniOptional<ZodMiniString<string>>;
 	mode: ZodMiniString<string>;
@@ -123,7 +123,7 @@ export const BinarySchema: ZodMiniObject<{
 		bitrate?: number & $brand<"u53"> | undefined;
 		broadcast?: RelativeBroadcast | undefined;
 		delay?: number & $brand<"u53"> | undefined;
-		instance?: ReferenceInstance | undefined;
+		identity?: ReferenceIdentity | undefined;
 		jitter?: number & $brand<"u53"> | undefined;
 		mime?: string | undefined;
 		mode: string;
@@ -228,10 +228,10 @@ export type Include = infer<typeof IncludeSchema>;
 
 export const IncludeSchema: ZodMiniObject<{
 	broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 }, $strip>;
 
-export const InstanceSchema: ZodMiniType<ReferenceInstance, string>;
+export const IdentitySchema: ZodMiniType<ReferenceIdentity, string>;
 
 export type Json = infer<typeof JsonSchema>;
 
@@ -241,7 +241,7 @@ export const JsonConfigSchema: ZodMiniObject<{
 	bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	mode: ZodMiniString<string>;
 	schema: ZodMiniOptional<ZodMiniString<string>>;
@@ -254,7 +254,7 @@ export const JsonSchema: ZodMiniObject<{
 		bitrate?: number & $brand<"u53"> | undefined;
 		broadcast?: RelativeBroadcast | undefined;
 		delay?: number & $brand<"u53"> | undefined;
-		instance?: ReferenceInstance | undefined;
+		identity?: ReferenceIdentity | undefined;
 		jitter?: number & $brand<"u53"> | undefined;
 		mode: string;
 		schema?: string | undefined;
@@ -303,8 +303,8 @@ export const ProjectionSchema: ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<
 	kind: string;
 }>>]>;
 
-export type ReferenceInstance = string & {
-	readonly _brand: "instance";
+export type ReferenceIdentity = string & {
+	readonly _brand: "identity";
 };
 
 export type RelativeBroadcast = string & {
@@ -338,7 +338,7 @@ export const RootSchema: ZodMiniObject<{
 			delay?: number & $brand<"u53"> | undefined;
 			description?: string | undefined;
 			enabled?: boolean | undefined;
-			instance?: ReferenceInstance | undefined;
+			identity?: ReferenceIdentity | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
 			label?: string | undefined;
 			layout?: string | undefined;
@@ -354,7 +354,7 @@ export const RootSchema: ZodMiniObject<{
 			bitrate?: number & $brand<"u53"> | undefined;
 			broadcast?: RelativeBroadcast | undefined;
 			delay?: number & $brand<"u53"> | undefined;
-			instance?: ReferenceInstance | undefined;
+			identity?: ReferenceIdentity | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
 			mime?: string | undefined;
 			mode: string;
@@ -366,7 +366,7 @@ export const RootSchema: ZodMiniObject<{
 	}, $strip>>;
 	include: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 		broadcast: RelativeBroadcast;
-		instance?: ReferenceInstance | undefined;
+		identity?: ReferenceIdentity | undefined;
 	}>, Record<string, unknown>>>>;
 	json: ZodMiniOptional<ZodMiniObject<{
 		tracks: ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
@@ -374,7 +374,7 @@ export const RootSchema: ZodMiniObject<{
 			bitrate?: number & $brand<"u53"> | undefined;
 			broadcast?: RelativeBroadcast | undefined;
 			delay?: number & $brand<"u53"> | undefined;
-			instance?: ReferenceInstance | undefined;
+			identity?: ReferenceIdentity | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
 			mode: string;
 			schema?: string | undefined;
@@ -410,7 +410,7 @@ export const RootSchema: ZodMiniObject<{
 			};
 			delay?: number & $brand<"u53"> | undefined;
 			format: string;
-			instance?: ReferenceInstance | undefined;
+			identity?: ReferenceIdentity | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
 			label?: string | undefined;
 			lang?: string | undefined;
@@ -481,7 +481,7 @@ export const RootSchema: ZodMiniObject<{
 			displayAspectWidth?: number & $brand<"u53"> | undefined;
 			enabled?: boolean | undefined;
 			framerate?: number | undefined;
-			instance?: ReferenceInstance | undefined;
+			identity?: ReferenceIdentity | undefined;
 			interlaced?: boolean | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
 			label?: string | undefined;
@@ -552,7 +552,7 @@ export const TextConfigSchema: ZodMiniObject<{
 	}>>]>>;
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	format: ZodMiniString<string>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
 	lang: ZodMiniOptional<ZodMiniString<string>>;
@@ -585,7 +585,7 @@ export const TextSchema: ZodMiniObject<{
 		};
 		delay?: number & $brand<"u53"> | undefined;
 		format: string;
-		instance?: ReferenceInstance | undefined;
+		identity?: ReferenceIdentity | undefined;
 		jitter?: number & $brand<"u53"> | undefined;
 		label?: string | undefined;
 		lang?: string | undefined;
@@ -697,7 +697,7 @@ export const Video: {
 			displayAspectWidth?: number & $brand<"u53"> | undefined;
 			enabled?: boolean | undefined;
 			framerate?: number | undefined;
-			instance?: ReferenceInstance | undefined;
+			identity?: ReferenceIdentity | undefined;
 			interlaced?: boolean | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
 			label?: string | undefined;
@@ -792,7 +792,7 @@ export const VideoConfigSchema: ZodMiniObject<{
 	displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
 	framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
+	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 	interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
@@ -882,7 +882,7 @@ export const VideoSchema: ZodMiniObject<{
 		displayAspectWidth?: number & $brand<"u53"> | undefined;
 		enabled?: boolean | undefined;
 		framerate?: number | undefined;
-		instance?: ReferenceInstance | undefined;
+		identity?: ReferenceIdentity | undefined;
 		interlaced?: boolean | undefined;
 		jitter?: number & $brand<"u53"> | undefined;
 		label?: string | undefined;

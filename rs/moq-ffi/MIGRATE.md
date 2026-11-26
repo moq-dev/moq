@@ -21,10 +21,10 @@ MoqSocketEndpoint, MoqSocketIncomingTcp, MoqSocketIncomingTrack, MoqSocketTcpStr
 
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
-`MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another instance taking a path over keeps it present, and a route's cost changing is not reported.
-Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new instance.
+`MoqAnnounceEvent` is `Present { announce }` or `Absent { announce }`. `Start`, `Update`, `End`, `Restart` and `Takeover` (with its `predecessor`) are gone: another identity taking a path over keeps it present, and a route's cost changing is not reported.
+Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Where you requested the path again on `Restart`, hold `MoqOriginConsumer::follow(path)` and await `available()` for each new identity.
 
-`MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `instance`, once another instance takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
+`MoqFollowing::available()` returns `Option<Arc<MoqBroadcastConsumer>>`: `None` once the path goes offline (or, for a follow pinned to an `identity`, once another identity takes it over), then the next broadcast when something serves the path again. The first call never returns `None`. Handle `None` as offline: drop what you read from the last broadcast and call `available()` again.
 
 ### Publishing goes through one `MoqRoute` handle
 
@@ -34,9 +34,9 @@ Map `Start` to `Present` and `End` to `Absent`, and drop `Update` handling. Wher
 - `MoqPublication::announce(MoqAnnounceRoute)` is `announce()`, and re-pricing is `set_cost(cost)`. `unannounce()` is `withdraw()`.
 - `MoqOriginRequests::requested_broadcast()` is `requested()`, which returns `None` once the origin closes instead of `Closed`. A call after `cancel()` fails with `Cancelled`.
 - `MoqBroadcastRequest::prepare()` then `MoqBroadcastPrepared::publish()` is `MoqBroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
-- `MoqRoute::instance_id()` is the stream's instance, minted at creation and kept across `withdraw` and `announce` (Kotlin names it `instance()`; the Python, Go and Swift wrappers expose `instance`). It is not `instance()` because the generated C and C++ objects reserve that name.
+- `MoqRoute::identity()` is the stream's identity, minted at creation and kept across `withdraw` and `announce` (the Python, Go and Swift wrappers expose it as `identity`).
 
-`MoqAnnounceRoute` is `MoqRouteOptions { hidden, cost, instance, epoch }`, given once at creation. A route is visible at once unless `hidden`; pass `hidden: true` and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing a different one is a new route.
+`MoqAnnounceRoute` is `MoqRouteOptions { hidden, cost, identity, epoch }`, given once at creation. A route is visible at once unless `hidden`; pass `hidden: true` and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `identity` is fixed for the route's lifetime: announcing a different one is a new route.
 
 Hold the `MoqRoute` for as long as the broadcast should stay announced. Dropping or cancelling it retracts the route, while `MoqBroadcastProducer::close()` still ends both; a broadcast handle alone no longer keeps it announced.
 
@@ -160,10 +160,10 @@ settings. Regenerate bindings and rebuild the native library together.
 
 ### `announce` takes a `MoqAnnounceRoute`
 
-`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, instance, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, identity, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
 `MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
-Leave `instance` null to keep the one the broadcast minted; name a stable one only for a publisher that continues its group sequences across restarts, raising `epoch` on each.
-To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream.
+Leave `identity` null to keep the one the broadcast minted; name a stable one only for a publisher that continues its group sequences across restarts, raising `epoch` on each.
+To re-announce an observed route, copy its `cost`, and its `identity` only when forwarding that same stream.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -201,9 +201,9 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 
 ### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-Rename `MoqOriginConsumer::request_broadcast(path)` to `request(path, instance)`, `announced_broadcast(path)` to `follow(path, instance)`, and `MoqAnnouncedBroadcast` to `MoqFollowing`.
-`instance` defaults to null in every generated binding, accepting whichever publisher instance serves the path; pass one to refuse every other.
-`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with `MoqError::Unroutable` only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+Rename `MoqOriginConsumer::request_broadcast(path)` to `request(path, identity)`, `announced_broadcast(path)` to `follow(path, identity)`, and `MoqAnnouncedBroadcast` to `MoqFollowing`.
+`identity` defaults to null in every generated binding, accepting whichever publisher identity serves the path; pass one to refuse every other.
+`request` resolves one publisher identity: it retries as the routes covering the path change, and fails with `MoqError::Unroutable` only once discovery has synced with no covering route. `follow` hands out each identity that serves the path in turn.
 
 ### A client asks only about what it watches (#6165)
 
@@ -216,11 +216,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 
-### Catalog references carry their instance
+### Catalog references carry their identity
 
-`MoqVideo` and `MoqAudio` gain `instance`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `instance: None`.
-`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `instance` from it.
-Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another instance with `Mux`.
+`MoqVideo` and `MoqAudio` gain `identity`, the publisher identity their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `identity: None`.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `identity` from it.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another identity with `Mux`.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -236,7 +236,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
-`MoqBroadcastRequest::accept` is replaced by `prepare()`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+`MoqBroadcastRequest::accept` is replaced by `prepare()`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh identity of its own and returns its producer.
 Dropping a prepared answer unpublished refuses the request.
 
 ### `MoqTrackInfo` gains `compression` (#5928)
@@ -295,10 +295,10 @@ let bandwidth = session.recv_bandwidth();
 let rate = bandwidth.as_ref().and_then(|b| b.rate());
 ```
 
-### `available()` waits for the next publisher instance (#5700)
+### `available()` waits for the next publisher identity (#5700)
 
 `MoqFollowing::available` returns the broadcast serving the path on its first call, as before.
-Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
+Each later call waits for the next identity to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)
 
@@ -342,7 +342,7 @@ Handle the new case where you match on errors.
 
 `MoqAnnounceConsumer::next` returns `Option<MoqAnnounceEvent>`: `Start`, `Update`, `End`, or `Restart`, each carrying a `MoqAnnounce` record (`prefix`, `captures`, `route`).
 The `MoqAnnounceUpdate` object and its `active()` are gone.
-`Restart` means another publisher instance now serves the prefix: request the path again.
+`Restart` means another publisher identity now serves the prefix: request the path again.
 Subscribe on `Start` or `Restart` where you checked `active()`.
 
 ### "Epoch" means only the publisher epoch (#5146)

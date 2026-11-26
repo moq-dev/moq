@@ -12,7 +12,7 @@ import type * as broadcast from "./broadcast.ts";
 import type * as datagram from "./datagram.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { WireRoute } from "./hop.ts";
-import type * as Instance from "./instance.ts";
+import type * as Identity from "./identity.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
@@ -84,7 +84,7 @@ export interface Route {
 	/** The metadata the route is advertised with, or undefined while hidden. */
 	readonly info: WireRoute | undefined;
 	/**
-	 * Advertise the route with `info` as given, as a session's update does: a named instance
+	 * Advertise the route with `info` as given, as a session's update does: a named identity
 	 * replaces the route's, which restarts its readers; otherwise it keeps the route's own.
 	 * Announces a hidden route.
 	 */
@@ -102,10 +102,10 @@ export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
 	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there.
-	 * A request naming an `instance` only matches a route serving it. */
-	local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined;
-	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `instance`. */
-	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
+	 * A request naming an `identity` only matches a route serving it. */
+	local(path: Path.Valid, identity?: Identity.Valid): broadcast.Consumer | undefined;
+	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `identity`. */
+	demand(path: Path.Valid, identity?: Identity.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean;
 	/** The root-relative prefixes the handle's scope admits; unset for every path. */
@@ -116,7 +116,7 @@ export interface OriginConsumer {
 
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
-	readonly identity: object;
+	readonly ref: object;
 	readonly route: WireRoute;
 	/** The absolute prefix a claim raised to its handle's root is filed at; unset when filed at its row. */
 	readonly filed?: Path.Valid;
@@ -126,19 +126,19 @@ export interface Advertised {
 	readonly order?: number;
 }
 
-/** What names a stream: an advertisement, and the instance its route serves. */
+/** What names a stream: an advertisement, and the identity its route serves. */
 export interface Served {
-	readonly identity: object;
-	readonly route: Pick<WireRoute, "instance" | "epoch">;
+	readonly ref: object;
+	readonly route: Pick<WireRoute, "identity" | "epoch">;
 }
 
 /**
- * Whether two advertisements serve one stream: the same route instance, or, for a route not
+ * Whether two advertisements serve one stream: the same route identity, or, for a route not
  * yet named one, the same advertisement.
  */
-export function sameInstance(a: Served, b: Served): boolean {
-	if (a.route.instance !== undefined || b.route.instance !== undefined) return a.route.instance === b.route.instance;
-	return a.identity === b.identity;
+export function sameIdentity(a: Served, b: Served): boolean {
+	if (a.route.identity !== undefined || b.route.identity !== undefined) return a.route.identity === b.route.identity;
+	return a.ref === b.ref;
 }
 
 /**
@@ -151,10 +151,10 @@ export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 /** The protocol-facing operations behind an established session. */
 export interface Established {
 	/**
-	 * Consume `path` from the session: the route it ranks best, or with `instance`, the best
-	 * route of that instance alone, as a request pinned to it resolves.
+	 * Consume `path` from the session: the route it ranks best, or with `identity`, the best
+	 * route of that identity alone, as a request pinned to it resolves.
 	 */
-	consume(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer;
+	consume(path: Path.Valid, identity?: Identity.Valid): broadcast.Consumer;
 	/**
 	 * Whether the peer refuses an announce request overlapping one it still holds, so
 	 * discovery never holds two where one covers the other.

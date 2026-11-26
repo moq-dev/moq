@@ -18,7 +18,7 @@ import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
-import * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
@@ -999,11 +999,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const path = Path.from("test");
-	// One publisher instance, so the two compete on cost alone.
-	const instance = Instance.random();
-	const localRoute = origin.route(path, { instance: { id: instance, epoch: 0n }, cost: 5n });
+	// One publisher identity, so the two compete on cost alone.
+	const identity = Identity.random();
+	const localRoute = origin.route(path, { identity: { id: identity, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
-	const dynamic = origin.claim(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
+	const dynamic = origin.claim(path, { identity: { id: identity, epoch: 0n }, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1790,7 +1790,7 @@ test("integration: a follower waits for a late publisher", async () => {
 	if (!active) throw new Error("expected an active broadcast");
 	expect(await active.track("video").subscribe().ordered().readString()).toBe("hello");
 
-	// It goes away; the request stays open for the next publisher instance.
+	// It goes away; the request stays open for the next publisher identity.
 	first.close();
 	await servingFirst;
 	await waitFor(watched.active, (b) => b === undefined);
@@ -2463,7 +2463,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			const front = request.active.peek();
 
 			// The listing leaves. Its announce request stays open for the request beneath it rather
-			// than handing the route to a narrower one, so the instance never changes.
+			// than handing the route to a narrower one, so the identity never changes.
 			listing.close();
 			await clock.advance(Duration.millis(2000));
 			expect([started, ended]).toEqual([1, 0]);
@@ -2580,7 +2580,7 @@ test("origin: a blind request ends with its session, and the next session answer
 		const first = await waitFor(request.active, (b) => b !== undefined);
 
 		// The answering session dies once healthy, and the request it answered ends with it: the
-		// next session is another publisher instance as far as anything here can tell.
+		// next session is another publisher identity as far as anything here can tell.
 		await clock.advance(Duration.millis(1000));
 		servers[0]?.session.close();
 		await Promise.resolve(request.closed);
@@ -2807,7 +2807,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 	},
 );
 
-// Without an instance on the wire nothing says the job's route continues the claim's stream.
+// Without an identity on the wire nothing says the job's route continues the claim's stream.
 test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 	"publishing a job still resets its first subscribe on %s",
 	async (protocol) => {
@@ -2845,7 +2845,7 @@ test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 	},
 );
 
-// On lite-07 a job's exact route continues its claim's minted instance, so a reader resolved
+// On lite-07 a job's exact route continues its claim's minted identity, so a reader resolved
 // through the claim keeps its broadcast and its subscription once that route lands.
 test.each(["request", "follow"] as const)(
 	"a job's route continues a reader resolved through its claim (%s)",
@@ -2878,7 +2878,7 @@ test.each(["request", "follow"] as const)(
 
 		// Written once the job's route is listed at the reader: the same subscription carries it.
 		const { job, chat } = await serving;
-		expect(job.instance).toBe(handle.instance);
+		expect(job.identity).toBe(handle.identity);
 		expect(await listing.next()).toMatchObject({ kind: "present", prefix: path });
 		chat.writeFrame(textFrame("later", Timestamp.fromMillis(1)));
 		expect(await track.readString()).toBe("later");

@@ -25,7 +25,7 @@ mod goaway;
 mod group;
 pub(crate) mod ietf;
 mod info;
-mod instance;
+mod identity;
 pub mod message;
 mod parameters;
 pub(crate) mod priority;

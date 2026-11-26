@@ -7,8 +7,8 @@
 //! that skips a span (a gap) or a client that joins mid-window never mis-addresses a segment
 //! the way positional numbering would.
 //!
-//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`), under the publisher instance
-//! it lists (`@<instance>/<kind>/<rendition>/...`). The instance and rendition name are
+//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`), under the publisher identity
+//! it lists (`@<identity>/<kind>/<rendition>/...`). The identity and rendition name are
 //! each percent-encoded as one path segment, using the HLS master's set, and the finished URL
 //! is then XML-escaped, so a name containing `/` still resolves under the broadcast. The
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
@@ -65,8 +65,8 @@ pub(crate) struct Representation {
 
 /// Everything a manifest render needs; built by `Broadcaster::manifest`.
 pub(crate) struct Manifest {
-	/// The publisher instance every representation's URLs are under.
-	pub instance: Arc<str>,
+	/// The publisher identity every representation's URLs are under.
+	pub identity: Arc<str>,
 	/// The wall-clock time of timeline `pts` 0 (`MPD@availabilityStartTime`). Required while
 	/// live (`type="dynamic"`); ignored once [`finished`](Self::finished).
 	pub availability_start: Option<Wall>,
@@ -137,13 +137,13 @@ fn max_segment_duration<'a>(representations: impl Iterator<Item = &'a Representa
 		.max(1)
 }
 
-fn render_representation(out: &mut String, instance: &str, rep: &Representation, query: Option<&str>) {
+fn render_representation(out: &mut String, identity: &str, rep: &Representation, query: Option<&str>) {
 	let kind = rep.kind.as_str();
 	// The id is the raw name. The URL encodes it first, as one path segment: a slash left
 	// raw would name a different broadcast, and XML-escaping before encoding would turn `&`
-	// into `&amp;` inside that segment. Only the instance and name are encoded, leaving `$Time$` literal.
+	// into `&amp;` inside that segment. Only the identity and name are encoded, leaving `$Time$` literal.
 	let id = escape(&rep.name);
-	let instance = utf8_percent_encode(instance, PATH_SEGMENT);
+	let identity = utf8_percent_encode(identity, PATH_SEGMENT);
 	let segment = utf8_percent_encode(&rep.name, PATH_SEGMENT);
 	let generation = rep
 		.generation
@@ -151,9 +151,9 @@ fn render_representation(out: &mut String, instance: &str, rep: &Representation,
 		.map(|generation| format!("{generation}."))
 		.unwrap_or_default();
 	let suffix = query.map(|query| format!("?{query}")).unwrap_or_default();
-	let initialization = escape(&format!("@{instance}/{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
+	let initialization = escape(&format!("@{identity}/{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
 	let media = escape(&format!(
-		"@{instance}/{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
+		"@{identity}/{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
 		rep.tag
 	));
 
@@ -198,7 +198,7 @@ fn render_representation(out: &mut String, instance: &str, rep: &Representation,
 
 fn render_adaptation_sets<'a>(
 	out: &mut String,
-	instance: &str,
+	identity: &str,
 	kind: Kind,
 	representations: impl Iterator<Item = &'a Representation>,
 	query: Option<&str>,
@@ -227,7 +227,7 @@ fn render_adaptation_sets<'a>(
 			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" startWithSAP=\"1\">"
 		);
 		for rep in representations {
-			render_representation(out, instance, rep, query);
+			render_representation(out, identity, rep, query);
 		}
 		let _ = writeln!(out, "    </AdaptationSet>");
 	}
@@ -292,8 +292,8 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 
 	// Every segment carries its absolute content time, so one period starting at pts 0 holds them.
 	let _ = writeln!(out, "  <Period id=\"0\" start=\"{}\">", xs_duration(Duration::ZERO));
-	render_adaptation_sets(&mut out, &manifest.instance, Kind::Video, manifest.video.iter(), query);
-	render_adaptation_sets(&mut out, &manifest.instance, Kind::Audio, manifest.audio.iter(), query);
+	render_adaptation_sets(&mut out, &manifest.identity, Kind::Video, manifest.video.iter(), query);
+	render_adaptation_sets(&mut out, &manifest.identity, Kind::Audio, manifest.audio.iter(), query);
 	let _ = writeln!(out, "  </Period>");
 	let _ = writeln!(out, "</MPD>");
 	out
@@ -352,7 +352,7 @@ mod tests {
 	#[test]
 	fn renders_dynamic_manifest() {
 		let manifest = Manifest {
-			instance: "run".into(),
+			identity: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			publish: Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
 			window: Duration::from_secs(16),
@@ -391,7 +391,7 @@ mod tests {
 	#[test]
 	fn renders_static_manifest_when_finished() {
 		let manifest = Manifest {
-			instance: "run".into(),
+			identity: "run".into(),
 			availability_start: None,
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -416,7 +416,7 @@ mod tests {
 	#[test]
 	fn query_rides_child_urls_escaped() {
 		let manifest = Manifest {
-			instance: "run".into(),
+			identity: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -435,7 +435,7 @@ mod tests {
 		let mut rep = video(vec![(0, 2_000)], false);
 		rep.generation = Some("run-7".into());
 		let manifest = Manifest {
-			instance: "run".into(),
+			identity: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -459,7 +459,7 @@ mod tests {
 	#[test]
 	fn empty_and_gap_only_representations_are_omitted() {
 		let manifest = Manifest {
-			instance: "run".into(),
+			identity: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -478,7 +478,7 @@ mod tests {
 		rep.name = name.into();
 		render_manifest(
 			&Manifest {
-				instance: "run".into(),
+				identity: "run".into(),
 				availability_start: Some(Wall::UNIX_EPOCH),
 				publish: Wall::UNIX_EPOCH,
 				window: Duration::from_secs(16),
@@ -530,12 +530,12 @@ mod tests {
 	}
 
 	#[test]
-	fn instances_round_trip_through_manifest_urls() {
+	fn identities_round_trip_through_manifest_urls() {
 		use crate::export::{Resource, Route};
 
-		let instance = "a/b?%23#音声\"\n&";
+		let identity = "a/b?%23#音声\"\n&";
 		let manifest = Manifest {
-			instance: instance.into(),
+			identity: identity.into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
 			window: Duration::from_secs(16),
@@ -559,16 +559,16 @@ mod tests {
 			assert_eq!(route.broadcast, "live");
 			match route.resource {
 				Resource::Init {
-					instance: actual,
+					identity: actual,
 					rendition,
 					..
 				}
 				| Resource::Segment {
-					instance: actual,
+					identity: actual,
 					rendition,
 					..
 				} => {
-					assert_eq!(actual, instance);
+					assert_eq!(actual, identity);
 					assert_eq!(rendition, "video0");
 				}
 				other => panic!("unexpected resource: {other:?}"),

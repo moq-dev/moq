@@ -1,6 +1,6 @@
 use std::{fmt, str::FromStr, sync::Arc};
 
-/// Names one run of a bucket's counters, independently of its broadcast's instance.
+/// Names one run of a bucket's counters, independently of its broadcast's identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde_with::SerializeDisplay, serde_with::DeserializeFromStr)]
 pub struct Epoch(Arc<str>);
 

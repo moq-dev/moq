@@ -407,7 +407,7 @@ export function reserved(allocator: Allocator): Getter<boolean> {
  * all (PCM audio has a fixed bitrate), still sends what it sends; the transport
  * sheds the excess by dropping groups.
  *
- * Hand the same instance to every sender on the connection.
+ * Hand the same identity to every sender on the connection.
  */
 export class Allocator implements Handle {
 	#divider: Divider;

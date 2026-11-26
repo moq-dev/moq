@@ -110,7 +110,7 @@ video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
     Track: &track,
 })
 _ = video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(pts, 90_000), Data: rgba})
-_ = route.Announce() // each route mints a fresh instance (route.Instance())
+_ = route.Announce() // each route mints a fresh identity (route.Identity())
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly

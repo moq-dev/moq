@@ -17,20 +17,20 @@ dev.moq.socket now exposes TCP group halves and reliably subscribed track halves
 ### `Following.available()` returns null once the path goes offline
 
 `following.available()` returns `BroadcastConsumer?`.
-After the first call, it returns null once the followed path goes offline, or, for a `follow(path, instance)` pinned to an instance, once another instance takes it over; the next call returns whatever serves the path next. The first call never returns null.
+After the first call, it returns null once the followed path goes offline, or, for a `follow(path, identity)` pinned to an identity, once another identity takes it over; the next call returns whatever serves the path next. The first call never returns null.
 Drop what you read from the previous broadcast either way. A caller that only waits for the first broadcast can take it with `!!`.
 
 ### Announcements are a listing
 
 `announced(config).updates()` emits `AnnounceEventPresent` when a path becomes present and `AnnounceEventAbsent` when it goes, each carrying an `Announce` as `announce`.
 `AnnounceEventStart` is `AnnounceEventPresent` and `AnnounceEventEnd` is `AnnounceEventAbsent`.
-`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are gone: a path whose route or publisher instance changes stays present and is not reported again.
-Where you requested the path again on a restart, hold `follow(path)` instead; each `available()` returns the next instance's broadcast.
+`AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are gone: a path whose route or publisher identity changes stays present and is not reported again.
+Where you requested the path again on a restart, hold `follow(path)` instead; each `available()` returns the next identity's broadcast.
 
 ```kotlin
 val following = moq.follow("live/camera")
 while (true) {
-    val broadcast = following.available() ?: continue // offline until the next instance
+    val broadcast = following.available() ?: continue // offline until the next identity
     play(broadcast)
 }
 ```
@@ -43,9 +43,9 @@ while (true) {
 - `Publication.announce(AnnounceRoute(...))` is `announce()`, and re-pricing is `setCost(cost)`. `unannounce()` is `withdraw()`.
 - `OriginRequests.requestedBroadcast()` is `Route.requested()`, which returns null once the origin closes; `requestedBroadcasts()` is now an extension on `Route`, and ending its collection no longer retracts the route.
 - `BroadcastRequest.prepare()` then `BroadcastPrepared.publish()` is `BroadcastRequest.route(options)`: create it hidden to fill it first, then `announce()`.
-- `Route.instance()` is the stream's instance, minted at creation and kept across `withdraw` and `announce`.
+- `Route.identity()` is the stream's identity, minted at creation and kept across `withdraw` and `announce`.
 
-`AnnounceRoute` is `RouteOptions(hidden, cost, instance, epoch)`, given once at creation. A route is visible at once unless `hidden = true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `instance` is fixed for the route's lifetime: announcing another one is a new route.
+`AnnounceRoute` is `RouteOptions(hidden, cost, identity, epoch)`, given once at creation. A route is visible at once unless `hidden = true`; set it and call `announce()` after filling the catalog to keep the old create-then-announce order. A stable `identity` is fixed for the route's lifetime: announcing another one is a new route.
 
 Hold the `Route` for as long as the broadcast should stay announced: closing or cancelling it retracts it, while `BroadcastProducer.end()` still ends both. A `BroadcastProducer` alone no longer keeps it announced.
 
@@ -146,8 +146,8 @@ the matching generated bindings and native library.
 
 ### `announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.announce` takes `AnnounceRoute(cost, instance, epoch)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
-`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream; leave `instance` unset to keep the one the broadcast minted.
+`BroadcastProducer.announce` takes `AnnounceRoute(cost, identity, epoch)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `identity` only when forwarding that same stream; leave `identity` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -186,8 +186,8 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 ### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
 
 On `OriginConsumer` and `Moq`, rename `requestBroadcast(path)` to `request(path)` and `announcedBroadcast(path)` to `follow(path)`; the `AnnouncedBroadcast` typealias is `Following`.
-Both take an optional `instance` to refuse every other publisher instance.
-`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
+Both take an optional `identity` to refuse every other publisher identity.
+`request` resolves one publisher identity: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each identity that serves the path in turn.
 
 ### A client asks only about what it watches (#6165)
 
@@ -200,11 +200,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 
-### Catalog references carry their instance
+### Catalog references carry their identity
 
-`Video` and `Audio` gain `instance`, the publisher instance their `broadcast` reference names; it defaults to `null`, so only positional construction changes.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(rendition)`, taking the catalog `Rendition` and reading its `broadcast` and `instance` from it.
-Resolving, and the rendition-based consumers, throw `MoqException.Mux` for a rendition whose broadcast is proven to serve another instance.
+`Video` and `Audio` gain `identity`, the publisher identity their `broadcast` reference names; it defaults to `null`, so only positional construction changes.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(rendition)`, taking the catalog `Rendition` and reading its `broadcast` and `identity` from it.
+Resolving, and the rendition-based consumers, throw `MoqException.Mux` for a rendition whose broadcast is proven to serve another identity.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -220,7 +220,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
-Replace `request.accept(broadcast)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+Replace `request.accept(broadcast)` with `request.prepare()`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh identity of its own and returns its producer.
 To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
@@ -273,10 +273,10 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `rate()` or wait with `rateChanged()`, and `cancel()` it to stop.
 Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.rate()`.
 
-### `Following.available()` waits for the next publisher instance (#5700)
+### `Following.available()` waits for the next publisher identity (#5700)
 
 The first call returns the broadcast serving the path, as before.
-Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
+Each later call waits for the next identity to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)
 
@@ -316,7 +316,7 @@ A panic in a background task throws `uniffi.moq.MoqException.Task` with the pani
 
 `announced(config).updates()` emits an `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` as `announce`.
 `Moq.announcements()` and `AnnounceUpdate` are gone.
-A restart means another publisher instance now serves the prefix: request the path again.
+A restart means another publisher identity now serves the prefix: request the path again.
 
 ```kotlin
 moq.announced().updates().collect { event ->

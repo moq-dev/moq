@@ -62,8 +62,8 @@ function publishControl(
 	effect.cleanup(() => route.close());
 	const track = route.broadcast.createTrack("control", { maxAge: CONTROL_HEARTBEAT });
 	if (!track) throw new Error("the track already exists");
-	// Announced once the track exists, under a fresh instance: the truck binds its
-	// single driver to this path and instance.
+	// Announced once the track exists, under a fresh identity: the truck binds its
+	// single driver to this path and identity.
 	route.announce();
 	return track;
 }

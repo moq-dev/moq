@@ -58,12 +58,12 @@ pub struct Info {
 	/// root: any `..` reference escapes.
 	pub path: crate::Path,
 
-	/// The instance of the route a [`Consumer`] was resolved through, naming the stream
+	/// The identity of the route a [`Consumer`] was resolved through, naming the stream
 	/// it reads.
 	///
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
 	/// handle not resolved through an origin.
-	pub instance: Option<crate::Instance>,
+	pub identity: Option<crate::Identity>,
 
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
@@ -80,7 +80,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: None,
 			path: crate::Path::default(),
-			instance: None,
+			identity: None,
 			frames: Default::default(),
 			edges: Default::default(),
 		}
@@ -547,7 +547,7 @@ impl Producer {
 		self.alive.close_unheld()
 	}
 
-	/// Return true if this is the same broadcast instance.
+	/// Return true if this is the same broadcast identity.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
@@ -564,7 +564,7 @@ struct Alive {
 	// Run once the broadcast ends: on close or the last producer-side handle dropping.
 	// The route owning the broadcast retracts through it. `None` for a standalone broadcast.
 	on_close: kio::Lock<Option<Box<dyn FnOnce() + Send>>>,
-	// How long a session's source still names the instance that minted it. Held on the
+	// How long a session's source still names the identity that minted it. Held on the
 	// producer side, never by a consumer, so the selection it may hold is dropped by its
 	// session rather than wherever the last consumer goes.
 	validity: RequestValidity,
@@ -691,7 +691,7 @@ impl RequestValidity {
 	}
 
 	/// [`Self::check`] for a request already sent but not yet answered: only another
-	/// instance taking the path refuses it. A withdrawal leaves it to its answer, as
+	/// identity taking the path refuses it. A withdrawal leaves it to its answer, as
 	/// moq-lite has the publisher conclude in-flight requests.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
@@ -822,7 +822,7 @@ impl Requests {
 	/// knows to stop and release its handle.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
-		// A source that no longer names the instance that minted it takes no new track:
+		// A source that no longer names the identity that minted it takes no new track:
 		// ending it refuses what is queued with `Unroutable`, while the tracks it handed
 		// out run on. Checked outside the broadcast lock, since the selection reads the origin.
 		if self.alive.validity.check(waiter).is_err() {
@@ -891,7 +891,7 @@ impl Requests {
 		self.alive.token.poll_closed(waiter)
 	}
 
-	/// Return true if this is the same broadcast instance.
+	/// Return true if this is the same broadcast identity.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
@@ -1028,12 +1028,12 @@ impl Consumer {
 		self
 	}
 
-	/// Stamp the instance of the route this handle was resolved through, overriding
-	/// [`Info::instance`].
-	pub(super) fn with_instance(mut self, instance: Option<crate::Instance>) -> Self {
-		if self.info.instance != instance {
+	/// Stamp the identity of the route this handle was resolved through, overriding
+	/// [`Info::identity`].
+	pub(super) fn with_identity(mut self, identity: Option<crate::Identity>) -> Self {
+		if self.info.identity != identity {
 			let mut info = (*self.info).clone();
-			info.instance = instance;
+			info.identity = identity;
 			self.info = Arc::new(info);
 		}
 		self
@@ -1251,7 +1251,7 @@ impl Consumer {
 		self.alive.poll_closed(waiter)
 	}
 
-	/// Check if this is the exact same instance of a broadcast.
+	/// Check if this is the exact same identity of a broadcast.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
@@ -1628,7 +1628,7 @@ mod test {
 		assert_eq!(handle.latest_key(), None);
 	}
 
-	/// A handle's largest reads the instance its open broadcast serves now, without asking
+	/// A handle's largest reads the identity its open broadcast serves now, without asking
 	/// for it, and ends once nothing is served under the name.
 	#[test]
 	fn a_handle_follows_the_largest_its_broadcast_serves() {
@@ -2269,7 +2269,7 @@ mod test {
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
 	}
 
-	/// A source that no longer names the instance that minted it takes no new track, even
+	/// A source that no longer names the identity that minted it takes no new track, even
 	/// from a handler that checks nothing: its request stream ends and every later request
 	/// answers `Unroutable`, while the track it accepted earlier runs on.
 	#[kio::test]

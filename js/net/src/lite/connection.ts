@@ -161,7 +161,7 @@ export class Connection implements Session {
 	#closed = new Once<Error | null>();
 
 	/**
-	 * Creates a new Connection instance.
+	 * Creates a new Connection identity.
 	 *
 	 * @internal
 	 */
@@ -263,7 +263,7 @@ export class Connection implements Session {
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
-			consume: (path, instance) => this.#subscriber.consume(path, instance),
+			consume: (path, identity) => this.#subscriber.consume(path, identity),
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,

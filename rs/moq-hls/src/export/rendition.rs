@@ -141,7 +141,7 @@ impl Handle {
 		if self.track.is_none()
 			&& let Ok(track) = broadcast.track(name)
 		{
-			// The lookup is lazy: the query installs the instance, and reads pin to it through
+			// The lookup is lazy: the query installs the identity, and reads pin to it through
 			// the query, since End may refuse any lookup made after this one.
 			self.track = Some(track.info().into_inner());
 		}
@@ -157,7 +157,7 @@ impl Media {
 	) -> moq_mux::Result<Self> {
 		let rel = reference.broadcast();
 		let mut handle = Handle {
-			binding: Arc::new(source.bind(rel, reference.instance())?),
+			binding: Arc::new(source.bind(rel, reference.identity())?),
 			track: None,
 		};
 		if !lazy && let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
@@ -192,7 +192,7 @@ impl Media {
 				handle.capture(&broadcast, &self.track);
 			}
 			if self.sibling && broadcast.poll_closed(waiter).is_ready() {
-				// End and Restart both drain only the pinned instance. Looking its path up again
+				// End and Restart both drain only the pinned identity. Looking its path up again
 				// could serve a replacement under the old track's rows.
 				window.end();
 			}
@@ -222,7 +222,7 @@ impl Media {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>>> {
 		let track = ready!(self.poll_track(binding, waiter));
-		// The bind can be refused while this read waits. Preserve that exact instance's
+		// The bind can be refused while this read waits. Preserve that exact identity's
 		// authorization error; other failed or disconnected references stay missing.
 		if track.is_none()
 			&& let Poll::Ready(Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized))) =
@@ -309,28 +309,28 @@ pub(crate) struct Handoff {
 	next: u64,
 	/// Its `EXT-X-TARGETDURATION`, which a replacement serving the same playlist URI keeps.
 	target_duration: u64,
-	/// The retired instance, while it lists or still waits to list a segment: the replacement
+	/// The retired identity, while it lists or still waits to list a segment: the replacement
 	/// keeps listing those (see [`Rendition::after`]).
 	previous: Option<Arc<Rendition>>,
 }
 
 /// Which segments a rendition lists, shared by its media watcher and [`Rendition::retire`] so a
-/// replacement starts exactly where a retired instance stops.
+/// replacement starts exactly where a retired identity stops.
 #[derive(Default)]
 struct Claim {
 	/// Segments numbered below this are a predecessor's (see [`Rendition::after`]).
 	start: u64,
-	/// The first segment this instance will not list: the one after its open segment, else the
-	/// one after the newest it listed. Final once a retired instance's window closes.
+	/// The first segment this identity will not list: the one after its open segment, else the
+	/// one after the newest it listed. Final once a retired identity's window closes.
 	next: u64,
 	/// Set by [`Rendition::retire`]: only the groups it had already read are listed.
 	retired: bool,
 	/// A segment waits on a later one to start before it is listed.
 	pending: bool,
-	/// The newest group this instance read from its track.
+	/// The newest group this identity read from its track.
 	seen: Option<u64>,
 	/// Set by [`Rendition::retire`] to [`seen`](Self::seen), or to the group before a
-	/// [`handover`](Rendition::handover): the groups this instance still lists are those up to it,
+	/// [`handover`](Rendition::handover): the groups this identity still lists are those up to it,
 	/// and a replacement on the same track lists only groups past it.
 	boundary: Option<u64>,
 	/// Retired, where the replacement starts: the first group past the boundary.
@@ -412,10 +412,10 @@ pub struct Rendition {
 	fanout: renditions::Fanout,
 	/// Follows the media track's groups into [`live`](Self::live); ends when the rendition drops.
 	watcher: Mutex<Watcher>,
-	/// Which segments this instance lists. A channel so the media watcher wakes once a
+	/// Which segments this identity lists. A channel so the media watcher wakes once a
 	/// [`retire`](Self::retire) leaves no segment pending.
 	claim: kio::Producer<Claim>,
-	/// The retired instance this one replaced under the same playlist URI, whose segments its playlist
+	/// The retired identity this one replaced under the same playlist URI, whose segments its playlist
 	/// still lists ahead of its own until the window slides past them (see [`after`](Self::after)).
 	/// Released once none is listed, or by a restart.
 	previous: Mutex<Option<Arc<Rendition>>>,
@@ -583,12 +583,12 @@ impl Rendition {
 	}
 
 	/// Whether this rendition follows `previous` onto the same media track: the same track name in
-	/// the same broadcast and instance, whose group sequences continue across the two.
+	/// the same broadcast and identity, whose group sequences continue across the two.
 	fn continues(&self, previous: &Rendition) -> bool {
 		use hang::catalog::Reference;
 		let source = |rendition: &Rendition| match &rendition.config {
-			Config::Video(config) => (config.broadcast().cloned(), config.instance().cloned()),
-			Config::Audio(config) => (config.broadcast().cloned(), config.instance().cloned()),
+			Config::Video(config) => (config.broadcast().cloned(), config.identity().cloned()),
+			Config::Audio(config) => (config.broadcast().cloned(), config.identity().cloned()),
 		};
 		self.track() == previous.track() && source(self) == source(previous)
 	}
@@ -775,7 +775,7 @@ impl Rendition {
 	///
 	/// The playlist URI keeps listing the predecessor's segments, under the
 	/// init they were muxed for, until the window slides past them: a server never removes a
-	/// segment from the middle or end of a live playlist (RFC 8216 6.2.2). This instance lists its
+	/// segment from the middle or end of a live playlist (RFC 8216 6.2.2). This identity lists its
 	/// own behind a discontinuity, once the predecessor has listed all it will, so the two never
 	/// interleave.
 	pub(crate) fn after(mut self, handoff: Option<&Handoff>) -> Self {
@@ -812,7 +812,7 @@ impl Rendition {
 			if let Some(resized) = self.handover(&claim, successor) {
 				claim.boundary = resized.group.checked_sub(1);
 				claim.theirs_at = Some(resized.at);
-				// No group of the open segment is this instance's, so it lists nothing more.
+				// No group of the open segment is this identity's, so it lists nothing more.
 				if let Some((first, open)) = claim.unplaced
 					&& first == resized.group
 				{
@@ -823,7 +823,7 @@ impl Rendition {
 			(claim.next, claim.pending)
 		};
 		// Once retired, one that neither lists nor waits to list a segment never will, so the
-		// replacement keeps only what this one was keeping: churn can't stack empty instances.
+		// replacement keeps only what this one was keeping: churn can't stack empty identities.
 		let lists = pending || !self.live.window().segments.is_empty();
 		Handoff {
 			next,
@@ -835,7 +835,7 @@ impl Rendition {
 		}
 	}
 
-	/// The group `successor`'s first on this track, when this instance read it but has not listed it:
+	/// The group `successor`'s first on this track, when this identity read it but has not listed it:
 	/// the newest in-band resize, to the picture size `successor` declares in place of this config's.
 	///
 	/// A track keeps its decoder identity, so the picture size is the only decoder change it carries,
@@ -847,7 +847,7 @@ impl Rendition {
 		let size = |config: &VideoConfig| config.coded_width.zip(config.coded_height);
 		let same_track = successor.track(&self.name) == self.track()
 			&& successor.broadcast() == current.broadcast()
-			&& successor.instance() == current.instance();
+			&& successor.identity() == current.identity();
 		let resized = claim.resized?;
 		let (unplaced, _) = claim.unplaced?;
 		let resizes = size(successor).is_some_and(|size| size == resized.size) && size(successor) != size(current);
@@ -864,7 +864,7 @@ impl Rendition {
 		self.previous.lock().expect("previous lock poisoned").clone()
 	}
 
-	/// The retired instances whose segments this one's playlist still lists, oldest first.
+	/// The retired identities whose segments this one's playlist still lists, oldest first.
 	fn lineage(&self) -> Vec<Arc<Rendition>> {
 		let mut lineage = Vec::new();
 		let mut next = self.previous();
@@ -876,10 +876,10 @@ impl Rendition {
 		lineage
 	}
 
-	/// The predecessors' rows listed ahead of `own`, oldest first, each with its instance.
+	/// The predecessors' rows listed ahead of `own`, oldest first, each with its identity.
 	///
-	/// They are trimmed as one window with `own`, as if one instance had listed them all. Rows
-	/// before a jump in the numbering are dropped, as a skip clears one instance's window. A
+	/// They are trimmed as one window with `own`, as if one identity had listed them all. Rows
+	/// before a jump in the numbering are dropped, as a skip clears one identity's window. A
 	/// predecessor none of whose rows is left is released, along with every older one, once none
 	/// of them can list another.
 	fn inherited(&self, own: &[segments::Row]) -> Vec<(Arc<Rendition>, segments::Row)> {
@@ -928,7 +928,7 @@ impl Rendition {
 			.take(inherited - trimmed)
 			.map(|(rendition, row)| (rendition.expect("an inherited row"), row))
 			.collect();
-		// Nothing lists anything older than the oldest instance left, whose rows followed every
+		// Nothing lists anything older than the oldest identity left, whose rows followed every
 		// older one's last.
 		match rows.first() {
 			Some((oldest, _)) => *oldest.previous.lock().expect("previous lock poisoned") = None,
@@ -1101,7 +1101,7 @@ impl Rendition {
 
 	/// Ready once the DASH [representation](Self::representation) lists a segment or this
 	/// rendition fails, as [`poll_playable`](Self::poll_playable) does for the media playlist:
-	/// this instance lists a segment of its own (or its media track ended), its media is denied,
+	/// this identity lists a segment of its own (or its media track ended), its media is denied,
 	/// or its window failed. A predecessor's segments don't count: the DASH manifest lists none of
 	/// them.
 	#[cfg_attr(test, kio::wrapper)]
@@ -1152,7 +1152,7 @@ impl Rendition {
 		if snapshot.segments.iter().any(|s| s.map.as_deref() == Some("")) {
 			return Ok(None);
 		}
-		// Nothing maps this instance's init until it lists a segment of its own, and an inline
+		// Nothing maps this identity's init until it lists a segment of its own, and an inline
 		// codec builds it only from that segment.
 		let mapped = snapshot.segments.is_empty() || snapshot.segments.iter().any(|s| s.map.is_none());
 		let init = match mapped {
@@ -1231,7 +1231,7 @@ impl Rendition {
 		self.fanout.failure().is_none() && self.check().is_err()
 	}
 
-	/// Whether a track query pins this rendition's media instance.
+	/// Whether a track query pins this rendition's media identity.
 	#[cfg(all(test, feature = "server"))]
 	pub(crate) fn pinned(&self) -> bool {
 		self.media.handle.lock().expect("media lock poisoned").track.is_some()
@@ -1267,7 +1267,7 @@ impl Rendition {
 
 	/// The snapshot listing `inherited` (see [`inherited`](Self::inherited)), then `window`.
 	///
-	/// An inherited segment maps its instance's init, or `""` while that is not built, which
+	/// An inherited segment maps its identity's init, or `""` while that is not built, which
 	/// [`media_playlist`](Self::media_playlist) refuses to render.
 	fn snapshot_from_window(
 		&self,
@@ -1442,9 +1442,9 @@ impl Rendition {
 	/// read.
 	pub async fn init(&self, hash: &str) -> Result<Option<Bytes>> {
 		// A predecessor's segments still listed map its init, which was built before any playlist
-		// listed them (see `media_playlist`), so it is served without building this instance's.
-		// Only the instance supplying the bytes is authorized: a denied one leaves them to this
-		// instance, which may have the same config.
+		// listed them (see `media_playlist`), so it is served without building this identity's.
+		// Only the identity supplying the bytes is authorized: a denied one leaves them to this
+		// identity, which may have the same config.
 		for rendition in self.lineage() {
 			if let Some(init) = rendition.built_init(&rendition.run()).filter(|init| init.hash == hash)
 				&& rendition.authorize().is_ok()
@@ -1540,7 +1540,7 @@ impl Rendition {
 	/// Fetches every group the segment holds on this rendition (an audio segment packs many
 	/// short groups) and encodes them as a single CMAF fragment. `None` when the segment isn't in
 	/// the playlist window, is a gap, or its groups already
-	/// left the relay cache. After End or Restart, only the bound instance's retained media
+	/// left the relay cache. After End or Restart, only the bound identity's retained media
 	/// drains; a replacement's media is never read under these rows. A denied referenced
 	/// broadcast returns its authorization error even when the requested row is absent.
 	///
@@ -1549,7 +1549,7 @@ impl Rendition {
 	/// and another run's URL would name different bytes.
 	pub async fn segment(&self, id: &segments::Id) -> Result<Option<Bytes>> {
 		// A predecessor's segments still listed, its cut among them, are muxed under its config. A
-		// config that returns gets its tag back, but the instances' segment numbers never overlap.
+		// config that returns gets its tag back, but the identities' segment numbers never overlap.
 		let owner = self
 			.lineage()
 			.into_iter()
@@ -1563,7 +1563,7 @@ impl Rendition {
 		Ok(segment.filter(|_| owner.generation().as_deref() == id.generation.as_deref()))
 	}
 
-	/// The fetch of the segment `id` names among this instance's own rows; see
+	/// The fetch of the segment `id` names among this identity's own rows; see
 	/// [`segment`](Self::segment).
 	fn fetch_own(&self, id: &segments::Id) -> Result<Option<Fetch>> {
 		self.authorize()?;
@@ -1871,14 +1871,14 @@ impl Loading {
 enum Playlist {
 	Start,
 	Playable,
-	/// Building the init of each inherited instance in turn, then this instance's own.
+	/// Building the init of each inherited identity in turn, then this identity's own.
 	Inits {
 		inherited: Vec<Arc<Rendition>>,
-		/// This instance's own init is mapped only once it lists a segment (see `media_playlist`).
+		/// This identity's own init is mapped only once it lists a segment (see `media_playlist`).
 		mapped: bool,
 		load: LoadInit,
 	},
-	/// Building this instance's own init, which it mapped since the render was checked.
+	/// Building this identity's own init, which it mapped since the render was checked.
 	Again(LoadInit),
 	Done,
 }
@@ -1950,7 +1950,7 @@ impl Playlist {
 					}
 					*load = LoadInit::default();
 					if inherited.pop().is_none() {
-						// This instance's own init, which it maps.
+						// This identity's own init, which it maps.
 						return Poll::Ready(rendition.media_playlist(query));
 					}
 				}
@@ -1997,7 +1997,7 @@ impl kio::Task for InitBuild {
 
 #[cfg(test)]
 impl Rendition {
-	/// The rows this instance lists itself, oldest first.
+	/// The rows this identity lists itself, oldest first.
 	pub(crate) fn rows(&self) -> Vec<segments::Row> {
 		self.live.window().segments
 	}
@@ -2116,7 +2116,7 @@ struct Follow {
 	probe: Option<Muxer>,
 	/// The next segment listed starts a new discontinuity.
 	broken: bool,
-	/// The last group a predecessor on the same track read: only later ones are this instance's.
+	/// The last group a predecessor on the same track read: only later ones are this identity's.
 	after: Option<u64>,
 	grid: grid::Grid,
 	/// The newest group, its first frame's pts, and what that frame reached, read again for its
@@ -2209,9 +2209,9 @@ impl Follow {
 		let Some(rendition) = rendition.upgrade() else {
 			return Some(Ok(()));
 		};
-		// Held while listing, so a retire sees exactly what this instance lists.
+		// Held while listing, so a retire sees exactly what this identity lists.
 		let mut claim = rendition.claim();
-		// Retired, a group past the last it had read is the replacement's: this instance lists
+		// Retired, a group past the last it had read is the replacement's: this identity lists
 		// the segments and gaps before the first holding one, and its own part of that one, then
 		// stops there.
 		let boundary = claim.boundary;
@@ -2242,7 +2242,7 @@ impl Follow {
 					start,
 					..
 				} if claim.retired && theirs(groups.last()) => match (boundary, theirs_at) {
-					// The replacement can't list this segment's number again, so this instance
+					// The replacement can't list this segment's number again, so this identity
 					// lists the groups it had read, ending where the replacement's group starts, with
 					// its last sample running to the replacement's first frame.
 					(Some(boundary), Some(at)) if groups.first().is_some_and(|first| first <= boundary) => {
@@ -2261,7 +2261,7 @@ impl Follow {
 				slot => (slot, false),
 			};
 			if !*whole {
-				// The first segment listed holds only this instance's groups, and starts whole.
+				// The first segment listed holds only this identity's groups, and starts whole.
 				let own = match &slot {
 					grid::Slot::Media { groups, .. } => {
 						after.is_none_or(|after| groups.first().is_some_and(|first| first > after))
@@ -3028,7 +3028,7 @@ mod tests {
 	}
 
 	// End may land while capture's query installs a dynamically served track. The handle must
-	// stay on that instance rather than repeat a lookup End refuses, or its retained media is lost.
+	// stay on that identity rather than repeat a lookup End refuses, or its retained media is lost.
 	#[test]
 	fn capture_keeps_the_queried_track_when_end_lands_during_the_query() {
 		struct Serve {

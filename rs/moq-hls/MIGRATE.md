@@ -33,10 +33,10 @@ next call, which resumes it rather than starting over.
 catalogs, on the root catalog's join interval and clock. Include media starts
 only when requested and stops once responses finish and it idles for the longer of three
 target durations and the playlist window plus one target duration.
-Their URLs include both instances:
-`@{instance}/include/{id}/{kind}/{rendition}/@{include-instance}/...`.
-`Route::include` identifies that include; `Resource::instance` still names the
-parent broadcast's instance. Embedders using `Server::respond` need no routing change.
+Their URLs include both identities:
+`@{identity}/include/{id}/{kind}/{rendition}/@{include-identity}/...`.
+`Route::include` identifies that include; `Resource::identity` still names the
+parent broadcast's identity. Embedders using `Server::respond` need no routing change.
 DASH, `Broadcaster::new`, and the recorder cursor continue serving the broadcast's own
 renditions only.
 
@@ -80,17 +80,17 @@ did, so a caller could not tell that final failure from a retryable fetch error.
 Match `CatalogFailed` wherever you match `MediaFailed`, and look through
 `source` for the underlying error.
 
-### Rendition URLs name the publisher instance
+### Rendition URLs name the publisher identity
 
-`Server` follows each instance that takes over a broadcast, and every URL the
-master playlist and DASH manifest list now sits under that instance:
-`/{broadcast}/@{instance}/{kind}/{rendition}/...` instead of
+`Server` follows each identity that takes over a broadcast, and every URL the
+master playlist and DASH manifest list now sits under that identity:
+`/{broadcast}/@{identity}/{kind}/{rendition}/...` instead of
 `/{broadcast}/{kind}/{rendition}/...`. `Route::parse` refuses the old layout,
-and `Resource::{Media, Init, Segment}` carry the `instance` they
+and `Resource::{Media, Init, Segment}` carry the `identity` they
 name. `Broadcaster::master_playlist` and `Broadcaster::manifest` render the new
 layout. An embedder that answers through `Server::respond` needs no change; one
-that routes rendition URLs itself must percent-decode the instance after splitting the
-`@{instance}` segment from the path. Instance delimiters such as `/`, `?`, `%`, and `#` are
+that routes rendition URLs itself must percent-decode the identity after splitting the
+`@{identity}` segment from the path. Identity delimiters such as `/`, `?`, `%`, and `#` are
 percent-encoded, just like rendition names.
 
 ### Denied broadcast references report authorization failure
