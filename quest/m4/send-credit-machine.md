@@ -49,7 +49,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [kio crates.io](/quest/m0/kio-crates-io.md) - moq depends on a crates.io kio release, so this quest's bump only moves to one with the `model` feature
-
-## Related
-
-- [Send credit reset wake](/quest/m4/send-credit-reset-wake.md) - settles `MakeRoom`'s reset wake in the spec this machine must match
