@@ -40,12 +40,15 @@ file's git history as `quest/m0/ci/mbx-r2-verify.md`.
 Found 2026-11-27 (R2 teardown): B2 throttles, so request rate matters even
 though requests are free. The first B2 Nightly
 ([run 45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463))
-retried about 16,000 GETs on `503 Service Unavailable (SlowDown)` and still
-failed 912 blob prefetches, 238 action prefetches, and 103 action lookups
-after retries, plus 41 PUT retries on `500 InternalError`. Its 469 "remote
+retried 16,043 GETs on `503 Service Unavailable (SlowDown)` and still
+failed 912 blob prefetches, 238 action prefetches, and 107 action lookups
+after retries, plus 42 PUT retries on `500 InternalError`. Its 469 "remote
 failures" were 55 on the last R2 Nightly, yet it hit as much (17,028 hits
-against 16,677). If throttling costs hits in later Nightlies, look first at
-how many prefetches the jobs run in parallel against one bucket.
+against 16,677). The second
+([run 46038678705](https://github.com/moq-dev/moq/actions/runs/46038678705))
+retried 3,008 GETs and failed 110 blob prefetches, 18 action prefetches, and
+11 lookups. If throttling costs hits in later Nightlies, look first at how
+many prefetches the jobs run in parallel against one bucket.
 
 Decided 2026-11-24 (maintainer, /quest-run on
 [moq-dev/moq#9558](https://github.com/moq-dev/moq/pull/9558)): ✅ after the
