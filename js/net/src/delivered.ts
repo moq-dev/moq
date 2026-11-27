@@ -12,6 +12,8 @@ import type { Run } from "./window.ts";
 export interface Judged {
 	/** The runs the placed ranges name from `from` up to the exclusive `end`, lowest first. */
 	placed(from: bigint, end: bigint): Run[];
+	/** Whether a live join still waits on a first group, which may then hold any group. */
+	readonly pending: boolean;
 }
 
 /**
@@ -153,11 +155,37 @@ export class Delivered {
 		this.#unjudged.addRun(start, end);
 	}
 
-	/** Take back each key a fold counted as handed out unjudged that `judged` now holds, so it is owed again. */
+	/** Whether a fold counted `key` as handed out while no range held it. */
+	unjudged(key: bigint): boolean {
+		return this.#unjudged?.has(key) ?? false;
+	}
+
+	/**
+	 * Take back each key a fold counted as handed out unjudged that `judged` now holds, so it is
+	 * owed again.
+	 *
+	 * The keys it gave back before that `judged` no longer holds, and any other gap it doesn't, it
+	 * counts as handed out unjudged again first, unless a live join still waits, so the gaps never
+	 * outlive the ranges that owed them, as the Rust `Record::retire` bounds them.
+	 */
 	reopen(judged: Judged): void {
 		const unjudged = this.#unjudged;
 		if (!unjudged) return;
 		const held = unjudged.#runs.flatMap(([first, last]) => judged.placed(first, last + 1n));
+		if (held.length === 0) return;
+		const last = this.#runs.at(-1);
+		if (!judged.pending && last) {
+			for (const gap of [...this.gaps(0n, last[1])]) {
+				let from = gap.start;
+				for (const run of [...judged.placed(gap.start, gap.end), { start: gap.end, end: gap.end }]) {
+					if (run.start > from) {
+						this.addRun(from, run.start);
+						this.#unjudge(from, run.start);
+					}
+					from = max(from, run.end);
+				}
+			}
+		}
 		for (const run of held) this.remove(run.start, run.end);
 	}
 

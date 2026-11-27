@@ -4186,12 +4186,10 @@ export class Subscriber {
 		return { budget: this.#window.budget(), ranges: this.#window.pending ? undefined : this.#window };
 	}
 
-	// Take back what a fold counted as handed out before any range held it, which the ranges now
-	// owe. A front's reader does so on each read, as its copies place its ranges.
+	// Take back what a fold counted as handed out before any range held it, which the ranges placed
+	// so far now owe. A front's reader does so on each read, as its copies place its ranges.
 	#reopenFolded(): void {
-		if (this.#resume) return;
-		const ranges = this.#foldTerms().ranges;
-		if (ranges) this.#delivered.reopen(ranges);
+		if (!this.#resume) this.#delivered.reopen(this.#window);
 	}
 
 	// Record `key` as skipped stale under `budget`, so a wider one offers it again.

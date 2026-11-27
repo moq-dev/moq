@@ -186,6 +186,11 @@ impl Delivered {
 		}
 	}
 
+	/// Whether a fold counted `key` as handed out while no range held it.
+	pub fn is_unjudged(&self, key: u64) -> bool {
+		self.unjudged.contains(&key)
+	}
+
 	/// Take back each key a fold counted as handed out unjudged that `judged` now holds, so it
 	/// is owed again.
 	pub fn reopen(&mut self, judged: &Cover) {

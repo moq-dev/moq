@@ -1396,7 +1396,10 @@ class Reader implements ResumeSource {
 
 	#deliverable(copy: Copy, key: bigint, delivered: Delivered): boolean {
 		const end = copyEnd(copy);
-		return (end === undefined || key < end) && !delivered.has(key);
+		if (end !== undefined && key >= end) return false;
+		// A range a copy placed during this read may hold a group a fold counted handed out.
+		if (delivered.unjudged(key) && this.#window().holds(key)) this.#reopenFolded(delivered);
+		return !delivered.has(key);
 	}
 
 	// Whether a copy's next group, `key`, waits for the reader's window to be placed, which decides
@@ -1566,7 +1569,7 @@ class Reader implements ResumeSource {
 		if (!serving) return false;
 		// The reader's own window, as its copies placed it: the subscriber's leaves its anchors to them.
 		const window = this.#window();
-		if (!window.pending) delivered.reopen(window);
+		delivered.reopen(window);
 		const end = window.end();
 		if (end === undefined || window.pending) return false;
 		const gaps = window.runs(window.floor() ?? 0n, end).flatMap((run) => [...delivered.gaps(run.start, run.end)]);
@@ -2248,11 +2251,10 @@ class Reader implements ResumeSource {
 	}
 
 	// Take back what a fold counted as handed out in `delivered` before any range held it, which the
-	// reader's ranges, as its copies placed them, now owe. Each read does so before it judges what
-	// the copies hold, since the copies place a range only once a group arrives for it.
+	// reader's ranges, as its copies placed them so far, now owe. Each read does so before it judges
+	// what the copies hold, since the copies place a range only once a group arrives for it.
 	#reopenFolded(delivered: Delivered): void {
-		const placed = this.#placed();
-		if (placed) delivered.reopen(placed);
+		delivered.reopen(this.#window());
 	}
 
 	untell(start: bigint, end: bigint): void {

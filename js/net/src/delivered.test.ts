@@ -85,6 +85,7 @@ function judged(...runs: [bigint, bigint][]): Judged {
 			runs
 				.filter(([start, stop]) => start < end && stop > from)
 				.map(([start, stop]) => ({ start: max(start, from), end: min(stop, end) })),
+		pending: false,
 	};
 }
 
@@ -135,6 +136,24 @@ test("a fold keeps no more unjudged runs than the ranges hold", () => {
 	expect([...delivered.gaps(0n, 100n)]).toEqual([
 		{ start: 0n, end: 40n },
 		{ start: 41n, end: 100n },
+	]);
+});
+
+test("a reopen closes the gaps no range holds any longer", () => {
+	const delivered = new Delivered();
+	delivered.add(100n);
+	delivered.foldBelow(100n, judged([100n, 1000n]));
+	// Lookbacks replaced one by one while none of their groups arrives leave one gap, not one each.
+	for (let key = 10n; key < 90n; key += 10n) {
+		delivered.reopen(judged([key, key + 1n], [100n, 1000n]));
+		expect([...delivered.gaps(0n, 100n)]).toEqual([{ start: key, end: key + 1n }]);
+	}
+	expect(delivered.runs).toBe(4);
+	// Nor while a live join waits, which may hold any group.
+	delivered.reopen({ ...judged([20n, 21n]), pending: true });
+	expect([...delivered.gaps(0n, 100n)]).toEqual([
+		{ start: 20n, end: 21n },
+		{ start: 80n, end: 81n },
 	]);
 });
 

@@ -10940,11 +10940,10 @@ impl Cursor {
 	}
 
 	/// Take in a window that moved: what a fold counted as handed out before any range held it,
-	/// the ranges now owe, and the reads resolve against the new ranges.
+	/// the ranges placed so far now owe, even while another still waits on its anchor, and the
+	/// reads resolve against the new ranges.
 	fn window_moved(&mut self) {
-		if let Some(groups) = self.filter.window.groups() {
-			self.record.delivered.reopen(groups);
-		}
+		self.record.delivered.reopen(self.filter.window.held());
 		self.filter.revision += 1;
 		self.update_servable();
 	}

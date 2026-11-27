@@ -3014,7 +3014,7 @@ impl Reader {
 		self.groups_read = true;
 		// Before any copy's group is judged against it, not when the read settles: one may have
 		// landed under an update another handle made since the last read.
-		let mut reopened = self.reopen_folded(delivered);
+		self.reopen_folded(delivered);
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
 		let widest = self.mirrored.widest();
@@ -3069,9 +3069,9 @@ impl Reader {
 							held = true;
 							break;
 						}
-						// A copy placing the window this pass placed what it owes too.
-						if !reopened {
-							reopened = self.reopen_folded(delivered);
+						// A range a copy placed this pass may hold a group a fold counted handed out.
+						if delivered.is_unjudged(key) && self.window().holds(key) {
+							self.reopen_folded(delivered);
 						}
 						// A copy resolves a time start against the groups it holds, which may place
 						// it below where the reader's window did: the window decides.
@@ -3682,13 +3682,10 @@ impl Reader {
 	/// A time start the resume point raised is asked from its time, so the backfill places it
 	/// at the group holding it, as the route would for a plain reader.
 	/// Take back what a fold of the logical record `delivered` counted as handed out before any
-	/// range held it, which the placed window now owes. Returns whether the window is placed.
-	fn reopen_folded(&mut self, delivered: &mut Delivered) -> bool {
-		let Some(groups) = self.window().groups() else {
-			return false;
-		};
-		delivered.reopen(groups);
-		true
+	/// range held it, which the ranges placed so far now owe, even while another still waits on
+	/// its anchor.
+	fn reopen_folded(&mut self, delivered: &mut Delivered) {
+		delivered.reopen(self.window().held());
 	}
 
 	fn backfill_gaps(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
