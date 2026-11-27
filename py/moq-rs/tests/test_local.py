@@ -2068,24 +2068,22 @@ async def test_a_closed_route_leaves_its_replacement_alone():
     replacement.broadcast.close()
 
 
-async def test_announced_pattern_captures():
+async def test_announced_lists_a_prefix_and_refuses_a_wildcard():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    announced = consumer.announced("room", filter="*/chat")
+    announced = consumer.announced("room/alice")
 
-    # A claim at "room" could serve a match, but its own name is none, so it is not listed.
-    dynamic = origin.claim("room")
-
-    audio = origin.route("room/alice/audio")
+    other = origin.route("room/bob/chat")
     chat = origin.route("room/alice/chat")
     match = await next_route(announced)
     assert isinstance(match, moq.AnnounceEventPresent)
     assert match.announce.prefix == "room/alice/chat"
-    assert match.announce.captures == ["alice"]
+
+    with pytest.raises(moq.Error.InvalidPrefix):
+        consumer.announced("room/*")
 
     announced.cancel()
-    dynamic.cancel()
-    audio.broadcast.close()
+    other.broadcast.close()
     chat.broadcast.close()
 
 

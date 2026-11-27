@@ -81,8 +81,8 @@ var (
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
 	// ErrInvalidIdentity is returned when an identity is empty or longer than 256 UTF-8 bytes.
 	ErrInvalidIdentity = ffi.ErrMoqErrorInvalidIdentity
-	// ErrInvalidPattern is returned when a path pattern is empty, has a doubled slash, or uses a reserved segment form.
-	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
+	// ErrInvalidPrefix is returned when a path prefix has an empty segment, a malformed escape, too many segments, or a "*".
+	ErrInvalidPrefix = ffi.ErrMoqErrorInvalidPrefix
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
 	// ErrUnsupportedCatalog is returned when a catalog needs a newer moq-hang draft than this build reads; upgrade to read it.

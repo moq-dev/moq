@@ -985,11 +985,12 @@ void main() {
     },
   );
 
-  test('announced pattern reports captures', () async {
+  test('announced lists a prefix and refuses a wildcard', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(
-      config: MoqAnnounceConfig(prefix: 'room', filter: '*/chat'),
+      config: MoqAnnounceConfig(prefix: 'room/alice'),
     );
+    final other = origin.route(path: 'room/bob/chat', options: RouteOptions());
     final route = origin.route(
       path: 'room/alice/chat',
       options: RouteOptions(),
@@ -997,7 +998,13 @@ void main() {
 
     final update = await nextRoute(announced) as AnnounceEventPresent;
     expect(update.announce.prefix, 'room/alice/chat');
-    expect(update.announce.captures, ['alice']);
+    expect(
+      () => origin.consume().announced(
+        config: MoqAnnounceConfig(prefix: 'room/*'),
+      ),
+      throwsA(isA<InvalidPrefixMoqException>()),
+    );
+    other.dispose();
     route.dispose();
   });
 

@@ -488,16 +488,22 @@ final class SmokeTests: XCTestCase {
         try replacement.broadcast.close()
     }
 
-    func testAnnouncedPatternCaptures() async throws {
+    func testAnnouncedListsAPrefixAndRefusesAWildcard() async throws {
         let origin = OriginProducer()
-        let announced = try origin.consume().announced(prefix: "room", filter: "*/chat")
+        let announced = try origin.consume().announced(prefix: "room/alice")
+        let other = try origin.route(path: "room/bob/chat")
         let chat = try origin.route(path: "room/alice/chat")
 
         guard case .present(let update) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(update.prefix, "room/alice/chat")
-        XCTAssertEqual(update.captures, ["alice"])
+        XCTAssertThrowsError(try origin.consume().announced(prefix: "room/*")) { error in
+            guard case MoqError.InvalidPrefix = error else {
+                return XCTFail("expected InvalidPrefix, got \(error)")
+            }
+        }
+        other.cancel()
         chat.cancel()
     }
 

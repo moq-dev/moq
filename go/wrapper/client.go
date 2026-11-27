@@ -292,7 +292,7 @@ func (c *Client) Route(path string, options RouteOptions) (*Route, error) {
 	return c.publisher.Route(path, options)
 }
 
-// Announced lists the paths the remote announces matching a discovery filter, as each becomes present or absent.
+// Announced lists the paths the remote announces at or beneath a prefix, as each becomes present or absent.
 func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }

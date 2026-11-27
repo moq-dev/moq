@@ -6,19 +6,15 @@ import 'version.dart';
 
 /// Scope for discovering announcements.
 final class AnnounceOptions {
-  /// Literal path root beneath the origin.
+  /// The prefix to list with every path beneath it; empty lists every path.
   final String prefix;
-
-  /// Pattern relative to [prefix], or null for every path beneath it.
-  final String? filter;
 
   /// Also list paths with a segment starting with `.` below [prefix].
   final bool hidden;
 
-  const AnnounceOptions({this.prefix = '', this.filter, this.hidden = false});
+  const AnnounceOptions({this.prefix = '', this.hidden = false});
 
-  AnnounceConfig get _ffi =>
-      AnnounceConfig(prefix: prefix, filter: filter, hidden: hidden);
+  AnnounceConfig get _ffi => AnnounceConfig(prefix: prefix, hidden: hidden);
 }
 
 /// Everything [Moq.connect] can be told beyond the URL, named and nested like

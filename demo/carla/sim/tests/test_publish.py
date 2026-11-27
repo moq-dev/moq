@@ -208,7 +208,7 @@ class Scripted:
 
 
 class Announcements(Scripted):
-    """The scripted listing of driver paths, by the id the filter captured."""
+    """The scripted listing of driver paths, each at `{PREFIX}/{driver}`."""
 
     async def __aenter__(self):
         return self
@@ -223,10 +223,10 @@ class Announcements(Scripted):
         return await self.next()
 
     async def present(self, driver: str) -> None:
-        await self.send(moq.AnnounceEventPresent(SimpleNamespace(captures=[driver])))
+        await self.send(moq.AnnounceEventPresent(SimpleNamespace(prefix=f"{PREFIX}/{driver}")))
 
     async def absent(self, driver: str) -> None:
-        await self.send(moq.AnnounceEventAbsent(SimpleNamespace(captures=[driver])))
+        await self.send(moq.AnnounceEventAbsent(SimpleNamespace(prefix=f"{PREFIX}/{driver}")))
 
 
 class Run:
@@ -295,8 +295,8 @@ class Relay:
         self.followed: list[str] = []
         self._followings: dict[str, Following] = {}
 
-    def announced(self, prefix: str, *, filter: str):
-        assert (prefix, filter) == (PREFIX, "*")
+    def announced(self, prefix: str):
+        assert prefix == PREFIX
         return self.announcements
 
     def following(self, driver: str) -> Following:
@@ -415,7 +415,20 @@ def test_a_failed_control_track_still_releases_its_lease() -> None:
 def test_availability_changes_never_follow_a_driver_twice() -> None:
     async def scenario(relay: Relay, drivers, commands: asyncio.Queue, gate: Drive) -> None:
         await relay.announcements.present("abc")
-        await relay.announcements.send(moq.AnnounceEventPresent(SimpleNamespace(captures=["abc"])))
+        await relay.announcements.send(moq.AnnounceEventPresent(SimpleNamespace(prefix=f"{PREFIX}/abc")))
+        assert relay.followed == [f"{PREFIX}/abc"]
+
+    asyncio.run(watching(scenario))
+
+
+def test_only_a_direct_child_names_a_driver() -> None:
+    """The prefix itself and paths beneath a driver are listed too, but name no driver."""
+
+    async def scenario(relay: Relay, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        await relay.announcements.send(moq.AnnounceEventPresent(SimpleNamespace(prefix=PREFIX)))
+        await relay.announcements.present("abc/catalog")
+        assert relay.followed == []
+        await relay.announcements.present("abc")
         assert relay.followed == [f"{PREFIX}/abc"]
 
     asyncio.run(watching(scenario))

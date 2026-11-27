@@ -28,9 +28,7 @@ if TYPE_CHECKING:
     from .session import Credential
 
 Announce = MoqAnnounce
-"""A route over a prefix: the origin-relative ``prefix``, what each filter wildcard
-matched (the required list ``captures``), and the ``route`` serving it.
-The list is empty when the filter has no wildcards.
+"""A route over a prefix: the origin-relative ``prefix`` and the ``route`` serving it.
 
 It carries no broadcast. Resolve a specific path with
 :meth:`OriginConsumer.request`. By convention a publisher announces
@@ -296,12 +294,12 @@ class OriginConsumer:
     def __init__(self, inner: MoqOriginConsumer) -> None:
         self._inner = inner
 
-    def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
-        """Iterate routes in the literal ``prefix`` matching the optional pattern ``filter``.
+    def announced(self, prefix: str = "", *, hidden: bool = False) -> AnnounceConsumer:
+        """Iterate routes at or beneath ``prefix``, which holds no ``*``; empty lists every path.
 
         Paths with a segment starting with ``.`` below ``prefix`` are hidden unless ``hidden``.
         """
-        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
+        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, hidden=hidden)))
 
     def follow(self, path: str, *, identity: Identity | None = None) -> Following:
         """Follow the broadcast at ``path``, resolving each publisher identity that serves it.
