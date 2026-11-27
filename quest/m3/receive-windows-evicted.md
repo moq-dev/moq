@@ -109,3 +109,7 @@ connection-wide admission semaphore are recorded in
 [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838).
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - replaces lite-07 refill FETCH with bounded SUBSCRIBE and settles per-range drop/eviction handling before re-enabling these cells

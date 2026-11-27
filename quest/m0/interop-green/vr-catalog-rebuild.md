@@ -19,7 +19,7 @@ throws.
 Two parts:
 
 - Why the catalog arrives four times: the publisher sends one. The AAC resume stall
-  ([aac-resume-stall](/quest/m0/interop-green/aac-resume-stall.md)) also saw repeated catalogs
+  ([aac-resume-stall](/quest/m0/aac-resume-stall.md)) also saw repeated catalogs
   without a resubscribe. If the relay or JS reader delivers a catalog again, fix that there.
 - Make the measurement follow the current listener, or wait for a settled catalog first, so
   a legitimate update can't break it.

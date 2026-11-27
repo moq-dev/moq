@@ -118,5 +118,6 @@ and earlier unchanged.
 
 ## Related
 
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - shares the lite-07 SUBSCRIBE layout, `rs/moq-net/fixtures/lite.json`, and `rs/moq-net/verify/subscribe/`
 - [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - the subscriber API and bindings that ask for what this serves
 - [Metadata-only subscriptions over moq-transport](/quest/m3/route-health/ietf.md) - the extension that lets a moq-transport hop carry the mode instead of payload

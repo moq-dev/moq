@@ -24,8 +24,8 @@ Boundaries:
 ## Plan
 
 Decided 2026-11-20 (maintainer, /quest-plan from Kixel's
-[stream-memory](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m1/stream-memory.md)
-question):
+[proxy](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m1/proxy.md)
+(formerly `stream-memory.md`) question):
 
 - ✅ A generic primitive here, a proxied stream to an announced broadcast,
   that Kixel's TCP byte streams use first (rejected: a TCP feature with an

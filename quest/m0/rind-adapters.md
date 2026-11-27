@@ -130,17 +130,17 @@ rind 0.4 itself changes three things, of which MoQ uses two:
   ([kixel-ai/rind#530](https://github.com/kixel-ai/rind/pull/530)): MoQ calls no
   AES-CBC encryption, by grep at that commit.
 
-Raise `rind` to 0.4 (`Cargo.toml:217`, keeping `wipe`) and the four adapter
-requirements in `Cargo.toml:218-221` to the releases that carry the fixes,
+Raise `rind` to 0.4 (`Cargo.toml:212`, keeping `wipe`) and the five adapter
+requirements in `Cargo.toml:213-217` (including `rind-str0m`) to the releases that carry the fixes,
 since the new calls do not compile against the old ones.
 
 Until those releases exist, check the branch with an uncommitted
-`[patch.crates-io]` that points `rind` and the four adapters at kixel-ai/rind's
+`[patch.crates-io]` that points `rind` and the adapters at kixel-ai/rind's
 `main` once the three PRs merge. #521 and #515 have merged; #519 is open and
 ready for review, so re-read its Public API section when it merges; a
 signature may have moved.
 
-Public API: `moq_crypto::provider` keeps its signatures; `moq_crypto::cpu::check` and `UnsupportedCpu` go if the recommendation above is taken. Wire: none.
+Public API: breaking in `moq-crypto` and the nine crates carrying `UnsupportedCpu` variants: deleting `moq_crypto::cpu::check` and `UnsupportedCpu` also makes `moq_crypto::provider::provider()` return `Provider` and `install_default()` return `()` instead of `Result<_, UnsupportedCpu>`. Wire: none.
 
 ## Waiting
 

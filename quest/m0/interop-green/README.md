@@ -20,12 +20,10 @@ so it only needs to stay green.
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
-  so the pass now runs the datagram step; the `replacement` case runs by
-  default on both engines and every wire. Decided 2026-11-09 (maintainer, AFK, accepting the
-  recommendation): close this quest on a pass, which the maintainer set with
-  those cases skipped; the pass that closes it runs all but `replacement`.
-  Release remeasure measures stale planned-break pins after publication and
-  opens the pin PR on its `release-remeasure` branch.
+  so the pass now runs the datagram step, and the `replacement` case runs by
+  default on both engines and every wire since
+  [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293). Close this quest
+  once a scheduled Interop run on `main` passes green.
 
 ## Plan
 

@@ -92,6 +92,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # uniffi-bindgen's generator-only UniFFI fork. Unpublished, so it never ships in a crate.
     "https://github.com/kixelated/uniffi-rs",
-    # Temporary until kixel-ai/kio publishes kio-macros and kio to crates.io (quest/m2/kio-crates-io.md).
+    # Temporary until kixel-ai/kio publishes kio-macros and kio to crates.io (quest/m0/kio-crates-io.md).
     "https://github.com/kixel-ai/kio",
 ]

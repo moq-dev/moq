@@ -127,3 +127,4 @@ m1 quest on 2026-10-22.
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - all breaking work and the MIGRATE.md convention have landed
+- [rind 0.4 adapters](/quest/m0/rind-adapters.md) - removes `UnsupportedCpu` and updates `moq_crypto::provider` signatures before the final migration pass
