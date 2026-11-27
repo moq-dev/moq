@@ -10725,6 +10725,9 @@ fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTree
 	keys.into_iter().map(|key| (key, prefs.joining(key))).collect()
 }
 
+/// The capacity, in keys, a reader keeps in [`Filter::arrived`] between arrival walks.
+const ARRIVED_KEPT: usize = 4;
+
 /// A cursor's own ranges, resolved, and what keeps them current.
 struct Filter {
 	/// Only the groups in it are read.
@@ -10748,7 +10751,8 @@ struct Filter {
 	/// them is visited once.
 	owed: RangeInclusiveSet<u64>,
 	/// The keys the arrival walk just took in, until [`Cursor::owe_arrivals`] owes them.
-	/// Empty between reads, and kept so its capacity serves every later arrival.
+	/// Empty between reads, and kept at up to [`ARRIVED_KEPT`] keys of capacity so a wake
+	/// taking in a few groups allocates nothing.
 	arrived: Vec<u64>,
 	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
 	lookups: Vec<Lookup>,
@@ -12342,6 +12346,9 @@ impl Cursor {
 				self.filter.owed.insert(key..=key);
 			}
 		}
+		// A catch-up walk can take in a whole cache at once: keep only what a wake that takes
+		// in a few groups needs, so an idle reader holds no more than that.
+		arrived.shrink_to(ARRIVED_KEPT);
 		self.filter.arrived = arrived;
 		self.prune_owed();
 		moved
