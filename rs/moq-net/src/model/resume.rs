@@ -42,7 +42,9 @@
 //!
 //! A reader polled for drops reports what the serving copy gave up, other than a route
 //! failure, once no copy it replaced may still deliver it. A route change discards what the
-//! former serving copy gave up and the reader had yet to report.
+//! former serving copy gave up and the reader had yet to report. A skip is the content's own,
+//! which every copy of the identity shares: the reader reports the skips of every copy it lets
+//! go of, and answers about the cache with every copy's, so a switch carries them over.
 
 use rangemap::{RangeMap, RangeSet};
 
@@ -811,6 +813,27 @@ struct Copy {
 	drains: Option<u64>,
 }
 
+/// The holes a reader's copies know of, taken out of its lock: the serving copy's, and the
+/// skips of every copy it replaced or let go of. Every copy is of one identity, so one content:
+/// a group one declared skipped no route will produce. What a replaced copy dropped is that
+/// route's own verdict, so only the serving copy's drops count.
+struct Holes {
+	serving: Option<track::Consumer>,
+	replaced: Vec<track::Consumer>,
+	carried: RangeSet<u64>,
+}
+
+impl Holes {
+	/// The exclusive end of the run at `key` no group will fill; with `dropped`, the serving
+	/// copy's drops for good count too. See [`track::Consumer::hole_end`].
+	fn end(&self, key: u64, dropped: bool) -> Option<u64> {
+		let serving = self.serving.as_ref().and_then(|track| track.hole_end(key, dropped));
+		let replaced = self.replaced.iter().filter_map(|track| track.hole_end(key, false));
+		let carried = self.carried.get(&key).map(|run| run.end);
+		serving.into_iter().chain(replaced).chain(carried).max()
+	}
+}
+
 // Boxed: a copy holds one for its whole life, and neither arm should pad every copy.
 enum Sub {
 	Pending(Box<kio::Pending<track::Subscribing>>),
@@ -1564,21 +1587,15 @@ impl Subscriber {
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
 		let mut reader = self.reader();
 		reader.window();
-		// The serving route's copy holds what its publisher skipped or gave up.
-		let serving = reader.copies.last().map(|copy| copy.track.clone());
-		track::first_open(reader.window.runs(from), |key| {
-			serving.as_ref().and_then(|track| track.hole_end(key, true))
-		})
+		let holes = reader.holes();
+		track::first_open(reader.window.runs(from), |key| holes.end(key, true))
 	}
 
-	/// Whether the serving route's copy holds every group of `run` declared skipped; see
+	/// Whether every group of `run` was declared skipped, by any copy of the track; see
 	/// [`track::Subscriber::is_skipped`].
 	pub(super) fn is_skipped(&self, run: impl Iterator<Item = std::ops::RangeInclusive<u64>>) -> bool {
-		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
-		let Some(serving) = serving else {
-			return false;
-		};
-		track::first_open(run, |key| serving.hole_end(key, false)).is_none()
+		let holes = self.reader().holes();
+		holes.serving.is_some() && track::first_open(run, |key| holes.end(key, false)).is_none()
 	}
 
 	/// Where a run of starts up to `end` ends with the span the serving copy knows it reaches
@@ -2801,6 +2818,19 @@ impl Reader {
 		}
 	}
 
+	/// What the reader's copies say no group fills, for answering about the track's cache.
+	fn holes(&self) -> Holes {
+		let serving = self.copies.last().map(|copy| copy.track.clone());
+		let replaced = (self.copies.iter().rev().skip(1))
+			.map(|copy| copy.track.clone())
+			.collect();
+		Holes {
+			serving,
+			replaced,
+			carried: self.carried.clone(),
+		}
+	}
+
 	/// The parts of `groups` recorded skipped or a copy held now declared skipped. Parks
 	/// `waiter` on each copy read while some of `groups` is not skipped there.
 	fn skipped_in(&self, groups: std::ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
@@ -3582,7 +3612,8 @@ impl Reader {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn untell(&mut self, range: std::ops::Range<u64>) {
 		for run in self.carried.overlapping(&range) {
-			self.unreported.insert(run.start.max(range.start)..run.end.min(range.end));
+			self.unreported
+				.insert(run.start.max(range.start)..run.end.min(range.end));
 		}
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
@@ -7514,11 +7545,11 @@ mod test {
 		assert!(consumer.serving().is_some_and(|copy| copy.same_channel(&b.consume())));
 	}
 
-	/// A reader asked about the track's cache answers for the serving copy, which a replaced
-	/// copy's groups and skips do not change; the run of skips just below a group counts
-	/// from any copy.
+	/// A reader asked about the track's cache answers with what every copy of the identity
+	/// knows was skipped, a replaced copy's too, since a switch carries the cache over; the
+	/// largest group is still the serving copy's.
 	#[test]
-	fn a_reader_answers_cache_queries_for_the_serving_copy() {
+	fn a_reader_answers_cache_queries_from_every_copy() {
 		let routes = Producer::new();
 		let a = copy();
 		write(&a, 1);
@@ -7537,9 +7568,10 @@ mod test {
 		assert_eq!(sub.skipped_below(5), 2, "the replaced copy knows 3 and 4 were skipped");
 		assert!(sub.is_skipped(std::iter::once(6..=7)));
 		assert!(
-			!sub.is_skipped(std::iter::once(3..=4)),
-			"only the replaced copy skipped 3 and 4"
+			sub.is_skipped(std::iter::once(3..=3)),
+			"the replaced copy's skip of 3 carries over"
 		);
+		assert!(!sub.is_skipped(std::iter::once(2..=3)), "group 2 exists");
 		assert!(sub.largest_finished(Position::group(5)));
 		assert!(!sub.largest_finished(Position::group(4)));
 		let consumer = routes.consume();
