@@ -8817,9 +8817,9 @@ mod test {
 		let mut skips = Vec::new();
 		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
 			assert!(matches!(hole, track::Hole::Skip), "{run:?} {hole:?}");
-			skips.push(run);
+			skips.push((run.start, run.end));
 		}
-		assert_eq!(skips, [2..3], "nothing below the reader's floor");
+		assert_eq!(skips, vec![(2, 3)], "nothing below the reader's floor");
 	}
 
 	/// A reader that read a copy's groups around a skip that copy's publisher declared is told
