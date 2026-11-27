@@ -946,8 +946,10 @@ where
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let bound = self.bound(end)?;
 		let marker_at = bound.or_else(|| self.estimated_end());
-		// Without a bound, the group's media still lasts past its last frame's timestamp.
-		self.close(end.or(marker_at), bound, marker_at, None)
+		// Without a bound, the group's media still lasts past its last frame's timestamp. A data item
+		// has no cadence to last for, so its estimate stays out of the bitrate.
+		let measured = end.or(marker_at.filter(|_| self.container.kind() != Kind::Data));
+		self.close(measured, bound, marker_at, None)
 	}
 
 	/// Where a group cut at `end` ends: there, or at its moved keyframe when only that frame
@@ -1812,6 +1814,30 @@ mod tests {
 		}
 
 		assert_eq!(producer.estimate().bitrate, Some(1_000_000));
+	}
+
+	/// A data item has no cadence to last for, so an unbounded cut measures to the next item rather
+	/// than to an end estimated from items spaced closer earlier.
+	#[tokio::test]
+	async fn unbounded_data_cuts_measure_to_the_next_item() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
+
+		// 250 bytes every 40 ms, 50 kbps: first as two items 10 ms apart, then one item at a time.
+		producer.write(sized_frame(0, true, 125)).unwrap();
+		producer.write(sized_frame(10_000, false, 125)).unwrap();
+		producer.cut(None).unwrap();
+		for i in 1..40u64 {
+			producer.write(sized_frame(i * 40_000, true, 250)).unwrap();
+			producer.cut(None).unwrap();
+		}
+
+		// A maximum, which the first group's close pair lifts a little, never to the 10 ms spacing.
+		let bitrate = producer.estimate().bitrate;
+		assert!(
+			bitrate.is_some_and(|bitrate| (50_000..55_000).contains(&bitrate)),
+			"{bitrate:?}"
+		);
 	}
 
 	/// An unbounded cut measures a group to where its last frame ends, not to that frame's
