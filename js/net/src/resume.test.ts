@@ -7827,3 +7827,115 @@ test("multi-range hopping prunes retired skips even when [0, 0] stays active", (
 		source.close();
 	}
 });
+
+// Narrowing a buffered closed copy with a wide skip [1, 10) from [0, 10] to [0, 0] + [10, 10]
+// must terminate without spinning or leaking out-of-range skips.
+test("narrowing around a wide skip on a closed copy does not spin", () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	front.serve(handle);
+	const g0 = producer.createGroup(0n);
+	g0.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+	g0.finishAt(10n);
+	producer.skipGroups(1n, 10n);
+	const g10 = producer.createGroup(10n);
+	g10.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(10) });
+	g10.finish();
+	producer.finish();
+
+	const sub = front.consumer.track("video").subscribe({
+		ranges: [{ start: 0n, end: 10n }],
+	});
+	try {
+		sub.update({
+			ranges: [
+				{ start: 0n, end: 0n },
+				{ start: 10n, end: 10n },
+			],
+		});
+		expect(hooks.tryDrop(sub)).toBeUndefined();
+		// Widening back to [0, 10] before draining replays the skip cleanly.
+		sub.update({ ranges: [{ start: 0n, end: 10n }] });
+		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 10n, skip: true });
+		expect(hooks.tryDrop(sub)).toBeUndefined();
+		expect(drain(sub)).toEqual([10n, 0n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+	}
+
+	// Also verify a truly closed buffered copy (`producer.close()`, whose copy ranges stay as
+	// resolved when it closed) terminates cleanly without spinning when narrowed around a skip.
+	const front2 = new Front();
+	const source2 = new BroadcastProducer();
+	const handle2 = source2.consume();
+	const producer2 = defined(source2.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	front2.serve(handle2);
+	const h0 = producer2.createGroup(0n);
+	h0.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+	h0.finishAt(10n);
+	producer2.skipGroups(1n, 10n);
+	const h10 = producer2.createGroup(10n);
+	h10.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(10) });
+	h10.finish();
+	const sub2 = front2.consumer.track("video").subscribe({
+		ranges: [{ start: 0n, end: 10n }],
+	});
+	try {
+		producer2.close();
+		sub2.update({
+			ranges: [
+				{ start: 0n, end: 0n },
+				{ start: 10n, end: 10n },
+			],
+		});
+		// Must terminate in bounded steps (never spin in `#tryDrop`).
+		let steps = 0;
+		while (hooks.tryDrop(sub2)) {
+			steps++;
+			expect(steps).toBeLessThanOrEqual(4);
+		}
+	} finally {
+		sub2.close();
+		front2.consumer.close();
+		handle2.close();
+		source2.close();
+	}
+});
+
+// Overlapping live groups (next group handed out before the previous group finishes whole and
+// records its skip) still coalesce into at most 2 runs in `delivered` even with an unlimited budget.
+test("overlapping sparse live groups keep delivered bounded", () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	front.serve(handle);
+	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
+	try {
+		let prev = producer.createGroup(1_000n);
+		prev.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1_000) });
+		expect(drain(sub)).toEqual([1_000n]);
+		for (let i = 1n; i <= 200n; i++) {
+			const key = 1_000n + i * 10n;
+			const next = producer.createGroup(key);
+			next.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
+			// Hand out the next group while `prev` is still open (no skip recorded yet).
+			expect(drain(sub)).toEqual([key]);
+			prev.finishAt(key);
+			producer.skipGroups(key - 9n, key);
+			prev = next;
+			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
+		}
+		prev.finish();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+	}
+});

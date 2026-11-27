@@ -595,6 +595,8 @@ export interface ResumeShell {
 	commit(info: Info): void;
 	/** End the logical track: cleanly, or with `abort`. */
 	close(abort?: Error): void;
+	/** The floor below which the logical reader folded its record for good. */
+	floor(): bigint;
 	/** Parts of `[start, end)` not yet reported to the logical reader (above its floor). */
 	untold(start: bigint, end: bigint): Run[];
 }
@@ -694,7 +696,7 @@ export interface ResumeSource {
 	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
 	 */
-	tryDrop(delivered: Delivered, passing?: bigint, fold?: boolean): (Recv & { kind: "drop" }) | undefined;
+	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
 	/**
 	 * Whether the reader's bounded window has nothing left to deliver: every key of the whole window
 	 * the logical reader (`delivered`) lacks is accounted for, as {@link accounts} judges. A copy
@@ -728,11 +730,7 @@ export interface ResumeSource {
 	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
 	 */
-	untell(start: bigint, end: bigint, rescan?: boolean): void;
-	/** Absorb declared skips on the serving copy into the logical reader's `delivered` set. */
-	absorbSkips(delivered: Delivered, key: bigint): void;
-	/** Mark every existing and future copy as drop-reporting (and optionally wired). */
-	markReporting(wired: boolean): void;
+	untell(start: bigint, end: bigint): void;
 	/** One past the declared skip run holding `key` on the serving copy, if `key` is skipped. */
 	skipEnd(key: bigint): bigint | undefined;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
@@ -1278,13 +1276,6 @@ export const hooks: {
 	 * `Subscriber::settle_if_dropping`.
 	 */
 	settleIfDropping: (subscriber: Subscriber, key: bigint) => void;
-	/**
-	 * Absorb declared skips on `subscriber`'s track touching `key` (or changed since `seen`) into
-	 * `delivered`, returning the new drops revision.
-	 */
-	absorbSkips: (subscriber: Subscriber, delivered: Delivered, key: bigint, seen: number) => number;
-	/** Mark `subscriber` (and any route copies behind it) as drop-reporting. */
-	markReporting: (subscriber: Subscriber) => void;
 	/** One past the declared skip run holding `key` on `subscriber`'s track, if `key` is skipped. */
 	skipEnd: (subscriber: Subscriber, key: bigint) => bigint | undefined;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
@@ -1316,7 +1307,7 @@ export const hooks: {
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
-	untell: (subscriber: Subscriber, start: bigint, end: bigint, rescan?: boolean) => void;
+	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1822,12 +1813,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	settleIfDropping: () => {
-		throw new Error("track.ts not loaded");
-	},
-	absorbSkips: () => {
-		throw new Error("track.ts not loaded");
-	},
-	markReporting: () => {
 		throw new Error("track.ts not loaded");
 	},
 	skipEnd: () => {

@@ -80,26 +80,74 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
-	/// Absorb a declared skip `groups` into `delivered` only where it extends an existing run
-	/// rightward (or starts at 0), returning the subrange absorbed. That keeps consecutive sparse
-	/// groups one run without introducing a new non-zero run start (for example, when a lagging
-	/// viewer skips groups as stale instead of delivering them).
-	pub fn absorb_skip(&mut self, groups: std::ops::Range<u64>) -> Option<std::ops::Range<u64>> {
-		if groups.is_empty() {
-			return None;
+	/// Bridge a declared skip `groups` into `delivered` only when it strictly connects two
+	/// already-handed-out runs (`groups.start - 1` and `groups.end` are both in `delivered`).
+	/// Strictly reduces the run count without extending `delivered` below the lowest or above
+	/// the highest handed-out group.
+	pub fn bridge_skip(&mut self, groups: std::ops::Range<u64>) -> bool {
+		if groups.is_empty() || groups.start == 0 {
+			return false;
 		}
-		if groups.start == 0 || self.contains(groups.start - 1) || self.contains(groups.start) {
-			self.insert_run(groups.clone());
-			return Some(groups);
+		if self.contains(groups.start - 1) && self.contains(groups.end) {
+			self.insert_run(groups);
+			return true;
 		}
-		if let Some(start) = self.next_from(groups.start)
-			&& start < groups.end
+		false
+	}
+
+	/// Bridge declared-skip gaps around `key` and at the oldest gap (`above_gap`), invoking
+	/// `on_bridge` for each bridged gap. Only connects already-handed-out runs; never extends
+	/// `delivered` below the lowest or above the highest handed-out group.
+	pub fn bridge_skips(
+		&mut self,
+		key: u64,
+		mut skip_end: impl FnMut(u64) -> Option<u64>,
+		mut on_bridge: impl FnMut(std::ops::Range<u64>),
+	) {
+		// Walk backward from the run holding `key`, allowing one still-open gap right below it so
+		// overlapping live groups still collapse even if a permanent hole sits lower down.
+		let mut cur = self.runs.range(..=key).next_back().map_or(key, |(&first, _)| first);
+		let mut allowed_open = true;
+		while let Some((&prev_start, &prev_last)) = self.runs.range(..cur).next_back() {
+			let Some(prev_end) = prev_last.checked_add(1).filter(|end| *end < cur) else {
+				break;
+			};
+			if skip_end(prev_end).is_some_and(|end| end >= cur) {
+				self.insert_run(prev_end..cur);
+				on_bridge(prev_end..cur);
+				cur = prev_start;
+			} else if allowed_open {
+				allowed_open = false;
+				cur = prev_start;
+			} else {
+				break;
+			}
+		}
+		// Bridge the immediate gap above the run holding `key`, if `key` landed below an
+		// already-handed-out group.
+		if let Some(after) = self.run_end(key)
+			&& let Some(next_start) = self.next_from(after)
+			&& next_start > after
+			&& skip_end(after).is_some_and(|end| end >= next_start)
 		{
-			let absorbed = start..groups.end;
-			self.insert_run(absorbed.clone());
-			return Some(absorbed);
+			self.insert_run(after..next_start);
+			on_bridge(after..next_start);
 		}
-		None
+		// Collapse any oldest gap that became skipped since the groups around it were handed out.
+		while let Some(above) = self.above_gap() {
+			let Some((_, &prev_last)) = self.runs.range(..above).next_back() else {
+				break;
+			};
+			let Some(below) = prev_last.checked_add(1).filter(|end| *end < above) else {
+				break;
+			};
+			if skip_end(below).is_some_and(|end| end >= above) {
+				self.insert_run(below..above);
+				on_bridge(below..above);
+			} else {
+				break;
+			}
+		}
 	}
 
 	/// Forget that any key in `groups` was handed out, splitting the runs it cuts.

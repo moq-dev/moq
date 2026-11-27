@@ -60,7 +60,7 @@ use crate::{Error, Result, StreamError, group, stats, track};
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
 use super::subscription::{
-	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window, minus,
+	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window,
 };
 use super::track::Failure;
 use crate::ledger;
@@ -607,7 +607,6 @@ impl Consumer {
 				received_checked: None,
 				declared: None,
 				declared_error: None,
-				reports: false,
 			})
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
@@ -773,11 +772,6 @@ struct Copy {
 	resolved: BTreeMap<u64, Resolved>,
 	/// Replaced by a newer route.
 	replaced: bool,
-	/// The [`track::TrackState::drops_changes`] revision absorbed into the logical reader's
-	/// `delivered` set on this copy when the reader does not poll drops.
-	skips_seen: u64,
-	/// True when the owning logical reader reports drops, propagated to `sub` once ready.
-	reports: bool,
 	/// Capped when replaced, at the boundary the copy replacing it starts at, or for a
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
@@ -1064,15 +1058,12 @@ impl Copy {
 			let sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
 			// The routes judge where the reader ends, not each copy.
-			let mut sub = sub
+			let sub = sub
 				.with_range((
 					Bound::Included(self.start(groups.0)),
 					groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				))
 				.parked();
-			if self.reports {
-				sub.mark_reporting();
-			}
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
@@ -1650,22 +1641,6 @@ impl Subscriber {
 		self.reader().drops.len()
 	}
 
-	/// Mark every existing and future copy as drop-reporting so skips enter `delivered` only
-	/// after being reported.
-	pub(super) fn mark_reporting(&mut self) {
-		self.reader().mark_reporting();
-	}
-
-	/// Absorb declared skips on the serving copy within local bounds into the logical reader's
-	/// `delivered` set.
-	pub(super) fn absorb_skips(&mut self, delivered: &mut Delivered, key: u64) {
-		let mut reader = self.reader();
-		let bounds = reader.groups.0..reader.groups.1.unwrap_or(u64::MAX);
-		if let Some(copy) = reader.copies.last_mut() {
-			copy.track.absorb_skips(delivered, key, bounds, &mut copy.skips_seen);
-		}
-	}
-
 	/// One past the declared skip run holding `key` on the serving copy, if `key` is skipped.
 	pub(super) fn skip_end(&self, key: u64) -> Option<u64> {
 		let reader = self.reader();
@@ -2212,8 +2187,6 @@ struct Reader {
 	/// last checked against it, so a poll rechecks those runs only after one may be gone.
 	/// `None` until the serving copy is first checked.
 	received_checked: Option<u64>,
-	/// True once the owning logical reader polls drops or backs a wire publisher.
-	reports: bool,
 }
 
 impl Reader {
@@ -2531,7 +2504,6 @@ impl Reader {
 						self.resolve(&resolved);
 					}
 				}
-				self.evict_outside_skips();
 			}
 		}
 
@@ -2549,10 +2521,7 @@ impl Reader {
 			return;
 		}
 		self.generation = Some(generation);
-		// What a former route gave up is no verdict on the one that serves now. Revoke any
-		// unforwarded declared skips on existing copies before clearing, so a copy whose
-		// subscription is reused on a later return to its route still reports them.
-		self.untell_queued_skips();
+		// What a former route gave up is no verdict on the one that serves now.
 		self.drops = RangeMap::new();
 		self.received = RangeSet::new();
 		self.received_checked = None;
@@ -2653,8 +2622,6 @@ impl Reader {
 			resume,
 			resolved,
 			replaced: false,
-			skips_seen: 0,
-			reports: self.reports,
 			until: None,
 			cap: None,
 			done: None,
@@ -3453,77 +3420,31 @@ impl Reader {
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
 		let delivered = &record.delivered;
-		let mut given_up = Vec::new();
-		let mut superseded = Vec::new();
 		let ready = matches!(self.poll_serving(waiter), Poll::Ready(Some(_)));
-		// The serving copy's subscription, borrowed apart from the received runs it checks.
-		if let Some(Sub::Ready(sub)) = self.copies.last_mut().filter(|_| ready).map(|copy| &mut copy.sub) {
-			// A received stale run queued here that a new upstream subscription superseded since
-			// is unknown again: the copy no longer holds it, and that subscription may deliver it. Checked
-			// only once the copy let a stale run go, never on every poll: each poll reports one
-			// run, so a check per poll would cost the received runs squared to drain them. With
-			// none received there is nothing to check, so a live reader never reads the revision
-			// through the track lock every subscriber shares.
-			if !self.received.is_empty() {
-				let current = sub.stale_revision();
-				if self.received_checked != Some(current) {
-					for run in self.received.iter() {
-						superseded.extend(sub.stale_held(run.clone()).gaps(run));
-					}
+		// A received stale run queued here that a new upstream subscription superseded since is
+		// unknown again: the copy no longer holds it, and that subscription may deliver it.
+		// Checked only once the copy let a stale run go, never on every poll.
+		if ready
+			&& !self.received.is_empty()
+			&& let Some(Sub::Ready(sub)) = self.copies.last_mut().map(|copy| &mut copy.sub)
+		{
+			let current = sub.stale_revision();
+			let mut superseded = Vec::new();
+			if self.received_checked != Some(current) {
+				for run in self.received.iter() {
+					superseded.extend(sub.stale_held(run.clone()).gaps(run));
 				}
-				self.received_checked = Some(current);
 			}
-			loop {
-				let polled = match probe {
-					true => sub.poll_drop(waiter),
-					false => sub.poll_queued_drop(waiter),
-				};
-				let Poll::Ready((run, hole)) = polled else { break };
-				// A stale run the copy holds came from its upstream, which a new upstream
-				// subscription may supersede.
-				let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
-				given_up.push((run, hole, received));
+			self.received_checked = Some(current);
+			for run in superseded {
+				self.remove_drop(run);
 			}
-		}
-		let cover = self
-			.window()
-			.is_settled()
-			.then(|| self.window.groups().cloned())
-			.flatten();
-		let mut revoked = Vec::new();
-		for run in superseded {
-			self.remove_drop(run);
-		}
-		for (run, hole, received) in given_up {
-			if !Error::Stream(hole.error()).retryable() {
-				if hole == track::Hole::Skip {
-					let (keep, excluded) = self.split_skip(run, cover.as_ref());
-					for part in keep {
-						self.received.remove(part.clone());
-						self.drops.insert(part, track::Hole::Skip);
-					}
-					revoked.extend(excluded);
-					continue;
-				}
-				match received {
-					true => self.received.insert(run.clone()),
-					false => self.received.remove(run.clone()),
-				}
-				self.drops.insert(run, hole);
-			}
-		}
-		if !revoked.is_empty() {
-			self.revoke_skips(revoked);
-			revoked = Vec::new();
 		}
 		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
-		// each poll reports one run, so such a pass would cost the queue squared to drain it,
-		// and a new reader can be handed one run per cached group and per gap between them.
+		// each poll reports one run, so such a pass would cost the queue squared to drain it.
 		// Declared skips are deduplicated against `record` (what was actually reported to the
 		// logical reader) rather than `delivered`, so budget-retired delivery prefixes below the
-		// reader's start never discard an unreported skip on a later widening. Out-of-range
-		// skips are pruned when bounds or active ranges change and clipped on insertion above
-		// rather than scanning excluded real drops on every poll.
+		// reader's start never discard an unreported skip on a later widening.
 		let (start, end) = self.groups;
 		while let Some((run, hole)) = self
 			.drops
@@ -3540,75 +3461,125 @@ impl Reader {
 				break;
 			}
 		}
-		// The common case: nothing to report on one route, and the serving copy's own poll
-		// above wakes this for the next run it gives up. A replaced copy is still judged:
-		// dropping the last group handed out from it wakes nothing else that lets it go.
-		let window = start..end.unwrap_or(u64::MAX);
-		let has_in_window = !window.is_empty() && self.drops.overlapping(&window).next().is_some();
-		if !has_in_window && !self.copies.iter().any(|copy| copy.replaced) {
-			return Poll::Pending;
-		}
-		// Judged as the group path judges it, so a copy kept only for a group still read
-		// holds nothing back, and letting one go wakes this too.
-		self.let_go(delivered, waiter);
-		if !has_in_window {
-			return Poll::Pending;
+		let replaced = self.copies.iter().any(|copy| copy.replaced);
+		if replaced {
+			// Judged as the group path judges it, so a copy kept only for a group still read
+			// holds nothing back, and letting one go wakes this too.
+			self.let_go(delivered, waiter);
 		}
 		let serving = self.generation;
 		let mut feeding = RangeSet::new();
-		for copy in &self.copies {
-			if Some(copy.generation) == serving || !copy.feeds {
-				continue;
-			}
-			let from = copy.start(start);
-			let until = copy.end().unwrap_or(u64::MAX);
-			if from < until {
-				feeding.insert(from..until);
+		if replaced {
+			for copy in &self.copies {
+				if Some(copy.generation) == serving || !copy.feeds {
+					continue;
+				}
+				let from = copy.start(start);
+				let until = copy.end().unwrap_or(u64::MAX);
+				if from < until {
+					feeding.insert(from..until);
+				}
 			}
 		}
-		let mut passed = Vec::new();
-		let next = self.drops.overlapping(&window).find_map(|(run, err)| {
-			let done = match err {
+		let window = start..end.unwrap_or(u64::MAX);
+		if !window.is_empty() && !self.drops.is_empty() {
+			let mut passed = Vec::new();
+			let next = self.drops.overlapping(&window).find_map(|(run, err)| {
+				let done = match err {
+					track::Hole::Skip => record.told_all(run.clone()),
+					track::Hole::Drop { .. } => delivered.covers(run.clone()),
+				};
+				if done {
+					passed.push(run.clone());
+					return None;
+				}
+				let clipped = run.start.max(start)..run.end.min(window.end);
+				let open = match err {
+					track::Hole::Skip => record.find_untold_gap(clipped, |gap| feeding.gaps(&gap).next())?,
+					track::Hole::Drop { .. } => delivered
+						.gaps(clipped)
+						.into_iter()
+						.find_map(|gap| feeding.gaps(&gap).next())?,
+				};
+				Some((open, err.clone()))
+			});
+			for run in passed {
+				self.remove_drop(run);
+			}
+			if let Some((open, err)) = next {
+				// Reported once. As on a plain cursor, the report is not final: a miss (a fill
+				// given up) may still land, and is handed out if it does.
+				self.remove_drop(open.clone());
+				return Poll::Ready((open, err));
+			}
+		}
+		// Pull lazily from the serving copy one drop at a time until one can be returned now: on
+		// a stable route with no replaced copies feeding, nothing unreturned is pre-queued into
+		// `self.drops`, so range updates and route switches never strand or need to revoke skips.
+		if !ready {
+			return Poll::Pending;
+		}
+		loop {
+			let Some(Sub::Ready(sub)) = self.copies.last_mut().map(|copy| &mut copy.sub) else {
+				return Poll::Pending;
+			};
+			let polled = match probe {
+				true => sub.poll_drop(waiter),
+				false => sub.poll_queued_drop(waiter),
+			};
+			let Poll::Ready((run, hole)) = polled else {
+				return Poll::Pending;
+			};
+			if Error::Stream(hole.error()).retryable() {
+				continue;
+			}
+			let done = match hole {
 				track::Hole::Skip => record.told_all(run.clone()),
 				track::Hole::Drop { .. } => delivered.covers(run.clone()),
 			};
 			if done {
-				passed.push(run.clone());
-				return None;
+				continue;
 			}
-			let open = match err {
-				track::Hole::Skip => {
-					let (keep, excluded) = Self::split_skip_with(run.clone(), window.clone(), cover.as_ref());
-					revoked.extend(excluded);
-					keep.into_iter()
-						.find_map(|part| record.find_untold_gap(part, |gap| feeding.gaps(&gap).next()))?
-				}
-				track::Hole::Drop { .. } => {
-					let clipped = run.start.max(start)..run.end.min(window.end);
-					delivered
-						.gaps(clipped)
+			let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
+			let clipped = run.start.max(start)..run.end.min(window.end);
+			let open = (!clipped.is_empty())
+				.then(|| match hole {
+					track::Hole::Skip => record.find_untold_gap(clipped.clone(), |gap| feeding.gaps(&gap).next()),
+					track::Hole::Drop { .. } => delivered
+						.gaps(clipped.clone())
 						.into_iter()
-						.find_map(|gap| feeding.gaps(&gap).next())?
+						.find_map(|gap| feeding.gaps(&gap).next()),
+				})
+				.flatten();
+			if let Some(open) = open {
+				// Keep only the unreturned remainder of this single run (for example when split
+				// around `feeding` or an already-reported key).
+				let (rem_start, rem_end) = match hole {
+					track::Hole::Skip => (clipped.start..open.start, open.end..clipped.end),
+					track::Hole::Drop { .. } => (run.start..open.start, open.end..run.end),
+				};
+				for rem in [rem_start, rem_end] {
+					let keep = !rem.is_empty()
+						&& match hole {
+							track::Hole::Skip => !record.told_all(rem.clone()),
+							track::Hole::Drop { .. } => !delivered.covers(rem.clone()),
+						};
+					if keep {
+						match received {
+							true => self.received.insert(rem.clone()),
+							false => self.received.remove(rem.clone()),
+						}
+						self.drops.insert(rem, hole.clone());
+					}
 				}
-			};
-			Some((open, err.clone()))
-		});
-		for run in passed {
-			self.remove_drop(run);
-		}
-		if !revoked.is_empty() {
-			for run in &revoked {
-				self.remove_drop(run.clone());
+				return Poll::Ready((open, hole));
 			}
-			self.revoke_skips(revoked);
+			match received {
+				true => self.received.insert(run.clone()),
+				false => self.received.remove(run.clone()),
+			}
+			self.drops.insert(run, hole);
 		}
-		let Some((open, err)) = next else {
-			return Poll::Pending;
-		};
-		// Reported once. As on a plain cursor, the report is not final: a miss (a fill given
-		// up) may still land, and is handed out if it does.
-		self.remove_drop(open.clone());
-		Poll::Ready((open, err))
 	}
 
 	/// Forget every copy's report of `range`, so the copy serving when the reader's ranges ask
@@ -3618,139 +3589,6 @@ impl Reader {
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
 				sub.untell(range.clone());
-			}
-		}
-	}
-
-	/// Revoke `ranges` on every copy and arm a drop rescan so a reused copy (or one whose bounds
-	/// are restored before its next poll) still replays cached skips in those ranges.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn revoke_skips(&mut self, ranges: impl IntoIterator<Item = std::ops::Range<u64>>) {
-		let mut any = false;
-		for run in ranges {
-			if !run.is_empty() {
-				self.untell(run);
-				any = true;
-			}
-		}
-		if any {
-			for copy in &mut self.copies {
-				if let Sub::Ready(sub) = &mut copy.sub {
-					sub.rescan_drops();
-				}
-			}
-		}
-	}
-
-	/// Split a skip run against `self.groups` and optional settled active `cover`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn split_skip(
-		&self,
-		run: std::ops::Range<u64>,
-		cover: Option<&Cover>,
-	) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
-		let window = self.groups.0..self.groups.1.unwrap_or(u64::MAX);
-		Self::split_skip_with(run, window, cover)
-	}
-
-	/// Split `run` into active parts inside `window` (and `cover` when settled) and excluded parts.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn split_skip_with(
-		run: std::ops::Range<u64>,
-		window: std::ops::Range<u64>,
-		cover: Option<&Cover>,
-	) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
-		if run.is_empty() {
-			return (Vec::new(), Vec::new());
-		}
-		let in_window = run.start.max(window.start)..run.end.min(window.end);
-		if in_window.is_empty() {
-			return (Vec::new(), vec![run]);
-		}
-		let mut excluded = Vec::new();
-		if run.start < in_window.start {
-			excluded.push(run.start..in_window.start);
-		}
-		let keep = match cover {
-			Some(cover) => {
-				let inclusive = in_window.start..=in_window.end - 1;
-				for gap in minus(inclusive.clone(), cover) {
-					excluded.push(*gap.start()..*gap.end() + 1);
-				}
-				cover
-					.within(*inclusive.start(), *inclusive.end())
-					.map(|part| *part.start()..*part.end() + 1)
-					.collect()
-			}
-			None => vec![in_window.clone()],
-		};
-		if in_window.end < run.end {
-			excluded.push(in_window.end..run.end);
-		}
-		(keep, excluded)
-	}
-
-	/// Evict any queued declared skips (or parts of skips) outside `self.groups` or the settled
-	/// active ranges and revoke them on existing copies so range hops never strand entries in
-	/// `self.drops`. Called only when cursor bounds or requested ranges change.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn evict_outside_skips(&mut self) {
-		if self.drops.is_empty() {
-			return;
-		}
-		let window = self.groups.0..self.groups.1.unwrap_or(u64::MAX);
-		let cover = self.window.is_settled().then(|| self.window.groups()).flatten();
-		let mut outside = Vec::new();
-		if cover.is_some() {
-			for (run, hole) in self.drops.iter() {
-				if *hole == track::Hole::Skip {
-					let (_, excluded) = Self::split_skip_with(run.clone(), window.clone(), cover);
-					outside.extend(excluded);
-				}
-			}
-		} else {
-			if window.start > 0 {
-				for (run, hole) in self.drops.overlapping(&(0..window.start)) {
-					if *hole == track::Hole::Skip {
-						outside.push(run.start..run.end.min(window.start));
-					}
-				}
-			}
-			if window.end < u64::MAX {
-				for (run, hole) in self.drops.overlapping(&(window.end..u64::MAX)) {
-					if *hole == track::Hole::Skip {
-						outside.push(run.start.max(window.end)..run.end);
-					}
-				}
-			}
-		}
-		for run in &outside {
-			self.remove_drop(run.clone());
-		}
-		self.revoke_skips(outside);
-	}
-
-	/// Untell every unforwarded declared skip currently in `self.drops` on existing copies and
-	/// arm a rescan, so a copy whose subscription is reused after a route switch replays them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn untell_queued_skips(&mut self) {
-		let skips: Vec<_> = self
-			.drops
-			.iter()
-			.filter_map(|(run, hole)| (*hole == track::Hole::Skip).then_some(run.clone()))
-			.collect();
-		self.revoke_skips(skips);
-	}
-
-	fn mark_reporting(&mut self) {
-		if self.reports {
-			return;
-		}
-		self.reports = true;
-		for copy in &mut self.copies {
-			copy.reports = true;
-			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.mark_reporting();
 			}
 		}
 	}
@@ -3799,7 +3637,6 @@ impl Reader {
 	/// resolves; one already reading has to be moved, or a group it skipped stays skipped.
 	fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
 		let passed = std::mem::replace(&mut self.groups, (start, end)).0;
-		self.evict_outside_skips();
 		self.capped.wake();
 		for copy in &mut self.copies {
 			copy.reopen();
@@ -3887,8 +3724,6 @@ impl Reader {
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
-			skips_seen: 0,
-			reports: self.reports,
 			until: Some(lowered.end.checked_sub(1)),
 			cap: None,
 			since: Some(track.now()),
@@ -16600,8 +16435,8 @@ mod test {
 			);
 			assert_eq!(
 				sub.queued_drops(),
-				1,
-				"only the second skip in the current window stays queued"
+				0,
+				"lazy pull does not pre-queue subsequent skips into Reader::drops"
 			);
 		}
 		sub.set_range(2_000..);
@@ -16721,8 +16556,8 @@ mod test {
 			);
 			assert_eq!(
 				sub.queued_drops(),
-				1,
-				"retired range skips must be pruned even when [0, 0] keeps cursor start at 0"
+				0,
+				"lazy pull leaves no retired-range skips in Reader::drops even when [0, 0] keeps cursor start at 0"
 			);
 		}
 		// Retire the second range: no skips remain in range or queued.
@@ -16784,5 +16619,113 @@ mod test {
 		);
 		drop(held);
 		g0.finish().unwrap();
+	}
+
+	/// Hopping a resolved range while an unrelated unresolved time range keeps `window.is_settled()`
+	/// false must still leave no retired skips queued in `Reader::drops` and never emit retired skips.
+	#[test]
+	#[cfg(feature = "async")]
+	fn multi_range_hopping_with_unresolved_time_range_keeps_front_drop_queue_bounded() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		a.received();
+		routes.serve(a.consume());
+
+		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
+		g0.write_frame(ts(0), &b"x"[..]).unwrap();
+		g0.finish().unwrap();
+		for i in 1..=20u64 {
+			let base = i * 10;
+			for offset in [0u64, 5] {
+				let k = base + offset;
+				let mut g = a.create_group(group::Info { start: k }).unwrap();
+				g.write_frame(ts(k), &b"x"[..]).unwrap();
+				g.finish_at(k + 5).unwrap();
+				a.skip_groups(k + 1..k + 5);
+			}
+		}
+		// Include an unresolved time range past the end (`Time(99_999)`) alongside the hopping
+		// resolved range so `window.is_settled()` stays false throughout.
+		let unresolved = track::Range {
+			start: track::Start::Time(99_999),
+			end: None,
+		};
+		let mut sub = logical
+			.consume()
+			.subscribe(Subscription::default().with_ranges([
+				track::Range {
+					start: track::Start::Time(10),
+					end: Some(19),
+				},
+				unresolved,
+			]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		for i in 1..=20u64 {
+			let base = i * 10;
+			sub.update(Subscription::default().with_ranges([
+				track::Range {
+					start: track::Start::Time(base),
+					end: Some(base + 9),
+				},
+				unresolved,
+			]))
+			.unwrap();
+			assert_eq!(
+				sub.poll_drop(&kio::Waiter::noop()),
+				Poll::Ready((base + 1..base + 5, track::Hole::Skip))
+			);
+			assert_eq!(sub.queued_drops(), 0);
+		}
+		// Retire the hopping range, leaving only the unresolved time range: no retired skips emit.
+		sub.update(Subscription::default().with_ranges([unresolved])).unwrap();
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		assert_eq!(sub.queued_drops(), 0);
+	}
+
+	/// Overlapping sparse live groups (next group handed out before the previous group finishes
+	/// whole and records its skip) still coalesce into at most 2 runs in `delivered`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn overlapping_sparse_live_groups_keep_delivered_bounded() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		a.received();
+		routes.serve(a.consume());
+
+		let mut sub = subscribe(&logical, HOUR);
+		let mut prev = a.create_group(group::Info { start: 1_000 }).unwrap();
+		prev.write_frame(ts(1_000), &b"x"[..]).unwrap();
+		let Poll::Ready(Ok(Some(g))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("expected group 1000");
+		};
+		assert_eq!(g.start, 1_000);
+		for i in 1..=200u64 {
+			let key = 1_000 + i * 10;
+			let mut next = a.create_group(group::Info { start: key }).unwrap();
+			next.write_frame(ts(key), &b"x"[..]).unwrap();
+			let Poll::Ready(Ok(Some(g))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("expected group {key}");
+			};
+			assert_eq!(g.start, key);
+			prev.finish_at(key).unwrap();
+			a.skip_groups(key - 9..key);
+			prev = next;
+			assert!(
+				sub.delivered_runs() <= 2,
+				"overlapping live groups must stay bounded, got {} at i={i}",
+				sub.delivered_runs()
+			);
+		}
+		prev.finish().unwrap();
 	}
 }

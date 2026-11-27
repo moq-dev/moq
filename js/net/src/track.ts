@@ -3528,50 +3528,6 @@ type Superseded = { successor?: Successor };
 // the oldest held.
 type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined };
 
-// Absorb declared skips within `[floor, limit)` touching `handed` (or changed since `seen`)
-// into `delivered`, returning the new drops revision. Used only by arrival-order readers that
-// never poll drops. Mirrors the Rust `TrackState::absorb_skips`.
-function absorbSkips(
-	drops: DropSet,
-	delivered: Delivered,
-	handed: bigint | undefined,
-	floor: bigint,
-	limit: bigint,
-	seen: number,
-	onAbsorb?: (start: bigint, end: bigint) => void,
-): number {
-	if (floor >= limit) return seen;
-	if (handed !== undefined) {
-		const next = drops.at(handed + 1n);
-		if (next?.skip) {
-			const from = max(handed + 1n, floor);
-			const to = min(next.end, limit);
-			if (from < to) {
-				const absorbed = delivered.absorbSkip(from, to);
-				if (absorbed) onAbsorb?.(absorbed.start, absorbed.end);
-			}
-		}
-	}
-	if (delivered.runs > 1 && drops.revision !== seen) {
-		for (const changed of drops.since(seen)) {
-			const cFrom = max(changed.start, floor);
-			const cTo = min(changed.end, limit);
-			if (cFrom >= cTo) continue;
-			for (const run of drops.overlapping(cFrom, cTo)) {
-				if (!run.skip) continue;
-				const from = max(run.start, floor);
-				const to = min(run.end, limit);
-				if (from < to) {
-					const absorbed = delivered.absorbSkip(from, to);
-					if (absorbed) onAbsorb?.(absorbed.start, absorbed.end);
-				}
-			}
-		}
-		return drops.revision;
-	}
-	return seen;
-}
-
 /**
  * What a lite publisher told its wire about a reader's keys, kept in the reader's own
  * record so the cursor's drops and the publisher's groups consult one map. Mirrors the
@@ -3588,8 +3544,6 @@ export interface WireRecord {
 	tell(start: bigint, end: bigint): void;
 	/** Forget what was recorded of `[start, end)` without going out on the wire. */
 	untell(start: bigint, end: bigint): void;
-	/** Absorb declared skips in `[start, end)` into `delivered` once settled on the wire. */
-	skipSettled(start: bigint, end: bigint): void;
 }
 
 /**
@@ -3694,17 +3648,12 @@ export class Subscriber {
 		coverage?: Coverage;
 	};
 	#reported = new Runs<Run>();
-	// The track's drops revision absorbed into `#delivered` when this reader does not poll drops.
-	#skipsSeen = 0;
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
 	// under pool pressure; a key-order read folds at where it is instead (see #fold).
 	#floor = 0n;
 	// A wire publisher reads #reported as what its wire was told, so it never folds.
 	#wired = false;
-	// True once drops are polled or a wire publisher accesses this reader's record, so declared
-	// skips enter `#delivered` only after they are reported rather than on hand-out.
-	#reports = false;
 	// What an ordered read owes before its next group; unset before its first read. See #tryItem.
 	#items?: Items;
 	// The group the frame-level helpers are currently draining, acquired through the
@@ -4088,23 +4037,12 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
-		if (!ordered) {
-			if (!this.#reports) {
-				if (this.#resume) this.#resume.absorbSkips(this.#delivered, key);
-				else this.#absorbSkips(key);
-			} else {
-				// A skip immediately above `key` that was already reported before `key` was handed
-				// out could not extend a run leftward at report time; merge the already-reported
-				// portion now without touching any unreported skip.
-				const told = this.#reported.at(key + 1n);
-				if (told) {
-					const skipEnd = this.#skipEnd(key + 1n);
-					if (skipEnd !== undefined) {
-						const absorbed = this.#delivered.absorbSkip(key + 1n, min(skipEnd, told.end));
-						if (absorbed) this.#pruneSkip(absorbed.start, absorbed.end);
-					}
-				}
-			}
+		if (!ordered && this.#delivered.runs > 1) {
+			this.#delivered.bridgeSkips(
+				key,
+				(k) => this.#skipEnd(k),
+				(start, end) => this.#pruneSkip(start, end),
+			);
 		}
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
@@ -4118,22 +4056,7 @@ export class Subscriber {
 		if (ordered) this.#fold(forgot);
 	}
 
-	// Absorb declared skips within local bounds into `#delivered` for an arrival-order reader that
-	// never polls drops.
-	#absorbSkips(handed?: bigint): void {
-		const { start: floor, end } = this.#cursor.peek();
-		this.#skipsSeen = absorbSkips(
-			this.#state.drops,
-			this.#delivered,
-			handed,
-			floor,
-			end ?? UNBOUNDED,
-			this.#skipsSeen,
-			(start, end) => this.#pruneSkip(start, end),
-		);
-	}
-
-	// Prune fill state overlapping an absorbed skip `[start, end)`, waking fills only when this
+	// Prune fill state overlapping a bridged skip `[start, end)`, waking fills only when this
 	// reader actually tracked something there.
 	#pruneSkip(start: bigint, end: bigint): void {
 		if (this.#adopted.length > 0) this.#adopted = removeRun(this.#adopted, start, end);
@@ -4331,15 +4254,6 @@ export class Subscriber {
 		if (producer && !this.#left && keys.length > 0) reofferKeys(producer, this.#state, keys);
 	}
 
-	// Mark this subscriber (and any route copies behind it) as drop-reporting, so declared skips
-	// enter `#delivered` only after being reported rather than on hand-out.
-	#markReporting(wired = false): void {
-		const changed = !this.#reports || (wired && !this.#wired);
-		this.#reports = true;
-		if (wired) this.#wired = true;
-		if (changed) this.#resume?.markReporting(this.#wired);
-	}
-
 	// One past the declared skip run holding `key`, if `key` was declared skipped.
 	#skipEnd(key: bigint): bigint | undefined {
 		if (this.#resume) return this.#resume.skipEnd(key);
@@ -4353,36 +4267,21 @@ export class Subscriber {
 		return from < end ? runGaps(this.#reported.overlapping(from, end), from, end) : [];
 	}
 
-	// Forget reports of `[start, end)` that were never sent, lowering `#floor` if needed.
-	// `rescan` clears `#dropsSeen` when a reused copy must re-emit them without a range change.
-	#untell(start: bigint, end: bigint, rescan = false): void {
-		if (start >= end) return;
-		if (start < this.#floor) {
-			const old = this.#floor;
-			this.#floor = start;
-			if (end < old) this.#reported.set(end, old, { start: end, end: old });
-		}
-		this.#reported.set(start, end);
-		this.#delivered.remove(start, end);
-		if (rescan) this.#dropsSeen = undefined;
-		this.#resume?.untell(start, end, rescan);
-	}
-
 	// The publisher's view of this reader's record.
 	#wireRecord(): WireRecord {
-		this.#markReporting(true);
+		this.#wired = true;
 		const reported = this.#reported;
 		return {
-			told: (key) => key < this.#floor || reported.at(key) !== undefined,
-			untold: (start, end) => this.#untold(start, end),
+			told: (key) => reported.at(key) !== undefined,
+			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
 			tell: (start, end) => {
 				if (start < end) reported.set(start, end, { start, end });
 			},
 			// A front's copies forget it too, so ranges that later ask for it report it again.
-			untell: (start, end) => this.#untell(start, end),
-			skipSettled: (start, end) => {
-				const absorbed = this.#delivered.absorbSkip(start, end);
-				if (absorbed) this.#pruneSkip(absorbed.start, absorbed.end);
+			untell: (start, end) => {
+				if (start >= end) return;
+				reported.set(start, end);
+				this.#resume?.untell(start, end);
 			},
 		};
 	}
@@ -5562,20 +5461,20 @@ export class Subscriber {
 		hooks.lowestBuffered = (subscriber, delivered) =>
 			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
-		hooks.untell = (subscriber, start, end, rescan) => subscriber.#untell(start, end, rescan);
+		hooks.untell = (subscriber, start, end) => {
+			if (start >= end) return;
+			subscriber.#reported.set(start, end);
+			// A copy that is itself a front has copies of its own that reported it.
+			subscriber.#resume?.untell(start, end);
+		};
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.settleIfDropping = (subscriber, key) => {
-			if (subscriber.#reports) {
+			if (subscriber.#dropsSeen !== undefined || subscriber.#reported.size > 0) {
 				subscriber.#settled(key, key + 1n);
 			}
 		};
-		hooks.absorbSkips = (subscriber, delivered, key, seen) => {
-			const { start: floor, end } = subscriber.#cursor.peek();
-			return absorbSkips(subscriber.#state.drops, delivered, key, floor, end ?? UNBOUNDED, seen);
-		};
-		hooks.markReporting = (subscriber) => subscriber.#markReporting();
 		hooks.skipEnd = (subscriber, key) => subscriber.#skipEnd(key);
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.taking = (subscriber) => {
@@ -5710,6 +5609,7 @@ export class Subscriber {
 				close: (abort) => {
 					closeTrackState(state, abort);
 				},
+				floor: () => subscriber.#floor,
 				untold: (start, end) => subscriber.#untold(start, end),
 			});
 			return subscriber;
@@ -6328,9 +6228,8 @@ export class Subscriber {
 		const [gap] = runGaps(this.#reported.overlapping(start, to), start, to);
 		if (!gap) return undefined;
 		this.#reported.set(gap.start, gap.end, { start: gap.start, end: gap.end });
-		if (hole.skip) {
-			const absorbed = this.#delivered.absorbSkip(gap.start, gap.end);
-			if (absorbed) this.#pruneSkip(absorbed.start, absorbed.end);
+		if (hole.skip && this.#delivered.bridgeSkip(gap.start, gap.end)) {
+			this.#pruneSkip(gap.start, gap.end);
 		}
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
@@ -6339,13 +6238,11 @@ export class Subscriber {
 	// first call on, a read without dispositions keeps its budget skips for it too. A resumed
 	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
-		this.#markReporting();
 		if (this.#resume) {
-			const fold = !this.#wired && this.#items !== undefined;
 			for (;;) {
 				const queued = this.#nextResumedDrop();
 				if (queued) return queued;
-				const next = this.#resume.tryDrop(this.#delivered, 0n, fold);
+				const next = this.#resume.tryDrop(this.#delivered);
 				if (!next) return undefined;
 				this.#queueResumedDrop(next);
 			}
@@ -6448,11 +6345,10 @@ export class Subscriber {
 				// the copies gave up there: a session-fed copy reports a key it passed to take this group.
 				if (ordered) {
 					const key = recv.group.start;
-					const fold = !this.#wired;
 					for (
-						let drop = resume.tryDrop(this.#delivered, key, fold);
+						let drop = resume.tryDrop(this.#delivered, key);
 						drop;
-						drop = resume.tryDrop(this.#delivered, key, fold)
+						drop = resume.tryDrop(this.#delivered, key)
 					) {
 						this.#queueResumedDrop(drop);
 					}
@@ -6816,11 +6712,10 @@ export class Subscriber {
 		// Passing the keys hands them out as far as #delivered knows, so first take what the copies
 		// gave up there, as a group handed out does.
 		if (this.#resume) {
-			const fold = !this.#wired;
 			for (
-				let drop = this.#resume.tryDrop(this.#delivered, end, fold);
+				let drop = this.#resume.tryDrop(this.#delivered, end);
 				drop;
-				drop = this.#resume.tryDrop(this.#delivered, end, fold)
+				drop = this.#resume.tryDrop(this.#delivered, end)
 			) {
 				this.#queueResumedDrop(drop);
 			}

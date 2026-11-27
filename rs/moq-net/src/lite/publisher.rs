@@ -6547,16 +6547,10 @@ impl TrackRun {
 		}
 
 		// The starts inside a whole group's span went out with its GROUP_END, so the end of the
-		// track names none of them. Its interior (`key+1..end`) was declared skipped and is
-		// already told, so absorbing it keeps consecutive sparse groups one run in `delivered`.
+		// track names none of them.
 		let whole = std::mem::take(&mut *self.ctx.outcomes.whole.lock().unwrap());
 		for span in whole {
-			self.mark_served(span.clone());
-			if let Some(inner_start) = span.start.checked_add(1)
-				&& inner_start < span.end
-			{
-				self.track.skip_settled(inner_start..span.end);
-			}
+			self.mark_served(span);
 		}
 		// A reset may have cut a GROUP_END after its header arrived, so the starts it told go
 		// out again as a skip, even one dropped before the group finished: its readers ended
@@ -6565,7 +6559,6 @@ impl TrackRun {
 		if !cut.is_empty() && self.start.emits_range() {
 			for inner in cut {
 				self.track.record_mut().tell(inner.clone(), Report::Final);
-				self.track.skip_settled(inner.clone());
 				self.buffer_hole(inner, Hole::Skip, writer)?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -6581,11 +6574,6 @@ impl TrackRun {
 					let record = self.track.record_mut();
 					for gap in record.untold(span.clone()).iter() {
 						record.tell(gap.clone(), Report::Final);
-					}
-					if let Some(inner_start) = span.start.checked_add(1)
-						&& inner_start < span.end
-					{
-						self.track.skip_settled(inner_start..span.end);
 					}
 				}
 				self.buffer_hole(span, hole, writer)?;
@@ -6840,16 +6828,11 @@ impl TrackRun {
 		if !self.start.emits_range() || range.is_empty() {
 			return Ok(false);
 		}
-		let end = match hole {
-			Hole::Skip => range.end,
-			Hole::Drop { .. } => self.track.span_end(range.end),
+		let range = match hole {
+			Hole::Skip => range,
+			Hole::Drop { .. } => range.start..self.track.span_end(range.end),
 		};
-		let span_tail = range.end..end;
-		let range = range.start..end;
 		self.track.record_mut().tell(range.clone(), Report::Final);
-		if !span_tail.is_empty() {
-			self.track.skip_settled(span_tail);
-		}
 		self.buffer_hole(range, hole.clone(), writer)?;
 		Ok(true)
 	}
@@ -6868,9 +6851,6 @@ impl TrackRun {
 		let gaps = self.track.record_mut().untold(range);
 		for gap in gaps.iter() {
 			self.track.record_mut().tell(gap.clone(), Report::Final);
-			if *hole == Hole::Skip {
-				self.track.skip_settled(gap.clone());
-			}
 			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())

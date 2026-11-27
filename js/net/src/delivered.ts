@@ -66,40 +66,84 @@ export class Delivered {
 	}
 
 	/**
-	 * Absorb a declared skip `[start, end)` only where it extends an existing run rightward (or
-	 * starts at 0), returning the subrange absorbed. Keeps consecutive sparse groups one run
-	 * without adding a new non-zero run start. Mirrors the Rust `Delivered::absorb_skip`.
+	 * Bridge a declared skip `[start, end)` into `delivered` only when it strictly connects two
+	 * already-handed-out runs (`start - 1` and `end` are both in `delivered`). Strictly reduces
+	 * the run count without extending `delivered` below the lowest or above the highest
+	 * handed-out group. Mirrors the Rust `Delivered::bridge_skip`.
 	 */
-	absorbSkip(start: bigint, end: bigint): { start: bigint; end: bigint } | undefined {
-		if (start >= end) return undefined;
-		if (start === 0n || this.has(start - 1n) || this.has(start)) {
+	bridgeSkip(start: bigint, end: bigint): boolean {
+		if (start >= end || start === 0n) return false;
+		if (this.has(start - 1n) && this.has(end)) {
 			this.addRun(start, end);
-			return { start, end };
+			return true;
 		}
-		const next = this.#below(start) + 1;
-		if (next < this.#runs.length && this.#runs[next][0] < end) {
-			const from = this.#runs[next][0];
-			this.addRun(from, end);
-			return { start: from, end };
-		}
-		return undefined;
+		return false;
 	}
 
-	/** Forget that any key in `[start, end)` was handed out, splitting any run it cuts. */
-	remove(start: bigint, end: bigint): void {
-		if (start >= end) return;
-		const last = end - 1n;
-		let first = this.#below(start);
-		if (first < 0 || this.#runs[first][1] < start) first++;
-		let stop = first;
-		while (stop < this.#runs.length && this.#runs[stop][0] <= last) stop++;
-		if (first >= stop) return;
-		const pieces: [bigint, bigint][] = [];
-		const lowest = this.#runs[first];
-		if (lowest[0] < start) pieces.push([lowest[0], start - 1n]);
-		const highest = this.#runs[stop - 1];
-		if (highest[1] > last) pieces.push([last + 1n, highest[1]]);
-		this.#runs.splice(first, stop - first, ...pieces);
+	/**
+	 * Bridge declared-skip gaps around `key` and at the oldest gap (`aboveGap`), invoking
+	 * `onBridge` for each bridged gap. Only connects already-handed-out runs; never extends
+	 * `delivered` below the lowest or above the highest handed-out group. Mirrors the Rust
+	 * `Delivered::bridge_skips`.
+	 */
+	bridgeSkips(
+		key: bigint,
+		skipEnd: (from: bigint) => bigint | undefined,
+		onBridge?: (start: bigint, end: bigint) => void,
+	): void {
+		// Walk backward from the run holding `key`, allowing one still-open gap right below it so
+		// overlapping live groups still collapse even if a permanent hole sits lower down.
+		const at = this.#below(key);
+		let cur = at >= 0 ? this.#runs[at][0] : key;
+		let allowedOpen = true;
+		for (;;) {
+			const prev = this.#below(cur - 1n);
+			if (prev < 0) break;
+			const [prevStart, prevLast] = this.#runs[prev];
+			const prevEnd = prevLast + 1n;
+			if (prevEnd >= cur) break;
+			const end = skipEnd(prevEnd);
+			if (end !== undefined && end >= cur) {
+				this.addRun(prevEnd, cur);
+				onBridge?.(prevEnd, cur);
+				cur = prevStart;
+			} else if (allowedOpen) {
+				allowedOpen = false;
+				cur = prevStart;
+			} else {
+				break;
+			}
+		}
+		// Bridge the immediate gap above the run holding `key`, if `key` landed below an
+		// already-handed-out group.
+		const after = this.runEnd(key);
+		if (after !== undefined) {
+			const nextIdx = this.#below(after) + 1;
+			if (nextIdx < this.#runs.length) {
+				const nextStart = this.#runs[nextIdx][0];
+				const end = skipEnd(after);
+				if (nextStart > after && end !== undefined && end >= nextStart) {
+					this.addRun(after, nextStart);
+					onBridge?.(after, nextStart);
+				}
+			}
+		}
+		// Collapse any oldest gap that became skipped since the groups around it were handed out.
+		for (;;) {
+			const above = this.aboveGap();
+			if (above === undefined) break;
+			const prev = this.#below(above - 1n);
+			if (prev < 0) break;
+			const below = this.#runs[prev][1] + 1n;
+			if (below >= above) break;
+			const end = skipEnd(below);
+			if (end !== undefined && end >= above) {
+				this.addRun(below, above);
+				onBridge?.(below, above);
+			} else {
+				break;
+			}
+		}
 	}
 
 	/** A record of what either this or `other` handed out. */

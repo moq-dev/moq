@@ -80,8 +80,8 @@ impl Record {
 	/// when every part was. `withdrawable` is true only for a key-order reader that may take
 	/// back an unreturned stale gap on a budget widening.
 	///
-	/// A declared skip (`Hole::Skip`) was never produced and is already reported here, so it
-	/// is also absorbed into `delivered` to keep consecutive sparse groups one run.
+	/// A declared skip (`Hole::Skip`) was never produced, so when it strictly bridges two
+	/// already-handed-out runs in `delivered` it merges them into one run.
 	pub fn report(&mut self, range: Range<u64>, hole: &Hole, withdrawable: bool) -> Option<Range<u64>> {
 		let range = range.start.max(self.floor)..range.end;
 		if range.is_empty() {
@@ -94,7 +94,7 @@ impl Record {
 		};
 		self.reported.insert(gap.clone(), report);
 		if *hole == Hole::Skip {
-			self.delivered.absorb_skip(gap.clone());
+			self.delivered.bridge_skip(gap.clone());
 		}
 		Some(gap)
 	}
@@ -162,21 +162,11 @@ impl Record {
 	}
 
 	/// Forget every report of `range`, which the wire was never told: a run given up below
-	/// where delivery starts, or a queued skip evicted while outside the reader's range, which a
-	/// later widening may still serve or report. Lowers `floor` if `range` reaches below it,
-	/// preserving the settled tail above `range.end` in `reported`.
+	/// where delivery starts, which a later widening may still serve or report.
 	pub fn untell(&mut self, range: Range<u64>) {
-		if range.is_empty() {
-			return;
+		if !range.is_empty() {
+			self.reported.remove(range);
 		}
-		if range.start < self.floor {
-			let old = self.floor;
-			self.floor = range.start;
-			if range.end < old {
-				self.reported.insert(range.end..old, Report::Final);
-			}
-		}
-		self.reported.remove(range);
 	}
 }
 
@@ -1072,16 +1062,15 @@ mod test {
 		assert_eq!(record.reported.len(), 1, "stale wire drops and skips coalesce");
 		assert_eq!(record.delivered.runs(), 0, "skips alone never create runs in delivered");
 
-		// Healthy sparse live reader: handed-out keys coalesce with following skips.
+		// Healthy sparse live reader: handed-out keys bridge across declared skips.
 		let mut healthy = Record::default();
 		for i in 0..500u64 {
 			let key = 1_000 + i * 17;
 			healthy.delivered.insert(key);
 			healthy.tell(key..key + 1, Report::Final);
-			assert_eq!(
-				healthy.report(key + 1..key + 17, &Hole::Skip, false),
-				Some(key + 1..key + 17)
-			);
+			if i > 0 {
+				assert_eq!(healthy.report(key - 16..key, &Hole::Skip, false), Some(key - 16..key));
+			}
 		}
 		assert_eq!(healthy.reported.len(), 1);
 		assert_eq!(healthy.delivered.runs(), 1);
@@ -1215,20 +1204,18 @@ mod test {
 							reported.remove(&k);
 						}
 					}
-					// Absorb a skip directly (e.g. GROUP_END or non-reporting reader).
+					// Bridge a skip strictly between handed-out runs.
 					_ => {
 						let start = rng.below(MAX_KEY);
 						let end = (start + 1 + rng.below(12)).min(MAX_KEY);
 						if (start..end).all(|k| !handed.contains(&k)) {
 							let before_runs = record.delivered.runs();
-							record.delivered.absorb_skip(start..end);
-							if start > 0 {
-								assert!(
-									record.delivered.runs() <= before_runs,
-									"seed {seed}: absorb_skip grew delivered from {before_runs} to {}",
-									record.delivered.runs()
-								);
-							}
+							record.delivered.bridge_skip(start..end);
+							assert!(
+								record.delivered.runs() <= before_runs,
+								"seed {seed}: bridge_skip grew delivered from {before_runs} to {}",
+								record.delivered.runs()
+							);
 							for k in start..end {
 								skipped.insert(k);
 							}
@@ -1314,25 +1301,6 @@ mod test {
 			"only the reported run bills above one delivered run"
 		);
 		assert!(!record.told(BASE - 1), "keys below the reader's start stay untold");
-	}
-
-	/// `untell` revokes a range even after pool debt folded it below `floor`, preserving the
-	/// settled keys above and below it.
-	#[test]
-	fn untell_revokes_keys_below_a_folded_floor() {
-		let (pool, track) = account();
-		let mut record = Record::default();
-		record.tell(0..10, Report::Final);
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert!(record.told(6) && record.told(9), "0..10 folded into floor");
-
-		record.untell(6..8);
-		assert!(record.told(5), "below untold stays told");
-		assert!(!record.told(6) && !record.told(7), "untold keys are revocable");
-		assert!(record.told(8) && record.told(9), "above untold stays told");
-		assert_eq!(record.report(6..10, &Hole::Skip, false), Some(6..8));
 	}
 
 	/// Keys retired solely by the freshness budget (`Delivered::retire_below`) stay out of the

@@ -407,8 +407,6 @@ interface Copy {
 	resolved?: (Resolved | undefined)[];
 	/** Replaced by a newer route. */
 	replaced: boolean;
-	/** The copy's drops revision absorbed into the logical reader's `delivered` set. */
-	skipsSeen?: number;
 	/**
 	 * Bounded once the newer copy delivered its first group: nothing past this group is taken
 	 * from it. `null` when that leaves nothing. Unset while it is the only copy still feeding
@@ -584,10 +582,6 @@ class Reader implements ResumeSource {
 	#record: (info: track.Info, source: Source) => void;
 	/** The first frame of each group the reader reads whole from, applied to every copy; see `hooks.wholeGroups`. */
 	#whole?: (key: bigint) => number | undefined;
-	/** True once the owning logical reader polls drops or backs a wire publisher. */
-	#reports = false;
-	/** True when the owning logical reader backs a wire publisher, whose copies must never fold. */
-	#wired = false;
 
 	/** `parent` is the newest copy of the reader this one forks, if any. */
 	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void, parent?: Copy) {
@@ -643,11 +637,7 @@ class Reader implements ResumeSource {
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
-		// What a former route gave up is no verdict on the one that serves now. Revoke any
-		// unforwarded declared skips on existing copies so a reused subscription replays them.
-		for (const run of this.#drops) {
-			if (run.skip) this.untell(run.start, run.end, true);
-		}
+		// What a former route gave up is no verdict on the one that serves now.
 		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
@@ -821,7 +811,6 @@ class Reader implements ResumeSource {
 		source.retain();
 		this.#readWhole(copy);
 		this.#bound(copy);
-		if (this.#reports) hooks.markReporting(copy.sub);
 		this.#copies.splice(index, 0, copy);
 		this.route.copied();
 		const shell = this.#shell;
@@ -1077,7 +1066,6 @@ class Reader implements ResumeSource {
 	 * replaced ranges, not its last ones. Mirrors the Rust `Reader::sync`.
 	 */
 	#follow(): void {
-		let prune = false;
 		const subscription = this.#shell.subscription.peek();
 		if (subscription !== this.#mirrored) {
 			this.#mirrored = subscription;
@@ -1099,18 +1087,14 @@ class Reader implements ResumeSource {
 					if (copy.from && sameRanges(copy.from, ranges)) this.#resolve(copy.resolved ?? []);
 				}
 			}
-			prune = true;
 		}
 		const cursor = this.#shell.cursor.peek();
-		if (cursor !== this.#bounded) {
-			const passed = this.#bounded.start;
-			this.#bounded = cursor;
-			prune = true;
-			for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
-			if (cursor.start < passed) this.#backfill(cursor.start, passed);
-			if (this.#ended) this.#letGo(this.#delivered);
-		}
-		if (prune) this.#evictOutsideSkips();
+		if (cursor === this.#bounded) return;
+		const passed = this.#bounded.start;
+		this.#bounded = cursor;
+		for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
+		if (cursor.start < passed) this.#backfill(cursor.start, passed);
+		if (this.#ended) this.#letGo(this.#delivered);
 	}
 
 	/**
@@ -1439,7 +1423,7 @@ class Reader implements ResumeSource {
 		this.#reopen();
 		this.#backfillGaps(delivered);
 		if (dispositions) {
-			const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
+			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
 		// The first group any copy holds next: the lowest for an ordered read, else the first in
@@ -1462,7 +1446,7 @@ class Reader implements ResumeSource {
 			if (!next) break;
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
-				const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
+				const dropped = this.#tryDrop(delivered);
 				if (dropped) return dropped;
 				continue;
 			}
@@ -1504,7 +1488,7 @@ class Reader implements ResumeSource {
 				}
 				const recv = this.#take(copy, ordered, dispositions, admit);
 				if (recv.kind === "drop") {
-					const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
+					const dropped = this.#tryDrop(delivered);
 					if (dropped) return dropped;
 					continue;
 				}
@@ -1548,7 +1532,7 @@ class Reader implements ResumeSource {
 		this.#letGo(delivered);
 		// A copy that ran out or was let go no longer holds back a drop.
 		if (dispositions) {
-			const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
+			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
 		const generation = this.route.generation;
@@ -1690,11 +1674,11 @@ class Reader implements ResumeSource {
 		return givenUp;
 	}
 
-	tryDrop(delivered: Delivered, passing?: bigint, fold = false): (Recv & { kind: "drop" }) | undefined {
+	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {
 		this.#delivered = delivered;
 		this.sync();
 		this.#learnEnd();
-		return this.#tryDrop(delivered, passing, fold);
+		return this.#tryDrop(delivered, passing);
 	}
 
 	/**
@@ -1703,16 +1687,17 @@ class Reader implements ResumeSource {
 	 * is under its bound, so a run there waits until that copy no longer feeds. Mirrors the
 	 * Rust `Reader::poll_drop`.
 	 */
-	#tryDrop(delivered: Delivered, passing = 0n, fold = false): (Recv & { kind: "drop" }) | undefined {
+	#tryDrop(delivered: Delivered, passing = 0n): (Recv & { kind: "drop" }) | undefined {
 		if (this.#closed) return undefined;
-		// For a key-order reader (which never widens backward and is never wired), fold each copy's
-		// record below the handed-out/passed prefix so a copy returning only gaps stays bounded.
-		if (fold && !this.#wired) {
-			const at = delivered.runEnd(0n) ?? 0n;
+		// Fold each copy's record only up to where the logical reader has already folded its own
+		// record (key-order reads advance `#floor`, arrival-order readers keep it at 0 so a bridged
+		// skip in `delivered` never folds away an unreported skip on a copy).
+		const at = min(delivered.runEnd(0n) ?? 0n, this.#shell.floor());
+		if (at > 0n) {
 			for (const copy of this.#copies) hooks.fold(copy.sub, at);
 		}
 		const serving = this.#serving();
-		if (serving) {
+		if (serving && this.#drops.length > 0) {
 			// A received stale run queued here that a new upstream subscription superseded since is
 			// unknown again: the copy no longer holds it.
 			for (const run of this.#drops) {
@@ -1721,68 +1706,62 @@ class Reader implements ResumeSource {
 				for (const gap of runGaps(held, run.start, run.end))
 					this.#drops = removeRun(this.#drops, gap.start, gap.end);
 			}
-			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
-				this.#queueDrop(serving, dropped);
-			}
 		}
 		const cursor = this.#shell.cursor.peek();
-		const window = this.#window();
-		this.#drops = this.#drops.filter((run) =>
-			run.skip ? this.#shell.untold(run.start, run.end).length > 0 : !delivered.covers(run.start, run.end),
-		);
+		const done = (run: Run & { skip?: boolean }) =>
+			run.skip ? this.#shell.untold(run.start, run.end).length === 0 : delivered.covers(run.start, run.end);
+		this.#drops = this.#drops.filter((run) => !done(run));
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
 			if (copy === serving || !this.#feeds(copy)) continue;
 			const start = max(cursor.start, copy.floor ?? 0n);
 			insertRun(feeding, start, copyEnd(copy) ?? UNBOUNDED);
 		}
-		const revoked: Run[] = [];
-		for (const run of this.#drops) {
-			if (run.skip) {
-				const split = this.#splitSkip(run.start, run.end, cursor, window);
-				for (const part of split.outside) revoked.push(part);
-				for (const part of split.keep) {
-					for (const gap of this.#shell.untold(part.start, part.end)) {
-						const [open] =
-							gap.start < passing
-								? [{ start: gap.start, end: min(gap.end, passing) }]
-								: runGaps(feeding, gap.start, gap.end);
-						if (open) {
-							for (const out of revoked) {
-								this.#drops = removeRun(this.#drops, out.start, out.end);
-								this.untell(out.start, out.end, true);
-							}
-							this.#drops = removeRun(this.#drops, open.start, open.end);
-							return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
-						}
-					}
-				}
-				continue;
-			}
+		const openGap = (run: Run & { skip?: boolean }): Run | undefined => {
 			const from = max(run.start, cursor.start);
 			const end = min(run.end, cursor.end ?? run.end);
-			if (from >= end) continue;
-			for (const gap of delivered.gaps(from, end)) {
+			if (from >= end) return undefined;
+			const gaps = run.skip ? this.#shell.untold(from, end) : delivered.gaps(from, end);
+			for (const gap of gaps) {
 				const [open] =
 					gap.start < passing
 						? [{ start: gap.start, end: min(gap.end, passing) }]
 						: runGaps(feeding, gap.start, gap.end);
-				if (open) {
-					for (const out of revoked) {
-						this.#drops = removeRun(this.#drops, out.start, out.end);
-						this.untell(out.start, out.end, true);
-					}
-					// Report once without marking it delivered: a late fill may still land.
-					this.#drops = removeRun(this.#drops, open.start, open.end);
-					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
-				}
+				if (open) return open;
+			}
+			return undefined;
+		};
+		for (const run of this.#drops) {
+			const open = openGap(run);
+			if (open) {
+				// Report once without marking it delivered: a late fill may still land.
+				this.#drops = removeRun(this.#drops, open.start, open.end);
+				return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 			}
 		}
-		for (const out of revoked) {
-			this.#drops = removeRun(this.#drops, out.start, out.end);
-			this.untell(out.start, out.end, true);
+		// Pull lazily from the serving copy one drop at a time until one can be returned now: on a
+		// stable route with no replaced copies feeding, nothing unreturned is pre-queued into
+		// `#drops`, so range updates and route switches never strand or need to revoke skips.
+		if (!serving) return undefined;
+		for (;;) {
+			const dropped = hooks.tryDrop(serving.sub);
+			if (!dropped) return undefined;
+			if (routeFailed(dropped.error) || done(dropped)) continue;
+			const open = openGap(dropped);
+			if (open) {
+				const rem: Run[] = [
+					{ start: dropped.start, end: open.start },
+					{ start: open.end, end: dropped.end },
+				];
+				for (const part of rem) {
+					if (part.start < part.end && !done({ ...part, skip: dropped.skip })) {
+						this.#queueDrop(serving, { ...dropped, ...part });
+					}
+				}
+				return { kind: "drop", ...open, error: dropped.error, skip: dropped.skip, stale: dropped.stale };
+			}
+			this.#queueDrop(serving, dropped);
 		}
-		return undefined;
 	}
 
 	// Queue a run the serving copy gave up, to report once no other copy may still deliver it.
@@ -1790,14 +1769,6 @@ class Reader implements ResumeSource {
 		// A route failing is no verdict: another route may still deliver the group, and one it
 		// failed while buffered is handed out to continue through its recovery.
 		if (routeFailed(dropped.error)) return;
-		if (dropped.skip) {
-			const split = this.#splitSkip(dropped.start, dropped.end, this.#shell.cursor.peek(), this.#window());
-			for (const part of split.keep) {
-				this.#drops = insertDrop(this.#drops, part.start, part.end, { ...dropped, ...part, received: false });
-			}
-			for (const part of split.outside) this.untell(part.start, part.end, true);
-			return;
-		}
 		// A stale run the copy holds came from its upstream, which a new subscription may supersede.
 		const received =
 			dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
@@ -2300,66 +2271,8 @@ class Reader implements ResumeSource {
 		this.forgetPast(delivered, this.#readerBudget());
 	}
 
-	untell(start: bigint, end: bigint, rescan = false): void {
-		for (const copy of this.#copies) hooks.untell(copy.sub, start, end, rescan);
-	}
-
-	// Split a declared skip against `cursor` and settled active `window` ranges.
-	#splitSkip(
-		start: bigint,
-		end: bigint,
-		cursor: { start: bigint; end?: bigint },
-		window: Window,
-	): { keep: Run[]; outside: Run[] } {
-		const from = max(start, cursor.start);
-		const to = cursor.end === undefined ? end : min(end, cursor.end);
-		if (from >= to) return { keep: [], outside: [{ start, end }] };
-		const keep = window.settled ? window.runs(from, to) : [{ start: from, end: to }];
-		const outside: Run[] = [];
-		if (start < from) outside.push({ start, end: from });
-		if (window.settled) {
-			for (const gap of runGaps(keep, from, to)) outside.push(gap);
-		}
-		if (to < end) outside.push({ start: to, end });
-		return { keep, outside };
-	}
-
-	// Evict queued declared skips (or parts of skips) outside cursor bounds or settled active
-	// ranges, revoking them on copies with a rescan so range hops never strand entries in `#drops`.
-	#evictOutsideSkips(): void {
-		if (this.#drops.length === 0) return;
-		const cursor = this.#shell.cursor.peek();
-		const window = this.#window();
-		const outside: Run[] = [];
-		const kept: DropRun[] = [];
-		for (const run of this.#drops) {
-			if (!run.skip) {
-				kept.push(run);
-				continue;
-			}
-			const split = this.#splitSkip(run.start, run.end, cursor, window);
-			for (const part of split.outside) outside.push(part);
-			for (const part of split.keep) {
-				kept.push(part.start === run.start && part.end === run.end ? run : { ...run, ...part });
-			}
-		}
-		this.#drops = kept;
-		for (const run of outside) this.untell(run.start, run.end, true);
-	}
-
-	absorbSkips(delivered: Delivered, key: bigint): void {
-		const serving = this.#copies.at(-1);
-		if (!serving) return;
-		serving.skipsSeen = hooks.absorbSkips(serving.sub, delivered, key, serving.skipsSeen ?? 0);
-	}
-
-	markReporting(wired: boolean): void {
-		const changed = !this.#reports || (wired && !this.#wired);
-		this.#reports = true;
-		if (wired) this.#wired = true;
-		if (changed) {
-			for (const copy of this.#copies) hooks.markReporting(copy.sub);
-		}
+	untell(start: bigint, end: bigint): void {
+		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
 	skipEnd(key: bigint): bigint | undefined {
