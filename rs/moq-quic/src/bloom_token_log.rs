@@ -28,9 +28,10 @@ impl BloomTokenLog {
 	/// Construct with an approximate maximum memory usage and expected number of validation token
 	/// usages per expiration period
 	///
-	/// Calculates the optimal bloom filter k number automatically.
+	/// Calculates the optimal bloom filter k number automatically, for each of the two filters
+	/// holding half of `max_bytes`.
 	pub fn new_expected_items(max_bytes: usize, expected_hits: u64) -> Self {
-		Self::new(max_bytes, optimal_k_num(max_bytes, expected_hits))
+		Self::new(max_bytes, optimal_k_num(max_bytes / 2, expected_hits))
 	}
 
 	/// Construct with an approximate maximum memory usage and a [bloom filter k number][bloom]
@@ -88,11 +89,12 @@ impl TokenLog for BloomTokenLog {
 				&mut state.filter_2
 			}
 			_ => {
-				// turn over both filters
+				// turn over both filters, starting at this token's issue, which is in the past: any
+				// token still valid expires after now, so none lands before period 1
 				state.filter_1 = Filter::default();
 				state.filter_2 = Filter::default();
-				state.period_1_start = expires_at;
-				&mut state.filter_1
+				state.period_1_start = issued;
+				&mut state.filter_2
 			}
 		};
 
@@ -114,7 +116,7 @@ impl TokenLog for BloomTokenLog {
 	}
 }
 
-/// Default to 20 MiB max memory consumption and expected one million hits
+/// Default to 10 MiB max memory consumption and expected one million hits
 ///
 /// With the default validation token lifetime of 2 weeks, this corresponds to one token usage per
 /// 1.21 seconds.
@@ -271,6 +273,21 @@ mod test {
 		// assert that these don't panic:
 		optimal_k_num(10 << 20, 0);
 		optimal_k_num(usize::MAX, 1_000_000);
+		// Each of the two filters gets half the bytes
+		assert_eq!(BloomTokenLog::default().0.lock().unwrap().config.k_num, 29);
+	}
+
+	/// A valid token issued just before the first one redeemed is still accepted, and only once
+	#[test]
+	fn earlier_token_after_first() {
+		let log = BloomTokenLog::new_expected_items(800, 200);
+		let lifetime = Duration::from_secs(1_000);
+		let issued = UNIX_EPOCH + lifetime * 10;
+		assert!(log.check_and_insert(1, issued, lifetime).is_ok());
+		let earlier = issued - Duration::from_secs(1);
+		assert!(log.check_and_insert(2, earlier, lifetime).is_ok());
+		assert!(log.check_and_insert(2, earlier, lifetime).is_err());
+		assert!(log.check_and_insert(1, issued, lifetime).is_err());
 	}
 
 	#[test]
@@ -285,7 +302,8 @@ mod test {
 			let token = rng.random::<u128>();
 			let result = log.check_and_insert(token, issued, lifetime);
 			{
-				let filter = &log.0.lock().unwrap().filter_1;
+				// Period 1 starts at the first token's issue, so tokens issued then expire in period 2
+				let filter = &log.0.lock().unwrap().filter_2;
 				if let Filter::Set(hset) = filter {
 					assert!(hset.capacity() * size_of::<u64>() <= 800);
 					assert_eq!(hset.len(), i + 1);
@@ -298,7 +316,7 @@ mod test {
 		}
 
 		assert!(
-			matches!(log.0.get_mut().unwrap().filter_1, Filter::Bloom { .. }),
+			matches!(log.0.get_mut().unwrap().filter_2, Filter::Bloom { .. }),
 			"didn't bloom"
 		);
 	}

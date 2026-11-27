@@ -82,6 +82,7 @@ impl<'a> Streams<'a> {
 
 		let x = self.state.next_reported_remote[dir as usize];
 		self.state.next_reported_remote[dir as usize] = x + 1;
+		self.state.materialize(StreamId::new(!self.state.side, dir, x));
 		if dir == Dir::Bi {
 			self.state.send_streams += 1;
 		}
