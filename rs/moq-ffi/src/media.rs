@@ -282,6 +282,17 @@ pub struct MoqFrame {
 	pub timestamp: MoqTimestamp,
 }
 
+/// A frame's header without its payload, as a metadata subscription reads it
+/// ([`MoqMetaGroup::next_header`](crate::consumer::MoqMetaGroup::next_header)).
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct MoqFrameHeader {
+	/// The frame's declared plain payload size in bytes; 0 for a real empty frame.
+	pub size: u64,
+	/// Presentation timestamp, or the [unscaled](MoqTimestamp::unscaled) group key on a
+	/// scale-less track.
+	pub timestamp: MoqTimestamp,
+}
+
 /// A [`MoqFrame`] plus the codec metadata a media track carries.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqMediaFrame {
