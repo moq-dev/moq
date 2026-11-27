@@ -4210,6 +4210,7 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// Whether the group has aged past `budget`, held to the publisher's max age, as
 	/// [`Self::is_expired`] judges its own, registering `waiter` for anything that could change
 	/// the answer while it has not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn aged(&self, budget: std::time::Duration, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter)
 	-> bool;
 
@@ -4672,7 +4673,7 @@ impl Consumer {
 	/// Whether the group has aged past `budget` under the subscription it was handed out
 	/// under, waking once it does: a range wanting it for that long stops wanting it then,
 	/// though another may still. `false` for a group handed out under none.
-	#[cfg(any(feature = "async", test))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_aged(&self, budget: std::time::Duration, waiter: &kio::Waiter) -> bool {
 		(self.expiry.as_ref()).is_some_and(|expiry| expiry.aged(budget, self.recover(), waiter))
 	}

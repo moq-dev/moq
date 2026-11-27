@@ -1516,6 +1516,7 @@ impl Subscriber {
 	}
 
 	/// The reader's ranges covering group `key`; see [`track::Subscriber::covering`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn covering(&self, key: u64) -> Vec<(u64, std::time::Duration)> {
 		let mut reader = self.reader();
 		reader.window();

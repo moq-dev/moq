@@ -13828,6 +13828,7 @@ impl Subscriber {
 
 	/// The ranges covering group `key`, by key, each with how long it keeps the group worth
 	/// delivering once superseded: a range not yet placed may cover any group up to its end.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn covering(&mut self, key: u64) -> Vec<(u64, Duration)> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
