@@ -4,9 +4,9 @@
  * Random sequences of route flips, route failures, give-ups, short closes, ranges, cache expiry,
  * and reader joins and leaves drive an origin's fronts on the manual clock. Every reader's groups,
  * frames, drops, and end are checked against what one plain cursor on the logical track would see:
- * every group its range and staleness budget allow, each once, in its order. A second identity, priced
- * below the first, wins the path while older readers stay on theirs until it has no route left,
- * then end with an error.
+ * every group its range and staleness budget allow, in its order, and once while its range holds it.
+ * A second identity, priced below the first, wins the path while older readers stay on theirs until
+ * it has no route left, then end with an error.
  *
  * `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
  */
@@ -311,6 +311,11 @@ interface Reader {
 	/** Every group handed out, in order. */
 	handed: number[];
 	reading: Map<number, Reading>;
+	/**
+	 * Groups handed out that a range edit since left outside the ranges: ranges holding one again
+	 * may hand it out again, as a new subscription would.
+	 */
+	released: Set<number>;
 	/** Groups reported dropped. */
 	dropped: Set<number>;
 	/** Only groups past this one are owed: older ones were cached history at join, or may have expired. */
@@ -522,6 +527,13 @@ class Model {
 			case "ranges": {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
+				// A live join places behind the newest group, so it holds none written before.
+				const newest = this.identities[reader.identity].newest();
+				const holds = (group: number): boolean => {
+					if (op.range) return op.range[0] <= group && group < op.range[1];
+					return reader.spec.budget === "hour" || newest === undefined || group >= newest;
+				};
+				for (const group of reader.reading.keys()) if (!holds(group)) reader.released.add(group);
 				reader.ranges = op.range;
 				reader.holding = undefined;
 				reader.expires ||= expires(reader.spec, op.range);
@@ -710,6 +722,7 @@ class Model {
 			cursor: spec.range,
 			handed: [],
 			reading: new Map(),
+			released: new Set(),
 			dropped: new Set(),
 			floor: this.identities[identity].newest(),
 			doomed: false,
@@ -778,7 +791,7 @@ class Model {
 			if (recv.kind === "group") {
 				const group = recv.group;
 				const key = Number(group.start);
-				if (reader.reading.has(key)) {
+				if (reader.reading.has(key) && !reader.released.delete(key)) {
 					throw fail(index, `group ${key} handed out twice: ${reader.handed}`);
 				}
 				const last = reader.handed.at(-1);
@@ -1841,6 +1854,22 @@ test("regressions", async () => {
 				{ kind: "write", identity: 0, slot: 0, group: 11, frames: 1 },
 				{ kind: "end", identity: 0, slot: 2 },
 				{ kind: "close", identity: 0, slot: 2, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Ranges moved off groups 0 and 2 forget them, so ranges holding them again may hand group 2
+		// out a second time: only a range holding a group throughout keeps it once. Mirrors the Rust
+		// case.
+		{
+			ops: [
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 2, group: 4, frames: 1 },
+				{ kind: "ranges", reader: 1, range: [4, 5] },
+				{ kind: "ranges", reader: 1, range: undefined },
 			],
 			finish: false,
 		},

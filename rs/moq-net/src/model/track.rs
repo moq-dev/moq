@@ -14138,9 +14138,10 @@ impl Subscriber {
 	/// empty range. Both bounds are assigned, in either direction: an omitted start is
 	/// group 0 and an omitted end removes the cap. Lowering the floor or raising the cap
 	/// offers the groups it newly covers that the cache still holds and this reader never
-	/// handed out, in its [`Order`]; a group is never handed out twice. Groups past the cap
-	/// stay cached, and lowering the cap below the cursor waits until it rises again or
-	/// the track finishes. [`Self::poll_largest`] reports within these bounds.
+	/// handed out, in its [`Order`]; a group is never handed out twice while the
+	/// subscription's ranges hold it (see [`Self::update`]). Groups past the cap stay cached,
+	/// and lowering the cap below the cursor waits until it rises again or the track
+	/// finishes. [`Self::poll_largest`] reports within these bounds.
 	///
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set
@@ -14206,9 +14207,10 @@ impl Subscriber {
 	/// here (see [`Producer::subscription`]). Replaced ranges resolve again here, a live
 	/// join placed behind the latest group now, and widening them offers
 	/// the cached groups they newly cover, even ones that arrived before the groups
-	/// already read. Returns [`Error::Closed`]
-	/// if the track already ended; the update is meaningless at that point and can usually
-	/// be ignored.
+	/// already read. A group read stays read while the ranges hold it; ranges replaced off it
+	/// may forget it, so ranges holding it again may hand it out again, as a new subscription
+	/// would. Returns [`Error::Closed`] if the track already ended; the update is meaningless
+	/// at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.update_stamped(subscription, [])
 	}
