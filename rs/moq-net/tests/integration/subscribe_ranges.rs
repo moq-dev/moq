@@ -698,9 +698,11 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 				.update(initial.clone().with_ranges([support::keys(future..)]))
 				.unwrap();
 			// Once the copy holds a group, its live SUBSCRIBE still covers the narrowing, and
-			// the publisher serves that as a live join.
+			// the publisher serves that as a live join. The widening back to 1 below then
+			// goes out as an absolute start, so the next narrowing does too, and a time
+			// start names the newest group at or before it: the publisher still asks from 1.
 			let narrowed = match start {
-				0 => support::keys(future..),
+				0 | 2 => support::keys(1..),
 				_ => Range::from(Start::Live {
 					min: Some(Duration::ZERO),
 					max: None,
