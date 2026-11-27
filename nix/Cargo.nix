@@ -61784,11 +61784,6 @@ rec {
             ];
           }
           {
-            name = "security-framework-sys";
-            packageId = "security-framework-sys";
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-          }
-          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -61945,7 +61940,7 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            features = [ "rustls-tls-native-roots" ];
+            features = [ "__rustls-tls" ];
           }
           {
             name = "tokio-util";
