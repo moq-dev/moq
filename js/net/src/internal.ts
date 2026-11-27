@@ -1509,8 +1509,16 @@ export const hooks: {
 	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
-	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
-	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
+	/**
+	 * Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating.
+	 * A `header` read takes the frame's header alone, leaving no payload in flight to tear on a route failure.
+	 */
+	readGroupFrame: (
+		group: GroupConsumer,
+		compressed: boolean,
+		from?: number,
+		header?: boolean,
+	) => Promise<ReadGroupFrame | undefined>;
 	/** Notify the owning track when a reader reaches its shed front. */
 	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
