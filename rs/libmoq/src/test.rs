@@ -2750,9 +2750,20 @@ fn raw_track_ends_on_an_aborted_group() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// What [header_callback] forwards: a header's group, frame, size, and timestamp, or the terminal code.
+type HeaderEvent = Result<(u64, u64, u64, u64), i32>;
+
+extern "C" fn header_callback(user_data: *mut c_void, header: *const moq_header, code: i32) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<HeaderEvent>) }.clone();
+	let event = match unsafe { header.as_ref() } {
+		Some(h) => Ok((h.group, h.frame, h.size, h.timestamp.value)),
+		None => Err(code),
+	};
+	let _ = tx.send(event);
+}
+
 /// A metadata subscription delivers each frame's position, declared size, and timestamp, an
-/// empty frame as size 0, then ends cleanly with the track; a header outlives its callback until
-/// freed.
+/// empty frame as size 0, then ends cleanly with the track on a NULL header.
 #[test]
 fn meta_reads_headers() {
 	let origin = id(moq_origin_create());
@@ -2761,15 +2772,16 @@ fn meta_reads_headers() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 	let consume = consume_local(broadcast);
-	let header_cb = Callback::new();
+	let (tx, rx) = mpsc::channel::<HeaderEvent>();
+	let tx = Box::into_raw(Box::new(tx));
 	let meta = id(unsafe {
 		moq_consume_meta(
 			consume,
 			name.as_ptr() as *const c_char,
 			name.len(),
 			std::ptr::null(),
-			Some(channel_callback),
-			header_cb.ptr,
+			Some(header_callback),
+			tx as *mut c_void,
 		)
 	});
 
@@ -2782,20 +2794,13 @@ fn meta_reads_headers() {
 	}
 	assert_eq!(moq_publish_group_finish(group), 0);
 
-	let mut headers = Vec::new();
-	for _ in 0..2 {
-		let header = id(header_cb.recv());
-		let mut dst = unsafe { std::mem::zeroed::<moq_header>() };
-		assert_eq!(unsafe { moq_consume_meta_header(header, &mut dst) }, 0);
-		assert_eq!(moq_consume_meta_header_free(header), 0);
-		assert!(moq_consume_meta_header_free(header) < 0, "freed once");
-		headers.push((dst.group, dst.frame, dst.size, dst.timestamp.value));
-	}
-	assert_eq!(headers, [(0, 0, 3, 0), (0, 1, 0, 1)]);
+	let headers: Vec<_> = (0..2).map(|_| rx.recv().expect("header")).collect();
+	assert_eq!(headers, [Ok((0, 0, 3, 0)), Ok((0, 1, 0, 1))]);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(header_cb.recv(), 0, "the track finished");
+	assert_eq!(rx.recv().expect("terminal"), Err(0), "the track finished");
 	assert!(moq_consume_meta_cancel(meta) < 0, "the task already ended");
+	drop(unsafe { Box::from_raw(tx) });
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);

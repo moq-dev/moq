@@ -5182,13 +5182,12 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// subscription and drops the payload. To read the payload after all, subscribe to the track
 /// from the group reached.
 ///
-/// `on_header` is called with a positive header ID for each frame, group by group in arrival
-/// order, then exactly once more with a terminal code: `0` (closed cleanly) or a negative error.
-/// After the terminal (`<= 0`) callback, `on_header` is never called again and `user_data` is
-/// never touched again, so release `user_data` there. The terminal callback fires even after
-/// [moq_consume_meta_cancel]. Read each header with [moq_consume_meta_header] and release it with
-/// [moq_consume_meta_header_free]. Pass NULL for `subscription` to use the [moq_consume_track]
-/// defaults.
+/// `on_header` is called with each frame's header, group by group in arrival order, borrowed
+/// only for the call: copy what you keep. It is then called exactly once more with a NULL header
+/// and a terminal code: `0` (closed cleanly) or a negative error. After the terminal callback,
+/// `on_header` is never called again and `user_data` is never touched again, so release
+/// `user_data` there. The terminal callback fires even after [moq_consume_meta_cancel]. Pass
+/// NULL for `subscription` to use the [moq_consume_track] defaults.
 ///
 /// Returns a non-zero handle to the subscription on success, or a negative code on failure.
 ///
@@ -5196,14 +5195,14 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
 /// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
 ///   whose `ranges` is NULL or points to `ranges_len` ranges.
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_header` callback.
+/// - The caller must keep `user_data` valid until the terminal (NULL header) `on_header` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_meta(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
 	subscription: *const moq_subscription,
-	on_header: ffi::moq_status_callback,
+	on_header: ffi::moq_header_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -5212,7 +5211,7 @@ pub unsafe extern "C" fn moq_consume_meta(
 		let subscription = unsafe { subscription.as_ref() }
 			.map(|subscription| unsafe { parse_subscription(subscription) })
 			.transpose()?;
-		let on_header = unsafe { ffi::OnStatus::new(user_data, on_header)? };
+		let on_header = unsafe { ffi::OnHeader::new(user_data, on_header)? };
 		State::lock()
 			.consume
 			.meta_track(broadcast, name, subscription, on_header)
@@ -5235,38 +5234,11 @@ pub unsafe extern "C" fn moq_consume_meta_update(meta: u32, subscription: *const
 	})
 }
 
-/// Read a header delivered via the [moq_consume_meta] callback into `dst`.
-///
-/// Returns a zero on success, or a negative code on failure.
-///
-/// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_header] struct.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_meta_header(header: u32, dst: *mut moq_header) -> i32 {
-	ffi::enter(move || {
-		let header = ffi::parse_id(header)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		*dst = State::lock().consume.meta_header(header)?;
-		Ok(())
-	})
-}
-
-/// Free a header delivered via the [moq_consume_meta] callback.
-///
-/// Returns a zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_meta_header_free(header: u32) -> i32 {
-	ffi::enter(move || {
-		let header = ffi::parse_id(header)?;
-		State::lock().consume.meta_header_close(header)
-	})
-}
-
 /// Stop a metadata subscription's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`; the [moq_consume_meta] `on_header` callback still fires once more with a terminal
-/// `0` (or a negative error), which is where `user_data` should be released.
+/// `user_data`; the [moq_consume_meta] `on_header` callback still fires once more with a NULL
+/// header and a terminal `0` (or a negative error), which is where `user_data` should be released.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_meta_cancel(meta: u32) -> i32 {
 	ffi::enter(move || {

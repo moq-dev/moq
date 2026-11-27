@@ -9,8 +9,8 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::decode::Read;
-use crate::ffi::OnStatus;
-use crate::task::Task;
+use crate::ffi::{OnHeader, OnStatus};
+use crate::task::{Task, Terminal};
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_header, moq_json_value,
 	moq_json_window_event, moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config,
@@ -206,8 +206,8 @@ pub(crate) async fn resolve(
 }
 
 /// A raw track task also accepts subscription updates and refreshes while it is running.
-struct RawTaskEntry {
-	task: Task,
+struct RawTaskEntry<C = OnStatus> {
+	task: Task<C>,
 	control: RawControl,
 	/// Dropped with the entry once the task ends, which ends its refresh waits.
 	alive: kio::Producer<()>,
@@ -318,10 +318,7 @@ pub struct Consume {
 	raw_refresh: NonZeroSlab<Task>,
 
 	/// Metadata subscription tasks, which deliver each frame's header alone.
-	meta_task: NonZeroSlab<RawTaskEntry>,
-
-	/// Buffered headers ready for consumption.
-	meta_header: NonZeroSlab<moq_header>,
+	meta_task: NonZeroSlab<RawTaskEntry<OnHeader>>,
 
 	/// Live datagram consumer tasks, independent of stream-track readers.
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
@@ -1081,13 +1078,13 @@ impl Consume {
 	}
 
 	/// Subscribe to a track's metadata by name, delivering each frame's header alone, group by
-	/// group in arrival order. Headers must be released with [`Self::meta_header_close`].
+	/// group in arrival order, each borrowed for its callback.
 	pub fn meta_track(
 		&mut self,
 		broadcast: Id,
 		name: &str,
 		subscription: RawSubscription,
-		on_header: OnStatus,
+		on_header: OnHeader,
 	) -> Result<Id, Error> {
 		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let driver = context
@@ -1129,7 +1126,7 @@ impl Consume {
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			let entry = State::lock().consume.meta_task.remove(id);
 			if let Some(entry) = entry {
-				entry.task.callback.call(res);
+				entry.task.callback.terminal(res);
 			}
 		});
 
@@ -1137,7 +1134,7 @@ impl Consume {
 	}
 
 	async fn run_meta(
-		callback: OnStatus,
+		callback: OnHeader,
 		mut track: moq_net::meta::Subscriber,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -1186,9 +1183,7 @@ impl Consume {
 					size: header.size,
 					timestamp: header.timestamp.into(),
 				};
-				// Hold the lock only to buffer the read; release it before the callback.
-				let header_id = State::lock().consume.meta_header.insert(header)?;
-				callback.call(Ok(header_id));
+				callback.header(&header);
 			}
 		}
 	}
@@ -1208,15 +1203,6 @@ impl Consume {
 			.ok_or(Error::TrackNotFound)?
 			.task
 			.close(Error::TrackNotFound)
-	}
-
-	pub fn meta_header(&self, header: Id) -> Result<moq_header, Error> {
-		self.meta_header.get(header).copied().ok_or(Error::FrameNotFound)
-	}
-
-	pub fn meta_header_close(&mut self, header: Id) -> Result<(), Error> {
-		self.meta_header.remove(header).ok_or(Error::FrameNotFound)?;
-		Ok(())
 	}
 
 	/// Subscribe to a live datagram track by name.

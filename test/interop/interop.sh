@@ -529,8 +529,11 @@ plan_pass() {
         fi
     done
     [[ "$VERSION" == auto ]] || return 0
+    record "not run" case=meta publisher=rust subscriber=rust version=moq-lite-07-wip
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
+        record "not run" case=meta publisher=rust subscriber="$runtime" version=moq-lite-07-wip
+        record "not run" case=meta publisher="$runtime" subscriber=rust version=moq-lite-07-wip
         for version in "${COMPRESS_VERSIONS[@]}"; do
             record "not run" case=compress publisher=rust subscriber="$runtime" version="$version"
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
