@@ -3962,6 +3962,7 @@ mod tests {
 				max: Some(max),
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		active.live = lite::LiveRanges::new(Version::Lite07, &[asked(Duration::ZERO)]);
 		active.starts = [(0, Some(20))].into();

@@ -3480,7 +3480,7 @@ test("a join answered before its retune goes out is probed", async () => {
 			{ start: answer(version, 20n, 0n, { position: { group: 20n, frame: 1 }, ended: false }) },
 		]);
 		const retune = await SubscribeUpdate.decode(sent, version);
-		expect(retune.retune).toEqual([[0n, 100]]);
+		expect(retune.retune).toEqual([[0n, { priority: 0, order: "descending", max: 100 }]]);
 		// Without the probe nothing more goes out, and the reader waits on its join for good.
 		const probe = await SubscribeUpdate.decode(sent, version);
 		expect(probe.ranges).toEqual([{ start: { live: { min: 0, max: 100 } } }]);

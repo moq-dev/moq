@@ -2589,10 +2589,7 @@ export class Subscriber {
 		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
 		// A metadata copy's fill asks for headers alone too.
 		const target = { name: producer.name, meta: copy.meta };
-		const msg = this.#withRanges(
-			this.#subscribeMessage(id, broadcast, consumed, target, policy, ranges),
-			ranges,
-		);
+		const msg = this.#withRanges(this.#subscribeMessage(id, broadcast, consumed, target, policy, ranges), ranges);
 		// Lite-07 recovery asks for exact group bounds [Position(start, 0), Position(end, 0))
 		// rather than time-containment ranges.
 		if (hasRanges(this.version)) {

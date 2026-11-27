@@ -35514,8 +35514,6 @@ mod test {
 				placed: Default::default(),
 				retire: Vec::new(),
 				add: vec![(1, Range::groups(3..=3))],
-				priority: 0,
-				order: Order::default(),
 			})
 			.unwrap();
 		assert_eq!(
@@ -35552,10 +35550,9 @@ mod test {
 					Range {
 						start: Start::Time(5),
 						end: Some(5),
+						..Default::default()
 					},
 				)],
-				priority: 0,
-				order: Order::default(),
 			})
 			.unwrap();
 		assert_eq!(
@@ -35612,8 +35609,6 @@ mod test {
 								placed: Default::default(),
 								retire: Vec::new(),
 								add: vec![(next_key, Range::groups(start..=end))],
-								priority: 0,
-								order: Order::default(),
 							})
 							.unwrap();
 						next_key += 1;
@@ -35629,8 +35624,6 @@ mod test {
 								placed: Default::default(),
 								retire: vec![key],
 								add: Vec::new(),
-								priority: 0,
-								order: Order::default(),
 							})
 							.unwrap();
 					}

@@ -9615,10 +9615,9 @@ mod test {
 				track::Range {
 					start: crate::track::Start::Time(5),
 					end: Some(9),
+					..Default::default()
 				},
 			)],
-			priority: 0,
-			order: track::Order::default(),
 		})
 		.unwrap();
 		assert_eq!(drain(&mut sub, false), [7]);
@@ -11496,8 +11495,6 @@ mod test {
 			placed: Default::default(),
 			retire: Vec::new(),
 			add: vec![(1, track::Range::groups(3..=3))],
-			priority: 0,
-			order: track::Order::default(),
 		})
 		.unwrap();
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing held there yet");

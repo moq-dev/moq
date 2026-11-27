@@ -11788,7 +11788,7 @@ mod serve_group_test {
 	) -> (TrackRun, Writer<crate::transport::boxed::SendStream, Version>, Log) {
 		let bounds = Bounds::new(ranges, None);
 		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
-		let whole = lite::Policy::of(ranges);
+		let whole = lite::Policy::top(ranges.iter().map(lite::Range::policy));
 		let steer = Steer {
 			priority: whole.priority,
 			order: whole.order,
@@ -11810,6 +11810,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 		let log = Log::default();
 		let writer = Writer::new(

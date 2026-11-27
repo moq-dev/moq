@@ -127,7 +127,7 @@ test("Legacy Producer starts nothing inside the span of a group a cut ended", as
 
 test("Legacy Producer starts a keyframe inside a cut group's span at its end", async () => {
 	const media = track(Time.Timescale.MICRO);
-	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
+	const subscriber = media.subscribe({ ranges: [{ order: "ascending" }] });
 	const producer = new Producer(media, new Format("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
@@ -145,7 +145,7 @@ test("Legacy Producer starts a keyframe inside a cut group's span at its end", a
 
 test("Legacy Producer cuts a moved keyframe's group at its source end", async () => {
 	const media = track(Time.Timescale.MICRO);
-	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
+	const subscriber = media.subscribe({ ranges: [{ order: "ascending" }] });
 	const producer = new Producer(media, new Format("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);

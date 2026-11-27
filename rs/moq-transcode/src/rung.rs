@@ -888,8 +888,8 @@ async fn newest(
 		Subscription::default().with_ranges([Range {
 			start: Start::Time(from),
 			end: Some(time),
-			priority: priority,
-			order: order,
+			priority,
+			order,
 		}])
 	};
 	let mut candidates = track.subscribe(span(from, Order::Descending)).await?;
@@ -929,7 +929,7 @@ async fn containing(
 	let subscription = Subscription::default().with_ranges([Range {
 		start: Start::Time(time),
 		end: Some(time),
-		priority: priority,
+		priority,
 		order: Order::Ascending,
 	}]);
 	let mut read = track.subscribe(subscription).await?.ordered();
@@ -1554,14 +1554,12 @@ mod tests {
 		let fills = track.requests();
 		// Between the first group's second and third frames.
 		let time = FRAME + FRAME / 2;
-		let mut reader = track.subscribe(
-			Subscription::default()
-				.with_ranges([Range {
-					start: Start::Time(time),
-					end: None,
-				}])
-				.with_order(Order::Ascending),
-		);
+		let mut reader = track.subscribe(Subscription::default().with_ranges([Range {
+			start: Start::Time(time),
+			end: None,
+			order: Order::Ascending,
+			..Range::default()
+		}]));
 		track.start_at(60 * FRAME).unwrap();
 		track
 			.create_group(moq_net::group::Info { start: 60 * FRAME })
@@ -1629,14 +1627,12 @@ mod tests {
 			.finish()
 			.unwrap();
 		let mut reader = track
-			.subscribe(
-				Subscription::default()
-					.with_ranges([Range {
-						start: Start::Time(time),
-						end: None,
-					}])
-					.with_order(Order::Ascending),
-			)
+			.subscribe(Subscription::default().with_ranges([Range {
+				start: Start::Time(time),
+				end: None,
+				order: Order::Ascending,
+				..Range::default()
+			}]))
 			.ordered();
 		let waiter = kio::Waiter::noop();
 		let _ = reader.poll_next_group(&waiter);
@@ -1681,14 +1677,12 @@ mod tests {
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut track = output.create_track("video/120p", info).unwrap();
 		let fills = track.requests();
-		let mut reader = track.subscribe(
-			Subscription::default()
-				.with_ranges([Range {
-					start: Start::Time(1),
-					end: None,
-				}])
-				.with_order(Order::Descending),
-		);
+		let mut reader = track.subscribe(Subscription::default().with_ranges([Range {
+			start: Start::Time(1),
+			end: None,
+			order: Order::Descending,
+			..Range::default()
+		}]));
 		track.start_at(HOUR).unwrap();
 		track
 			.create_group(moq_net::group::Info { start: HOUR })
