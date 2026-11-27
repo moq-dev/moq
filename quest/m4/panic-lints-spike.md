@@ -20,7 +20,7 @@ Guidance for the implementer:
 
 - `moq`'s test build doubles as the clippy gate, so run the spike with test-allowing `clippy.toml` keys (`allow-unwrap-in-tests = true`, `allow-indexing-slicing-in-tests = true`, `allow-panic-in-tests = true`) or `--lib --bins` so test code does not drown out production findings.
 - Classify findings per crate and per lint: confirmed reachable panic bug, latent bug / fragile invariant, type-improvable site (`NonZero`, `as_chunks`, iterators, `NonEmpty`), or pure noise.
-- Pay special attention to peer-controlled lengths, timestamps, counters, and packet/segment slicing, which produced the panics tracked in [stats-aggregate-fixes](/quest/m1/stats-aggregate-fixes.md) and [quic-lease-ownership](/quest/m2/quic-lease-ownership.md).
+- Pay special attention to peer-controlled lengths, timestamps, counters, and packet/segment slicing, which produced the panics tracked in [stats-aggregate-fixes](/quest/m1/stats-aggregate-fixes.md) and the `moq_quic::recv::Lease` underflow fixed by [moq-dev/moq#9801](https://github.com/moq-dev/moq/pull/9801).
 - Keep the PR summary concise with the per-lint counts, every real bug found (fixed here or filed as an `m0`/`m1` follow-up), and a concrete recommendation on which lints (if any) have high enough signal-to-noise to gate in CI as a follow-up quest.
 
 Public API: none. Wire: none.
