@@ -180,8 +180,9 @@ fn busy_session_pays_nothing() {
 
 /// How long after healing an `outage` a client blackholed mid-send hears its peer again (`SOFT` if
 /// it never does): the dead path fills its congestion window with packets nothing acknowledges,
-/// and its PTO probes back off further apart than `soft`
-fn full_window_heal(outage: Duration) -> Duration {
+/// and its PTO probes back off further apart than `soft`. A `straggler` lets one of the peer's
+/// packets through partway.
+fn full_window_heal(outage: Duration, straggler: bool) -> Duration {
 	let (mut pair, client_ch, server_ch) = connect();
 	pair.drive();
 	pair.latency = Duration::from_millis(10);
@@ -217,6 +218,18 @@ fn full_window_heal(outage: Duration) -> Duration {
 	pair.to_server = collapsed();
 	pair.to_client = collapsed();
 	let blackholed = pair.time;
+	if straggler {
+		// Once the first probe went out past the window, one packet of the peer's gets through,
+		// acknowledging nothing new, and the path goes dead again.
+		run(&mut pair, blackholed.saturating_add(SOFT + SOFT / 4), |pair, _| {
+			send(pair)
+		});
+		pair.to_client = throttled();
+		pair.server_conn_mut(server_ch).ping();
+		let through = pair.time.saturating_add(Duration::from_millis(100));
+		run(&mut pair, through, |pair, _| send(pair));
+		pair.to_client = collapsed();
+	}
 	run(&mut pair, blackholed.saturating_add(outage), |pair, _| send(pair));
 	assert!(pair.client_conn_mut(client_ch).is_stale());
 
@@ -241,7 +254,22 @@ fn full_window_still_probes_after_healing() {
 	let _guard = subscribe();
 	// Outages from just past `soft` to just short of `hard`, landing between backed-off PTOs.
 	for ms in (3_000..9_000).step_by(500) {
-		let after = full_window_heal(Duration::from_millis(ms));
+		let after = full_window_heal(Duration::from_millis(ms), false);
+		assert!(
+			after <= SOFT / 2 + Duration::from_millis(100),
+			"live {after:?} after healing a {ms} ms outage"
+		);
+	}
+}
+
+/// A packet that slips through an outage without acknowledging anything new does not end the
+/// probes past the window, so a later silence still probes once the path heals
+#[test]
+fn straggler_does_not_end_full_window_probes() {
+	let _guard = subscribe();
+	// Outages long enough to turn stale again after the straggler, short of `hard` after it.
+	for ms in (6_000..9_500).step_by(500) {
+		let after = full_window_heal(Duration::from_millis(ms), true);
 		assert!(
 			after <= SOFT / 2 + Duration::from_millis(100),
 			"live {after:?} after healing a {ms} ms outage"
@@ -284,14 +312,19 @@ fn unacknowledged_excess(keep_alive: bool, secs: u64) -> u64 {
 	in_flight.saturating_sub(window)
 }
 
-/// A peer that keeps talking but never acknowledges gets the keep-alive one probe past the
-/// congestion window, not one per half `soft`, so it cannot grow the sent history without bound
+/// A peer that keeps talking but never acknowledges gets the keep-alive only the probes past the
+/// congestion window that a dead path would draw before `hard`, not one per half `soft` for as long
+/// as it keeps talking, so it cannot grow the sent history without bound
 #[test]
 fn unacknowledging_peer_keeps_probes_within_the_window() {
 	let _guard = subscribe();
-	// Over these 10 s an unbounded keep-alive adds about six full-size probes past the window.
-	let (early, late) = (unacknowledged_excess(true, 18), unacknowledged_excess(true, 28));
-	assert!(late < early + 1200, "{early} then {late} bytes past the window");
+	// What a dead path draws before `hard` closes it, each at most a minimum-MTU datagram, plus
+	// slack for one PTO pair that the keep-alive's timing moves.
+	let probes = u64::try_from(HARD.as_nanos() / (SOFT / 2).as_nanos()).unwrap();
+	let bound = unacknowledged_excess(false, 28) + (probes + 2) * 1200;
+	// Over 28 s an unbounded keep-alive draws about 18 probes from a peer pinging every 1.5 s.
+	let excess = unacknowledged_excess(true, 28);
+	assert!(excess <= bound, "{excess} bytes past the window, past {bound}");
 }
 
 /// Anyone on the path can send a Version Negotiation packet, so one says nothing of the peer and

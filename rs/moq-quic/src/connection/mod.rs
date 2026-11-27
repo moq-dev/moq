@@ -221,8 +221,9 @@ pub struct Connection {
 	liveness: Option<Liveness>,
 	/// When the peer was last heard: the latest authenticated packet
 	heard: Instant,
-	/// When the keep-alive last sent a probe past the congestion window
-	exempt_probe: Option<Instant>,
+	/// When the keep-alive's first probe past the congestion window since the peer last
+	/// acknowledged progress went out, and how many have since
+	exempt_probes: Option<(Instant, u32)>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -380,7 +381,7 @@ impl Connection {
 			keep_alive: None,
 			liveness: None,
 			heard: now,
-			exempt_probe: None,
+			exempt_probes: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -2829,6 +2830,7 @@ impl Connection {
 			return;
 		};
 		let after = liveness.probe_after();
+		let limit = liveness.probes_before_close();
 		let sent = self.spaces[SpaceId::Data].time_of_last_ack_eliciting_packet;
 		match sent.map(|sent| sent.saturating_add(after)).filter(|&at| at > now) {
 			Some(at) => self.timers.set(Timer::KeepAlive, at),
@@ -2837,15 +2839,17 @@ impl Connection {
 				self.ping();
 				// Exempt from congestion control, as a PTO's probe is: a dead path leaves the window
 				// full of packets nothing acknowledges, and the backed-off PTO can fall past `hard`.
-				// A peer heard since the last exempt probe that acknowledged nothing sent after it
-				// is not a dead path, and gets no more, or it could grow the sent history by one
-				// probe per half `soft`.
+				// Only as many as a dead path draws before `hard` closes it, until the peer
+				// acknowledges one: a peer that keeps talking without acknowledging could otherwise
+				// grow the sent history by one probe per half `soft`.
 				let space = self.highest_space;
-				let exempt = self
-					.exempt_probe
-					.is_none_or(|at| self.heard <= at || self.spaces[space].largest_acked_packet_sent >= at);
-				if exempt {
-					self.exempt_probe = Some(now);
+				let acked = self.spaces[space].largest_acked_packet_sent;
+				let (since, count) = self
+					.exempt_probes
+					.filter(|&(since, _)| acked < since)
+					.unwrap_or((now, 0));
+				if count < limit {
+					self.exempt_probes = Some((since, count + 1));
 					let space = &mut self.spaces[space];
 					space.loss_probes = space.loss_probes.max(1);
 				}

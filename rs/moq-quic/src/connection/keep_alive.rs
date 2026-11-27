@@ -87,6 +87,12 @@ impl Liveness {
 		self.config.soft / 2
 	}
 
+	/// How many probes a path that stays dead draws before `hard` closes it
+	pub(crate) fn probes_before_close(&self) -> u32 {
+		let probes = self.config.hard.as_nanos() / self.probe_after().as_nanos();
+		u32::try_from(probes).unwrap_or(u32::MAX)
+	}
+
 	/// When to probe a peer not heard from since
 	pub(crate) fn probe_at(&self) -> Instant {
 		self.heard.saturating_add(self.probe_after())
