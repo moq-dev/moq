@@ -59780,15 +59780,6 @@ rec {
             target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
           }
           {
-            name = "kio";
-            packageId = "kio";
-            features = [
-              "manual"
-              "serde"
-              "sim"
-            ];
-          }
-          {
             name = "libc";
             packageId = "libc";
             target = { target, features }: (target.name == "aarch64-apple-darwin");
