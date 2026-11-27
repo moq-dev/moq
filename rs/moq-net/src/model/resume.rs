@@ -3988,15 +3988,15 @@ impl Recover {
 			|| copy_failed(&self.copy)
 			|| matches!(err, Error::Lagged)
 			|| (self.reader.is_none() && matches!(code, StreamError::Old | StreamError::Evicted))
-			|| (code == StreamError::Old && self.outgrows_judging())
+			|| (code == StreamError::Old && self.outgrows_judging(&self.copy))
 	}
 
-	/// Whether the reader is wider than the narrowest budget the copy's upstream asked, which
-	/// a group it reset as too old may have been judged under: that verdict settles a reader
-	/// only as a stale drop does (see [`track::settles`]), and the route still delivers the
-	/// group to a request under the reader's own terms. A cache only makes things faster.
-	fn outgrows_judging(&self) -> bool {
-		let Some(judged) = self.copy.judged_under() else {
+	/// Whether the reader is wider than the narrowest budget `copy`'s upstream asked, which a
+	/// group it reset or dropped as too old may have been judged under: that verdict settles a
+	/// reader only as a stale drop does (see [`track::settles`]), and the route still delivers
+	/// the group to a request under the reader's own terms. A cache only makes things faster.
+	fn outgrows_judging(&self, copy: &track::Consumer) -> bool {
+		let Some(judged) = copy.judged_under() else {
 			return false;
 		};
 		let Some(reader) = self.reader.as_ref().and_then(Weak::upgrade) else {
@@ -4212,9 +4212,15 @@ impl Recover {
 			// The serving route gave the group up, which ends a reader's group with that
 			// route's error however a fetch of the rest would answer. A drop judges that
 			// route's subscription, not whether the group exists, so it is no verdict on a
-			// fetch; nor is one a copy that failed dropped its open groups with, or a failure
-			// of the route it came through.
-			Poll::Ready(Err(err)) if self.reader.is_some() && !err.retryable() && !copy_failed(serving) => {
+			// fetch, nor on a reader wider than that subscription's budget; nor is one a copy
+			// that failed dropped its open groups with, or a failure of the route it came
+			// through.
+			Poll::Ready(Err(err))
+				if self.reader.is_some()
+					&& !err.retryable()
+					&& !copy_failed(serving)
+					&& !(StreamError::from(&err) == StreamError::Old && self.outgrows_judging(serving)) =>
+			{
 				return Poll::Ready(Err(err));
 			}
 			_ => {}
@@ -14796,7 +14802,14 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_copys_stale_reset_stands_only_for_a_reader_no_wider() {
-		for reader in ["bounded", "longer", "edge"] {
+		for (reader, dropped) in [
+			("bounded", false),
+			("longer", false),
+			("edge", false),
+			("bounded", true),
+			("longer", true),
+			("edge", true),
+		] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
@@ -14820,24 +14833,28 @@ mod test {
 				_ => subscribe(&logical, Duration::ZERO),
 			};
 			let mut reading = recv(&mut sub);
-			assert_eq!(read(&mut reading), Some(b"a".to_vec()), "{reader}");
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()), "{reader} {dropped}");
 
 			arriving.abort(Error::Stream(StreamError::Old)).unwrap();
 			let _next = a.create_group(group::Info { start: 1 }).unwrap();
+			// Lite-07 also names it dropped too old, which the copy records under the budget asked.
+			if dropped {
+				a.give_up(0..1, track::Hole::stale(Duration::ZERO));
+			}
 			let res = reading.read_frame().now_or_never();
 			if reader == "edge" {
-				assert!(matches!(res, Some(Err(_))), "{reader}: {res:?}");
+				assert!(matches!(res, Some(Err(_))), "{reader} {dropped}: {res:?}");
 				assert!(dynamic.requested_fill_group().now_or_never().is_none(), "nothing asked");
 				continue;
 			}
-			assert!(res.is_none(), "{reader}: {res:?}");
+			assert!(res.is_none(), "{reader} {dropped}: {res:?}");
 			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-			assert_eq!((request.key(), request.frame_start()), (0, 1), "{reader}");
+			assert_eq!((request.key(), request.frame_start()), (0, 1), "{reader} {dropped}");
 			let mut rest = request.accept(None).unwrap().expect("a fresh group");
 			rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 			rest.finish().unwrap();
-			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "{reader}");
-			assert_eq!(read(&mut reading), None, "{reader}");
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "{reader} {dropped}");
+			assert_eq!(read(&mut reading), None, "{reader} {dropped}");
 		}
 	}
 

@@ -55,6 +55,7 @@ import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionC
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
 	type Ask,
+	type Coverage,
 	type Dispositions,
 	type DropRun,
 	type Expiry,
@@ -74,6 +75,8 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
+	settles,
+	staleHole,
 	type Within,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
@@ -2169,6 +2172,16 @@ class Reader implements ResumeSource {
 	}
 
 	/**
+	 * The groups the reader's ranges resolve to and the cap its cursor stops at, undefined while a
+	 * live join waits on a first group. Mirrors the Rust `Recover::window`.
+	 */
+	coverage(): Coverage {
+		const window = this.#window();
+		if (window.pending) return undefined;
+		return { runs: window.runs(), cap: this.#shell.cursor.peek().end };
+	}
+
+	/**
 	 * Whether `within` passed since `copy` was superseded; see {@link Copy.since}. Arms a wakeup
 	 * for then, so a read waiting on the copy looks again.
 	 */
@@ -2919,7 +2932,26 @@ class Recover implements GroupRecover {
 	 * route is asked, which bounds a hostile route to one bad answer per route change.
 	 */
 	#undelivered(failed: Error, copy: Copy): boolean {
-		return routeFailed(failed) || copyFailed(copy);
+		return routeFailed(failed) || copyFailed(copy) || this.#outgrows(failed, copy);
+	}
+
+	/** Whether `err` is a too old verdict from `copy` that the reader outgrows (see {@link #outgrowsJudging}). */
+	#outgrows(err: Error, copy: Copy): boolean {
+		return err instanceof StreamError && err.code === StreamCode.Old && this.#outgrowsJudging(copy);
+	}
+
+	/**
+	 * Whether the reader is wider than the narrowest budget `copy`'s upstream asked, which a group
+	 * it reset or dropped as too old may have been judged under: that verdict settles a reader only as a stale
+	 * drop does (see {@link settles}), and the route still delivers the group to a request under the
+	 * reader's own terms. A cache only makes things faster. Mirrors the Rust
+	 * `Recover::outgrows_judging`.
+	 */
+	#outgrowsJudging(copy: Copy): boolean {
+		const judged = hooks.judgedUnder(copy.sub);
+		if (judged === undefined) return false;
+		const run = { start: this.key, end: this.key + 1n, ...staleHole(judged) };
+		return !settles(run, this.#reader.within.budget(), this.#reader.coverage());
 	}
 
 	async replace(index: number, cause: RecoverCause, signal: AbortSignal): Promise<Replacement> {
@@ -2993,7 +3025,12 @@ class Recover implements GroupRecover {
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
 				// it, and a group the route failed is no verdict either.
 				const given = hooks.givenUp(serving.sub, this.key);
-				if (given.error && !routeFailed(given.error) && !copyFailed(serving)) {
+				if (
+					given.error &&
+					!routeFailed(given.error) &&
+					!copyFailed(serving) &&
+					!this.#outgrows(given.error, serving)
+				) {
 					throw given.error;
 				}
 				waits.push(...given.changed);

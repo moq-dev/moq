@@ -1,9 +1,10 @@
 ---------------------------- MODULE StaleRecover ----------------------------
 (***************************************************************************)
 (* One group a relay reader reads from a copy whose upstream subscription  *)
-(* resets the group's stream as too old (`OLD`), as `model::resume`'s      *)
-(* `Recover` (rs/moq-net/src/model/resume.rs) and the lite-07 subscriber   *)
-(* that records the verdict (rs/moq-net/src/lite/subscriber.rs) run it.    *)
+(* resets the group's stream, or drops the group, as too old (`OLD`), as   *)
+(* `model::resume`'s `Recover` (rs/moq-net/src/model/resume.rs) and the    *)
+(* lite-07 subscriber that records the verdict                             *)
+(* (rs/moq-net/src/lite/subscriber.rs) run it.                             *)
 (*                                                                         *)
 (* The copy's subscription asks the upstream publisher for the group under *)
 (* a budget, how long a superseded group stays worth sending, which the    *)
@@ -120,8 +121,9 @@ Expire ==
     /\ rd \in {"reading", "asked"} /\ StaleUnder(rb) /\ rd' = "old"
     /\ UNCHANGED <<asked, cur, retunes, superseded, age, copy, judged, recorded, rb>>
 
-\* `Recover::wants` and `Recover::poll` on the copy's failure: the verdict
-\* stands, or the route is asked for the group (`Recover::poll_fetch`).
+\* `Recover::undelivered` on the copy's failed stream, and `Recover::poll_serving`
+\* on the copy's recorded drop: the verdict stands, or the route is asked for
+\* the group (`Recover::poll_fetch`).
 Recover ==
     /\ rd = "reading" /\ copy = "stale"
     /\ LET ask == CASE Rule = "stand" -> FALSE

@@ -25,6 +25,7 @@ import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer }
 import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type Ask,
+	type Coverage,
 	cutRun,
 	type Dispositions,
 	type DropRun,
@@ -50,6 +51,7 @@ import {
 	runsFrom,
 	type StagedTrack,
 	sameHole,
+	settles,
 	skipHole,
 	staleHole,
 	subtractRuns,
@@ -1212,9 +1214,6 @@ let unaccounted: (
 	settled: (start: bigint, end: bigint) => Run[],
 ) => { folds?: Instant } | undefined;
 
-/** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
-type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
-
 /** Whether two coverages hold the same groups and cap. */
 function sameCoverage(a: Coverage, b: Coverage): boolean {
 	if (a === undefined || b === undefined) return a === b;
@@ -1274,29 +1273,10 @@ function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): 
 	return out;
 }
 
-/**
- * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
- * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
- * that reads every group above the run's start: its own successor and edge are then no older than
- * those the verdict was judged against, since a group's verdict looks only above it. An uncapped
- * reader reads them past the live edge; a capped one only when the upstream judged within the very
- * cap it has (`run.cap`), else the verdict may rest on groups above the cap it never sees. A reader
- * whose budget varies by group is held to its widest. Mirrors the Rust `settles`.
- */
-function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
-	if (run.stale === undefined) return true;
-	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
-	if (coverage === undefined) return false;
-	const { cap } = coverage;
-	if (cap !== undefined && run.cap !== cap) return false;
-	const above = run.start + 1n;
-	const end = cap ?? UNBOUNDED;
-	if (above >= end) return true;
-	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
-	return held !== undefined && held.end >= end;
-}
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;
+// The budget a copy's upstream may judge a group too old under; see `Producer.#judging`.
+let judgingOf: (producer: Producer) => number | undefined;
 // The fills serving the producer's misses; assigned in its static block.
 let fillsOf: (producer: Producer) => FillState;
 
@@ -1572,6 +1552,10 @@ export class Producer {
 	// A copy some wire subscription fed, which knows the live feed only from its upstream's answer,
 	// even between feeds; never set on a track's own publisher.
 	#copy = false;
+	// The narrowest budget in milliseconds any upstream subscription feeding this copy asked,
+	// undefined while none asked one: a group whose stream that upstream reset as too old may have
+	// been judged under it, so the verdict stands only for a reader no wider (see `hooks.judgeUnder`).
+	#judging?: number;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The keys the live feed delivered as a group, and the drops a reclaim forgot, which `drops`
@@ -1774,6 +1758,10 @@ export class Producer {
 			producer.#copy = true;
 			producer.#placing++;
 		};
+		hooks.judgeUnder = (producer, budget) => {
+			producer.#judging = Math.min(producer.#judging ?? budget, budget);
+		};
+		judgingOf = (producer) => producer.#judging;
 		hooks.answerEdge = (producer) => {
 			if (!producer.#wire || producer.#wire.edge) return;
 			producer.#wire.edge = true;
@@ -5611,6 +5599,10 @@ export class Subscriber {
 			return held;
 		};
 		hooks.trackAborted = (subscriber) => subscriber.#state.aborted;
+		hooks.judgedUnder = (subscriber) => {
+			const producer = subscriber.#state.producer;
+			return producer && judgingOf(producer);
+		};
 		hooks.givenUp = (subscriber, key) => {
 			const { drops, refused } = subscriber.#state;
 			const drop = drops.at(key);
