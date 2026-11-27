@@ -5078,6 +5078,7 @@ dependencies = [
  "hang",
  "kio",
  "libc",
+ "moq-json",
  "moq-mux",
  "moq-net",
  "moq-tokio",

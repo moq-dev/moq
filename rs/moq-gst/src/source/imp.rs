@@ -989,7 +989,7 @@ impl Session {
 				// The guard stops us polling a closed catalog track (which would spin the loop
 				// returning None) while the followers drain.
 				next = catalog_consumer.next(), if !catalog_closed => match next {
-					Ok(Some(catalog)) => reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, &emptied, cancel),
+					Ok(Some(catalog)) => reconcile(&catalog.value, &source, &playback, &mut followers, &mut tasks, &emptied, cancel),
 					// Catalog track closed. Don't stop the followers: let each reader reach its natural
 					// end, and just stop reconciling while they drain.
 					//

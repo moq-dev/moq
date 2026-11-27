@@ -55,7 +55,7 @@ impl Watch {
 				loop {
 					match consumer.next().await {
 						Ok(Some(catalog)) => {
-							listed.replace(&catalog);
+							listed.replace(&catalog.value);
 							published(&listed);
 						}
 						// The run finished its catalog: nothing further gets listed.

@@ -29,18 +29,19 @@ impl<E: CatalogExt> Consumer<E> {
 		}
 	}
 
-	/// Get the next catalog update, or `None` once the track ends.
+	/// Get the next catalog update and the timestamp it takes effect at, or `None` once the track ends.
 	///
-	/// Drops the update's timestamp: an exporter applies each catalog as it reads it.
+	/// The timestamp is on the broadcast's media timeline: a derivative republishing that media
+	/// stamps its own catalog change there too.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
 	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
 	/// [`Error::Moq`](crate::Error::Moq).
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_json::Timed<Catalog<E>>>>> {
 		self.inner.poll_next(waiter).map(|next| match next {
-			Ok(next) => Ok(next.map(|timed| timed.value)),
+			Ok(next) => Ok(next),
 			// Lifted to this crate's variants, which `Source` reports for the same faults.
 			Err(hang::Error::Moq(err)) => Err(crate::Error::Moq(err)),
 			Err(hang::Error::EscapingBroadcast(rel)) => Err(crate::Error::EscapingBroadcast(rel)),
@@ -84,9 +85,9 @@ mod test {
 		(catalog, payload)
 	}
 
-	fn expect_catalog(result: Poll<Result<Option<Catalog>>>) -> Catalog {
+	fn expect_catalog(result: Poll<Result<Option<moq_json::Timed<Catalog>>>>) -> Catalog {
 		match result {
-			Poll::Ready(Ok(Some(decoded))) => decoded,
+			Poll::Ready(Ok(Some(decoded))) => decoded.value,
 			other => panic!("expected catalog payload, got {other:?}"),
 		}
 	}
@@ -127,7 +128,7 @@ mod test {
 		group.finish().expect("catalog group should finish");
 
 		match consumer.poll_next(&kio::Waiter::noop()) {
-			Poll::Ready(result) => result,
+			Poll::Ready(result) => result.map(|next| next.map(|timed| timed.value)),
 			Poll::Pending => panic!("a finished catalog group should be ready"),
 		}
 	}
@@ -182,7 +183,7 @@ mod test {
 			.expect("catalog frame should write");
 		group.finish().expect("catalog group should finish");
 
-		consumer.next().await
+		consumer.next().await.map(|next| next.map(|timed| timed.value))
 	}
 
 	/// [`publish_catalog_served`] over one audio rendition carrying `reference`.

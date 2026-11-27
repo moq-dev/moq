@@ -3039,6 +3039,7 @@ video.m3u8
 		let published_early = match consumer.poll_next(&kio::Waiter::noop()) {
 			Poll::Pending => false,
 			Poll::Ready(Ok(Some(snapshot))) => {
+				let snapshot = snapshot.value;
 				assert!(
 					!snapshot.video.renditions.is_empty() && !snapshot.audio.renditions.is_empty(),
 					"first catalog listed video {} and audio {}",
@@ -3056,7 +3057,7 @@ video.m3u8
 
 		if !published_early {
 			let snapshot = match consumer.poll_next(&kio::Waiter::noop()) {
-				Poll::Ready(Ok(Some(snapshot))) => snapshot,
+				Poll::Ready(Ok(Some(snapshot))) => snapshot.value,
 				other => panic!("expected the first catalog, got {other:?}"),
 			};
 			assert!(!snapshot.video.renditions.is_empty(), "video rendition missing");

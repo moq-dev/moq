@@ -349,6 +349,82 @@ pub(crate) fn inherit(rungs: &mut [Published], source: &VideoConfig) {
 	}
 }
 
+/// The derivative catalog: each source snapshot republished with the ladder, on the source's
+/// timeline.
+///
+/// The rungs carry the source's media timestamps, so a catalog change is stamped where the source
+/// stamped it: a player holding an update until its media reaches that time applies it with the
+/// frames it describes. The producer's own clock reads nothing of the source's media, so it never
+/// times a change, except for a scale-less source catalog track, whose keys are not times.
+pub(crate) struct Derived {
+	producer: moq_mux::catalog::Producer,
+	/// Where the source's renditions are referenced from, when they are passed through.
+	source: Option<Relative>,
+	anchor: Anchor,
+	/// The last publish's stamp, in the catalog track's scale. Every later one passes it.
+	last: Option<moq_net::Timestamp>,
+}
+
+impl Derived {
+	/// Register the (empty) derivative catalog on `output`.
+	pub(crate) fn new(output: &mut moq_net::broadcast::Producer, source: Option<Relative>) -> Result<Self, Error> {
+		Ok(Self {
+			producer: moq_mux::catalog::Producer::new(output, moq_mux::catalog::Config::default())?,
+			source,
+			anchor: Anchor::default(),
+			last: None,
+		})
+	}
+
+	/// Publish `snapshot` of the source with `rungs`, stamped at the source's own timestamp.
+	///
+	/// A stamp that does not pass the last publish lands one unit past it, the earliest the change can
+	/// still take effect: a source republishing an earlier time, or a ladder move republishing the
+	/// snapshot that asked for it. The catalog never rewinds and the change is never dropped.
+	pub(crate) fn publish(
+		&mut self,
+		snapshot: &mut moq_json::Timed<moq_mux::catalog::hang::Catalog>,
+		rungs: &[Published],
+	) -> Result<(), Error> {
+		self.anchor.pin(&mut snapshot.value);
+		let at = self.stamp(snapshot.at)?;
+		let mut guard = self.producer.modify(at)?;
+		populate(&mut guard, &snapshot.value, rungs, self.source.as_ref())?;
+		guard.commit()?;
+		self.last = Some(at);
+		Ok(())
+	}
+
+	/// Where a change the source stamped `at` lands on the derivative catalog.
+	fn stamp(&self, at: moq_net::Timestamp) -> Result<moq_net::Timestamp, Error> {
+		let at = match at.scale() {
+			Some(_) => at,
+			None => self.producer.next_timestamp(),
+		};
+		// The scale `moq_mux::catalog::Producer` creates the catalog tracks with, so two stamps one
+		// unit apart publish as two groups.
+		let at = hang::Catalog::default_track_info().rescale(at)?;
+		match self.last {
+			Some(last) if at.value() <= last.value() => {
+				let scale = last.scale().ok_or(moq_net::Error::TimestampMismatch)?;
+				let next = last.value().checked_add(1).ok_or(moq_net::Error::TimestampMismatch)?;
+				Ok(moq_net::Timestamp::new(next, scale)?)
+			}
+			_ => Ok(at),
+		}
+	}
+
+	/// End the derivative catalog cleanly, once the source ends.
+	pub(crate) fn finish(&mut self) -> Result<(), Error> {
+		Ok(self.producer.finish()?)
+	}
+
+	/// End the derivative catalog with `err`, keeping an earlier clean finish or error.
+	pub(crate) fn abort(&self, err: moq_net::Error) {
+		self.producer.clone().abort(err);
+	}
+}
+
 /// The source `sync.clock` the derivative first published under, which a later snapshot cannot move.
 ///
 /// Once published, the derivative's catalog refuses a different mapping, and its rungs have already
@@ -356,7 +432,7 @@ pub(crate) fn inherit(rungs: &mut [Published], source: &VideoConfig) {
 /// keeps the derivative on the first one: [`pin`](Self::pin) overwrites the snapshot's, so
 /// `populate` never asks the catalog producer to change it.
 #[derive(Default)]
-pub(crate) struct Anchor {
+struct Anchor {
 	/// `Some` once a snapshot was seen; the inner `None` is a source with no clock.
 	clock: Option<Option<hang::catalog::Clock>>,
 	/// The last changed clock warned about, so a repeating snapshot warns once.
@@ -365,7 +441,7 @@ pub(crate) struct Anchor {
 
 impl Anchor {
 	/// Pin `snapshot` to the clock the first one carried, which the first call records.
-	pub(crate) fn pin(&mut self, snapshot: &mut moq_mux::catalog::hang::Catalog) {
+	fn pin(&mut self, snapshot: &mut moq_mux::catalog::hang::Catalog) {
 		let anchored = *self.clock.get_or_insert(snapshot.sync.clock);
 		// The same mapping in other units is no change, which the catalog producer accepts too.
 		// Compared exactly by cross-multiplying, since flooring both to microseconds would pass a
@@ -399,7 +475,7 @@ impl Anchor {
 /// every source rendition referenced through it (so players fetch those tracks
 /// from the source broadcast directly). Called again on each source catalog
 /// update, with whatever the ladder resolved to for that snapshot.
-pub(crate) fn populate(
+fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
 	rungs: &[Published],
@@ -1064,6 +1140,40 @@ mod tests {
 		out.sync.clock = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1).unwrap()).unwrap());
 		populate(&mut out, &child, &[], None).unwrap();
 		assert_eq!(out.sync.clock, None, "no clock is invented for a child without one");
+	}
+
+	/// A change keeps the source's stamp while it passes the last publish, compared in the catalog
+	/// track's milliseconds; one that doesn't lands a unit past it, and a scale-less key on the
+	/// producer's own clock, still past it.
+	#[test]
+	fn derived_stamps_follow_the_source_without_rewinding() {
+		let mut output = moq_net::broadcast::Info::new().produce();
+		let mut derived = Derived::new(&mut output, None).unwrap();
+		let mut publish = |at| {
+			let mut snapshot = moq_json::Timed::new(moq_mux::catalog::hang::Catalog::<()>::default(), at);
+			derived.publish(&mut snapshot, &[]).unwrap();
+			derived.last.unwrap()
+		};
+		let ms = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+
+		assert_eq!(publish(ms(5)), ms(5));
+		assert_eq!(publish(ms(5)), ms(6), "a republished stamp moves past the last");
+		assert_eq!(publish(ms(3)), ms(7), "an earlier stamp moves past the last");
+		let within = moq_net::Timestamp::from_micros(7_500).unwrap();
+		assert_eq!(
+			publish(within),
+			ms(8),
+			"a stamp inside the last millisecond moves past it"
+		);
+		assert_eq!(publish(ms(20)), ms(20));
+		let own = publish(moq_net::Timestamp::unscaled(1));
+		assert!(own > ms(20));
+		assert_eq!(own.scale(), Some(moq_net::Timescale::MILLI));
+		assert_eq!(
+			publish(ms(20)),
+			ms(own.value() + 1),
+			"a stamp the producer gave is passed too"
+		);
 	}
 
 	/// The first snapshot's clock, or lack of one, is the one every later snapshot carries.
