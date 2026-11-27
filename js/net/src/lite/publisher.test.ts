@@ -1535,6 +1535,84 @@ test("lite-07 GROUP_END may end a group at its highest frame or its start", asyn
 	}
 });
 
+// An in-flight group a live join and a history range both want goes out at the live join's
+// priority, then falls to the history range's once it ages past the join's max age, while a newer
+// group the join still wants stays at its priority. Mirrors the Rust
+// `lite07_a_group_falls_to_the_history_range_once_it_ages_past_the_live_join`.
+test("lite draft-07: a group falls to the history range once it ages past the live join", async () => {
+	using clock = manual();
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		ranges: [
+			{ ...within(1000), priority: 5 },
+			{ start: { time: 0n }, priority: 1, order: "ascending" },
+		],
+	});
+	// Left open, so each stream stays ranked while the later groups arrive.
+	const groups: GroupProducer[] = [];
+	const write = async (key: bigint, ms: number) => {
+		const group = sub.track.createGroup(key);
+		groups.push(group);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+		expect(await sub.servedHeader()).toBe(key);
+	};
+	const orders = () => sub.quic.sendStreams.uni.map((stream) => stream.sendOrder);
+	try {
+		await write(0n, 0);
+		await clock.advance(Duration.ZERO);
+		expect(orders()).toEqual([sendOrder({ priority: 5 })]);
+
+		// Group 0 reaches to group 1, a second and a half behind the edge; group 1 reaches the edge.
+		await write(1n, 500);
+		await write(2n, 2000);
+		await clock.advance(Duration.ZERO);
+		expect(orders()).toEqual([
+			sendOrder({ priority: 1 }),
+			sendOrder({ priority: 5, position: 1 }),
+			sendOrder({ priority: 5 }),
+		]);
+	} finally {
+		for (const group of groups) group.finish();
+		await sub.close();
+	}
+});
+
+// An update retuning a range's priority moves the in-flight groups it ranks, apart from the
+// subscription's as a whole, which a range covering no group yet holds above it. Mirrors the Rust
+// `lite07_a_retuned_range_moves_its_in_flight_groups`.
+test("lite draft-07: a retuned range moves its in-flight groups", async () => {
+	using clock = manual();
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		ranges: [
+			{ start: { time: 0n }, priority: 2 },
+			{ start: { absolute: 100n }, priority: 9 },
+		],
+	});
+	const group = sub.track.createGroup(0n);
+	try {
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		expect(await sub.servedHeader()).toBe(0n);
+		await clock.advance(Duration.ZERO);
+		const stream = sub.quic.sendStreams.uni[0];
+		expect(stream.sendOrder).toBe(sendOrder({ priority: 2 }));
+
+		const before = sub.track.subscription.peek();
+		await new SubscribeUpdate({
+			priority: 9,
+			ranges: [],
+			retune: [[0n, { priority: 7, order: "descending", max: null }]],
+		}).encode(sub.client.writer, Version.DRAFT_07);
+		while (sub.track.subscription.peek() === before) await sub.track.subscription.changed();
+		// The publisher re-ranks from the same update, so let everything it queued run.
+		await clock.advance(Duration.ZERO);
+		expect(stream.sendOrder).toBe(sendOrder({ priority: 7 }));
+	} finally {
+		group.finish();
+		await sub.close();
+	}
+});
+
 // A subscription starting partway into a group gets a stream with Frame Start above 0, whose first
 // delta still counts from the group's start: it carries no frame 0 to count from.
 test("lite-07 counts a resumed stream's first delta from the group's start", async () => {

@@ -43,7 +43,7 @@ import {
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
-import { Priority, sendOrder } from "../priority.ts";
+import { Priority, type Ranking, sendOrder } from "../priority.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { floorAt, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -67,8 +67,10 @@ import {
 	type Applied,
 	type Edge,
 	encodeSubscribeResponse,
+	groupPolicy,
 	LiveRanges,
 	legacyStart,
+	policyOf,
 	positionFrames,
 	positionStops,
 	rangeBounds,
@@ -263,6 +265,8 @@ interface RunGroup {
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
 	priority: Pick<Priority, "reserve" | "add" | "remove">;
+	/** Lite-07: the group's own ranking within {@link priority}, by the ranges still wanting it. */
+	ranking?: Ranking;
 
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
 	unsubscribed: Promise<void>;
@@ -558,8 +562,9 @@ class SubscriptionControls {
 				}
 				// Each lite-07 update edits the live ranges, which only the stream's history names.
 				const edit = live.apply(update);
-				// Lite-07 carries a priority and order per range, which this serves the subscription at
-				// as a whole.
+				// Lite-07 carries a priority and order per range, which rank each group by the ranges
+				// wanting it (see `groupPolicy`). The subscription's as a whole still ranks a group no range
+				// wants, and is what a copy asks upstream.
 				if (hasRanges(version)) Object.assign(update, subscriptionPolicy(live.ranges()));
 				apply(update, edit);
 				// The latest one replaces any the loop has yet to take, its edit folded in.
@@ -2382,6 +2387,33 @@ export class Publisher {
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);
+		// Lite-07: the policy of the live range with Range ID `id`, as the latest update left it.
+		// Mirrors the Rust `Steer::policy`.
+		const rangePolicy = (id: bigint) => {
+			const range = controls.range(id);
+			return range && policyOf(range);
+		};
+		// Lite-07: a group goes out at the top of the live ranges still wanting it, falling as it ages
+		// past the ones above, so its stream ranks by its own policy. The ranges covering it are fixed
+		// as it goes out, as the Rust `GroupServe::covered_by`.
+		const rankingOf = (group: group.Consumer): Ranking | undefined => {
+			if (!hasRanges(this.version)) return undefined;
+			const covers = hooks.servingCovering(track, group.start);
+			const expiry = hooks.groupExpiry(group);
+			// The widest budget the group is known to have aged past, which only grows.
+			let aged: number | undefined;
+			return {
+				policy: (whole) => {
+					for (;;) {
+						const { policy, lasts } = groupPolicy({ whole, policy: rangePolicy }, covers, aged);
+						if (lasts === undefined || !expiry?.aged?.(lasts)) return policy;
+						aged = lasts;
+					}
+				},
+				// Aging moves a group only between ranges, so one covered by a single range never does.
+				changed: covers.length > 1 ? (expiry?.changed ?? []) : [],
+			};
+		};
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
@@ -2749,6 +2781,7 @@ export class Publisher {
 					stamp,
 					compress,
 					priority,
+					ranking: rankingOf(group),
 					unsubscribed,
 					start: range.start,
 					end: range.end,
@@ -3240,14 +3273,14 @@ export class Publisher {
 	 * @internal
 	 */
 	async #openGroup(options: RunGroup): Promise<Writer | Error> {
-		const { group, givenUp, priority, unsubscribed, start } = options;
+		const { group, givenUp, priority, ranking, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, and opens wait for stream credit in
 			// it, so this is what makes a high-priority track (and a newer group within it) win
 			// the link and the peer's credit when there isn't room for both. The place ranks the
 			// open against the subscription's other groups while it waits.
 			// Watch the group while the open waits, and release that watch once it settles.
-			const place = priority.reserve(group.start, start);
+			const place = priority.reserve(group.start, start, ranking);
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
 			const abandoned = givenUp
@@ -3287,7 +3320,18 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame, stops } = options;
+		const {
+			sub,
+			group,
+			givenUp,
+			stamp,
+			compress,
+			priority,
+			ranking,
+			start: startFrame,
+			end: endFrame,
+			stops,
+		} = options;
 		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, key: group.start, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
@@ -3306,7 +3350,7 @@ export class Publisher {
 			if (hooks.groupIndex(group) > startFrame) throw new Error(`group lacks frame ${startFrame}`);
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
-			priority.add(stream, group.start, startFrame);
+			priority.add(stream, group.start, startFrame, ranking);
 
 			await write(async () => {
 				await stream.u53(0); // stream type

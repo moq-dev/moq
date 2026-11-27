@@ -4026,9 +4026,16 @@ export class Subscriber {
 		hooks.expireGroup(group, {
 			expired: () => this.#staleAt(group.start, this.#drift(), true, held),
 			budget: () => this.#drift().budget.at(group.start),
+			aged: (budget) => this.#agedPast(group.start, this.#drift(), budget, held),
 			changed: this.#expiryChanged(),
 		});
 		return group;
+	}
+
+	// Whether group `key` aged past `budget` milliseconds, held to the track's max age, as `drift`
+	// judges it otherwise. Mirrors the Rust `GroupExpiry::aged`.
+	#agedPast(key: bigint, drift: Drift, budget: number, held: Superseded): boolean {
+		return this.#staleAt(key, { ...drift, budget: Budget.uniform(budget).clamped(drift.bound) }, true, held);
 	}
 
 	// What can change a drift verdict.
@@ -5410,6 +5417,19 @@ export class Subscriber {
 			subscriber.#settle();
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
+		hooks.servingCovering = (subscriber, key) => {
+			const resumed = subscriber.#resume?.covering(key);
+			if (resumed) {
+				// A reader following route copies keys its ranges by position, in key order.
+				const keys = [...subscriber.#state.update.entries()].map(([held]) => held);
+				return resumed.flatMap(([index, budget]) => {
+					const held = keys[Number(index)];
+					return held === undefined ? [] : [[held, budget] as [bigint, number]];
+				});
+			}
+			subscriber.#settle();
+			return subscriber.#window.covering(key);
+		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
 		hooks.restateSubscriber = (subscriber, subscription) => subscriber.#update(subscription, false);
 		hooks.stampSubscriber = (subscriber, since) => subscriber.#stamp(since);
@@ -5496,6 +5516,7 @@ export class Subscriber {
 			return {
 				expired: () => subscriber.#staleAt(key, drift(), true, held),
 				budget: () => drift().budget.at(key),
+				aged: (budget) => subscriber.#agedPast(key, drift(), budget, held),
 				changed,
 			};
 		};

@@ -5,8 +5,9 @@
  * @module
  */
 
-import type { Dispose } from "@moq/signals";
+import type { Dispose, Getter } from "@moq/signals";
 import { hooks } from "./internal.ts";
+import type { Policy } from "./lite/subscribe.ts";
 import type { Writer } from "./stream.ts";
 import type * as track from "./track.ts";
 
@@ -61,10 +62,26 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.min(Math.max(Math.trunc(value), min), max);
 }
 
-// Where a group stream starts: its group, and its first object in that group.
+/**
+ * A group stream's own ranking, for one whose policy can differ from its subscription's:
+ * lite-07 ranks each group by the ranges still wanting it.
+ *
+ * @internal
+ */
+export interface Ranking {
+	/** The policy the stream goes out at now, `whole` being the subscription's. */
+	policy(whole: Policy): Policy;
+	/** What besides the subscription can change {@link policy}, watched while the stream is ranked. */
+	readonly changed: readonly Getter<unknown>[];
+}
+
+// Where a group stream starts, its group and its first object in that group, with the ranking
+// it has of its own and the policy it was last ranked at.
 interface Start {
 	key: bigint;
 	object: number;
+	ranking?: Ranking;
+	policy: Policy;
 }
 
 // A stream ranked by its start: an open one, or a place held for one still waiting to open.
@@ -85,15 +102,16 @@ export interface Place {
 
 /**
  * Ranks one subscription's group streams against each other, and re-ranks them whenever the
- * set changes or the subscription is updated.
+ * set changes, the subscription is updated, or a stream's own {@link Ranking} may move.
  *
- * A group's rank is its position among the groups in flight, so which group goes first is
- * decided here rather than by arithmetic on sequence numbers. The subscription's
- * {@link track.Order} picks the direction: newest first sheds a congested backlog rather than
- * the live edge, oldest first drains it.
+ * A group's rank is its policy's priority, then its position among the groups in flight at
+ * that priority, so which group goes first is decided here rather than by arithmetic on
+ * sequence numbers. The policy's {@link track.Order} picks the direction: newest first sheds a
+ * congested backlog rather than the live edge, oldest first drains it.
  *
- * One listener covers the whole subscription. A listener per group would instead pile up on
- * it, and a track that stalls with many groups open would trip the signals leak guard.
+ * One listener covers the whole subscription, plus one per signal the streams' rankings watch
+ * however many share it. A listener per group would instead pile up on the subscription, and a
+ * track that stalls with many groups open would trip the signals leak guard.
  *
  * @internal
  */
@@ -101,6 +119,8 @@ export class Priority {
 	#track: track.Subscriber;
 	#publisher: number;
 	#streams = new Map<Ranked, Start>();
+	// Each signal the ranked streams' rankings watch, with how many do.
+	#watched = new Map<Getter<unknown>, { count: number; dispose: Dispose }>();
 	#dispose: Dispose;
 	#closed = false;
 
@@ -114,39 +134,53 @@ export class Priority {
 		this.#dispose = hooks.preferences(track).revision.subscribe(() => this.#rerank());
 	}
 
-	/** The send order for a stream starting at this group and object, before it opens. */
-	rank(key: bigint, object: number): number {
-		const subscription = hooks.preferences(this.#track).scalars();
-		return sendOrder({
-			priority: subscription?.priority ?? 0,
-			publisher: this.#publisher,
-			position: this.#position(key, object, subscription?.order),
-		});
+	/**
+	 * The send order for a stream starting at this group and object, before it opens, at
+	 * `ranking`'s policy when it has one of its own.
+	 */
+	rank(key: bigint, object: number, ranking?: Ranking): number {
+		const whole = this.#whole();
+		const start = { key, object, policy: ranking?.policy(whole) ?? whole };
+		let position = 0;
+		for (const other of this.#streams.values()) {
+			if (other.policy.priority === start.policy.priority && compareStarts(other, start) < 0) position++;
+		}
+		return sendOrder({ priority: start.policy.priority, publisher: this.#publisher, position });
 	}
 
 	/** Hold a place for a stream starting at this group and object while it waits to open. */
-	reserve(key: bigint, object: number): Place {
+	reserve(key: bigint, object: number, ranking?: Ranking): Place {
 		const place: Place = {
-			rank: () => this.rank(key, object),
+			rank: () => this.rank(key, object, ranking),
 			release: () => this.remove(place),
 		};
-		this.#streams.set(place, { key: key, object });
-		this.#rerank();
+		this.#insert(place, key, object, ranking);
 		return place;
 	}
 
-	/** Rank a stream by its first object now and after ranking changes, until {@link remove}. */
-	add(stream: Writer, key: bigint, object: number) {
-		this.#streams.set(stream, { key: key, object });
-
+	/**
+	 * Rank a stream by its first object, at `ranking`'s policy when it has one of its own, now
+	 * and after ranking changes, until {@link remove}.
+	 */
+	add(stream: Writer, key: bigint, object: number, ranking?: Ranking) {
 		// Also covers the stream itself: opening one can block on transport capacity, so an
 		// update that landed while it did predates this registration.
-		this.#rerank();
+		this.#insert(stream, key, object, ranking);
 	}
 
 	/** Stop ranking a finished group's stream, promoting whatever was queued behind it. */
 	remove(stream: Ranked) {
-		if (!this.#streams.delete(stream)) return;
+		const start = this.#streams.get(stream);
+		if (!start) return;
+		this.#streams.delete(stream);
+		for (const getter of start.ranking?.changed ?? []) {
+			const watched = this.#watched.get(getter);
+			if (!watched) continue;
+			watched.count--;
+			if (watched.count > 0) continue;
+			watched.dispose();
+			this.#watched.delete(getter);
+		}
 
 		if (this.#closed && this.#streams.size === 0) {
 			this.#dispose();
@@ -167,36 +201,55 @@ export class Priority {
 		if (this.#streams.size === 0) this.#dispose();
 	}
 
-	// How many streams go ahead of one starting here.
-	#position(key: bigint, object: number, order: track.Order = "descending"): number {
-		const start = { key: key, object };
-		let ahead = 0;
-		for (const other of this.#streams.values()) {
-			if (compareStarts(other, start, order) < 0) ahead++;
+	#insert(stream: Ranked, key: bigint, object: number, ranking?: Ranking) {
+		this.#streams.set(stream, { key, object, ranking, policy: this.#whole() });
+		for (const getter of ranking?.changed ?? []) {
+			const watched = this.#watched.get(getter);
+			if (watched) watched.count++;
+			else this.#watched.set(getter, { count: 1, dispose: getter.subscribe(() => this.#rerank()) });
 		}
-		return ahead;
+		this.#rerank();
+	}
+
+	// The subscription's own policy, which a stream without a ranking of its own goes out at.
+	#whole(): Policy {
+		const subscription = hooks.preferences(this.#track).scalars();
+		return { priority: subscription?.priority ?? 0, order: subscription?.order ?? "descending" };
 	}
 
 	// Sorted once, so ranking every stream costs one sort rather than a scan per stream: a
-	// stream's position is how many sort strictly ahead of it.
+	// stream's position is how many at its priority sort strictly ahead of it.
 	#rerank() {
-		const subscription = hooks.preferences(this.#track).scalars();
-		const priority = subscription?.priority ?? 0;
-		const order = subscription?.order ?? "descending";
-		const queue = [...this.#streams].sort(([, a], [, b]) => compareStarts(a, b, order));
+		const whole = this.#whole();
+		for (const start of this.#streams.values()) start.policy = start.ranking?.policy(whole) ?? whole;
+		const queue = [...this.#streams].sort(([, a], [, b]) => compareStarts(a, b));
+		let first = 0;
 		let position = 0;
 		for (let i = 0; i < queue.length; i++) {
 			const [stream, start] = queue[i];
-			if (i > 0 && compareStarts(queue[i - 1][1], start, order) !== 0) position = i;
+			const prev = queue[i - 1]?.[1];
+			if (prev?.policy.priority !== start.policy.priority) {
+				first = i;
+				position = 0;
+			} else if (compareStarts(prev, start) !== 0) {
+				position = i - first;
+			}
 			if ("setPriority" in stream)
-				stream.setPriority(sendOrder({ priority, publisher: this.#publisher, position }));
+				stream.setPriority(
+					sendOrder({ priority: start.policy.priority, publisher: this.#publisher, position }),
+				);
 		}
 	}
 }
 
-// Negative when `a` goes before `b`. Group order dominates, earlier objects win within one
-// group so a fill precedes its live rest, and identical starts tie.
-function compareStarts(a: Start, b: Start, order: track.Order): number {
-	if (a.key !== b.key) return a.key < b.key === (order === "ascending") ? -1 : 1;
+// Negative when `a` goes before `b`. A higher priority goes first. Within one, each start's
+// own order picks the direction, newest first when descending and oldest first when
+// ascending, so starts of two orders compare by key against negated key. Earlier objects win
+// within one group so a fill precedes its live rest, and identical starts tie.
+function compareStarts(a: Start, b: Start): number {
+	if (a.policy.priority !== b.policy.priority) return b.policy.priority - a.policy.priority;
+	const signed = (start: Start) => (start.policy.order === "ascending" ? -start.key : start.key);
+	const [x, y] = [signed(a), signed(b)];
+	if (x !== y) return x > y ? -1 : 1;
 	return a.object - b.object;
 }

@@ -182,7 +182,7 @@ export interface Policy {
 }
 
 /** The policy `range` carries. */
-function policyOf(range: WireRange): Policy {
+export function policyOf(range: WireRange): Policy {
 	return { priority: range.priority ?? 0, order: range.order ?? "descending" };
 }
 
@@ -212,6 +212,50 @@ export function subscriptionPolicy(ranges: readonly WireRange[]): Policy {
 			top = policy;
 	}
 	return top ?? { priority: 0, order: "descending" };
+}
+
+/** A lite-07 subscription's policies: its own as a whole, and each live range's. Mirrors the Rust `Steer`. */
+export interface Steer {
+	/** The subscription's as a whole, which a group no live range with a policy wants goes out at. */
+	whole: Policy;
+	/** The policy of the live range with Range ID `id`, undefined once retired. */
+	policy(id: bigint): Policy | undefined;
+}
+
+/**
+ * The policy a group goes out at, `covers` being the ranges covering it with their budgets in
+ * milliseconds, and `aged` the widest budget it is known to have aged past: the highest priority
+ * among the ranges still wanting it, at that priority's order, descending breaking a tie. The
+ * subscription's whole when no range with a policy wants it. `lasts` is the budget whose aging may
+ * lower that policy, undefined once none can: a range ranked below it wanting the group longer.
+ * Mirrors the Rust `Steer::serving`.
+ */
+export function groupPolicy(
+	steer: Steer,
+	covers: readonly (readonly [bigint, number])[],
+	aged?: number,
+): { policy: Policy; lasts?: number } {
+	const wanting: [Policy, number][] = [];
+	for (const [id, budget] of covers) {
+		const policy = aged === undefined || budget > aged ? steer.policy(id) : undefined;
+		if (policy) wanting.push([policy, budget]);
+	}
+	let top: Policy | undefined;
+	for (const [policy] of wanting) {
+		if (
+			top === undefined ||
+			policy.priority > top.priority ||
+			(policy.priority === top.priority && policy.order === "descending")
+		)
+			top = policy;
+	}
+	if (!top) return { policy: steer.whole };
+	const best = top;
+	const same = (policy: Policy) => policy.priority === best.priority && policy.order === best.order;
+	let lasts = 0;
+	for (const [policy, budget] of wanting) if (same(policy)) lasts = Math.max(lasts, budget);
+	const outlasted = wanting.some(([policy, budget]) => !same(policy) && budget > lasts);
+	return outlasted ? { policy: best, lasts } : { policy: best };
 }
 
 /**

@@ -2469,6 +2469,15 @@ class Reader implements ResumeSource {
 		return this.#window();
 	}
 
+	// The reader's ranges covering group `key`, by index, each stale past its own budget: the window
+	// places a live join as a time start, whose groups still go stale past its max. Mirrors the Rust
+	// `Reader::covering`.
+	covering(key: bigint): [bigint, number][] {
+		this.sync();
+		const ranges = this.#ranges();
+		return this.#window().covering(key, (index) => ranges[Number(index)]);
+	}
+
 	// The serving copy's runs leave out the keys below a time start it still waits to place, so its
 	// barrier holds a gap the group containing that start may lie below.
 	gapHeld(at: bigint, end: bigint): boolean {
@@ -3065,6 +3074,11 @@ class FetchExpiry implements Expiry {
 
 	budget(): number {
 		return this.#judging?.expiry.budget?.() ?? NO_MAX_DELAY;
+	}
+
+	aged(budget: number): boolean {
+		this.#pick();
+		return this.#judging?.expiry.aged?.(budget) ?? false;
 	}
 
 	/** Judge afresh once the group moves to another route: the old route's copy says nothing about it. */

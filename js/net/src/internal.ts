@@ -602,6 +602,12 @@ export interface Expiry {
 	expired: () => boolean;
 	/** The budget in milliseconds the group is judged under, which a stale verdict names. */
 	budget?: () => number;
+	/**
+	 * Whether the group aged past `budget` milliseconds, held to the publisher's max age, as
+	 * {@link expired} judges its own: a range wanting it that long stops wanting it then. Arms a
+	 * wakeup on {@link changed} for when it would.
+	 */
+	aged?: (budget: number) => boolean;
 	changed: readonly Getter<unknown>[];
 }
 
@@ -753,6 +759,8 @@ export interface ResumeSource {
 	runs(start: bigint, end: bigint): Run[];
 	/** The reader's own window, which spans every copy, synced. */
 	window(): Window;
+	/** The reader's ranges covering group `key`, by index, with their budgets; see `hooks.servingCovering`. */
+	covering(key: bigint): [bigint, number][];
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
@@ -1183,6 +1191,12 @@ export const hooks: {
 	 * `track.ts`.
 	 */
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
+	/**
+	 * The ranges of a subscriber covering group `key`, by key, each with how long in milliseconds it
+	 * keeps the group worth delivering once superseded: a range not yet placed may cover any group up
+	 * to its end. Mirrors the Rust `Subscriber::covering`; assigned by `track.ts`.
+	 */
+	servingCovering: (subscriber: Subscriber, key: bigint) => [bigint, number][];
 	/**
 	 * Where a live join a subscriber placed at `placed` starts under `budget` milliseconds, as a
 	 * publisher reports it: past the groups the budget expired, unless an upstream's answer placed
@@ -1669,6 +1683,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingResolvedKeys: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingCovering: () => {
 		throw new Error("track.ts not loaded");
 	},
 	joinStart: () => {
