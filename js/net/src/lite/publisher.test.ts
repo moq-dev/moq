@@ -2495,12 +2495,17 @@ for (const skipped of ["failed", "stale"] as const) {
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 			expect(response.start.start).toBe(6n);
-			if (skipped === "failed") {
-				// The failed group below the start is final, so it is named all the same.
-				for (const run of [
-					[5n, 6n],
-					[7n, 8n],
-				]) {
+			{
+				// The failed group below the start is final, so it is named all the same, and so is one
+				// stale under the track's own max age, which no budget reaches past.
+				const runs =
+					skipped === "failed"
+						? [
+								[5n, 6n],
+								[7n, 8n],
+							]
+						: [[5n, 6n]];
+				for (const run of runs) {
 					const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 					if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
 					expect([dropped.drop.start, dropped.drop.end]).toEqual(run);

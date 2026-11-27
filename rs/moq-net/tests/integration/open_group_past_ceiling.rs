@@ -46,8 +46,9 @@ async fn an_open_group_past_the_ceiling_reaches_an_oldest_reader() {
 	let producer = route.broadcast().create_track("bucket", info).unwrap();
 	route.announce().unwrap();
 
-	// A closed group, then an open one written past the ceiling: everything below it, the
-	// skips each append declared included, is stale under the ceiling by the time anyone reads.
+	// A closed group, then an open one written past the ceiling: by the time anyone reads, the
+	// closed group is gone and everything below the open one, the skips each append declared
+	// included, is stale under the ceiling, as a long-lived track's evicted history is.
 	let at = |ms: u64| Timestamp::from_millis(ms).unwrap();
 	let mut old = producer.append_group(at(10)).unwrap();
 	old.write_frame(at(10), &b"old"[..]).unwrap();
