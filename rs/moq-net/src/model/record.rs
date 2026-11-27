@@ -310,15 +310,14 @@ impl Record {
 		};
 		bill.set(bytes);
 		let owed = bill.debt() > 0;
+		let non_reporting = skips.is_some() && self.reported.is_empty() && self.pending.is_empty();
 		let threshold = match owed {
 			true => self.compact_at.max(2),
 			false => self.compact_at.max(16),
 		};
-		let compact = skips.is_some()
-			&& self.reported.is_empty()
-			&& self.pending.is_empty()
-			&& self.delivered.runs() >= threshold;
-		if !owed && !moved && !compact {
+		let full_compact = non_reporting && self.delivered.runs() >= threshold;
+		let tail_candidate = non_reporting && !full_compact && reader.handed.is_some() && self.delivered.runs() >= 2;
+		if !owed && !moved && !full_compact && !tail_candidate {
 			return;
 		}
 		let mut folded = Vec::new();
@@ -328,13 +327,26 @@ impl Record {
 		if owed {
 			folded.extend(self.fold(&reader, &*beside));
 		}
-		if compact
+		if (full_compact || tail_candidate)
 			&& self.reported.is_empty()
 			&& self.pending.is_empty()
 			&& let Some(skips) = skips
 		{
-			skips.with_skips(&mut |skip_end| self.compact_delivered_skips(skip_end, &mut folded));
-			self.compact_at = self.delivered.runs().saturating_mul(2).max(16);
+			if full_compact {
+				skips.with_skips(&mut |skip_end| {
+					self.compact_delivered_skips(skip_end, &mut folded);
+					self.compact_at = self.delivered.runs().saturating_mul(2).max(16);
+				});
+			} else if let Some(handed) = reader.handed {
+				let tail_gaps = [self.delivered.gap_before(handed), self.delivered.gap_after(handed)];
+				if tail_gaps.iter().any(Option::is_some) {
+					skips.with_skips(&mut |skip_end| {
+						for gap in tail_gaps.iter().flatten() {
+							self.compact_gap(gap.clone(), skip_end, &mut folded);
+						}
+					});
+				}
+			}
 		}
 		for folded in folded {
 			beside.forget(folded);
@@ -393,9 +405,19 @@ impl Record {
 			if fold && !stretch.gaps.is_empty() {
 				walk.forgot.extend(self.forget_outside(start..stretch.end, reader));
 			}
-			from = stretch.end.max(start + 1);
+			from = self.next_after_stretch(start, stretch.end);
 		}
 		walk
+	}
+
+	/// The next key to inspect after `final_end` stopped at `end` from `start`: skips a whole
+	/// `Report::Withdrawable` run in one step so neither `walk` nor `fold` steps through a wide
+	/// stale gap one key at a time.
+	fn next_after_stretch(&self, start: u64, end: u64) -> u64 {
+		match self.reported.get_key_value(&start) {
+			Some((run, Report::Withdrawable)) if end == start => run.end,
+			_ => end.max(start.saturating_add(1)),
+		}
 	}
 
 	/// Forget what the record holds of `stretch` outside the reader's ranges, above the
@@ -492,15 +514,12 @@ impl Record {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
-			let next = match self.reported.get_key_value(&start) {
-				Some((run, Report::Withdrawable)) if stretch.end == start => run.end,
-				_ => stretch.end.max(start + 1),
-			};
+			let next = self.next_after_stretch(start, stretch.end);
 			from = [
 				self.delivered.next_settled_from(next),
 				self.reported
 					.overlapping(&(next..u64::MAX))
-					.find(|(_, report)| **report == Report::Final)
+					.next()
 					.map(|(run, _)| run.start.max(next)),
 			]
 			.into_iter()
@@ -508,6 +527,23 @@ impl Record {
 			.min();
 		}
 		folded
+	}
+
+	/// Bridge a single newly formed gap between two delivered runs above `0` if every key in
+	/// `gap` is proved skipped right now (O(1) per gap, before the serving cache expires its
+	/// skip proof).
+	fn compact_gap(&mut self, gap: Range<u64>, skip_end: &dyn Fn(u64) -> Option<u64>, folded: &mut Vec<Range<u64>>) {
+		let mut at = gap.start;
+		while at < gap.end {
+			let Some(next) = skip_end(at).filter(|next| *next > at) else {
+				return;
+			};
+			at = next.min(gap.end);
+		}
+		self.delivered.compact_skip(gap.clone());
+		self.skipped.forget(gap.clone());
+		self.written_off.remove(gap.clone());
+		folded.push(gap);
 	}
 
 	/// Compact fragmented `delivered` runs across declared skips for a non-reporting reader
@@ -622,10 +658,7 @@ impl Record {
 			self.delivered.above_gap(),
 			self.skipped.lowest(),
 			self.written_off.iter().next().map(|run| run.start),
-			self.reported
-				.iter()
-				.find(|(_, report)| **report == Report::Final)
-				.map(|(run, _)| run.start),
+			self.reported.iter().next().map(|(run, _)| run.start),
 		]
 		.into_iter()
 		.flatten()
@@ -1646,5 +1679,101 @@ mod test {
 			"expected logarithmic backoff under sustained debt, got {} scans over 500 reads",
 			lookup.0.get()
 		);
+	}
+
+	/// Moving ranges past a wide `Report::Withdrawable` stale gap must jump straight to the
+	/// report's end during retirement rather than stepping one key at a time across the gap.
+	#[test]
+	fn retire_skips_wide_withdrawable_report_in_one_step() {
+		let (_pool, track) = account();
+		let mut record = Record::default();
+		let wide_end = 1_000_000_000u64;
+		record.tell(10..wide_end, Report::Withdrawable);
+		record.delivered.insert(wide_end + 10);
+		record.delivered.insert(wide_end + 20);
+		record.settle(
+			|| track.clone(),
+			&mut (),
+			Standing {
+				from: wide_end + 20,
+				handed: None,
+				ranges: Some(Cover::new(std::iter::once(wide_end + 20..=wide_end + 20))),
+			},
+		);
+		assert_eq!(
+			record.reported.get(&10),
+			Some(&Report::Withdrawable),
+			"wide withdrawable report must stay intact after range retirement"
+		);
+	}
+
+	/// Debt folding with many arrival-order delivery runs followed by many buffered withdrawable
+	/// stale reports visits each withdrawable run once in key order rather than rescanning them
+	/// quadratically.
+	#[test]
+	fn debt_fold_visits_many_withdrawable_reports_linearly() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		for i in 1..=1_000u64 {
+			record.delivered.insert(i * 2);
+		}
+		for i in 0..1_000u64 {
+			let start = 10_000 + i * 2;
+			record.tell(start..start + 1, Report::Withdrawable);
+		}
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert_eq!(record.reported.get(&10_000), Some(&Report::Withdrawable));
+		assert_eq!(record.reported.get(&(10_000 + 999 * 2)), Some(&Report::Withdrawable));
+	}
+
+	/// When a serving cache only retains the last few declared skips, checking newly formed tail
+	/// gaps on hand-out compacts each bridge before its skip proof expires.
+	#[test]
+	fn fresh_tail_skip_proofs_compact_before_expiring() {
+		use std::cell::RefCell;
+
+		struct RecentSkips(RefCell<std::collections::VecDeque<Range<u64>>>);
+		impl SkipLookup for RecentSkips {
+			fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+				let skips = self.0.borrow();
+				f(&|key| skips.iter().find(|r| r.contains(&key)).map(|r| r.end));
+			}
+		}
+
+		const BASE: u64 = 1_000;
+		const SPACING: u64 = 17;
+		let (_pool, track) = account();
+		let mut record = Record::default();
+		let skips = RecentSkips(RefCell::new(std::collections::VecDeque::new()));
+		let mut most_runs = 0;
+		for n in 0..200u64 {
+			let key = BASE + n * SPACING;
+			record.delivered.insert(key);
+			record.settle_with(
+				|| track.clone(),
+				&mut (),
+				Standing {
+					from: BASE,
+					handed: Some(key),
+					ranges: None,
+				},
+				Some(&skips),
+			);
+			most_runs = most_runs.max(record.delivered.runs());
+			let mut q = skips.0.borrow_mut();
+			q.push_back(key + 1..key + SPACING);
+			// Retain only the 2 most recent skip proofs (far smaller than the 16-run watermark).
+			while q.len() > 2 {
+				q.pop_front();
+			}
+		}
+		assert!(
+			most_runs <= 2,
+			"expected tail-gap compaction to keep delivered bounded despite 2-skip retention, peaked at {most_runs}"
+		);
+		assert!(record.reported.is_empty());
+		assert!(!record.told(BASE + 1));
 	}
 }

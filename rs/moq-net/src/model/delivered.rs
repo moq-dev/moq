@@ -326,6 +326,24 @@ impl Delivered {
 		self.runs.range(..key).next_back().map(|(start, _)| *start)
 	}
 
+	/// The gap immediately below the run holding `key` when both runs start strictly above `0`
+	/// (so bridging it never raises `delivered.floor()`).
+	pub fn gap_before(&self, key: u64) -> Option<std::ops::Range<u64>> {
+		let (&run_start, _) = self.runs.range(..=key).next_back().filter(|(_, last)| key <= **last)?;
+		let (&prev_start, &prev_last) = self.runs.range(..run_start).next_back()?;
+		(prev_start > 0 && prev_last + 1 < run_start).then_some(prev_last + 1..run_start)
+	}
+
+	/// The gap immediately above the run holding `key` when that run starts strictly above `0`.
+	pub fn gap_after(&self, key: u64) -> Option<std::ops::Range<u64>> {
+		let (&run_start, &run_last) = self.runs.range(..=key).next_back().filter(|(_, last)| key <= **last)?;
+		if run_start == 0 {
+			return None;
+		}
+		let (&next_start, _) = self.runs.range(run_last + 1..).next()?;
+		(run_last + 1 < next_start).then_some(run_last + 1..next_start)
+	}
+
 	/// One past the last key of the run holding `key`, if it was handed out.
 	pub fn run_end(&self, key: u64) -> Option<u64> {
 		self.runs
