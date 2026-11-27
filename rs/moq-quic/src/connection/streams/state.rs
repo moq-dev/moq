@@ -23,6 +23,7 @@ use crate::{
 	connection::stats::{CreditStats, FrameStats, HeldStats, SendCreditStats},
 	connection::waits::{Wait, Waits},
 	frame::{self, FrameStruct, StreamMetaVec},
+	range_set::RangeSet,
 	transport_parameters::TransportParameters,
 };
 
@@ -60,6 +61,13 @@ pub(crate) struct StreamsState {
 	max_concurrent_remote_count: [u64; 2],
 	/// Lowest remotely-initiated stream index that haven't actually been opened by the peer
 	pub(super) next_remote: [u64; 2],
+	/// Remotely-initiated stream indices below `next_remote` that a later index opened and no frame
+	/// or accept has touched, so they hold no slot yet
+	///
+	/// A single frame may skip any number of indices up to the limit we granted, and a slot each
+	/// would let one packet allocate that whole window. These are open, not closed: a slot is
+	/// made on their first frame, or when the application accepts them.
+	pub(super) skipped: [RangeSet; 2],
 	// Next to report to the application, once opened
 	pub(super) next_reported_remote: [u64; 2],
 	/// Number of outbound streams
@@ -227,6 +235,7 @@ impl StreamsState {
 			allocated_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			max_concurrent_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			next_remote: [0, 0],
+			skipped: Default::default(),
 			next_reported_remote: [0, 0],
 			send_streams: 0,
 			pending: Schedule::new(),
@@ -530,10 +539,17 @@ impl StreamsState {
 	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual. A stream
 	/// waiting to be accepted counts as open, since only the application can tell whether to keep it.
 	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &FxHashSet<StreamId>) -> bool {
-		let mut open = false;
 		let mut asked = false;
+		// A stream opened implicitly and never touched is open, and unaccepted.
+		let mut open = self.skipped.iter().any(|skipped| !skipped.is_empty());
 		for (&id, slot) in &mut self.recv {
 			if keep.contains(&id) {
+				continue;
+			}
+			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
+			// Only the application can tell whether to keep it, so an untouched one gets no state.
+			if unaccepted && slot.is_none() {
+				open = true;
 				continue;
 			}
 			let rs = get_or_insert_recv(slot, self.initial_stream_receive_window);
@@ -541,7 +557,6 @@ impl StreamsState {
 				continue;
 			}
 			open = true;
-			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
 			if unaccepted || rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
 				continue;
 			}
@@ -646,8 +661,11 @@ impl StreamsState {
 	/// unidirectional one. On an ordered transport, data at any other offset is a protocol
 	/// violation.
 	pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
-		// A peer stream not opened yet starts at offset 0 too
-		if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {
+		// A peer stream not opened yet, or opened implicitly and untouched, starts at offset 0 too
+		if id.initiator() != self.side
+			&& (id.index() >= self.next_remote[id.dir() as usize]
+				|| self.skipped[id.dir() as usize].contains(id.index()))
+		{
 			return Some(0);
 		}
 		let recv = self.recv.get(&id)?;
@@ -1320,28 +1338,43 @@ impl StreamsState {
 		}
 	}
 
-	/// Allocate state for remotely-initiated streams up to and including `id`
+	/// Open remotely-initiated streams up to and including `id`, and make `id` a slot
 	///
-	/// A frame for index N implicitly opens `0..N`, so the skipped indices need slots too.
+	/// A frame for index N implicitly opens `0..N`, which stay slotless until [`Self::materialize`].
 	fn insert_remote(&mut self, id: StreamId) {
 		let dir_idx = id.dir() as usize;
+		let index = id.index();
 
-		if id.initiator() == self.side
-			|| id.index() >= self.max_remote[dir_idx]
-			|| id.index() < self.next_remote[dir_idx]
-		{
+		if id.initiator() == self.side || index >= self.max_remote[dir_idx] {
 			return;
 		}
 
-		for i in self.next_remote[dir_idx]..=id.index() {
-			let tid = StreamId::new(!self.side, id.dir(), i);
-			assert!(self.recv.insert(tid, None).is_none());
-			if id.dir() == Dir::Bi {
-				assert!(self.send.insert(tid, None).is_none());
-			}
+		let next = self.next_remote[dir_idx];
+		if index < next {
+			self.materialize(id);
+			return;
 		}
-		self.next_remote[dir_idx] = id.index() + 1;
+
+		if index > next {
+			self.skipped[dir_idx].insert(next..index);
+		}
+		self.insert_slots(id);
+		self.next_remote[dir_idx] = index + 1;
 		self.waits.wake_accept(id.dir());
+	}
+
+	/// Give a stream the peer opened implicitly its slots, if it has none yet
+	pub(super) fn materialize(&mut self, id: StreamId) {
+		if self.skipped[id.dir() as usize].remove(id.index()..id.index() + 1) {
+			self.insert_slots(id);
+		}
+	}
+
+	fn insert_slots(&mut self, id: StreamId) {
+		assert!(self.recv.insert(id, None).is_none());
+		if id.dir() == Dir::Bi {
+			assert!(self.send.insert(id, None).is_none());
+		}
 	}
 
 	/// Adds credits to the connection flow control window
@@ -3404,6 +3437,59 @@ mod tests {
 		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(4).unwrap().unwrap().bytes.len(), 4);
 		chunks.finalize();
+	}
+
+	/// One frame at the far end of a huge grant allocates one slot, not the whole window, and the
+	/// streams it skipped stay open: each works on its first frame or when the application accepts it.
+	#[test]
+	fn sparse_stream_id_allocates_one_slot() {
+		for dir in Dir::iter() {
+			let cap = VarInt::from_u64(MAX_STREAM_COUNT).unwrap();
+			let mut server = StreamsState::new(Side::Server, cap, cap, 1024 * 1024, VarInt::MAX, VarInt::MAX);
+			let far = StreamId::new(Side::Client, dir, MAX_STREAM_COUNT - 1);
+			data(&mut server, far, 0, 1, true);
+			assert_eq!(server.recv.len(), 1);
+			assert_eq!(server.send.len(), (dir == Dir::Bi) as usize);
+
+			let early = StreamId::new(Side::Client, dir, 7);
+			assert_eq!(server.rx_offset(early), Some(0));
+			data(&mut server, early, 0, 3, false);
+			assert_eq!(server.recv.len(), 2);
+			assert_eq!(server.rx_offset(early), Some(3));
+
+			// The application meets the skipped streams in order, each getting its slot as it does.
+			for index in 0..3 {
+				let id = StreamId::new(Side::Client, dir, index);
+				assert_eq!(Streams::new(&mut server, false).accept(dir), Some(id));
+				assert!(server.recv.contains_key(&id));
+				assert_eq!(server.send.contains_key(&id), dir == Dir::Bi);
+			}
+			assert_eq!(server.recv.len(), 5);
+		}
+	}
+
+	/// A quiesce counts an unaccepted stream the peer only touched by `STOP_SENDING` as open without
+	/// allocating its receive state, and so a stream it skipped.
+	#[test]
+	fn quiesce_leaves_untouched_streams_slotless() {
+		let mut server = make(Side::Server);
+		let mut pending = Retransmits::default();
+		let keep = FxHashSet::default();
+		assert!(!server.quiesce(&mut pending, 0u32.into(), &keep));
+
+		let stopped = StreamId::new(Side::Client, Dir::Bi, 0);
+		server.received_stop_sending(stopped, 0u32.into()).unwrap();
+		assert_eq!(server.recv.len(), 1);
+		assert!(server.quiesce(&mut pending, 0u32.into(), &keep));
+		assert!(
+			server.recv.values().all(Option::is_none),
+			"a quiesce allocated receive state"
+		);
+		assert!(pending.stop_sending.is_empty());
+
+		let mut server = make(Side::Server);
+		data(&mut server, StreamId::new(Side::Client, Dir::Uni, 1), 0, 1, true);
+		assert!(server.quiesce(&mut pending, 0u32.into(), &keep));
 	}
 
 	#[test]
