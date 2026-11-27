@@ -24,17 +24,17 @@ public final class OriginProducer: Sendable {
     ///
     /// Visible at once unless `hidden`: a hidden route is invisible and unroutable, for this
     /// origin's consumers and peers alike, until `Route.announce()`, so create it hidden to
-    /// fill the catalog first. It serves a fresh instance, kept across `withdraw` and
-    /// `announce`, unless `instance` names one, with `epoch` ordering its runs; `cost` prices
+    /// fill the catalog first. It serves a fresh identity, kept across `withdraw` and
+    /// `announce`, unless `identity` names one, with `epoch` ordering its runs; `cost` prices
     /// it, lower wins. Hold the route: releasing or cancelling it retracts it, and
     /// `BroadcastProducer.close()` ends both.
     public func route(
-        path: String, hidden: Bool = false, cost: UInt64 = 0, instance: Instance? = nil, epoch: UInt64 = 0
+        path: String, hidden: Bool = false, cost: UInt64 = 0, identity: Identity? = nil, epoch: UInt64 = 0
     ) throws -> Route {
         Route(
             try ffi.route(
                 path: path,
-                options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
+                options: MoqRouteOptions(hidden: hidden, cost: cost, identity: identity, epoch: epoch)))
     }
 
     /// Claim `prefix` and serve the requests beneath it.
@@ -44,12 +44,12 @@ public final class OriginProducer: Sendable {
     /// requested. Iterate the claim, or call `requested()`, to answer each request; hold
     /// it while it should stay advertised.
     public func claim(
-        prefix: String, hidden: Bool = false, cost: UInt64 = 0, instance: Instance? = nil, epoch: UInt64 = 0
+        prefix: String, hidden: Bool = false, cost: UInt64 = 0, identity: Identity? = nil, epoch: UInt64 = 0
     ) throws -> Claim {
         Claim(
             try ffi.claim(
                 prefix: prefix,
-                options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
+                options: MoqRouteOptions(hidden: hidden, cost: cost, identity: identity, epoch: epoch)))
     }
 }
 
@@ -68,18 +68,18 @@ public final class BroadcastRequest: Sendable {
 
     /// Answer with the path's own exact route, owning a new broadcast.
     ///
-    /// Unless `instance` names one, it takes the instance its claim lends when it first
-    /// announces or `Route.instance` first reads it, so readers that resolved the path through
-    /// the claim continue on it; its end then moves the claim to a fresh instance, so a
-    /// restarted job is a new stream. A claim that names its instance lends none, and the route
+    /// Unless `identity` names one, it takes the identity its claim lends when it first
+    /// announces or `Route.identity` first reads it, so readers that resolved the path through
+    /// the claim continue on it; its end then moves the claim to a fresh identity, so a
+    /// restarted job is a new stream. A claim that names its identity lends none, and the route
     /// mints its own.
     /// Created visible, it announces now and answers the waiting requesters; created `hidden`, they wait until
     /// `Route.announce()`, so the job can fill its catalog first.
     public func route(
-        hidden: Bool = false, cost: UInt64 = 0, instance: Instance? = nil, epoch: UInt64 = 0
+        hidden: Bool = false, cost: UInt64 = 0, identity: Identity? = nil, epoch: UInt64 = 0
     ) throws -> Route {
         Route(
-            try ffi.route(options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
+            try ffi.route(options: MoqRouteOptions(hidden: hidden, cost: cost, identity: identity, epoch: epoch)))
     }
 
     /// Serve held content under the claim's continuous group starts, without an exact route.
@@ -109,18 +109,18 @@ public final class Route: Sendable {
     }
 
     /// The stream this route serves now, or once cancelled, the last one it reported or
-    /// announced under (`nil` for a hidden route that did neither). A named instance never
+    /// announced under (`nil` for a hidden route that did neither). A named identity never
     /// changes. A job's route takes its claim's current one when it first announces or when
     /// this first reads it. Read first, the job announces under it, and `announce()` throws
     /// `Unroutable` once the claim has moved past it, so a signer built from it stays valid.
-    public var instance: Instance? { ffi.instanceId() }
+    public var identity: Identity? { ffi.identity() }
 
     /// Make the route visible, or keep it so; throws `Closed` once its broadcast closed.
     public func announce() throws {
         try ffi.announce()
     }
 
-    /// Hide the route, keeping its broadcast and instance: `announce()` brings the same stream back.
+    /// Hide the route, keeping its broadcast and identity: `announce()` brings the same stream back.
     public func withdraw() throws {
         try ffi.withdraw()
     }
@@ -160,16 +160,16 @@ public final class Claim: AsyncSequence, Sendable {
         self.ffi = ffi
     }
 
-    /// The stream this claim serves now. A named instance never changes. Unnamed, the claim
+    /// The stream this claim serves now. A named identity never changes. Unnamed, the claim
     /// moves to a fresh one each time a job holding its current one ends.
-    public var instance: Instance { ffi.instanceId() }
+    public var identity: Identity { ffi.identity() }
 
     /// Make the claim visible, or keep it so.
     public func announce() throws {
         try ffi.announce()
     }
 
-    /// Hide the claim, keeping its instance: `announce()` brings it back. Requests beneath it
+    /// Hide the claim, keeping its identity: `announce()` brings it back. Requests beneath it
     /// are rejected meanwhile.
     public func withdraw() throws {
         try ffi.withdraw()
@@ -216,7 +216,7 @@ public final class OriginConsumer: Sendable {
     }
 
     /// List the paths under a literal prefix matching an optional pattern filter, as each
-    /// becomes present or absent. A new publisher instance keeps its path present, so use
+    /// becomes present or absent. A new publisher identity keeps its path present, so use
     /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
     /// out unless `hidden`.
     public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
@@ -224,18 +224,18 @@ public final class OriginConsumer: Sendable {
     }
 
     /// Follow an exact path, resolving each stream that serves it.
-    /// Pass an `instance` to follow only that stream.
-    public func follow(path: String, instance: Instance? = nil) throws -> Following {
-        Following(try ffi.follow(path: path, instance: instance))
+    /// Pass an `identity` to follow only that stream.
+    public func follow(path: String, identity: Identity? = nil) throws -> Following {
+        Following(try ffi.follow(path: path, identity: identity))
     }
 
     /// Request a broadcast by path, resolving one stream as soon as it can be
     /// served through the best announced route covering it: an announced broadcast on this
     /// origin, a route a session announced (served on demand by that session), or a dynamic
     /// handler on the origin, or an error if nothing can serve it. Unlike `follow`, this
-    /// does not wait for a future announcement. Pass an `instance` to refuse any other stream.
-    public func request(path: String, instance: Instance? = nil) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.request(path: path, instance: instance))
+    /// does not wait for a future announcement. Pass an `identity` to refuse any other stream.
+    public func request(path: String, identity: Identity? = nil) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.request(path: path, identity: identity))
     }
 }
 
@@ -272,7 +272,7 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// Follows a specific broadcast path across the publisher instances that serve it.
+/// Follows a specific broadcast path across the publisher identities that serve it.
 public final class Following: Sendable {
     let ffi: MoqFollowing
 
@@ -280,12 +280,12 @@ public final class Following: Sendable {
         self.ffi = ffi
     }
 
-    /// Suspend until the publisher instance serving the path changes.
-    /// The first call resolves the instance serving the path once one is announced, and
-    /// never returns nil. Each later call returns another instance taking over (a
+    /// Suspend until the publisher identity serving the path changes.
+    /// The first call resolves the identity serving the path once one is announced, and
+    /// never returns nil. Each later call returns another identity taking over (a
     /// restarted publisher, or a replacement session), or nil once the path goes offline
-    /// (or, with an `instance`, another one takes it over), then whatever serves it next.
-    /// Drop what was read from the previous instance then: its tracks end when its
+    /// (or, with an `identity`, another one takes it over), then whatever serves it next.
+    /// Drop what was read from the previous identity then: its tracks end when its
     /// session does. Throws `Closed` if cancelled or the origin closes first.
     public func available() async throws -> BroadcastConsumer? {
         (try await ffi.available()).map(BroadcastConsumer.init)

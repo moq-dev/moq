@@ -33,6 +33,8 @@ enum Message {
 	AnnounceInit,
 	/// A group stream header, length prefix included.
 	Group,
+	/// A SUBSCRIBE, length prefix included.
+	Subscribe,
 	/// A `moql` CLIENT_SETUP.
 	ClientSetup,
 }
@@ -77,6 +79,7 @@ fn run(case: &Case, data: &[u8]) -> String {
 			outcome(data, version, decoded.map(|init| (init, used)))
 		}
 		Message::Group => outcome(data, version, super::Group::decode_slice(data, version)),
+		Message::Subscribe => outcome(data, version, super::Subscribe::decode_slice(data, version)),
 		Message::ClientSetup => {
 			let decoded = crate::setup::Client::decode_slice(data, case.version);
 			if let (Ok((client, _)), Some(server)) = (&decoded, case.server)

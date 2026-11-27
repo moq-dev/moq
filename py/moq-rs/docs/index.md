@@ -242,7 +242,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    TrackRefresh
    FetchGroupOptions
    RouteInfo
-   Instance
+   Identity
    ConnectionStats
 ```
 

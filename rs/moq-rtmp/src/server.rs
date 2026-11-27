@@ -631,7 +631,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, instance = %publisher.route.instance(), "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, identity = %publisher.route.identity(), "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -1512,14 +1512,14 @@ struct Publisher {
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
 	metadata: crate::metadata::Dropped,
-	// Announces the path under this connection's fresh instance, so an encoder reconnecting
+	// Announces the path under this connection's fresh identity, so an encoder reconnecting
 	// under the same key replaces this broadcast at once instead of resuming into it.
 	// Closing its broadcast retracts it before the importer's fill clone drops.
 	route: moq_net::origin::Route,
 }
 
 impl Publisher {
-	/// Open a broadcast at `path` under a fresh instance and prime the importer with
+	/// Open a broadcast at `path` under a fresh identity and prime the importer with
 	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let route = origin.route(path, moq_net::origin::RouteOptions::default())?;
@@ -1947,7 +1947,7 @@ mod tests {
 			let (client, server) = tokio::io::duplex(64 * 1024);
 			let start = kio::clock::now();
 			let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
-			// A hangup ends the instance at once, before a follower would hand it out, so this
+			// A hangup ends the identity at once, before a follower would hand it out, so this
 			// requests it on its announcement instead.
 			let mut announced = consumer.announced();
 			let broadcast = async {
@@ -2373,11 +2373,11 @@ mod tests {
 		server_task.abort();
 	}
 
-	/// Publish an AVC broadcast at `live/cam0` under `instance`, starting with a keyframe carrying
+	/// Publish an AVC broadcast at `live/cam0` under `identity`, starting with a keyframe carrying
 	/// `idr`, and return its route and its importer for more tags.
 	fn publish_avc(
 		origin: &origin::Producer,
-		instance: moq_net::Instance,
+		identity: moq_net::Identity,
 		idr: &[u8],
 	) -> (moq_net::origin::Route, FlvImport, moq_mux::catalog::Producer) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
@@ -2389,7 +2389,7 @@ mod tests {
 		let route = origin
 			.route(
 				"live/cam0",
-				moq_net::origin::RouteOptions::default().with_instance(instance, 0),
+				moq_net::origin::RouteOptions::default().with_identity(identity, 0),
 			)
 			.unwrap();
 		let catalog =
@@ -2402,16 +2402,16 @@ mod tests {
 		(route, importer, catalog)
 	}
 
-	/// A play stays on the instance it resolved: a publisher taking over the path never reaches
+	/// A play stays on the identity it resolved: a publisher taking over the path never reaches
 	/// it, so the session never splices in another timeline or codec state, and the play fails
-	/// once its instance's route dies.
+	/// once its identity's route dies.
 	#[tokio::test]
-	async fn a_play_stays_on_its_instance_until_the_route_dies() {
+	async fn a_play_stays_on_its_identity_until_the_route_dies() {
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let (old_route, mut old, old_catalog) =
-			publish_avc(&origin, moq_net::Instance::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+			publish_avc(&origin, moq_net::Identity::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2435,10 +2435,10 @@ mod tests {
 		assert_eq!(next().await.1[..2], [0x17, 0x00]);
 		assert_eq!(next().await.1[..2], [0x17, 0x01]);
 
-		let instance = moq_net::Instance::random();
-		let mut instances = consumer.follow("live/cam0", instance.clone()).unwrap();
-		let (_new_route, _new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
-		kio::clock::timeout(Duration::from_secs(5), instances.available())
+		let identity = moq_net::Identity::random();
+		let mut identities = consumer.follow("live/cam0", identity.clone()).unwrap();
+		let (_new_route, _new, _new_catalog) = publish_avc(&origin, identity, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		kio::clock::timeout(Duration::from_secs(5), identities.available())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap()
@@ -2449,7 +2449,7 @@ mod tests {
 		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
 		let (video, body) = next().await;
 		assert!(video && body.starts_with(&[0x27, 0x01]), "{body:?}");
-		assert!(body.ends_with(OLD_DELTA), "the play left its instance: {body:?}");
+		assert!(body.ends_with(OLD_DELTA), "the play left its identity: {body:?}");
 
 		old.abort(moq_net::Error::Transport("connection lost".into()));
 		drop(old_catalog);
@@ -2893,7 +2893,7 @@ mod tests {
 	}
 
 	/// An encoder reconnecting under the same key while its stale connection is still
-	/// open restarts the broadcast at once: each connection is its own instance, so a
+	/// open restarts the broadcast at once: each connection is its own identity, so a
 	/// fresh request reaches the reconnect, while the stale viewer stays on the old one
 	/// until it leaves.
 	#[tokio::test]

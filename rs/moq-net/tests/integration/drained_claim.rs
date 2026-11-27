@@ -87,8 +87,8 @@ impl Worker {
 }
 
 /// Read the first frame of `video` at `pool/p` through `relay`. On moq-lite-07 the answer's
-/// exact route carries the claim's instance, so the first subscription reads. Older wires
-/// mint an instance per announcement, so the answer resets the first subscription through
+/// exact route carries the claim's identity, so the first subscription reads. Older wires
+/// mint an identity per announcement, so the answer resets the first subscription through
 /// the claim: they wake the worker first.
 async fn watch(version: Version, relay: &origin::Producer) -> String {
 	if version != "moq-lite-07-wip".parse().unwrap() {

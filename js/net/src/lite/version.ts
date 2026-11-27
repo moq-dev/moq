@@ -12,7 +12,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream instance, and the Auth Stream.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream identity, and the Auth Stream.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -378,10 +378,10 @@ export function keepsSubscribeOpen(version: Version): boolean {
 	return hasRanges(version);
 }
 
-/** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
- * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
- * mints an instance for each announcement. */
-export function hasInstance(version: Version): boolean {
+/** Whether announcements carry their identity and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
+ * the identity they pin. Added in lite-07. Older versions carry nothing, so the receiving session
+ * mints an identity for each announcement. */
+export function hasIdentity(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -401,6 +401,25 @@ export function hasInstance(version: Version): boolean {
  * datagram its inflated size. Added in lite-07.
  */
 export function hasCompression(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether SUBSCRIBE carries a `Meta` byte, and a metadata subscription's FRAMEs their header
+ * alone. Added in lite-07; an earlier subscription always carries the payload.
+ */
+export function hasMeta(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

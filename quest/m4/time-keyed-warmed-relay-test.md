@@ -26,4 +26,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A created first group reads differently locally and through a relay](/quest/m3/created-first-group-relay-parity.md) - the same reader on a finished track whose first group was created, where the local and relayed answers differ
+- [A created first group reads differently locally and through a relay](/quest/m1/created-first-group-relay-parity.md) - the same reader on a finished track whose first group was created, where the local and relayed answers differ

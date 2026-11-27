@@ -30,6 +30,14 @@ pub enum Container {
 	/// property block followed by the codec payload.
 	Loc,
 
+	/// No container header: each frame is the raw codec payload and its presentation
+	/// timestamp is the MoQ transport timestamp (DTS == PTS). Requires a timed track.
+	Raw,
+
+	/// A QUIC varint composition time offset (CTS, in the track's timescale) followed
+	/// by the raw codec payload; PTS is transport timestamp + CTS. Requires a timed track.
+	Cts,
+
 	/// A container this build does not recognize, preserved verbatim.
 	Unknown(UnknownContainer),
 }
@@ -72,6 +80,8 @@ enum Known {
 		init: Bytes,
 	},
 	Loc,
+	Raw,
+	Cts,
 }
 
 impl Serialize for Container {
@@ -81,6 +91,8 @@ impl Serialize for Container {
 			// Bytes is refcounted, so this clone is cheap.
 			Self::Cmaf { init } => Known::Cmaf { init: init.clone() },
 			Self::Loc => Known::Loc,
+			Self::Raw => Known::Raw,
+			Self::Cts => Known::Cts,
 			Self::Unknown(unknown) => return unknown.0.serialize(serializer),
 		};
 
@@ -95,12 +107,14 @@ impl<'de> Deserialize<'de> for Container {
 		// Only route to the derived enum for kinds we know, so a malformed known container is
 		// still a hard error instead of silently becoming Unknown.
 		match object.get("kind").and_then(serde_json::Value::as_str) {
-			Some("legacy" | "cmaf" | "loc") => {
+			Some("legacy" | "cmaf" | "loc" | "raw" | "cts") => {
 				let known = Known::deserialize(serde_json::Value::Object(object)).map_err(de::Error::custom)?;
 				Ok(match known {
 					Known::Legacy => Self::Legacy,
 					Known::Cmaf { init } => Self::Cmaf { init },
 					Known::Loc => Self::Loc,
+					Known::Raw => Self::Raw,
+					Known::Cts => Self::Cts,
 				})
 			}
 			Some(_) => Ok(Self::Unknown(UnknownContainer(object))),
@@ -140,6 +154,17 @@ mod tests {
 		let parsed: Container = serde_json::from_str(r#"{"kind":"loc"}"#).unwrap();
 		assert_eq!(parsed, Container::Loc);
 		assert_eq!(serde_json::to_string(&parsed).unwrap(), r#"{"kind":"loc"}"#);
+	}
+
+	#[test]
+	fn raw_and_cts_roundtrip() {
+		let raw: Container = serde_json::from_str(r#"{"kind":"raw"}"#).unwrap();
+		assert_eq!(raw, Container::Raw);
+		assert_eq!(serde_json::to_string(&raw).unwrap(), r#"{"kind":"raw"}"#);
+
+		let cts: Container = serde_json::from_str(r#"{"kind":"cts"}"#).unwrap();
+		assert_eq!(cts, Container::Cts);
+		assert_eq!(serde_json::to_string(&cts).unwrap(), r#"{"kind":"cts"}"#);
 	}
 
 	#[test]

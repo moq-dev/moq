@@ -284,6 +284,10 @@ impl Record {
 		let moved = reader.ranges.is_some() && reader.ranges != self.retired;
 		if moved {
 			self.retired = reader.ranges.clone();
+			// What a fold counted as handed out before any range held it, the ranges now owe.
+			if let Some(ranges) = &reader.ranges {
+				self.delivered.reopen(ranges);
+			}
 		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
@@ -491,7 +495,7 @@ impl Record {
 	/// Settle everything below `floor` for good.
 	fn raise(&mut self, floor: u64) {
 		self.floor = floor;
-		self.delivered.forget_below(floor);
+		self.delivered.settle_below(floor);
 		self.skipped.forget(0..floor);
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);
@@ -1322,7 +1326,7 @@ mod test {
 		assert!(!record.told(BASE - 1), "keys below the reader's start stay untold");
 	}
 
-	/// Keys retired solely by the freshness budget (`Delivered::retire_below`) stay out of the
+	/// Keys retired solely by the freshness budget (`Delivered::fold_below`) stay out of the
 	/// report floor under cache debt, so widening back over them still reports skips there.
 	#[test]
 	fn a_debt_does_not_promote_budget_retired_delivery_prefix_into_report_floor() {
@@ -1330,7 +1334,7 @@ mod test {
 		let mut record = Record::default();
 		record.delivered.insert(2);
 		record.delivered.insert(4);
-		record.delivered.retire_below(5);
+		record.delivered.fold_below(5, None);
 		assert!(record.delivered.contains(1), "delivery prefix covers key 1");
 		// Bill a run so pool debt actually triggers `Record::fold`.
 		record.tell(10..11, Report::Final);

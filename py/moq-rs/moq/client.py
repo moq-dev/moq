@@ -17,7 +17,7 @@ from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implemen
 from .origin import AnnounceConsumer, Following, OriginConsumer, OriginProducer, Route
 from .session import Session
 from .subscribe import BroadcastConsumer
-from .types import Instance
+from .types import Identity
 
 CongestionControl = MoqCongestionControl
 
@@ -157,13 +157,13 @@ class Client:
             state.inner.cancel()
 
     def route(
-        self, path: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
+        self, path: str, *, hidden: bool = False, cost: int = 0, identity: Identity | None = None, epoch: int = 0
     ) -> Route:
         """Create a route at ``path`` owning a broadcast to fill; hold it to keep it announced.
 
         See :meth:`OriginProducer.route`.
         """
-        return self._connected().publisher.route(path, hidden=hidden, cost=cost, instance=instance, epoch=epoch)
+        return self._connected().publisher.route(path, hidden=hidden, cost=cost, identity=identity, epoch=epoch)
 
     def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
         """Async-iterate broadcasts under ``prefix`` matching an optional pattern.
@@ -172,19 +172,19 @@ class Client:
         """
         return self._connected().consumer.announced(prefix, filter=filter, hidden=hidden)
 
-    def follow(self, path: str, *, instance: Instance | None = None) -> Following:
-        """Follow the broadcast at exactly ``path`` across its publisher instances.
+    def follow(self, path: str, *, identity: Identity | None = None) -> Following:
+        """Follow the broadcast at exactly ``path`` across its publisher identities.
 
         See :meth:`OriginConsumer.follow`.
         """
-        return self._connected().consumer.follow(path, instance=instance)
+        return self._connected().consumer.follow(path, identity=identity)
 
-    async def request(self, path: str, *, instance: Instance | None = None) -> BroadcastConsumer:
-        """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
+    async def request(self, path: str, *, identity: Identity | None = None) -> BroadcastConsumer:
+        """Request the broadcast at ``path``, resolving one publisher identity as soon as it can be served.
 
         See :meth:`OriginConsumer.request`.
         """
-        return await self._connected().consumer.request(path, instance=instance)
+        return await self._connected().consumer.request(path, identity=identity)
 
     def _connected(self) -> _Connected:
         if not isinstance(self._state, _Connected):

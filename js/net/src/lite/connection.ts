@@ -4,11 +4,12 @@ import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Goaway as Received } from "../connection/goaway.ts";
+import type { Liveness } from "../connection/keep_alive.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, peerEnded, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop } from "../hop.ts";
+import { type Cost, type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -78,6 +79,12 @@ export interface ConnectionProps {
 	implementation?: string;
 	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
 	probeTarget?: Getter<number>;
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	liveness?: Getter<Liveness>;
+	/** This link's price, declared in our SETUP and winning over the peer's (lite-06+). */
+	cost?: Cost;
+	/** This link's rank, which every route the peer sends carries at most. Defaults to 0. */
+	priority?: number;
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
@@ -121,6 +128,9 @@ export class Connection implements Session {
 	/** The peer's PROBE estimates; see {@link Session.probe}. */
 	readonly probe: Getter<Probe>;
 
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	readonly liveness: Getter<Liveness> | undefined;
+
 	// Our tokens and grants, and the answers to the peer's; see {@link Session.auth}.
 	#auth: AuthSession;
 
@@ -149,6 +159,8 @@ export class Connection implements Session {
 	#implementation: string;
 	// See {@link ConnectionProps.probeTarget}.
 	#probeTarget?: Getter<number>;
+	// See {@link ConnectionProps.cost}.
+	#cost?: Cost;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
@@ -176,7 +188,14 @@ export class Connection implements Session {
 		token,
 		implementation = IMPLEMENTATION,
 		probeTarget,
+		liveness,
+		cost,
+		priority = 0,
 	}: ConnectionProps) {
+		this.liveness = liveness;
+		// A free link would leave a route as cheap as the one it came from, so lite-07 refuses one.
+		if (cost === 0n && hasRoutes(version)) throw new RangeError("a moq-lite-07 link cannot cost 0");
+		this.#cost = cost;
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
 		this.#token = client && hasAuth(version) ? token : undefined;
@@ -256,6 +275,7 @@ export class Connection implements Session {
 			this.#auth.scope,
 			undefined,
 			this.#auth,
+			{ cost, priority },
 		);
 		this.#client = client;
 		this.#implementation = implementation;
@@ -263,7 +283,7 @@ export class Connection implements Session {
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
-			consume: (path, instance) => this.#subscriber.consume(path, instance),
+			consume: (path, identity) => this.#subscriber.consume(path, identity),
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,
@@ -440,6 +460,7 @@ export class Connection implements Session {
 			const probe = await probeLevel(this.#quic, this.#version);
 			await new Setup({
 				probe,
+				cost: this.#cost,
 				hop: this.hop,
 				token: this.#token,
 				implementation: this.#implementation,

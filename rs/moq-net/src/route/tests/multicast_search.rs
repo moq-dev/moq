@@ -35,7 +35,7 @@ use super::*;
 /// How far the search may go.
 #[derive(Clone, Debug)]
 struct Bounds {
-	/// The paths the publisher may claim at, each life a new Instance.
+	/// The paths the publisher may claim at, each life a new Identity.
 	claims: &'static [&'static str],
 	/// Claims announced or withdrawn.
 	changes: u32,
@@ -129,7 +129,7 @@ struct Mesh {
 	relays: usize,
 	publisher: Node,
 	links: Vec<(Node, Node)>,
-	/// The Instance the publisher's next claim serves.
+	/// The Identity the publisher's next claim serves.
 	next: Id,
 }
 

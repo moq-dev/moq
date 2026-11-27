@@ -1,5 +1,5 @@
 //! A change of source, its clock stepping onto another timeline or its PAT naming another
-//! program, ends the import's instance.
+//! program, ends the import's identity.
 //!
 //! The stimulus is a real capture played twice, the second pass on another clock: the whole
 //! multiplex steps at one packet, with every continuity counter broken once and no
@@ -125,7 +125,7 @@ fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::
 		if let Some(restart) = import.decode_or_restart(piece)? {
 			let mut rest = restart.remainder.to_vec();
 			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
-			// The instance before the step ends cleanly.
+			// The identity before the step ends cleanly.
 			let _finished = import.finish().unwrap();
 			return Ok(Some((restart, rest)));
 		}
@@ -221,7 +221,7 @@ fn an_unflagged_switch_restarts_either_way() {
 	for (gap, expected) in [(-SWITCH, "rewind"), (SWITCH, "leap")] {
 		let (data, second) = replay(gap, |_| 0);
 		for chunk in [data.len(), 188 * 7, 1_000] {
-			let (restart, rest) = feed(&data, chunk).unwrap().expect("the switch ends the instance");
+			let (restart, rest) = feed(&data, chunk).unwrap().expect("the switch ends the identity");
 			let by = match (restart.step, expected) {
 				(Step::Rewind { by, flagged: false }, "rewind") | (Step::Leap { by }, "leap") => by,
 				(step, _) => panic!("{expected}: {step:?}"),
@@ -229,7 +229,7 @@ fn an_unflagged_switch_restarts_either_way() {
 			let switch = Duration::from_micros((SWITCH * 1_000_000 / HZ) as u64);
 			assert!(by.abs_diff(switch) < Duration::from_secs(1), "{expected} by {by:?}");
 
-			// The new instance takes everything from the second pass's first timestamp, which
+			// The new identity takes everything from the second pass's first timestamp, which
 			// is where the old one stopped reading: none of it is published twice or lost.
 			assert!(data[second..].ends_with(&rest), "{expected} {chunk}");
 			assert!(rest.len() >= first_timed(&data[second..]).len(), "{expected} {chunk}");
@@ -241,8 +241,8 @@ fn an_unflagged_switch_restarts_either_way() {
 	}
 }
 
-/// A raw import has no next instance to carry on into, so a switch fails `decode`, and every
-/// later call, while `finish` still ends the instance cleanly before the step.
+/// A raw import has no next identity to carry on into, so a switch fails `decode`, and every
+/// later call, while `finish` still ends the identity cleanly before the step.
 #[test]
 fn a_switch_fails_a_raw_import() {
 	let (data, _) = replay(SWITCH, |_| 0);
@@ -273,7 +273,7 @@ fn a_switch_found_at_the_end_fails_a_raw_finish() {
 
 /// A source switch whose PAT names another `transport_stream_id` before its first clock
 /// reading restarts at that PAT, where the old program's identity check would otherwise fail
-/// the whole import. The new instance reads the PAT itself, however the input is split.
+/// the whole import. The new identity reads the PAT itself, however the input is split.
 #[test]
 fn another_identity_restarts_at_its_pat() {
 	let second = retagged(&shift(CLIP, |_| -SWITCH));
@@ -293,7 +293,7 @@ fn another_identity_restarts_at_its_pat() {
 	for chunk in [data.len(), 188 * 7, 1_000] {
 		let (restart, rest) = feed(&data, chunk)
 			.unwrap()
-			.unwrap_or_else(|| panic!("{chunk}: the switch ends the instance"));
+			.unwrap_or_else(|| panic!("{chunk}: the switch ends the identity"));
 		assert_eq!(
 			restart.step,
 			Step::Identity {
@@ -302,14 +302,14 @@ fn another_identity_restarts_at_its_pat() {
 			},
 			"{chunk}"
 		);
-		assert_eq!(rest, second[pat..], "{chunk}: the new instance starts at its PAT");
+		assert_eq!(rest, second[pat..], "{chunk}: the new identity starts at its PAT");
 		let fed = feed(&rest, chunk);
 		assert!(matches!(fed, Ok(None)), "{chunk}: {fed:?}");
 	}
 }
 
 /// A clock that steps forward by less than the bound, such as across lost packets, carries
-/// the same instance on.
+/// the same identity on.
 #[test]
 fn a_step_under_the_bound_carries_on() {
 	let (data, _) = replay(9 * HZ, |_| 0);
@@ -325,7 +325,7 @@ fn a_step_under_the_bound_carries_on() {
 }
 
 /// A stream the new source does not carry is waited for only as long as a cadenced stream may
-/// stay silent: the clocks that stepped decide, and the instance does not stall.
+/// stay silent: the clocks that stepped decide, and the identity does not stall.
 #[test]
 fn a_stream_the_new_source_lacks_is_not_waited_for() {
 	let (mut data, second) = replay(-SWITCH, |_| 0);
@@ -341,7 +341,7 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 	data.truncate(second);
 	data.extend(&without);
 
-	let (restart, rest) = feed(&data, 188 * 7).unwrap().expect("the switch ends the instance");
+	let (restart, rest) = feed(&data, 188 * 7).unwrap().expect("the switch ends the identity");
 	assert!(
 		matches!(restart.step, Step::Rewind { flagged: false, .. }),
 		"{restart:?}"

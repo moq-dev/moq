@@ -24,7 +24,7 @@ pub struct Timeline {
 	/// pause: the longest group (GOP) any of them publishes.
 	///
 	/// It is also the grid an HLS or DASH export numbers its segments on, so every rendition shares
-	/// segment numbers, and it is fixed for the broadcast instance since that numbering depends on
+	/// segment numbers, and it is fixed for the broadcast identity since that numbering depends on
 	/// it. A broadcast without one is not HLS-renderable. Serialized as whole milliseconds, rounded
 	/// up. Zero is no promise: encoding refuses it, and so does a reader.
 	#[serde(

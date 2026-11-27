@@ -4,8 +4,8 @@
 //! recorder writing `<name>/media.m3u8`, say) reuses the grouping and attribute
 //! rules. [`Broadcaster::master_playlist`](super::Broadcaster::master_playlist)
 //! renders the live layout, relative to `/<broadcast>/master.m3u8`: each rendition under the
-//! publisher instance it lists (`@<instance>/<kind>/<rendition>/media.m3u8`), with the instance
-//! and rendition name each percent-encoded as one segment.
+//! publisher identity it lists, by its token (`@<token>/<kind>/<rendition>/media.m3u8`), with the
+//! rendition name percent-encoded as one segment.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -14,12 +14,14 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::Kind;
 
-const VERSION: u32 = 9;
+/// The lowest version the playlist and its media comply with (RFC 8216 4.3.1.2): no master tag
+/// needs more, and every rendition's fMP4 segments need 6.
+const VERSION: u32 = 6;
 const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
 ///
-/// The HLS playlists and DASH manifest encode instances and rendition names with this set,
+/// The HLS playlists and DASH manifest encode identities and rendition names with this set,
 /// so each stays one segment in both layouts.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
@@ -31,12 +33,12 @@ pub(crate) fn is_path_segment(name: &str) -> bool {
 	!matches!(name, "" | "." | "..")
 }
 
-/// The live layout's media-playlist URI for a rendition of the publisher `instance`, relative to
+/// The live layout's media-playlist URI for a rendition of the publisher `identity`, relative to
 /// the master, with an optional query (without the leading `?`) appended.
-pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Option<&str>) -> String {
+pub(crate) fn rendition_uri(identity: &str, kind: Kind, name: &str, query: Option<&str>) -> String {
 	let mut uri = format!(
 		"@{}/{}/{}/media.m3u8",
-		utf8_percent_encode(instance, PATH_SEGMENT),
+		utf8_percent_encode(identity, PATH_SEGMENT),
 		kind.as_str(),
 		utf8_percent_encode(name, PATH_SEGMENT)
 	);
@@ -49,7 +51,7 @@ pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Optio
 pub(crate) fn include_uri(
 	parent: &str,
 	id: &str,
-	instance: &str,
+	identity: &str,
 	rendition: &super::Rendition,
 	query: Option<&str>,
 ) -> String {
@@ -59,7 +61,7 @@ pub(crate) fn include_uri(
 		utf8_percent_encode(id, PATH_SEGMENT),
 		rendition.kind.as_str(),
 		utf8_percent_encode(&rendition.name, PATH_SEGMENT),
-		utf8_percent_encode(instance, PATH_SEGMENT)
+		utf8_percent_encode(identity, PATH_SEGMENT)
 	);
 	if let Some(query) = query {
 		let _ = write!(uri, "?{query}");
@@ -181,6 +183,8 @@ pub fn render(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
+	// Every segment opens on a group, and every group on a keyframe.
+	let _ = writeln!(out, "#EXT-X-INDEPENDENT-SEGMENTS");
 
 	let audio_groups = group_audio(audio);
 	for group in &audio_groups {
@@ -256,7 +260,7 @@ mod tests {
 			&[video("video", Some(1280), Some(720))],
 			&[audio("audio", 128_000, "mp4a.40.2")],
 		);
-		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
+		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n"));
 		assert!(out.contains(
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"@run/audio/audio/media.m3u8\"\n"
 		));
@@ -316,15 +320,15 @@ mod tests {
 	}
 
 	#[test]
-	fn instances_round_trip_through_playlist_urls() {
+	fn identities_round_trip_through_playlist_urls() {
 		use crate::export::{Resource, Route};
 
-		for (instance, encoded) in [
+		for (identity, encoded) in [
 			("a/b?%23#", "a%2Fb%3F%2523%23"),
 			("音声\"\n&", "%E9%9F%B3%E5%A3%B0%22%0A%26"),
 			("~0123_-.abc", "~0123_-.abc"),
 		] {
-			let uri = rendition_uri(instance, Kind::Video, "hd", Some("jwt=abc"));
+			let uri = rendition_uri(identity, Kind::Video, "hd", Some("jwt=abc"));
 			assert_eq!(uri, format!("@{encoded}/video/hd/media.m3u8?jwt=abc"));
 			let mut variant = video("hd", None, None);
 			variant.uri = uri;
@@ -342,7 +346,7 @@ mod tests {
 					broadcast: "live".into(),
 					include: None,
 					resource: Resource::Media {
-						instance: instance.into(),
+						token: identity.into(),
 						kind: Kind::Video,
 						rendition: "hd".into(),
 					},

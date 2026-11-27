@@ -20,4 +20,4 @@ GPU capacity and health reporting remains a separate additive follow-up.
 
 ## Related
 
-- [GPU health](/quest/m3/gpu-health.md) - later reporting, not a surface release gate
+- [GPU health](/quest/m4/gpu-health.md) - later reporting, not a surface release gate

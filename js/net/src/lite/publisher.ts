@@ -24,7 +24,7 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
-import type * as Instance from "../instance.ts";
+import type * as Identity from "../identity.ts";
 import {
 	type DropRun,
 	datagramTrackInfo,
@@ -52,7 +52,7 @@ import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import { isEmpty, type Resolved, rangeKey } from "../window.ts";
-import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
@@ -257,6 +257,11 @@ interface RunGroup {
 	stamp: Stamp | undefined;
 	/** Whether to serve stored slices with their declared plain sizes. */
 	compress: boolean;
+	/**
+	 * Whether the subscriber asked for each frame's header alone (lite-07 `Meta`): its FRAME names
+	 * the plain size, and no payload follows it, so a compressed frame is never inflated to send it.
+	 */
+	meta: boolean;
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
 	priority: Pick<Priority, "reserve" | "add" | "remove">;
@@ -1002,7 +1007,7 @@ export class Publisher {
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Keyed by suffix, valued by identity plus route, so a republish diffs as a restart
+		// Keyed by suffix, valued by ref plus route, so a republish diffs as a restart
 		// and a re-price as an update.
 		let active = new Map<Path.Valid, Advertised>();
 
@@ -1025,11 +1030,11 @@ export class Publisher {
 			auth: undefined,
 		});
 
-		// Another instance is another stream, which these versions announce as an end and a start.
-		const restarted = (prev: Advertised, next: Advertised): boolean => !sameInstance(prev, next);
+		// Another identity is another stream, which these versions announce as an end and a start.
+		const restarted = (prev: Advertised, next: Advertised): boolean => !sameIdentity(prev, next);
 
 		const announce = async (suffix: Path.Valid, route: WireRoute) => {
-			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
+			console.debug(`announce: broadcast=${suffix} active=true identity=${route.identity}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
@@ -1057,7 +1062,7 @@ export class Publisher {
 			);
 		};
 
-		// Another instance: an end and a start.
+		// Another identity: an end and a start.
 		const restart = async (suffix: Path.Valid, route: WireRoute) => {
 			await retract(suffix);
 			await announce(suffix, route);
@@ -1189,12 +1194,12 @@ export class Publisher {
 
 	/** The broadcast a request names, from this session's origin. */
 	async #resolve(
-		msg: { broadcast: Path.Valid; instance?: Instance.Valid },
+		msg: { broadcast: Path.Valid; identity?: Identity.Valid },
 		signal: AbortSignal,
 	): Promise<broadcast.Consumer | undefined> {
 		const origin = this.#publish && wireOf(this.#publish);
 		if (!origin) return undefined;
-		return origin.local(msg.broadcast, msg.instance) ?? (await origin.demand(msg.broadcast, msg.instance, signal));
+		return origin.local(msg.broadcast, msg.identity) ?? (await origin.demand(msg.broadcast, msg.identity, signal));
 	}
 
 	/**
@@ -1560,6 +1565,7 @@ export class Publisher {
 				stamp,
 				publisher,
 				compress,
+				meta: msg.meta,
 				named,
 				floor,
 				bounds,
@@ -1712,6 +1718,7 @@ export class Publisher {
 				givenUp,
 				stamp: stamping(this.version, info),
 				compress: info.compress,
+				meta: msg.meta,
 				priority,
 				unsubscribed,
 				start: req.startFrame,
@@ -1909,6 +1916,8 @@ export class Publisher {
 			/** The track's publisher priority, breaking ties between subscriptions. */
 			publisher: number;
 			compress: boolean;
+			/** Whether each frame goes out as its header alone (lite-07 `Meta`). */
+			meta: boolean;
 			// Whether the wire names what it never served (lite-05 and later), recording what it
 			// told in the reader's own record.
 			named: boolean;
@@ -1924,7 +1933,7 @@ export class Publisher {
 			oneShot?: boolean;
 		},
 	): Promise<boolean | "one-shot"> {
-		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial, requested } = serving;
+		const { sub, broadcast, stamp, publisher, compress, meta, named, bounds, initial, requested } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -2625,6 +2634,7 @@ export class Publisher {
 					givenUp: new GivenUp(group),
 					stamp,
 					compress,
+					meta,
 					priority,
 					unsubscribed,
 					start: range.start,
@@ -3224,7 +3234,7 @@ export class Publisher {
 					closed?.catch(() => {});
 					break;
 				}
-				pendingRead ??= hooks.readGroupFrame(group, compress);
+				pendingRead ??= hooks.readGroupFrame(group, compress, 0, options.meta);
 				closed ??= stream.closed.then(() => undefined);
 				let disposeStop: Dispose | undefined;
 				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;
@@ -3276,15 +3286,12 @@ export class Publisher {
 					highest = max(highest ?? ts, ts);
 				}
 
-				const header = frameHeader(
-					stream.version,
-					delta,
-					read.inflated,
-					readSize(read),
-					hasLengthFirst(this.version),
-				);
-				const chunks = read.chunks;
-				const payload = chunks ? undefined : read.frame.payload;
+				const header = options.meta
+					? frameHeader(stream.version, delta, undefined, read.inflated ?? readSize(read), true)
+					: frameHeader(stream.version, delta, read.inflated, readSize(read), hasLengthFirst(this.version));
+				// A metadata FRAME is its header: the frame's bytes are never read, so nothing waits for them.
+				const chunks = options.meta ? undefined : read.chunks;
+				const payload = options.meta || chunks ? undefined : read.frame.payload;
 				// One budget race covers the frame's header and payload.
 				await write(async () => {
 					await stream.write(header);

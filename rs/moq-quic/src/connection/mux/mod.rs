@@ -18,7 +18,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::{debug, trace};
 
 use super::{
-	Error as ConnectionError, ThinRetransmits,
+	Error as ConnectionError, KeepAlive, KeepAliveError, ThinRetransmits,
 	datagrams::DatagramState,
 	spaces::Retransmits,
 	stats::FrameStats,
@@ -283,7 +283,10 @@ impl Connection {
 		if self.is_closed() {
 			return;
 		}
-		self.timer.on_recv(now);
+		if self.timer.on_recv(now) {
+			debug!("qmux peer is live again");
+			self.streams.waits.wake_stale();
+		}
 		if let Err(err) = self.process(payload, now) {
 			self.fail(err);
 		}
@@ -309,8 +312,9 @@ impl Connection {
 
 	/// Close the connection with an APPLICATION_CLOSE, unless it already ended
 	///
-	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
-	/// the transport.
+	/// The frame comes from [`Self::poll_transmit`], in a record of its own if the transport
+	/// parameters still go first; keep transmitting until [`Self::is_drained`], then flush
+	/// before shutting down the transport.
 	pub fn close(&mut self, error_code: VarInt, reason: String) {
 		if self.is_closed() {
 			return;
@@ -420,7 +424,44 @@ impl Connection {
 		} else if due.ping {
 			self.ping_request = true;
 		}
+		if due.stale {
+			debug!("qmux peer is stale");
+			self.streams.waits.wake_stale();
+		}
 		self.observe_credit(now);
+	}
+
+	/// Start `keep_alive`, replacing any running, measured from the last record received
+	///
+	/// A QX_PING goes out every half of `soft` while the peer stays unheard, the peer turns stale
+	/// once all of `soft` passes (see [`Self::poll_stale`]), and the connection closes as
+	/// [`ConnectionError::TimedOut`] once `hard` does. Errors, changing nothing, on draft-00,
+	/// which has no QX_PING, or a `hard` longer than the negotiated idle timeout.
+	pub fn set_keep_alive(&mut self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
+		if !self.config.version.uses_records() {
+			return Err(KeepAliveError::Unsupported);
+		}
+		if self.timer.set_keep_alive(keep_alive)?.is_some_and(|old| old.is_stale()) {
+			self.streams.waits.wake_stale();
+		}
+		// The driver reads the new deadline when it next polls.
+		self.streams.waits.wake_transmit();
+		Ok(())
+	}
+
+	/// Whether a [`KeepAlive`] found the peer unheard for its `soft` limit
+	pub fn is_stale(&self) -> bool {
+		self.timer.is_stale()
+	}
+
+	/// Wait until [`Self::is_stale`] differs from `stale`, returning the new value
+	pub fn poll_stale(&mut self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		let now = self.is_stale();
+		if now != stale {
+			return Poll::Ready(now);
+		}
+		self.streams.waits.register_stale(waiter);
+		Poll::Pending
 	}
 
 	/// Accrue a writer's wait on the peer's credit, and a hold on the spent receive window, up to `now`
@@ -589,9 +630,14 @@ impl Connection {
 		}
 
 		if let End::Closing { error, frame } = &mut self.end {
+			let room = budget.saturating_sub(buf.len());
+			if frame.is_some() && !buf.is_empty() && room < Close::SIZE_BOUND {
+				// The transport parameters left no room, so the close goes in the next record
+				self.timer.on_send(now);
+				return Some(Default::default());
+			}
 			// Write the close frame, if any, and go quiet
 			if let Some(close) = frame.take() {
-				let room = budget - buf.len();
 				close.encode(buf, room);
 			}
 			self.end = End::Closed(error.clone());

@@ -2,6 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use rangemap::RangeSet;
+
+use super::subscription::{Cover, minus};
+
 /// The group keys a reader handed out, as runs of consecutive keys.
 ///
 /// A reader stops expecting a group once it is past its budget, and counts everything
@@ -12,10 +16,14 @@ use std::collections::BTreeMap;
 pub(super) struct Delivered {
 	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
-	/// Highest key retired solely by the reader's freshness budget (see [`Self::retire_below`]).
+	/// Highest key retired solely by the reader's freshness budget (see [`Self::fold_below`]).
 	/// Kept apart from handed-out keys so debt folding never promotes a budget-retired prefix
 	/// into the report floor.
 	budget: u64,
+	/// The keys a fold counted as handed out that no range held then, so no budget judged
+	/// them: a range added later owes each it holds (see [`Self::reopen`]). Always within `runs`,
+	/// and never more runs than [`Self::fold_below`] leaves.
+	unjudged: RangeSet<u64>,
 }
 
 impl Delivered {
@@ -62,6 +70,7 @@ impl Delivered {
 		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
+		self.unjudged.remove(groups.clone());
 		let mut first = groups.start;
 		// A run ending at or just below the first key joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
@@ -85,6 +94,7 @@ impl Delivered {
 		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
+		self.unjudged.remove(groups.clone());
 		// Runs are disjoint and sorted, so the ones reaching into `groups` are the last few
 		// starting at or below its last key.
 		let cut: Vec<(u64, u64)> = (self.runs.range(..=last).rev())
@@ -137,17 +147,77 @@ impl Delivered {
 		gaps
 	}
 
-	/// Count every key below `floor` as handed out because it fell past the freshness budget.
-	/// Unlike [`Self::forget_below`], this records the budget boundary so debt folding never
-	/// promotes budget-retired keys into the report floor.
-	pub fn retire_below(&mut self, floor: u64) {
+	/// Count every key below `floor` as handed out, as a fold past the reader's budget does:
+	/// each gap it closes that `judged` doesn't hold, or every one while the ranges are still
+	/// being placed, a range added later that holds it owes again.
+	///
+	/// So that ranges moving to disjoint groups leave no more runs than they hold, what lies
+	/// between two runs it remembers that `judged` doesn't hold joins them: what ranges added
+	/// over it later hand out may then include a group handed out before, which the same
+	/// identity makes harmless, as [`Record::retire`](super::record::Record) trades, rather than
+	/// miss one never handed out.
+	pub fn fold_below(&mut self, floor: u64, judged: Option<&Cover>) {
 		self.budget = self.budget.max(floor);
+		let gaps: Vec<std::ops::Range<u64>> = self.gaps(self.floor()..floor).collect();
+		let added = !gaps.is_empty();
+		for gap in gaps {
+			match judged {
+				Some(judged) => {
+					for run in minus(gap.start..=gap.end - 1, judged) {
+						self.unjudged.insert(*run.start()..*run.end() + 1);
+					}
+				}
+				None => self.unjudged.insert(gap),
+			}
+		}
 		self.forget_below(floor);
+		// Placed ranges say what joins; a fold while they're placed is followed by one that is.
+		let (Some(judged), true, Some(first), Some(last)) = (
+			judged,
+			added,
+			self.unjudged.iter().next().map(|run| run.start),
+			self.unjudged.iter().next_back().map(|run| run.end - 1),
+		) else {
+			return;
+		};
+		for run in minus(first..=last, judged) {
+			let run = *run.start()..*run.end() + 1;
+			self.unjudged.insert(run.clone());
+			// Not what a reopen gave back since, which is owed rather than counted handed out.
+			let owed: Vec<std::ops::Range<u64>> = self.gaps(run).collect();
+			for gap in owed {
+				self.unjudged.remove(gap);
+			}
+		}
 	}
 
 	/// Highest key retired by the reader's freshness budget.
 	pub fn budget_floor(&self) -> u64 {
 		self.budget
+	}
+
+	/// Whether a fold counted `key` as handed out while no range held it.
+	pub fn is_unjudged(&self, key: u64) -> bool {
+		self.unjudged.contains(&key)
+	}
+
+	/// Take back each key a fold counted as handed out unjudged that `judged` now holds, so it
+	/// is owed again.
+	pub fn reopen(&mut self, judged: &Cover) {
+		let held: Vec<std::ops::Range<u64>> = (self.unjudged.iter())
+			.flat_map(|run| judged.within(run.start, run.end - 1))
+			.map(|run| *run.start()..*run.end() + 1)
+			.collect();
+		for run in held {
+			self.remove(run);
+		}
+	}
+
+	/// Count every key below `floor` as handed out for good: none is owed again, whatever
+	/// range is added later.
+	pub fn settle_below(&mut self, floor: u64) {
+		self.forget_below(floor);
+		self.unjudged.remove(0..floor);
 	}
 
 	/// Count every key below `floor` as handed out.
@@ -200,9 +270,9 @@ impl Delivered {
 		self.runs.last_key_value().map(|(_, last)| last + 1)
 	}
 
-	/// How many runs it holds: one per gap, plus the floor.
+	/// How many runs it holds: one per gap, plus the floor, plus one per run folded unjudged.
 	pub fn runs(&self) -> usize {
-		self.runs.len()
+		self.runs.len() + self.unjudged.len()
 	}
 
 	/// Count distinct runs overlapping `groups`, stopping at `limit`.
@@ -360,5 +430,59 @@ mod test {
 		assert_eq!(delivered.count_runs_in(21..22, 4), 0);
 		assert_eq!(delivered.count_runs_in(20..20, 4), 0);
 		assert_eq!(delivered.count_runs_in(20..30, 0), 0);
+	}
+
+	#[test]
+	fn a_fold_reopens_only_the_gaps_no_range_judged() {
+		let mut delivered = Delivered::default();
+		for key in [4, 9] {
+			delivered.insert(key);
+		}
+		// Ranges hold 2..=4 and 6..=7 as the fold closes every gap below 9.
+		delivered.fold_below(9, Some(&Cover::new([2..=4, 6..=7])));
+		assert_eq!(runs(&delivered), [(0, 9)]);
+		assert_eq!(delivered.runs(), 4, "the floor plus three gaps no range held");
+
+		// A range added over 0..=8 owes the gaps folded unjudged, never a hand-out nor what the
+		// budget judged.
+		delivered.reopen(&Cover::new(std::iter::once(0..=8)));
+		assert_eq!(runs(&delivered), [(2, 4), (6, 7), (9, 9)]);
+		assert_eq!(delivered.runs(), 3, "nothing left to reopen");
+
+		// Folded while the ranges are still being placed, every gap is unjudged; one handed out or
+		// settled since is not reopened.
+		delivered.fold_below(10, None);
+		delivered.insert_run(0..1);
+		delivered.reopen(&Cover::new(std::iter::once(0..=9)));
+		assert_eq!(runs(&delivered), [(0, 0), (2, 4), (6, 7), (9, 9)]);
+
+		// Settled for good, nothing below is owed again.
+		delivered.fold_below(10, None);
+		delivered.settle_below(10);
+		delivered.reopen(&Cover::new(std::iter::once(0..=9)));
+		assert_eq!(runs(&delivered), [(0, 9)]);
+		assert_eq!(delivered.runs(), 1);
+	}
+
+	#[test]
+	fn a_fold_keeps_no_more_unjudged_runs_than_the_ranges_hold() {
+		let mut delivered = Delivered::default();
+		// Ranges moving to a fresh group each time, each handed out and folded past by ranges
+		// then holding only the live edge, would leave a run no range held between each pair.
+		for key in (10..100).step_by(10) {
+			delivered.insert(key);
+			delivered.fold_below(key + 5, Some(&Cover::new(std::iter::once(key + 5..=1000))));
+		}
+		assert_eq!(delivered.runs(), 2, "the floor and one run between");
+		// A range added over a group handed out before owes it again, and while it holds it,
+		// splits the runs around it; one no longer held, as 97 next, joins them.
+		delivered.reopen(&Cover::new([40..=40, 95..=1000]));
+		assert!(!delivered.contains(40));
+		delivered.insert(40);
+		delivered.insert(97);
+		delivered.fold_below(99, Some(&Cover::new([40..=40, 99..=1000])));
+		assert_eq!(delivered.runs(), 3, "the floor and a run each side of 40");
+		delivered.reopen(&Cover::new(std::iter::once(0..=98)));
+		assert_eq!(runs(&delivered), [(40, 40)]);
 	}
 }

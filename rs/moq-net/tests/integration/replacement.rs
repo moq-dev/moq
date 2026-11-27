@@ -4,7 +4,7 @@
 //! same peer re-announces every route while the first one is still open, as a GOAWAY
 //! drain does.
 //!
-//! lite-07 carries the publisher's instance, so the replacement continues the stream: no
+//! lite-07 carries the publisher's identity, so the replacement continues the stream: no
 //! `Restart`, and the old handle keeps working. Older wires carry none, so the receiving
 //! session mints one per announcement and the re-announced routes are new streams:
 //! announce consumers get a `Restart` at once, and the old handle refuses new requests
@@ -16,7 +16,7 @@ use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Error, Instance, Version, broadcast, origin, track};
+use moq_net::{Error, Identity, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -80,14 +80,14 @@ const WITHIN_HOLD: Duration = Duration::from_millis(10);
 /// Longer than the default update hold.
 const PAST_HOLD: Duration = Duration::from_millis(500);
 
-async fn replace(version: &str, instance: Option<Instance>) {
+async fn replace(version: &str, identity: Option<Identity>) {
 	let carries = version == "moq-lite-07-wip";
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
 
-	let options = match &instance {
-		Some(instance) => origin::RouteOptions::default().with_instance(instance.clone(), 0),
+	let options = match &identity {
+		Some(identity) => origin::RouteOptions::default().with_identity(identity.clone(), 0),
 		None => origin::RouteOptions::default(),
 	};
 	let cam = publisher.route("cam", options).unwrap();
@@ -104,10 +104,10 @@ async fn replace(version: &str, instance: Option<Instance>) {
 			..
 		} => {
 			assert_eq!(announce.prefix.as_str(), "cam");
-			let carried = announce.route.instance();
+			let carried = announce.route.identity();
 			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
-			if carries && let Some(instance) = &instance {
-				assert_eq!(carried, instance, "{version}: carried instance");
+			if carries && let Some(identity) = &identity {
+				assert_eq!(carried, identity, "{version}: carried identity");
 			}
 		}
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
@@ -124,7 +124,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 	kio::clock::sleep(WITHIN_HOLD).await;
 
 	if carries {
-		// The instance continues across the replacement: nothing to restart, and the old
+		// The identity continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
 		if let Ok(event) = kio::clock::timeout(PAST_HOLD, announced.next()).await {
 			panic!("{version}: the stream restarted on replacement: {event:?}");
@@ -138,7 +138,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		return;
 	}
 
-	// A minted instance makes the replacement a restart, delivered at once, and the old
+	// A minted identity makes the replacement a restart, delivered at once, and the old
 	// handle refuses new requests from then on.
 	match announced.try_next() {
 		Some(origin::RouteEvent {
@@ -171,17 +171,17 @@ async fn minted_lite06() {
 		.expect("timed out");
 }
 
-/// lite-07 carries the instance the route minted, or the stable one it names.
+/// lite-07 carries the identity the route minted, or the stable one it names.
 #[kio::test]
 async fn carried_lite07() {
-	for instance in [None, Some("cam".parse().unwrap())] {
-		kio::clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", instance))
+	for identity in [None, Some("cam".parse().unwrap())] {
+		kio::clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", identity))
 			.await
 			.expect("timed out");
 	}
 }
 
-/// moq-transport carries no instance, even a stable one, so a replacement restarts as it
+/// moq-transport carries no identity, even a stable one, so a replacement restarts as it
 /// does over older lite.
 #[kio::test]
 async fn minted_ietf() {
@@ -195,7 +195,7 @@ async fn minted_ietf() {
 /// A route change alone is never fatal. Once a replacement is announced, a subscription on
 /// the old route keeps going while the old publisher serves it. Its session closing then
 /// ends the subscription with an error, never cleanly, where the wire minted the routes
-/// apart; lite-07 carries one instance on both, so the subscription resumes on the
+/// apart; lite-07 carries one identity on both, so the subscription resumes on the
 /// replacement instead. The viewer reads either straight from the publisher or through a
 /// relay, and the old session closes after `wait`: inside the update hold, or past it.
 async fn route_death(version: &str, relayed: bool, wait: Duration) {
@@ -229,7 +229,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	assert_eq!(
 		read(&mut sticky).await,
 		"video:1",
-		"{version}: the replacement cut the old instance off while it served"
+		"{version}: the replacement cut the old identity off while it served"
 	);
 
 	let _ = old_session.server.close().await;
@@ -238,7 +238,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 		assert_eq!(
 			read(&mut sticky).await,
 			"video:2",
-			"{version} (relayed: {relayed}): the instance did not resume on the replacement"
+			"{version} (relayed: {relayed}): the identity did not resume on the replacement"
 		);
 		return;
 	}

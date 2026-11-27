@@ -63,9 +63,9 @@ export async function nextMedia(consumer: Container.Consumer, signal: AbortSigna
 
 /** The source a fatal decode failure belongs to. @internal */
 export interface Failure {
-	/** The catalog broadcast's instance. */
+	/** The catalog broadcast's identity. */
 	broadcast: unknown;
-	/** The instance of the broadcast the rendition reads. */
+	/** The identity of the broadcast the rendition reads. */
 	media: unknown;
 	track: string;
 	identity: string;

@@ -204,6 +204,17 @@ obs_data_t *obs_encoder_get_settings(const obs_encoder_t *encoder)
 	return reinterpret_cast<obs_data_t *>(const_cast<obs_encoder_t *>(encoder));
 }
 
+// AudioData measures each packet's length to close a group once it carries 100 ms: 20 ms Opus.
+uint32_t obs_encoder_get_sample_rate(const obs_encoder_t *)
+{
+	return 48000;
+}
+
+size_t obs_encoder_get_frame_size(const obs_encoder_t *)
+{
+	return 960;
+}
+
 uint32_t obs_encoder_get_width(const obs_encoder_t *)
 {
 	return 1920;
@@ -445,7 +456,7 @@ std::optional<moq::Catalog> relayCatalog(
 // The production commit boundary lets a real stats call race retirement without
 // callbacks or branches in the output's hot path.
 struct MoQOutputStatsTest {
-	static std::optional<std::string> Instance(MoQOutput &output)
+	static std::optional<std::string> Identity(MoQOutput &output)
 	{
 		std::shared_ptr<moq::OriginProducer> origin;
 		{
@@ -462,7 +473,7 @@ struct MoQOutputStatsTest {
 		const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
 		if (!present)
 			return std::nullopt;
-		return present->announce.route.instance->text();
+		return present->announce.route.identity->text();
 	}
 
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
@@ -568,22 +579,22 @@ int main()
 		reset(relay.Url());
 		MoQOutput output(nullptr, OUTPUT);
 		CHECK(output.Start());
-		const auto first = MoQOutputStatsTest::Instance(output);
+		const auto first = MoQOutputStatsTest::Identity(output);
 		CHECK(first.has_value() && !first->empty());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
 		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
 		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
-		CHECK(MoQOutputStatsTest::Instance(output) == first);
+		CHECK(MoQOutputStatsTest::Identity(output) == first);
 		output.Stop();
 		CHECK(output.Start());
-		const auto second = MoQOutputStatsTest::Instance(output);
+		const auto second = MoQOutputStatsTest::Identity(output);
 		CHECK(second.has_value() && !second->empty());
 		CHECK(second != first);
 		output.Stop();
 	}
-	printf("each start announces a fresh instance, reconnect preserves it: ok\n");
+	printf("each start announces a fresh identity, reconnect preserves it: ok\n");
 
 	{
 		TestRelay relay;

@@ -77,6 +77,8 @@ pub(crate) struct Waits {
 	ended: WaiterList,
 	/// For a received datagram
 	datagram: WaiterList,
+	/// For the peer to turn stale or live again under a keep-alive
+	stale: WaiterList,
 	/// For something to transmit: the driver, woken by whatever the application queues
 	transmit: WaiterList,
 	handshake_data: Latch,
@@ -169,6 +171,16 @@ impl Waits {
 		self.datagram.wake();
 	}
 
+	/// Register `waiter` for the peer to turn stale or live again
+	pub(crate) fn register_stale(&mut self, waiter: &Waiter) {
+		waiter.register(&mut self.stale);
+	}
+
+	/// The peer turned stale or live again
+	pub(crate) fn wake_stale(&mut self) {
+		self.stale.wake();
+	}
+
 	/// Register `waiter` for something to transmit
 	pub(crate) fn register_transmit(&mut self, waiter: &Waiter) {
 		waiter.register(&mut self.transmit);
@@ -258,6 +270,7 @@ impl Waits {
 		}
 		self.ended.wake();
 		self.datagram.wake();
+		self.stale.wake();
 		// A close still owes the peer its CONNECTION_CLOSE.
 		self.transmit.wake();
 		self.handshake_data.waiters.wake();

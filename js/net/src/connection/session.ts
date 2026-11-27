@@ -4,6 +4,7 @@ import type { RouteOptions, Routes } from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
 import type { Goaway } from "./goaway.ts";
+import type { Liveness } from "./keep_alive.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
@@ -29,6 +30,13 @@ export interface Session {
 	 * See {@link Stats} for what the local transport counts.
 	 */
 	readonly probe: Getter<Probe>;
+
+	/**
+	 * Whether the peer was heard within the `keepAlive` connect option's `soft` limit, or
+	 * undefined when the session runs without one. Turns `stale` once `soft` passes unheard,
+	 * `live` again on the peer's next frame, and the session closes if `hard` passes too.
+	 */
+	readonly liveness: Getter<Liveness> | undefined;
 
 	/**
 	 * The tokens this side presented and the grant they earned, plus the tokens the peer

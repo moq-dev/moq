@@ -5,7 +5,7 @@
  * @module
  */
 
-import type { Instance, Path } from "@moq/net";
+import type { Identity, Path } from "@moq/net";
 import type * as Echo from "./echo.ts";
 import type * as Stats from "./stats.ts";
 
@@ -19,8 +19,8 @@ export type Role = "publisher" | "viewer";
 export interface Observer {
 	/** The publisher's media broadcast, or the viewer's echo broadcast. */
 	path: Path.Valid;
-	/** The instance of the reporting broadcast's stream, when its route carries one. */
-	instance?: Instance.Valid;
+	/** The identity of the reporting broadcast's stream, when its route carries one. */
+	identity?: Identity.Valid;
 }
 
 /** One snapshot and the broadcast it was read from. */
@@ -359,7 +359,7 @@ function connection(link: Link, role: Role, thresholds: Thresholds): Connection 
 }
 
 function sameObserver(a: Observer, b: Observer): boolean {
-	return a.path === b.path && a.instance === b.instance;
+	return a.path === b.path && a.identity === b.identity;
 }
 
 function decreased<R>(previous: Snapshot<R>, current: Snapshot<R>, kind: Kind<R>): boolean {

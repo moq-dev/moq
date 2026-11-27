@@ -1007,18 +1007,18 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes carry the same instance over lite-07, so they serve
+/// being retracted: both routes carry the same identity over lite-07, so they serve
 /// the same bytes and the subscription rides the failover.
 #[tokio::test]
 async fn broadcast_route_migration() {
-	// Replicas of one publisher instance, and the only version that carries it.
-	let instance = moq_net::Instance::random();
+	// Replicas of one publisher identity, and the only version that carries it.
+	let identity = moq_net::Identity::random();
 	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
 	let origin_a = moq_tokio::origin::spawn();
 	let options_a = moq_net::origin::RouteOptions::default()
-		.with_instance(instance.clone(), 0)
+		.with_identity(identity.clone(), 0)
 		.with_cost(1);
 	let broadcast_a = origin_a.route("test", options_a).expect("announce");
 	let track_a = broadcast_a
@@ -1041,7 +1041,7 @@ async fn broadcast_route_migration() {
 	// ── publisher B: the standby, pricier so A wins ─────────────────
 	let origin_b = moq_tokio::origin::spawn();
 	let options_b = moq_net::origin::RouteOptions::default()
-		.with_instance(instance.clone(), 0)
+		.with_identity(identity.clone(), 0)
 		.with_cost(2);
 	let broadcast_b = origin_b.route("test", options_b).expect("announce");
 	let track_b = broadcast_b
@@ -1141,7 +1141,7 @@ async fn broadcast_route_migration() {
 		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["a1"]);
 
-	// Kill the serving session. Both routes serve the same instance, so the
+	// Kill the serving session. Both routes serve the same identity, so the
 	// broadcast re-splices through the standby at the group boundary and the
 	// SAME subscription carries B's continuation.
 	drop(session_a);
@@ -1466,7 +1466,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let origin = moq_tokio::origin::spawn();
-	// Re-pricing the same route in place keeps its instance, so the restart is
+	// Re-pricing the same route in place keeps its identity, so the restart is
 	// an in-place route change rather than a broadcast replacement.
 	let producer = origin
 		.route("test", moq_net::origin::RouteOptions::default())
@@ -1548,7 +1548,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "a restart must not retract the route");
 	assert!(update.route.cost() > initial.cost(), "the new price must arrive");
-	assert_eq!(update.route.instance(), initial.instance(), "the same stream");
+	assert_eq!(update.route.identity(), initial.identity(), "the same stream");
 	{
 		let mut group = track
 			.create_group(moq_net::group::Info { start: 1 })

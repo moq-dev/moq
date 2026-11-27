@@ -132,8 +132,8 @@ struct State {
 	waiting: BTreeMap<Key, (Held, Owner)>,
 }
 
-/// Where a rendition's media track is: its broadcast, instance, and track name.
-type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
+/// Where a rendition's media track is: its broadcast, identity, and track name.
+type Held = (Option<moq_net::path::Relative>, Option<moq_net::Identity>, String);
 
 /// Holds `track` on `binding` subscribed until dropped, as demand for its media.
 ///
@@ -175,6 +175,9 @@ impl kio::Task for Hold {
 			let Ok(track) = broadcast.track(&self.track) else {
 				return Poll::Ready(());
 			};
+			// Demand the export makes for itself rather than for a client, so a metered source
+			// counts no viewer for it.
+			let track = track.unmetered();
 			let subscribing = track.subscribe(moq_net::track::Subscription::default()).into_inner();
 			self.state = Holding::Subscribing {
 				_broadcast: broadcast,
@@ -677,7 +680,7 @@ impl Producer {
 	/// Renditions join the set only once the catalog declares `sync.interval`, which a
 	/// publisher measures over its first second or group when it knows no GOP: without that grid
 	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
-	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
+	/// interval is fixed for a broadcast identity; should it change anyway, every rendition is
 	/// rebuilt on the new grid.
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
@@ -693,7 +696,7 @@ impl Producer {
 		let video = catalog.video.renditions.iter().map(|(name, config)| {
 			let reference = (
 				config.broadcast.clone(),
-				config.instance.clone(),
+				config.identity.clone(),
 				config.track(name).to_string(),
 			);
 			((Kind::Video, name.clone()), reference)
@@ -701,7 +704,7 @@ impl Producer {
 		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
 			let reference = (
 				config.broadcast.clone(),
-				config.instance.clone(),
+				config.identity.clone(),
 				config.track(name).to_string(),
 			);
 			((Kind::Audio, name.clone()), reference)
@@ -713,8 +716,8 @@ impl Producer {
 			if waiting.contains_key(&key) {
 				continue;
 			}
-			let (broadcast, instance, track) = &held;
-			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
+			let (broadcast, identity, track) = &held;
+			let Ok(binding) = source.bind(broadcast.as_ref(), identity.as_ref()) else {
 				continue;
 			};
 			let owner = self.fanout.spawn(Hold {
@@ -982,6 +985,50 @@ mod tests {
 			end(&producer);
 			assert!(producer.state.read().waiting.is_empty(), "the hold outlived the set");
 		}
+	}
+
+	/// A track held while the catalog has no join interval is the export's own demand, so a
+	/// metered source counts no subscription, and no viewer, for it.
+	#[tokio::test(start_paused = true)]
+	async fn a_held_track_counts_no_viewer() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let route = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let track = route
+			.broadcast()
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+		let consumer = origin.consume().with_stats(
+			registry
+				.tier(moq_net::stats::Tier::default())
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer"))),
+		);
+		let resolved = consumer.request("live", None).await.expect("the broadcast resolves");
+		let source = moq_mux::Source::new(consumer, resolved);
+		let mut catalog = Catalog::default();
+		let video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let producer = Producer::spawned(Duration::from_secs(30));
+		let _cursor = producer.subscribe();
+		producer.sync(&source, &catalog);
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!(track.subscription().is_some(), "the track was not held");
+		let subscriptions: u64 = registry
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.map(|(_, _, traffic)| traffic.subscriptions_started + traffic.broadcasts_started)
+			.sum();
+		assert_eq!(subscriptions, 0, "the hold counted a viewer");
 	}
 
 	#[test]

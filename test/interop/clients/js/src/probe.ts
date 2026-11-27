@@ -207,8 +207,8 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
-			// Its text: a minted instance is an object, which JSON would print as {}.
-			broadcastInstance: instanceText(el.broadcast.out.active.peek()?.instance),
+			// Its text: a minted identity is an object, which JSON would print as {}.
+			broadcastIdentity: identityText(el.broadcast.out.active.peek()?.identity),
 			broadcastStatus: el.broadcast.out.status.peek(),
 			userActivated: navigator.userActivation.hasBeenActive,
 			at: performance.now(),
@@ -255,7 +255,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 	return () => self.clearInterval(timer);
 }
 
-// The instance's text: both kinds stringify to it.
-function instanceText(instance: { toString(): string } | undefined): string | undefined {
-	return instance === undefined ? undefined : String(instance);
+// The identity's text: both kinds stringify to it.
+function identityText(identity: { toString(): string } | undefined): string | undefined {
+	return identity === undefined ? undefined : String(identity);
 }

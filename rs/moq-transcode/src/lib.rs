@@ -193,17 +193,28 @@ impl Transcoder {
 		// A move onto another source track, waiting on its timescale, with the snapshot that
 		// asked for it. A newer snapshot drops it.
 		let mut moving: Option<Moving> = None;
+		// Set once the source catalog finished cleanly: the source is ending, so the ladder stops
+		// following it and starts no rung, idle rungs end, and the rungs still serving finish what
+		// their source tracks send.
+		let mut ended = false;
 		loop {
+			if ended && tasks.is_empty() {
+				break;
+			}
 			tokio::select! {
 				request = dynamic.requested_track() => {
 					// Err means the broadcast closed; nothing left to serve.
 					let Ok(request) = request else { break };
-					match ladder.rung(request.name()) {
+					let rung = match ended {
+						true => None,
+						false => ladder.rung(request.name()),
+					};
+					match rung {
 						Some(rung) => { tasks.spawn(rung::serve(rung, request)); }
 						None => request.reject(moq_net::Error::NotFound),
 					}
 				},
-				update = catalogs.next() => match update {
+				update = catalogs.next(), if !ended => match update {
 					Ok(Some(snapshot)) => {
 						moving = None;
 						if let Some(next) = ladder.follow(&snapshot.video).await {
@@ -214,8 +225,15 @@ impl Transcoder {
 						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 						guard.commit()?;
 					}
-					// The source ended (or its catalog track died): wind down.
-					Ok(None) => break,
+					// The source is ending: so does the derivative catalog, but a rung mid-group
+					// still finishes it, and a rung finishes its track once its source track does.
+					Ok(None) => {
+						ended = true;
+						moving = None;
+						ladder.end();
+						derived.finish()?;
+					}
+					// The catalog track died, which says nothing of the source media: wind down.
 					Err(err) => {
 						tracing::debug!(%err, "source catalog ended");
 						break;
@@ -244,15 +262,15 @@ impl Transcoder {
 			}
 		}
 
-		// Wind the rungs down. On a clean source end they are already finishing on
-		// their own (the live path saw the source track end), so `shutdown` just
-		// joins them. But `run` also breaks on a catalog-track error while the
-		// source media and viewers are still live, and a rung task only self-ends on
-		// source-media-end or broadcast-close, not catalog-end. Aborting rather than
-		// awaiting keeps that case from hanging forever here.
+		// Abort whatever is still serving. After a clean catalog end that is only what the
+		// closed source cut off, since the loop waits on the rest. A catalog-track error breaks while
+		// the source media and viewers may still be live, and a rung task only self-ends on
+		// source-media-end or broadcast-close, so awaiting it could hang here forever.
 		tasks.shutdown().await;
 
-		derived.finish()?;
+		if !ended {
+			derived.finish()?;
+		}
 		output.close();
 		Ok(())
 	}
@@ -1027,6 +1045,126 @@ mod tests {
 
 		drop(live);
 		transcoder.abort();
+	}
+
+	/// Under a budget, a subscription over past groups of a source with no live group, as one
+	/// paused or replaying history has, starts no live encode either: with nothing on the feed to
+	/// place the edge by, one would hold the only session for good, starving the fills.
+	#[tokio::test]
+	async fn a_past_subscription_of_a_paused_source_leaves_the_session_to_its_fills() {
+		let source = source_catalog(320, 240);
+		let source_fetches = source._track.requests();
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			sessions: Sessions::new(std::num::NonZeroUsize::MIN),
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let past = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(3),
+			end: Some(4),
+		}]);
+		let rung = consumer.track("video/120p").unwrap();
+		let _subscriber = rung.subscribe(past).await.unwrap();
+
+		tokio::spawn(async move {
+			while let Ok(request) = source_fetches.requested_fill().await {
+				let mut group = request
+					.accept(request.start().group, None)
+					.unwrap()
+					.expect("a fresh group");
+				write_keyframe(&mut group);
+				group.finish().unwrap();
+			}
+		});
+
+		let fetched = kio::clock::timeout(std::time::Duration::from_secs(10), async {
+			let mut fetched = rung.fetch_group(3, None).await.unwrap();
+			while fetched.read_frame().await.unwrap().is_some() {}
+			fetched.finished().await.unwrap()
+		})
+		.await
+		.expect("a live encode held the only session");
+		assert!(fetched > 0, "the fill produced no frames");
+		assert!(
+			source._track.subscription().is_none(),
+			"the subscription started a live encode"
+		);
+
+		transcoder.abort();
+	}
+
+	/// A source whose catalog finishes cleanly is ending, not gone: a rung mid-group finishes
+	/// that group and then its track with its source track, rather than being cut off with the
+	/// catalog. An idle rung ends at once, and the derivative catalog finishes, so the transcoder
+	/// ends with its last serving rung even while the source broadcast stays open.
+	#[tokio::test]
+	async fn a_finished_catalog_lets_the_rungs_drain() {
+		let mut source = source_catalog(320, 240);
+		let config = Config {
+			ladder: Ladder::new([
+				Rung::new(60, moq_net::bandwidth::Rate::from_bps(50_000)),
+				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
+			])
+			.unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		// A viewer who came and went leaves its rung idle.
+		drop(subscribe(&consumer, "video/60p").await);
+		let mut rung = subscribe(&consumer, "video/120p").await;
+		let mut catalogs =
+			moq_mux::catalog::hang::Consumer::<()>::new(consumer.track(hang::Catalog::DEFAULT_NAME).unwrap());
+		let mut group = source._track.create_group(0u64.into()).unwrap();
+		write_keyframe(&mut group);
+		let mut output = rung.recv_group().await.unwrap().expect("the rung's first group");
+
+		// The source ends its catalog while its media is still mid-group.
+		source.catalog.finish().unwrap();
+		while catalogs.next().await.expect("the derivative catalog failed").is_some() {}
+
+		group.finish().unwrap();
+		drop(source._track.clone().finish().unwrap());
+		let mut frames = 0;
+		while output.read_frame().await.expect("the open group was cut off").is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 1, "the open group lost its frame");
+		assert!(
+			rung.recv_group().await.expect("the rung was cut off").is_none(),
+			"the rung finishes with its source"
+		);
+		let wait = std::time::Duration::from_secs(10);
+		kio::clock::timeout(wait, transcoder)
+			.await
+			.expect("the transcoder outlived its rungs")
+			.unwrap()
+			.unwrap();
 	}
 
 	#[tokio::test]

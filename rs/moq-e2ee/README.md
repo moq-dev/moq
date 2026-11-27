@@ -26,8 +26,8 @@ learns only its length rounded up to 16 bytes. A track served on demand is reser
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.produce();
-// The route serves the generation's epoch as its instance, so subscribers find the key.
-let options = RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
+// The route serves the generation's epoch as its identity, so subscribers find the key.
+let options = RouteOptions::hidden().with_identity(generation.epoch().identity(), 0);
 let route = origin.route(&credential.path("meeting.hang")?, options)?;
 let protected = broadcast::Producer::new(route.broadcast().clone(), generation.clone());
 let video = protected.create_track("video", None)?.context("video already exists")?;
@@ -36,7 +36,7 @@ route.announce()?;
 
 A subscriber follows `credential.path(semantic)` with `origin.follow(path, None)`. It takes
 each instance's epoch from the broadcast it resolved, `Epoch::of(&broadcast)` (or from the
-application's channel on a wire that carries no instance, older than lite-07), so the key always matches the instance
+application's channel on a wire that carries no identity, older than lite-07), so the key always matches the identity
 it reads. It binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
 `broadcast::Consumer`. Its `subscribe(semantic, subscription)` opens the track a decrypted
 catalog names. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.

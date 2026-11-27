@@ -2,12 +2,12 @@
 
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
-//! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
+//! A publisher `P` pushes one broadcast, under one identity, to CDN relays `A` and `B`. A
 //! subscriber `S` links to both, ranking `A` first by demoting `B` with
 //! [`origin::Producer::with_priority`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. A lite-07 route ranks by the lowest preference on its path,
 //! and `P`'s links to both CDNs are neutral, so promoting `A` instead would gain nothing. Losing `A` moves `S` to `B`, and `A` returning moves it
-//! back. Between lite-07 routes, which carry the instance, each move resumes the
+//! back. Between lite-07 routes, which carry the identity, each move resumes the
 //! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
 //! onto it is a restart that ends the subscription rather than stitching onto it.
 
@@ -272,7 +272,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Timestamp)], groups: u64) {
 	}
 }
 
-/// Two CDNs under one instance, `B` over `secondary`: `S` reads through `A` although `B` is
+/// Two CDNs under one identity, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
@@ -303,7 +303,7 @@ async fn fails_over_and_back(secondary: &str) {
 					..
 				}
 			) && !via_a(&update),
-			"same instance over B: {update:?}"
+			"same identity over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
 
@@ -335,7 +335,7 @@ async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// A moq-transport `B` carries no instance, so `S` mints one for its route and losing `A`
+/// A moq-transport `B` carries no identity, so `S` mints one for its route and losing `A`
 /// is a restart onto another stream: the track ends with no frame of `B`'s.
 async fn restarts_across_protocols(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
@@ -358,7 +358,7 @@ async fn restarts_across_protocols(secondary: &str) {
 					..
 				}
 			) && !via_a(&update),
-			"another instance over B: {update:?}"
+			"another identity over B: {update:?}"
 		);
 		topology.group();
 		settle().await;

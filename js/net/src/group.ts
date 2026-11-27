@@ -1306,7 +1306,8 @@ export class Consumer {
 				if (group.#quiet?.latched() instanceof Error) group.#quiet = undefined;
 			}
 		};
-		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
+		hooks.readGroupFrame = (group, compressed, from = 0, header = false) =>
+			group.#readFrame(from, compressed, true, header);
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		hooks.refreshGroup = (group) => group.#state.charge?.touch();
 		hooks.onShedRead = (group, notify) => {
@@ -1476,9 +1477,13 @@ export class Consumer {
 	}
 
 	// Take the next frame whole, or as chunks when it is a chunked frame `streaming` reads, or
-	// one still being written that a `collect` read gathers itself. A plain whole read leaves an
-	// incomplete frame buffered.
-	#readBufferedFrame(compressed = false, take: "whole" | "collect" | "stream" = "whole"): ReadGroupFrame | undefined {
+	// one still being written that a `collect` read gathers itself. A `header` read takes a chunked
+	// frame without its payload, so no payload is in flight for a failure to tear. A plain whole
+	// read leaves an incomplete frame buffered.
+	#readBufferedFrame(
+		compressed = false,
+		take: "whole" | "collect" | "stream" | "header" = "whole",
+	): ReadGroupFrame | undefined {
 		const frames = this.#bufferedFrames();
 		const closed = this.#state.closed.peek();
 		if (closed instanceof StreamError && closed.code === StreamCode.Evicted) {
@@ -1489,11 +1494,11 @@ export class Consumer {
 		const front = frames.first;
 		if (!front) return undefined;
 		if (front instanceof Chunked) {
-			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
+			if (take === "stream" || take === "header" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
 				const index = this.#state.index++;
 				this.#delivered = index + 1;
-				this.#streamed = front;
+				if (take !== "header") this.#streamed = front;
 				this.#refresh();
 				this.#state.charge?.touch();
 				return { index, frame: front, chunks: makeFrameConsumer(index, front) };
@@ -1622,7 +1627,12 @@ export class Consumer {
 		return read.chunks ?? makeFrameConsumer(read.index, read.frame);
 	}
 
-	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
+	async #readFrame(
+		from: number,
+		compressed = false,
+		streaming = false,
+		header = false,
+	): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
 			const verdict = this.#verdict.peek();
 			if (verdict) {
@@ -1633,14 +1643,14 @@ export class Consumer {
 			// A whole read streams a frame still being written into its own buffer, rather
 			// than waiting for it whole while the group sheds its head.
 			const delivered = this.#delivered;
-			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
+			const read = this.#readBufferedFrame(compressed, header ? "header" : streaming ? "stream" : "collect");
 			if (read) {
 				if (read.index < from) {
 					if (read.chunks) this.#streamed = undefined;
 					this.#delivered = delivered;
 					continue;
 				}
-				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
+				if (read.chunks && !streaming && !header) return this.#join(read.index, read.chunks);
 				return read;
 			}
 

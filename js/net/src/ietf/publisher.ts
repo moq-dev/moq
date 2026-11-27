@@ -53,7 +53,7 @@ import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, saturatingSub } from "../util/key.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
-import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
 import { type RequestCondition, requestReason, SubscribeRefused } from "./error.ts";
@@ -118,9 +118,9 @@ function change(
 	held: Advertised | undefined,
 	next: Advertised | undefined,
 ): "same" | "restart" | Reprice {
-	// Another publisher instance: moq-transport has no restart, so the peer sees the namespace
+	// Another publisher identity: moq-transport has no restart, so the peer sees the namespace
 	// end and start again, and resubscribes.
-	if (held === undefined || next === undefined || !sameInstance(held, next)) return "restart";
+	if (held === undefined || next === undefined || !sameIdentity(held, next)) return "restart";
 	const from = clusterFor(base, held.route);
 	const to = clusterFor(base, next.route);
 	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
@@ -188,7 +188,7 @@ type Requests = Map<Path.Valid, NamespaceRequest>;
 
 /** What one announce loop knows about the peer, keyed the way that loop names namespaces. */
 interface Namespaces {
-	/** What the peer holds, by identity plus route. */
+	/** What the peer holds, by ref plus route. */
 	active: Map<Path.Valid, Advertised>;
 
 	/** What the peer refused, and whether coming back is worth anything. */
@@ -1789,7 +1789,7 @@ export class Publisher {
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
 			// How long to stay away the next time the peer ends each advertisement while idle,
-			// and the instance that wait is about.
+			// and the identity that wait is about.
 			const lapses = new Map<Path.Valid, { snap: Advertised; wait: number }>();
 			let retry = 0;
 
@@ -1833,7 +1833,7 @@ export class Publisher {
 				// Another broadcast at the path starts its backoff fresh, as a refusal does.
 				for (const [key, lapse] of lapses) {
 					const snap = updated.get(key);
-					if (snap === undefined || !sameInstance(lapse.snap, snap)) lapses.delete(key);
+					if (snap === undefined || !sameIdentity(lapse.snap, snap)) lapses.delete(key);
 				}
 
 				const outstanding = await this.#reconcile(ns, updated, target);
@@ -1865,7 +1865,7 @@ export class Publisher {
 	 * whether anything it should hold is still missing and worth coming back for.
 	 *
 	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, and
-	 * a changed instance is withdrawn before it is advertised again.
+	 * a changed identity is withdrawn before it is advertised again.
 	 * `ns` records what the peer holds rather than what we attempted: a declined
 	 * advertisement or update stays out of it, so the next turn offers it fresh instead
 	 * of believing it is already up.
@@ -1879,8 +1879,8 @@ export class Publisher {
 		for (const key of [...ns.refused.keys()]) {
 			const snap = updated.get(key);
 			const offered = ns.offered.get(key);
-			// Another publisher instance is another broadcast too.
-			if (snap === undefined || offered === undefined || !sameInstance(offered, snap)) {
+			// Another publisher identity is another broadcast too.
+			if (snap === undefined || offered === undefined || !sameIdentity(offered, snap)) {
 				ns.refused.delete(key);
 				ns.offered.delete(key);
 			}
@@ -1924,7 +1924,7 @@ export class Publisher {
 		ns.active = held;
 
 		// Keep the backoff only for a peer refusal that permits another offer. Local
-		// credit failures and unanswered requests are terminal for this broadcast instance.
+		// credit failures and unanswered requests are terminal for this broadcast identity.
 		return [...updated].some(
 			([key, snap]) =>
 				this.#change(key, held.get(key), snap, target) !== "same" && this.#pending(key, ns.refused),

@@ -7,7 +7,7 @@ import dev.moq.media.*
 
 val opusInit: ByteArray
     get() = TODO()
-val packet: ByteArray
+val packets: List<ByteArray>
     get() = TODO()
 val pts: dev.moq.Timestamp
     get() = TODO()
