@@ -7163,7 +7163,7 @@ impl Alive {
 			Outcome::Open => {
 				let (resume, open) = state.tear_down(Error::Cancel);
 				let end = Position::group(state.next_key());
-				state.outcome = match state.declare(end, None, None, true) {
+				state.outcome = match state.declare(end, None, TailState::Local, true) {
 					Ok(()) => match std::mem::take(&mut state.outcome) {
 						Outcome::Ending(end) => Outcome::Sealed(end),
 						_ => unreachable!("declare sets the end"),
