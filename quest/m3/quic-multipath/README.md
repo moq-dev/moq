@@ -102,5 +102,5 @@ and how to read per-path stats.
 
 - [QUIC address discovery](/quest/m3/quic-address-discovery.md) - reports an observed address per path
 - [A relay dials from its listening socket](/quest/m3/relay-one-socket.md) - extra paths leave from the one socket too
-- [A path that's back is used within an RTT](/quest/m3/quic-path-return.md) - the single-path half of surviving an outage
+- [A path that's back is used within an RTT](/quest/m1/quic-path-return.md) - the single-path half of surviving an outage
 - [moq-quic's client migrates to a server's preferred address](/quest/m4/quic-preferred-address.md) - where extra paths go when a relay advertises one

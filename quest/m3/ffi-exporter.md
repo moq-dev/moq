@@ -68,9 +68,10 @@ rust2-ffi with rust2's std sysroot, so moq's stable cargo runs it.
   right after `user_data` (when set, `error` is NULL and `value` is empty; a
   Rust panic aborts). `c/moq/test/probe.c`'s callbacks take `cancelled` and
   release `user_data`.
-- **Route identity name**: [Rename Instance to Identity](/quest/m2/identity-rename-and-cap.md)
-  renames `Route::instance()` to `Route::identity()` in `m2`, which also avoids
-  the old C++ private `uint64_t instance` clash that forced `MoqRoute.instanceId()`.
+- **Route identity name**: the Identity rename
+  ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720)) renamed
+  `Route::instance()` to `Route::identity()`, which also avoids the old C++
+  private `uint64_t instance` clash that forced `MoqRoute.instanceId()`.
 - Verify rust2's C backend accepts `Duration` (used by moq-ffi's audio configs).
 - **One pin**: rust2 becomes a flake input, its `ffi` package the exporter, and `flake.nix`, the release
   workflows, `rs/moq-ffi/build.sh`, and `sh/` read the generators from it.

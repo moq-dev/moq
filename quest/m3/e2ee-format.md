@@ -190,10 +190,6 @@ and moq-lite: none.
 
 - Maintainer: submit `draft-lcurley-moq-e2ee-01` to the datatracker once the PR merges, and add a crates.io trusted publisher for `moq-e2ee` (repository `moq-dev/moq`, workflow `release-rs.yml`, environment `publish`); both need a login an agent does not hold. Done when the datatracker shows -01 and a `release-rs.yml` run publishes `moq-e2ee` through OIDC.
 
-## Required
-
-- [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - `moq_net::Instance` renames to `Identity` before this format freezes its public API and test vectors
-
 ## Related
 
 - [End-to-end encrypted MoQ](/quest/m5/e2ee/README.md) - the questline that builds publishers and players on this format
