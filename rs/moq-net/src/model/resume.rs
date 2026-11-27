@@ -10594,11 +10594,18 @@ mod test {
 
 	/// A group the switch left to a replaced copy to drain is asked of the serving route once that
 	/// copy no longer offers it, whether its read gave the group up or its cache lost it, and
-	/// whether the copy is let go or a read of another of its groups keeps it.
+	/// whether the copy is let go (even by a poll of the read's drops, before any group poll) or a
+	/// read of another of its groups keeps it.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_group_a_draining_copy_gives_up_is_backfilled() {
-		for (evicted, leased) in [(false, false), (true, false), (false, true)] {
+		let cases = [
+			(false, false, false),
+			(true, false, false),
+			(false, true, false),
+			(false, false, true),
+		];
+		for (evicted, leased, drops) in cases {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
@@ -10619,17 +10626,25 @@ mod test {
 			if !leased {
 				drop(reading);
 			}
+			// Judging the replaced copy starts its drain budget, so the poll of drops after it lets
+			// the copy go before any group poll looks at what it was left.
+			if drops {
+				assert_eq!(dropped(&mut sub), []);
+			}
 			// A budget later, the replaced copy no longer offers group 1, while the serving route
 			// still does.
 			kio::clock::sleep(Duration::from_millis(1200)).await;
 			if evicted {
 				a.evict(1);
 			}
+			if drops {
+				assert_eq!(dropped(&mut sub), []);
+			}
 			let mut read = Vec::new();
 			while let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&fresh()) {
 				read.push(group.start);
 			}
-			assert_eq!(read, [1], "evicted {evicted}, leased {leased}");
+			assert_eq!(read, [1], "evicted {evicted}, leased {leased}, drops {drops}");
 		}
 	}
 

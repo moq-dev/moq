@@ -5523,7 +5523,9 @@ test("a group a draining copy gives up is backfilled", async () => {
 			tb.write(3n);
 			await settle();
 			// The switch leaves group 1 to the replaced copy, which hands out only group 2 for now.
-			expect(sub.tryRecvGroup()?.start).toBe(3n);
+			const serving = sub.tryRecvGroup();
+			expect(serving?.start).toBe(3n);
+			serving?.close();
 			const reading = sub.tryRecvGroup();
 			expect(reading?.start).toBe(2n);
 			if (!leased) reading?.close();
