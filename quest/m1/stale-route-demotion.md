@@ -37,8 +37,10 @@ Decided 2026-11-26 (maintainer, /quest-plan via kixel-ai/kixel.ai):
   `moq-auth` changes.
 - ✅ On `lite-07` (`rs/moq-net/src/route/relay.rs`), track a per-link
   reversible `stale: bool` on `Peer` feeding `Offer.draining`
-  (`peer.draining || peer.stale`) in `Here::arrive` and claim adoption
-  (`Claim::adopted`, `restate`, and local ways), without sending
+  (`peer.draining || peer.stale`) in `Here::arrive` and dynamically during
+  route ranking and `restate` (storing only the peer-advertised draining bit on
+  `Claim::adopted` so `Live` recovery clears local staleness without waiting
+  for a re-announcement), without sending
   `Msg::Drain { node }` (rejected: emitting `Msg::Drain`, which permanently
   poisons all paths through `node` for GOAWAY).
 - ✅ On `lite-05/06` (`rs/moq-net/src/lite/subscriber.rs`) and `moq-transport`

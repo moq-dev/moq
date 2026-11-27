@@ -5,10 +5,12 @@
 1. In `@moq/net` (`js/net/src/listing.ts`), re-adding a queued track before the
    reader drains never shifts another pre-`SYNCED` queued track after `SYNCED`
    (matching Rust's queue accounting).
-2. In `drafts/draft-lcurley-moq-lite.md` and the Rust `Tracks` comments, scope
-   the upstream complete-list `SYNCED` guarantee to `moq-lite` upstreams that
-   signal completion, noting that a relay with a `moq-transport` upstream
-   reports only what it knows at that hop.
+2. In `drafts/draft-lcurley-moq-lite.md`, the Rust `Tracks` comments, and
+   `js/net/src/listing.ts`'s `TracksEvent` API comment, scope the upstream
+   complete-list `SYNCED` guarantee to `moq-lite` upstreams that signal
+   completion, noting that a Rust relay with a `moq-transport` upstream reports
+   only what it knows at that hop and that the TypeScript subscriber rejects
+   listings over `moq-transport`.
 
 ## Plan
 
