@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Duration } from "@moq/clock";
 import * as Echo from "./echo";
 import * as Health from "./health";
 import * as Stats from "./stats";
@@ -24,8 +25,8 @@ function grade(c: Case, thresholds?: Health.Thresholds): Health.Health {
 		const sample = {
 			previous: c.previous && report(c.previous),
 			current: report(c.current),
-			interval: c.interval,
-			age: c.age,
+			interval: Duration.millis(c.interval),
+			age: Duration.millis(c.age),
 		};
 		return Health.publisher(sample, thresholds);
 	}
@@ -33,8 +34,8 @@ function grade(c: Case, thresholds?: Health.Thresholds): Health.Health {
 	const sample = {
 		previous: c.previous && report(c.previous),
 		current: report(c.current),
-		interval: c.interval,
-		age: c.age,
+		interval: Duration.millis(c.interval),
+		age: Duration.millis(c.age),
 	};
 	return Health.viewer(sample, thresholds);
 }
@@ -49,11 +50,11 @@ test("caller thresholds override the defaults", () => {
 	const c = cases.find((c) => c.name.startsWith("viewer healthy"));
 	if (!c) throw new Error("missing fixture");
 	const thresholds = Health.defaultThresholds();
-	thresholds.transport.rtt.degraded = 50;
+	thresholds.transport.rtt.degraded = Duration.millis(50);
 	const health = grade(c, thresholds);
 	expect(health.transport.verdict).toBe("degraded");
 	expect(health.verdict).toBe("degraded");
-	expect(Health.defaultThresholds().transport.rtt.degraded).toBe(300);
+	expect(Health.defaultThresholds().transport.rtt.degraded.asMillis()).toBe(300);
 });
 
 test("a rendition named __proto__ is graded like any other", () => {
@@ -63,8 +64,8 @@ test("a rendition named __proto__ is graded like any other", () => {
 	const health = Health.publisher({
 		previous: { observer, snapshot: snapshot(100, 0) },
 		current: { observer, snapshot: snapshot(200, 10) },
-		interval: 1000,
-		age: 0,
+		interval: Duration.secs(1),
+		age: Duration.ZERO,
 	});
 	expect(Object.keys(health.renditions)).toEqual(["__proto__"]);
 	expect(health.verdict).toBe("unhealthy");
@@ -76,16 +77,15 @@ test("a bitrate past u64 saturates where Rust's does", () => {
 	const health = Health.publisher({
 		previous: { observer, snapshot: snapshot(0) },
 		current: { observer, snapshot: snapshot(Number.MAX_SAFE_INTEGER) },
-		interval: 1,
-		age: 0,
+		interval: Duration.millis(1),
+		age: Duration.ZERO,
 	});
 	expect(health.renditions.video.bitrate).toBe(Number("18446744073709551615"));
 });
 
-test("a negative or non-finite interval or age is refused", () => {
-	const c = cases[0];
-	expect(() => grade({ ...c, interval: -1 })).toThrow();
-	expect(() => grade({ ...c, age: Number.NaN })).toThrow();
-	expect(() => grade({ ...c, interval: Number.POSITIVE_INFINITY })).toThrow();
-	expect(() => grade({ ...c, age: Number.POSITIVE_INFINITY })).toThrow();
+test("a fractional interval reports whole milliseconds, as Rust's does", () => {
+	const c = cases.find((c) => (c.health as Health.Health).interval !== undefined);
+	if (!c) throw new Error("missing fixture");
+	const health = grade({ ...c, interval: c.interval + 0.5 });
+	expect(health.interval).toBe(c.interval);
 });

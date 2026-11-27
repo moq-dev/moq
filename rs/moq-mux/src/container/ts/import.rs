@@ -5467,7 +5467,8 @@ pub(super) mod test {
 			.await
 			.expect("the cue track publishes the initial catalog")
 			.unwrap()
-			.unwrap();
+			.unwrap()
+			.value;
 		assert!(
 			first.video.renditions.is_empty() && first.audio.renditions.is_empty(),
 			"only the extension lists a track"
@@ -7566,7 +7567,8 @@ pub(super) mod test {
 			.await
 			.expect("the catalog waits on a track that cannot resolve")
 			.unwrap()
-			.unwrap();
+			.unwrap()
+			.value;
 		assert_eq!(first.video.renditions.len(), 1);
 		assert!(first.audio.renditions.is_empty());
 
@@ -7582,7 +7584,8 @@ pub(super) mod test {
 				.await
 				.expect("the AAC track never joined")
 				.unwrap()
-				.unwrap();
+				.unwrap()
+				.value;
 			if let Some(audio) = update.audio.renditions.values().next() {
 				break audio.clone();
 			}
@@ -10807,7 +10810,8 @@ pub(super) mod test {
 				.unwrap();
 			import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 			let waiter = kio::Waiter::noop();
-			let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			let std::task::Poll::Ready(Ok(Some(moq_json::Timed { value: first, .. }))) = updates.poll_next(&waiter)
+			else {
 				panic!("the catalog waited for a rate measurement");
 			};
 			assert_eq!(first.ext.mpegts.mux_rate, None);
@@ -10825,7 +10829,7 @@ pub(super) mod test {
 				latest = Some(update);
 			}
 			assert_eq!(
-				latest.map(|update| update.ext.mpegts.mux_rate),
+				latest.map(|update| update.value.ext.mpegts.mux_rate),
 				cbr.then_some(Some(3_760_000)),
 				"a window's rate arrives as an update, a variable one publishes nothing"
 			);
@@ -10852,7 +10856,7 @@ pub(super) mod test {
 			.unwrap();
 		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 		let waiter = kio::Waiter::noop();
-		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+		let std::task::Poll::Ready(Ok(Some(moq_json::Timed { value: first, .. }))) = updates.poll_next(&waiter) else {
 			panic!("a measured catalog waited for a window");
 		};
 		assert_eq!(first.ext.mpegts.mux_rate, Some(3_000_000));
@@ -11222,7 +11226,9 @@ pub(super) mod test {
 		let mut header = vec![0, 0, 1, 0xbd, 0, 8 + body.len() as u8, 0x80, 0x80, 5];
 		header.extend_from_slice(&pes_timestamp(2, 90_000));
 		import.decode(&pes_fragment(PID, true, 0, &header)).unwrap();
-		let std::task::Poll::Ready(Ok(Some(first))) = published.poll_next(&kio::Waiter::noop()) else {
+		let std::task::Poll::Ready(Ok(Some(moq_json::Timed { value: first, .. }))) =
+			published.poll_next(&kio::Waiter::noop())
+		else {
 			panic!("the known config and final clock release the catalog at the header");
 		};
 		let name = first.audio.renditions.keys().next().unwrap();

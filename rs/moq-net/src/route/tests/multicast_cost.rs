@@ -375,7 +375,7 @@ fn a_leave_costs_the_routes_it_was_sent() {
 
 /// Each event's cost along each axis, at sizes past the gate's.
 #[test]
-#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_relay_event_work() {
 	type Axis = (&'static str, fn(&mut Shape, usize));
 	let axes: [Axis; 7] = [

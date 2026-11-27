@@ -1151,7 +1151,10 @@ where
 		{
 			end = Some(moq_net::Timestamp::new(start, scale).map_err(|_| moq_net::Error::TimestampMismatch)?);
 		}
-		self.close(None, None, end, None)?;
+		// Measured to where the group ends, as an unbounded cut measures it; a data item has no
+		// cadence to last for.
+		let measured = end.filter(|_| self.container.kind() != Kind::Data);
+		self.close(measured, None, end, None)?;
 		self.pending_start = Some(start);
 		Ok(())
 	}
@@ -1841,6 +1844,22 @@ mod tests {
 
 	/// An unbounded cut measures a group to where its last frame ends, not to that frame's
 	/// timestamp, or five-packet audio groups would advertise a quarter more than they carry.
+	/// A seek closing each group measures it the same way, and never across the gap it jumps.
+	#[tokio::test]
+	async fn seeks_measure_the_last_frame() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		for group in 0..40u64 {
+			// Five 20 ms packets of 250 bytes (100 kbps), then a seek 100 ms past their end.
+			let start = group * 200_000;
+			for i in 0..5 {
+				producer.write(sized_frame(start + i * 20_000, i == 0, 250)).unwrap();
+			}
+			producer.seek(start + 200_000).unwrap();
+		}
+		assert_eq!(producer.estimate().bitrate, Some(100_000));
+	}
+
 	#[tokio::test]
 	async fn grouped_unbounded_cuts_measure_the_last_frame() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));

@@ -263,6 +263,8 @@ struct Publisher {
 	short: BTreeSet<(u64, usize)>,
 	/// Some route declared the track's end.
 	ended: bool,
+	/// The newest group when idle cached groups last expired: any route may have let go of those.
+	expired: Option<u64>,
 }
 
 impl Publisher {
@@ -524,6 +526,9 @@ impl Model {
 			Op::Advance { ms } => kio::clock::sim::advance(Duration::from_millis(ms)).await,
 			Op::Expire => {
 				kio::clock::sim::advance(Duration::from_secs(60)).await;
+				for identity in &mut self.identities {
+					identity.expired = identity.newest();
+				}
 				for reader in self.readers.iter_mut().flatten() {
 					reader.floor = self.identities[reader.identity].newest();
 				}
@@ -944,7 +949,7 @@ impl Model {
 						}
 						if !whole
 							&& !reader.expires && !reader.doomed
-							&& reader.floor.is_none_or(|floor| *key > floor)
+							&& identity.expired.is_none_or(|expired| *key > expired)
 							&& !identity.live().any(|copy| copy.closed_at(*key, read.frames))
 							&& !identity.serving().is_some_and(|copy| copy.given_up.contains(key))
 						{
@@ -2226,6 +2231,37 @@ fn regressions() {
 					frames: 1,
 				},
 				Op::Down { identity: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// The serving copy finished the track at its last group while that group was open, then
+		// closed it short and failed: the reader's group reads on from the route replacing it.
+		Case {
+			ops: vec![
+				Op::Up { identity: 0, slot: 1 },
+				Op::Write {
+					identity: 0,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::End { identity: 0, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Close {
+					identity: 0,
+					slot: 1,
+					group: None,
+					down: true,
+				},
+				Op::Write {
+					identity: 0,
+					slot: 0,
+					group: Some(0),
+					frames: 1,
+				},
 			],
 			finish: false,
 		},

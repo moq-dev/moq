@@ -36,8 +36,9 @@
       inputs.flake-utils.follows = "flake-utils";
     };
     # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
-    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind starts new
-    # Kixel Quest series, since another Valgrind can count differently.
+    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind, or the library
+    # rust2-bench preloads into each counted process, starts new Kixel Quest series, since
+    # either can count differently.
     rust2 = {
       url = "github:kixel-ai/rust2";
       inputs.flake-utils.follows = "flake-utils";
