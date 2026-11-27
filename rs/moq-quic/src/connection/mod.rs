@@ -1626,11 +1626,10 @@ impl Connection {
 				}
 				Timer::PathValidation => {
 					debug!("path validation failed");
-					if let Some((_, prev)) = self.prev_path.take() {
-						self.replace_path(now, prev);
-						self.set_loss_detection_timer(now);
+					match self.prev_path.take() {
+						Some((_, prev)) => self.fall_back(now, prev),
+						None => self.path.challenge = None,
 					}
-					self.path.challenge = None;
 				}
 				Timer::Pacing => trace!("pacing timer expired"),
 				Timer::PushNewCid => {
@@ -2084,10 +2083,11 @@ impl Connection {
 				ecn_acked += u64::from(info.ecn && this_path);
 				self.spaces[space].ecn_prior_path |= info.ecn && !this_path;
 
-				// Notify MTU discovery that a packet was acked, because it might be an MTU probe
-				let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
-				if mtu_updated {
-					self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
+				// Notify MTU discovery that a packet was acked, because it might be an MTU probe. One
+				// the peer's previous path sent stays that path's, which it may return to.
+				let path = self.sent_path(info.path_generation);
+				if path.mtud.on_acked(space, packet, info.size) {
+					path.congestion.on_mtu_update(path.mtud.current_mtu());
 				}
 
 				// Packet numbers repeat across spaces, and only 1-RTT packets carry ACK_FREQUENCY. A
@@ -2411,8 +2411,14 @@ impl Connection {
 
 	fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
 		let mut lost_packets = Vec::<u64>::new();
-		let mut lost_mtu_probe = None;
-		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe(pn_space);
+		let mut lost_mtu_probes = [None; 2];
+		// The previous path's probe too, which stays that path's
+		let in_flight_mtu_probes = [
+			self.path.mtud.in_flight_mtu_probe(pn_space),
+			self.prev_path
+				.as_ref()
+				.and_then(|(_, prev)| prev.mtud.in_flight_mtu_probe(pn_space)),
+		];
 		let rtt = self.path.rtt.conservative();
 		let loss_delay = cmp::max(rtt.mul_f32(self.config.time_threshold), TIMER_GRANULARITY);
 
@@ -2444,10 +2450,10 @@ impl Connection {
 			// saturating equivalent of this substraction operation with a Duration.
 			let packet_too_old = now.saturating_duration_since(info.time_sent) >= loss_delay;
 			if packet_too_old || largest_acked_packet >= packet + packet_threshold {
-				if Some(packet) == in_flight_mtu_probe {
+				if let Some(i) = in_flight_mtu_probes.iter().position(|&probe| probe == Some(packet)) {
 					// Lost MTU probes are not included in `lost_packets`, because they should not
 					// trigger a congestion control response
-					lost_mtu_probe = in_flight_mtu_probe;
+					lost_mtu_probes[i] = Some(packet);
 				} else {
 					lost_packets.push(packet);
 					size_of_lost_packets += info.size as u64;
@@ -2549,10 +2555,10 @@ impl Connection {
 		}
 
 		// Handle a lost MTU probe
-		if let Some(packet) = lost_mtu_probe {
-			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
+		for packet in lost_mtu_probes.into_iter().flatten() {
+			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probes is omitted from lost_packets, and therefore must not have been removed yet
 			self.remove_in_flight(&info);
-			self.path.mtud.on_probe_lost();
+			self.sent_path(info.path_generation).mtud.on_probe_lost();
 			self.stats.path.lost_plpmtud_probes += 1;
 		}
 	}
@@ -3809,11 +3815,7 @@ impl Connection {
 		// that path, skipping validation and keeping its loss detection and congestion state (§9.3).
 		if let Some((_, prev)) = self.prev_path.take_if(|(_, prev)| prev.remote == remote) {
 			trace!("returning to the previous path");
-			self.replace_path(now, prev);
-			self.path.challenge = None;
-			self.timers.stop(Timer::PathValidation);
-			self.datagrams().drop_oversized();
-			self.set_loss_detection_timer(now);
+			self.fall_back(now, prev);
 			return;
 		}
 		self.path_counter = self.path_counter.wrapping_add(1);
@@ -3856,6 +3858,60 @@ impl Connection {
 			Timer::PathValidation,
 			now.saturating_add(3 * cmp::max(self.pto(SpaceId::Data), prev_pto)),
 		);
+	}
+
+	/// Return to the path the peer left, abandoning the unvalidated one it moved to
+	fn fall_back(&mut self, now: Instant, prev: PathData) {
+		let abandoned = self.replace_path(now, prev);
+		self.path.challenge = None;
+		self.timers.stop(Timer::PathValidation);
+
+		// No path counts what went out on the abandoned one in flight, so loss detection would
+		// never find it lost: requeue it, as the address may never have reached the peer
+		let generation = abandoned.generation();
+		let space = &mut self.spaces[SpaceId::Data];
+		let sent: Vec<u64> = space
+			.sent_packets
+			.range(..)
+			.filter(|(_, info)| info.path_generation == generation)
+			.map(|(pn, _)| pn)
+			.collect();
+		for packet in sent {
+			let info = self.spaces[SpaceId::Data]
+				.sent_packets
+				.remove(packet)
+				.expect("listed above");
+			// A probe's duplicates leave the loss of their data to the originals
+			if !info.bandwidth_probe {
+				for frame in info.stream_frames {
+					self.streams.retransmit(frame);
+				}
+			}
+			self.ack_frequency.on_lost(packet);
+			let space = &mut self.spaces[SpaceId::Data];
+			space.pending |= info.retransmits;
+			// Kept so a late ACK of it still attributes its ECN mark to the abandoned path
+			space.lost_packets.insert(
+				packet,
+				LostPacket {
+					time_sent: info.time_sent,
+					ecn_path: info.ecn.then_some(generation),
+					congestion_path: None,
+				},
+			);
+		}
+
+		self.datagrams().drop_oversized();
+		self.set_loss_detection_timer(now);
+	}
+
+	/// The path a packet sent on path `generation` counts against: the previous one if it went
+	/// there, otherwise the current one
+	fn sent_path(&mut self, generation: u64) -> &mut PathData {
+		match &mut self.prev_path {
+			Some((_, prev)) if prev.generation() == generation => prev,
+			_ => &mut self.path,
+		}
 	}
 
 	/// Make `path` the current path, returning the one it replaces
