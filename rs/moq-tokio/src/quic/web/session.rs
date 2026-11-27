@@ -1119,8 +1119,10 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(self.conn.receive_window())
 	}
+	/// Only raw QUIC: a browser's WebTransport API may discard a reset stream's prefix unread
+	/// even when its QUIC stack negotiated RESET_STREAM_AT, and nothing here tells a browser apart.
 	fn reliable_reset(&self) -> bool {
-		self.conn.reset_stream_at()
+		matches!(self.mode, Mode::Raw { .. }) && self.conn.reset_stream_at()
 	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
@@ -1359,17 +1361,18 @@ mod tests {
 		(client.unwrap(), server.unwrap())
 	}
 
-	/// Both ends advertise RESET_STREAM_AT, so a reset keeps its prefix for the peer's reader,
-	/// which lets a lite-07 publisher account for a reset group by its header alone.
+	/// Both ends advertise RESET_STREAM_AT, so a raw QUIC reset keeps its prefix for the peer's
+	/// reader, which lets a lite-07 publisher account for a reset group by its header alone.
+	/// WebTransport never claims it, since a browser's API may drop that prefix anyway.
 	#[tokio::test]
-	async fn resets_are_reliable_between_peers_with_reset_stream_at() {
+	async fn only_raw_quic_resets_are_reliable() {
 		use moq_net::transport::poll::Session as _;
 
 		for framed in [false, true] {
 			let (client, server, _endpoints) = pair().await;
 			let (client, server) = sessions(framed, client, server).await;
-			assert!(client.reliable_reset(), "framed: {framed}");
-			assert!(server.reliable_reset(), "framed: {framed}");
+			assert_eq!(client.reliable_reset(), !framed, "framed: {framed}");
+			assert_eq!(server.reliable_reset(), !framed, "framed: {framed}");
 		}
 	}
 

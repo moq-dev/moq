@@ -779,8 +779,10 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(Self::receive_window(self))
 	}
+	/// Only raw QUIC: a browser's WebTransport API may discard a reset stream's prefix unread
+	/// even when its QUIC stack negotiated RESET_STREAM_AT, and nothing here tells a browser apart.
 	fn reliable_reset(&self) -> bool {
-		self.conn.reset_stream_at()
+		self.web.is_none() && self.conn.reset_stream_at()
 	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
