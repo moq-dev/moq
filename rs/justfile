@@ -33,7 +33,7 @@ tla spec *args:
 # A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
 # and moq-gst; pass `--workspace` for all of it.
 
-# Compile, lint, format-check, doc-check, and verify dependency hygiene.
+# Compile, lint, format-check, doc-check (under CI_STRICT), and verify dependency hygiene.
 [positional-arguments]
 check *args:
     bash sh/local.sh cargo clippy --locked --all-targets "$@" -- -D warnings
@@ -64,7 +64,11 @@ lint *args:
         [ "$rc" -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     ) & pids+=($!)
     run cargo fmt --all --check & pids+=($!)
-    RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    # Rustdoc is never shared across checkouts by the build cache, so only
+    # `just ci` (CI_STRICT), which the merge queue runs, builds the docs.
+    if [[ -n "${CI_STRICT:-}" ]]; then
+        RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    fi
     run cargo shear --deny-warnings & pids+=($!)
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
     (
@@ -106,6 +110,7 @@ check-test-changed $LIST:
 
 # Clippy for macOS and Windows from this host, on the crates in a changed-file
 # list (or `--all`) plus their dependents; the gate runs it on every Rust diff.
+# Outside CI_STRICT it lints only those that name a platform (sh/rs/select.sh).
 cross-lint-changed $LIST:
     sh/rs/select.sh cross "$LIST"
 
@@ -186,10 +191,10 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
-# moq-net without its `async` feature: the lib, its tests, and its docs.
+# moq-net without its `async` feature: the lib, its tests, and (under CI_STRICT, as for `lint`) its docs.
 no-async:
     bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+    [ -z "${CI_STRICT:-}" ] || RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
 
 # moq-net's `fuzz` module alone, as the fuzz crates build it: every other build
 # unifies `test-support` back in, which hides a call into a test-only door.
