@@ -219,8 +219,9 @@ impl Leased {
 /// read are leased again next time.
 ///
 /// A lease dropped instead leaves its stream leased: the stream keeps the credit of every byte it
-/// held, holds eviction off for the whole connection, and panics on its next lease, until
-/// [`Stream::stop()`] discards it.
+/// held, holds eviction off for the whole connection (counted in
+/// [`HeldStats::readers`](crate::connection::HeldStats::readers)), and panics on its next lease,
+/// until [`Stream::stop()`] discards it.
 #[derive(Debug)]
 #[must_use = "hand a lease back with `restore` or `release`"]
 pub struct Lease {
