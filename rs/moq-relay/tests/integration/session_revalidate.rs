@@ -328,7 +328,7 @@ async fn push_by_id_refuses_inside_the_cadence() {
 	assert_eq!(script.ends().len(), 1);
 }
 
-/// A path pattern and a CIDR each match the right subset of three sessions.
+/// A path prefix and a CIDR each match the right subset of three sessions.
 #[tokio::test]
 async fn path_and_cidr_select_a_subset() {
 	let script = Script::new(grant());
@@ -343,7 +343,7 @@ async fn path_and_cidr_select_a_subset() {
 		session.unwrap_or_else(|| panic!("{path} is listed")).id.clone()
 	};
 
-	let (status, path) = fixture.list("?path=demo/**").await;
+	let (status, path) = fixture.list("?prefix=demo").await;
 	assert_eq!(status, reqwest::StatusCode::OK);
 	assert_eq!(path.sessions.len(), 2);
 	assert!(path.sessions.iter().all(|s| s.path.starts_with("/demo/")));
@@ -364,7 +364,7 @@ async fn path_and_cidr_select_a_subset() {
 	assert_eq!(cidr.sessions[0].id, "net");
 
 	script.on_revalidate(Answer::Status(403));
-	let (status, nudged) = fixture.revalidate("?path=demo/**").await;
+	let (status, nudged) = fixture.revalidate("?prefix=demo").await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	let mut ids = nudged.ids.clone();
 	ids.sort();

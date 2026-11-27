@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::parts::{is_segment, parts};
-use crate::{InvalidPattern, Pattern, Patterns};
+use super::Path;
+use super::parts::{is_segment, parts};
 
 /// Why a string is not a valid [`Prefix`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12,8 +12,12 @@ pub enum InvalidPrefix {
 	/// The text holds a `*`. A grant is a set of prefixes, each covering its whole subtree,
 	/// so it takes no wildcard: `foo` already covers what `foo/**` meant.
 	Wildcard(String),
-	/// The text is not a path: an empty segment, a malformed escape, or too many segments.
-	Path(InvalidPattern),
+	/// A segment is empty: a leading, trailing, or doubled `/`.
+	EmptySegment,
+	/// A segment holds a bare `/` or a `\` that escapes neither `\` nor `/`.
+	InvalidSegment(String),
+	/// More than [`Path::MAX_PARTS`] segments.
+	TooManySegments,
 }
 
 impl fmt::Display for InvalidPrefix {
@@ -38,25 +42,21 @@ impl fmt::Display for InvalidPrefix {
 					"`{text}` holds a wildcard: grants are prefixes, each covering one path and every path beneath it"
 				),
 			},
-			Self::Path(err) => write!(f, "invalid prefix: {err}"),
+			Self::EmptySegment => write!(f, "invalid prefix: empty path segment"),
+			Self::InvalidSegment(segment) => write!(f, "invalid prefix: invalid segment {segment:?}"),
+			Self::TooManySegments => write!(f, "invalid prefix: more than {} segments", Path::MAX_PARTS),
 		}
 	}
 }
 
 impl std::error::Error for InvalidPrefix {}
 
-impl From<InvalidPattern> for InvalidPrefix {
-	fn from(err: InvalidPattern) -> Self {
-		Self::Path(err)
-	}
-}
-
 /// One member of a grant: a path, covering itself and every path beneath it.
 ///
 /// The empty prefix covers every path. A prefix is spelled like a path: `/`-separated
-/// segments, a `\` escaping the `\` or `/` after it, at most [`Pattern::MAX_SEGMENTS`]
+/// segments, a `\` escaping the `\` or `/` after it, at most [`Path::MAX_PARTS`]
 /// segments, and no leading, trailing, or doubled `/`. It never holds a `*`: parsing one
-/// fails loudly with [`InvalidPrefix::Wildcard`], since a grant never names a pattern.
+/// fails loudly with [`InvalidPrefix::Wildcard`], since a grant never names a wildcard.
 ///
 /// Ordered segment by segment, so a prefix sorts right before every path beneath it.
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
@@ -81,7 +81,7 @@ impl Prefix {
 	}
 
 	/// Whether `path` is this prefix or beneath it. The path is normalized like a broadcast
-	/// path (slashes trimmed and collapsed), as [`Pattern::matches`] does.
+	/// path (slashes trimmed and collapsed).
 	pub fn matches(&self, path: &str) -> bool {
 		beneath(path, &self.text)
 	}
@@ -101,8 +101,8 @@ impl Prefix {
 			(true, _) => Ok(self.clone()),
 			(false, true) => Ok(root),
 			(false, false) => {
-				if parts(&root.text).count() + parts(&self.text).count() > Pattern::MAX_SEGMENTS {
-					return Err(InvalidPattern::TooManySegments.into());
+				if parts(&root.text).count() + parts(&self.text).count() > Path::MAX_PARTS {
+					return Err(InvalidPrefix::TooManySegments);
 				}
 				Ok(Self {
 					text: format!("{}/{}", root.text, self.text),
@@ -141,12 +141,6 @@ impl Prefix {
 		let (path, prefix) = (&other.text, &self.text);
 		path.starts_with(prefix.as_str())
 			&& (prefix.is_empty() || path.len() == prefix.len() || path.as_bytes()[prefix.len()] == b'/')
-	}
-
-	/// The paths this prefix covers, as a pattern: `prefix/**`, or the literal when it is
-	/// already as deep as a path may be.
-	pub fn pattern(&self) -> Pattern {
-		Pattern::subtree(&self.text).expect("a prefix is a valid literal")
 	}
 }
 
@@ -190,7 +184,7 @@ impl PartialOrd for Prefix {
 impl FromStr for Prefix {
 	type Err = InvalidPrefix;
 
-	/// Parse a prefix's text. A `*` anywhere is refused before anything else, so a pattern
+	/// Parse a prefix's text. A `*` anywhere is refused before anything else, so a wildcard
 	/// written where a prefix belongs always says so. Slashes are not normalized: a
 	/// leading, trailing, or doubled `/` is an error, so a typo cannot silently widen a grant.
 	fn from_str(text: &str) -> Result<Self, InvalidPrefix> {
@@ -200,17 +194,17 @@ impl FromStr for Prefix {
 		// One past the limit is enough to refuse, without splitting a peer's megabytes of
 		// `a/a/...` first.
 		let mut count = 0;
-		for part in parts(text).take(Pattern::MAX_SEGMENTS + 1) {
+		for part in parts(text).take(Path::MAX_PARTS + 1) {
 			count += 1;
 			if part.is_empty() {
-				return Err(InvalidPattern::EmptySegment.into());
+				return Err(InvalidPrefix::EmptySegment);
 			}
 			if !is_segment(part) {
-				return Err(InvalidPattern::InvalidSegment(part.to_string()).into());
+				return Err(InvalidPrefix::InvalidSegment(part.to_string()));
 			}
 		}
-		if count > Pattern::MAX_SEGMENTS {
-			return Err(InvalidPattern::TooManySegments.into());
+		if count > Path::MAX_PARTS {
+			return Err(InvalidPrefix::TooManySegments);
 		}
 		Ok(Self { text: text.to_string() })
 	}
@@ -244,14 +238,12 @@ impl fmt::Debug for Prefix {
 	}
 }
 
-#[cfg(feature = "serde")]
 impl serde::Serialize for Prefix {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		serializer.serialize_str(&self.text)
 	}
 }
 
-#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Prefix {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
@@ -266,7 +258,7 @@ impl<'de> serde::Deserialize<'de> for Prefix {
 ///
 /// Every operation costs near-linear time in the members it reads: collecting sorts once
 /// and sweeps, and a query binary-searches each prefix above the path it asks about, of
-/// which there are at most [`Pattern::MAX_SEGMENTS`] + 1. So a peer's grant costs
+/// which there are at most [`Path::MAX_PARTS`] + 1. So a peer's grant costs
 /// O(n log n) to read, whatever its shape.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Prefixes(Vec<Prefix>);
@@ -313,7 +305,7 @@ impl Prefixes {
 			*end += usize::from(i > 0) + part.len();
 			Some(*end)
 		}));
-		ancestors.take(Pattern::MAX_SEGMENTS + 1).find_map(|end| {
+		ancestors.take(Path::MAX_PARTS + 1).find_map(|end| {
 			let ancestor = &path[..end];
 			let index = self.0.binary_search_by(|member| order(&member.text, ancestor)).ok()?;
 			Some(&self.0[index])
@@ -360,11 +352,6 @@ impl Prefixes {
 	/// Every member placed beneath the path `root`; see [`Prefix::rooted`].
 	pub fn rooted(&self, root: &str) -> Result<Self, InvalidPrefix> {
 		self.0.iter().map(|prefix| prefix.rooted(root)).collect()
-	}
-
-	/// The paths this set covers, as patterns: each member's [`Prefix::pattern`].
-	pub fn patterns(&self) -> Patterns {
-		self.0.iter().map(Prefix::pattern).collect()
 	}
 
 	/// The members, in canonical order.
@@ -432,14 +419,12 @@ impl<'a> IntoIterator for &'a Prefixes {
 	}
 }
 
-#[cfg(feature = "serde")]
 impl serde::Serialize for Prefixes {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		serializer.collect_seq(self.iter())
 	}
 }
 
-#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Prefixes {
 	/// Reads a list and reduces it, so a persisted grant is canonical after a round trip.
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -485,11 +470,17 @@ mod tests {
 	#[test]
 	fn refuses_what_is_not_a_path() {
 		for text in ["/a", "a/", "a//b", r"a\", r"a\b"] {
-			assert!(matches!(text.parse::<Prefix>(), Err(InvalidPrefix::Path(_))), "{text}");
+			assert!(
+				matches!(
+					text.parse::<Prefix>(),
+					Err(InvalidPrefix::EmptySegment | InvalidPrefix::InvalidSegment(_))
+				),
+				"{text}"
+			);
 		}
-		let deep = ["a"; Pattern::MAX_SEGMENTS + 1].join("/");
+		let deep = ["a"; Path::MAX_PARTS + 1].join("/");
 		assert!(deep.parse::<Prefix>().is_err());
-		assert!(["a"; Pattern::MAX_SEGMENTS].join("/").parse::<Prefix>().is_ok());
+		assert!(["a"; Path::MAX_PARTS].join("/").parse::<Prefix>().is_ok());
 		assert!(prefix("").is_empty());
 		assert_eq!(prefix(r"a\/b/c\\").as_str(), r"a\/b/c\\");
 	}
@@ -584,10 +575,10 @@ mod tests {
 		assert_eq!(set.rooted("r").unwrap(), prefixes(&["r/a/b", "r/c"]));
 		assert_eq!(Prefixes::all().rooted("r").unwrap(), prefixes(&["r"]));
 		assert!(set.rooted("*").is_err());
-		let deep = ["a"; Pattern::MAX_SEGMENTS].join("/");
+		let deep = ["a"; Path::MAX_PARTS].join("/");
 		assert!(set.rooted(&deep).is_err());
 		assert_eq!(set.rooted("r").unwrap().rebase("r"), set);
-		// A root is normalized like a broadcast path, as a pattern's is.
+		// A root is normalized like a broadcast path.
 		assert_eq!(set.rebase("/a//"), prefixes(&["b"]));
 		assert_eq!(set.rooted("/r//s/").unwrap(), prefixes(&["r/s/a/b", "r/s/c"]));
 		// A root ending inside an escape is no segment of a prefix.
@@ -596,19 +587,6 @@ mod tests {
 		assert_eq!(escaped.rebase(r"a\/b"), Prefixes::all());
 	}
 
-	#[test]
-	fn patterns_cover_the_same_paths() {
-		let set = prefixes(&["a", ""]);
-		assert_eq!(set.patterns(), Patterns::from(Pattern::all()));
-		assert_eq!(
-			prefixes(&["a/b"]).patterns(),
-			Patterns::from(Pattern::subtree("a/b").unwrap())
-		);
-		let deep = ["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert_eq!(prefix(&deep).pattern(), Pattern::literal(&deep).unwrap());
-	}
-
-	#[cfg(feature = "serde")]
 	#[test]
 	fn serde_round_trips_reduced_and_refuses_wildcards() {
 		let set: Prefixes = serde_json::from_str(r#"["a/b", "a", "c"]"#).unwrap();
@@ -641,10 +619,10 @@ mod tests {
 	}
 
 	/// Over every short path built from separators, escapes, and multi-byte characters, a
-	/// query never panics, answers as it does for the path normalized, and agrees with the
-	/// prefix's pattern and with each member alone.
+	/// query never panics, answers as it does for the path normalized, and agrees with each
+	/// member alone.
 	#[test]
-	fn agrees_with_patterns_on_any_path() {
+	fn agrees_with_members_on_any_path() {
 		let pieces = ["", "/", "a", "é", r"\/", r"\\", r"\"];
 		let mut paths = vec![String::new()];
 		for _ in 0..4 {
@@ -669,11 +647,6 @@ mod tests {
 		for path in &paths {
 			let normal = normalize(path);
 			for member in members.map(prefix) {
-				assert_eq!(
-					member.matches(path),
-					member.pattern().matches(path),
-					"{member:?} {path}"
-				);
 				assert_eq!(member.matches(path), member.matches(&normal), "{member:?} {path}");
 				assert_eq!(member.overlaps(path), member.overlaps(&normal), "{member:?} {path}");
 			}

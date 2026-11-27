@@ -1,17 +1,16 @@
-//! Broadcast paths, the prefixes that grant them, and the patterns that filter them.
+//! Broadcast paths and the prefixes that grant them.
 //!
 //! [`Path`] is a literal coordinate: `/`-separated non-empty segments, with
 //! segment-aware prefix operations. A `\` escapes the `\` or `/` after it, so `a\/b` is one
 //! segment holding a `/`; [`parts`] is the one walk every segment reading goes through.
 //! [`Prefixes`] is a grant or an origin scope: a set of [`Prefix`]es, each covering its
-//! whole subtree. [`Pattern`] describes a set of paths with wildcards, for discovery
-//! filters, and [`Patterns`] is a union of them reduced by containment. All of these live
-//! in [`moq-pattern`](moq_pattern); this module re-exports them beside [`Path`].
+//! whole subtree.
 
-pub use moq_pattern::{
-	InvalidPattern, InvalidPrefix, Parts, Pattern, Patterns, Prefix, Prefixes, Segment, Specificity, escape, parts,
-	unescape,
-};
+mod parts;
+mod prefix;
+
+pub use parts::{Parts, escape, parts, unescape};
+pub use prefix::{InvalidPrefix, Prefix, Prefixes};
 
 use std::fmt::{self, Display};
 use std::sync::Arc;

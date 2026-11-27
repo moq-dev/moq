@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use moq_net::{Error, Pattern, Prefixes, Version, origin};
+use moq_net::{Error, Prefixes, Version, origin};
 
 use crate::support;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -128,21 +128,13 @@ impl Lazy {
 			.routes()
 	}
 
-	/// Inspect the current table without running discovery for the observation itself.
+	/// Inspect the current table without running discovery for the observation itself:
+	/// whether a route sits at exactly `path`.
 	async fn routes(&self, path: &str) -> bool {
-		let consumer = self
-			.subscriber
-			.consume()
-			.filter(&Pattern::literal(path).unwrap())
-			.unwrap();
+		let consumer = self.subscriber.consume().scope(path, &Prefixes::all()).unwrap();
 		let mut announced = consumer.routes();
-		matches!(
-			announced.poll_next(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Some(origin::RouteEvent {
-				kind: origin::RouteKind::Start,
-				..
-			}))
-		)
+		std::iter::from_fn(|| announced.try_next())
+			.any(|event| event.kind == origin::RouteKind::Start && event.announce.prefix.is_empty())
 	}
 }
 

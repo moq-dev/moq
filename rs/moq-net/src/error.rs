@@ -330,11 +330,6 @@ pub enum Error {
 	#[error(transparent)]
 	BoundsExceeded(#[from] coding::BoundsExceeded),
 
-	/// A path holds a segment no pattern can spell (`*` or `**`), so it can never
-	/// be announced or matched.
-	#[error("invalid path: {0}")]
-	InvalidPath(#[from] crate::InvalidPattern),
-
 	/// A published broadcast or route contains a literal `.` or `..` segment.
 	#[error("broadcast path contains a navigation segment")]
 	NavigationSegment,
@@ -700,7 +695,6 @@ impl From<&Error> for SessionError {
 			| Error::Encode(_)
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
-			| Error::InvalidPath(_)
 			| Error::NavigationSegment
 			| Error::Path(_) => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
@@ -763,7 +757,6 @@ impl From<&Error> for StreamError {
 			// Our own parse failure is, from the peer's side, a malformed track.
 			Error::Decode(_)
 			| Error::BoundsExceeded(_)
-			| Error::InvalidPath(_)
 			| Error::NavigationSegment
 			| Error::Path(_)
 			| Error::MalformedTrack => Self::MalformedTrack,

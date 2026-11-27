@@ -1,5 +1,5 @@
 use crate::Rate;
-use moq_pattern::Prefixes;
+use moq_net::Prefixes;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// What one role (publish or subscribe) of a token or grant reaches: path prefixes,

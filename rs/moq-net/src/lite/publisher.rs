@@ -4061,7 +4061,6 @@ mod announce_test {
 	fn initial_replay_keeps_the_last_event_and_its_order() {
 		let update = |prefix: &'static str, cost| crate::announce::Announce {
 			prefix: crate::Path::try_from(prefix).unwrap(),
-			captures: None,
 			route: origin::RouteInfo::new().with_cost(cost),
 		};
 		let events = [

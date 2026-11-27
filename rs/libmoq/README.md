@@ -83,7 +83,7 @@ int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config,
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
-// config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
+// config (NULL for everything): the prefix to list, with every path beneath it. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
 // Identities (0 means none: unpinned, or a fresh one in route options; a route's or claim's is the caller's to free, an announcement's lives with it)
 int32_t moq_identity_parse(const char *text, uintptr_t text_len);

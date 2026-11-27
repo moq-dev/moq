@@ -20,12 +20,9 @@ pub struct MoqOriginConfig {
 /// Scope for an announcement stream.
 #[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct MoqAnnounceConfig {
-	/// Literal path prefix beneath the origin.
+	/// The prefix to list beneath the origin: it and every path beneath it, empty for all.
 	#[uniffi(default = "")]
 	pub prefix: String,
-	/// Pattern relative to `prefix`, or `None` for every path beneath it.
-	#[uniffi(default = None)]
-	pub filter: Option<String>,
 	/// Also list hidden paths: those with a segment starting with `.` below the prefix.
 	#[uniffi(default = false)]
 	pub hidden: bool,
@@ -184,8 +181,6 @@ pub struct MoqBroadcastRequest {
 pub struct MoqAnnounce {
 	/// The covered prefix, relative to the origin.
 	pub prefix: String,
-	/// What each wildcard matched, empty when the filter has no wildcards.
-	pub captures: Vec<String>,
 	/// The route serving the prefix: its identity and a static cost.
 	pub route: MoqRouteInfo,
 }
@@ -194,12 +189,6 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	fn from(announce: moq_net::announce::Announce) -> Self {
 		Self {
 			prefix: announce.prefix.to_string(),
-			captures: announce
-				.captures
-				.expect("bindings only list full announcement matches")
-				.into_iter()
-				.map(|capture| capture.to_string())
-				.collect(),
 			route: announce.route.into(),
 		}
 	}
@@ -360,16 +349,12 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes whose names match a discovery filter; updates stay relative to the origin.
+	/// Subscribe to the routes at or beneath a prefix; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		let filter = match config.filter {
-			Some(filter) => filter.parse::<moq_net::Pattern>()?,
-			None => moq_net::Pattern::all(),
-		};
-		let filter = filter.rooted(&config.prefix)?;
-		let origin = self.inner.filter(&filter)?.with_hidden(config.hidden);
+		let prefix = config.prefix.parse::<moq_net::Prefix>()?;
+		let origin = self.inner.scope("", &prefix.into())?.with_hidden(config.hidden);
 		Ok(Arc::new(MoqAnnounceConsumer {
 			reads: Polled::new(origin.announced()).supervised(self.driver.clone()),
 		}))

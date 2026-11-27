@@ -4,7 +4,7 @@ use tokio::sync::oneshot;
 use crate::ffi::{OnFollow, OnStatus};
 use crate::publish::Children;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route_info, moq_string};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_route_info};
 
 /// Global state managing all active resources.
 ///
@@ -84,9 +84,6 @@ impl Producer {
 /// One announce event and the C string views borrowed from it.
 struct AnnouncedRecord {
 	prefix: String,
-	/// Owns the strings `capture_views` borrows; never read directly.
-	_captures: Vec<String>,
-	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
 	cost: u64,
 	available: bool,
@@ -110,24 +107,8 @@ impl AnnouncedRecord {
 			Event::Absent(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT),
 			_ => return Ok(None),
 		};
-		let captures: Vec<_> = update
-			.captures
-			.expect("bindings only list full announcement matches")
-			.into_iter()
-			.map(|capture| capture.to_string())
-			.collect();
-		let capture_views = captures
-			.iter()
-			.map(|capture| moq_string {
-				data: capture.as_ptr().cast(),
-				len: capture.len(),
-			})
-			.collect();
-
 		Ok(Some(Self {
 			prefix: update.prefix.to_string(),
-			_captures: captures,
-			capture_views,
 			kind,
 			cost: update.route.cost().value(),
 			available: update.route.available(),
@@ -198,7 +179,7 @@ impl Origin {
 	pub fn announced(
 		&mut self,
 		origin: Id,
-		filter: moq_net::Pattern,
+		prefix: moq_net::Prefix,
 		hidden: bool,
 		on_announce: OnStatus,
 	) -> Result<Id, Error> {
@@ -208,7 +189,7 @@ impl Origin {
 		let consumer = origin
 			.producer
 			.consume()
-			.filter(&filter)?
+			.scope("", &prefix.into())?
 			.with_hidden(hidden)
 			.announced();
 		self.announced_task.spawn(
@@ -247,8 +228,6 @@ impl Origin {
 		*dst = moq_announce_event {
 			prefix: announced.prefix.as_ptr().cast::<c_char>(),
 			prefix_len: announced.prefix.len(),
-			captures: announced.capture_views.as_ptr(),
-			captures_len: announced.capture_views.len(),
 			kind: announced.kind,
 			route: moq_route_info {
 				cost: announced.cost,

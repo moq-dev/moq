@@ -11,7 +11,7 @@
 //! subtree pattern releases before 0.22 spell it: `foo/**`, and `**` for the empty prefix.
 
 use crate::{Access, Link};
-use moq_pattern::{InvalidPrefix, Pattern, Prefix, Prefixes};
+use moq_net::{InvalidPrefix, Path, Prefix, Prefixes};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
@@ -300,7 +300,7 @@ impl Grants {
 
 		// A legacy prefix had its slashes trimmed and collapsed, as a broadcast path does.
 		let legacy = |prefix: &String| -> Result<Prefix, String> {
-			let normalized = Pattern::literal(prefix).map_err(|err| format!("legacy prefix {prefix:?}: {err}"))?;
+			let normalized = crate::path::normalize(prefix);
 			Prefix::try_from(normalized.as_str()).map_err(|err| format!("legacy prefix {prefix:?}: {err}"))
 		};
 		let prefixes = |prefixes: Option<Vec<String>>| -> Result<Access, String> {
@@ -425,7 +425,16 @@ pub(crate) mod alias {
 
 	impl Serialize for Written<'_> {
 		fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-			serializer.collect_seq(self.0.iter().map(Prefix::pattern))
+			serializer.collect_seq(self.0.iter().map(written))
+		}
+	}
+
+	/// One prefix as the subtree pattern a release before 0.22 reads.
+	fn written(prefix: &Prefix) -> String {
+		match prefix.as_str() {
+			"" => "**".to_string(),
+			text if moq_net::path::parts(text).count() == Path::MAX_PARTS => text.to_string(),
+			text => format!("{text}/**"),
 		}
 	}
 
@@ -525,7 +534,7 @@ pub(crate) mod alias {
 			);
 			// Nothing lies beneath a prefix of the most segments a path holds, and a pattern
 			// one segment longer is refused, so it is written as the literal.
-			let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
+			let deepest = vec!["a"; Path::MAX_PARTS].join("/");
 			let list = List(Prefixes::from(deepest.parse::<Prefix>().unwrap()));
 			assert_eq!(serde_json::to_value(&list).unwrap(), serde_json::json!([deepest]));
 			let read: List = serde_json::from_value(serde_json::to_value(&list).unwrap()).unwrap();

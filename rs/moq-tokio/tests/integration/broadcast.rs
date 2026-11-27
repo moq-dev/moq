@@ -2874,10 +2874,10 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	);
 }
 
-/// A prefix grant on both ends of a session, and a discovery filter on the subscriber.
+/// A prefix grant on both ends of a session, and a narrower listing on the subscriber.
 /// The subscriber's scope (`room`) bounds what it may land and the server's grant
-/// (`server_scope`) what it advertises and serves; the filter (`room/*/chat`) only picks
-/// which announcements the subscriber lists, capturing the room.
+/// (`server_scope`) what it advertises and serves; the listing (each room's chat) only
+/// picks which announcements the subscriber reads.
 async fn prefix_scope_test(version: &str, server_scope: &str) {
 	let scope = |text: &str| moq_net::Prefixes::from(text.parse::<moq_net::Prefix>().unwrap());
 
@@ -2926,8 +2926,11 @@ async fn prefix_scope_test(version: &str, server_scope: &str) {
 	let sub_origin = moq_tokio::origin::spawn();
 	let consume = sub_origin.scope("", &scope("room")).expect("scope consume origin");
 	let sub_consumer = consume.consume();
-	let chats = "room/*/chat".parse::<moq_net::Pattern>().unwrap();
-	let mut announcements = sub_consumer.filter(&chats).expect("filter").announced();
+	let chats: moq_net::Prefixes = ["room/alice/chat", "room/bob/chat"]
+		.into_iter()
+		.map(|text| text.parse::<moq_net::Prefix>().unwrap())
+		.collect();
+	let mut announcements = sub_consumer.scope("", &chats).expect("list chats").announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -2950,13 +2953,9 @@ async fn prefix_scope_test(version: &str, server_scope: &str) {
 		.expect("client connect failed");
 
 	// Exactly alice's chat: bob's is outside the server's grant, the lobby is outside the
-	// client's, and alice's audio is outside the filter. The match pins the room.
+	// client's, and alice's audio is outside the listing.
 	let (update, active) = next_announce(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "room/alice/chat");
-	assert_eq!(
-		update.captures,
-		Some(vec!["alice".parse::<moq_net::Pattern>().unwrap()])
-	);
 	assert!(active);
 
 	// The granted path serves; the excluded ones are refused before the wire.

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use moq_auth::{Peer, Request, Role, Transport};
-use moq_net::Pattern;
+use moq_net::Prefix;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -168,8 +168,8 @@ impl Registry {
 /// A partial request: every given field must match, and an empty filter is
 /// every session on this node.
 ///
-/// `id` and every scalar are exact. `path` is a [`Pattern`] against the dialed
-/// path. `remote` is an IP or CIDR with the port dropped and IPv4-mapped IPv6
+/// `id` and every scalar are exact. `prefix` matches the dialed path and every path
+/// beneath it. `remote` is an IP or CIDR with the port dropped and IPv4-mapped IPv6
 /// folded. `query` and `token` are not fields: they carry the credential.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Filter {
@@ -187,8 +187,8 @@ pub struct Filter {
 	pub server_name: Option<String>,
 	/// Negotiated application protocol.
 	pub alpn: Option<String>,
-	/// Pattern matched against the dialed path.
-	pub path: Option<Pattern>,
+	/// A prefix covering the dialed path: it or any path beneath it.
+	pub prefix: Option<Prefix>,
 	/// SETUP role, when the client declared one.
 	pub role: Option<Role>,
 	/// Certificate SAN/CN/fingerprint.
@@ -276,12 +276,15 @@ impl Filter {
 				}
 				"server_name" => filter.server_name = Some(value.into_owned()),
 				"alpn" => filter.alpn = Some(value.into_owned()),
-				"path" => {
-					filter.path = Some(value.parse().map_err(|_| Error::Invalid {
-						field: "path",
+				"prefix" => {
+					filter.prefix = Some(value.parse().map_err(|_| Error::Invalid {
+						field: "prefix",
 						value: value.into_owned(),
 					})?);
 				}
+				// It matched a wildcard pattern, so `path=demo` meant only `demo`: refused rather
+				// than read as a prefix, which would widen an exact revalidation to a subtree.
+				"path" => return Err(Error::Path),
 				"role" => {
 					filter.role = Some(parse_role(&value).ok_or_else(|| Error::Invalid {
 						field: "role",
@@ -336,8 +339,8 @@ impl Filter {
 		{
 			return false;
 		}
-		if let Some(path) = &self.path
-			&& !path.matches(request.path.trim_start_matches('/'))
+		if let Some(prefix) = &self.prefix
+			&& !prefix.matches(&request.path)
 		{
 			return false;
 		}
@@ -429,6 +432,8 @@ pub enum Error {
 	},
 	/// A field given more than once, which would otherwise keep only the last.
 	Repeated(String),
+	/// The `path` field, which took a wildcard pattern: `prefix` replaces it.
+	Path,
 }
 
 impl std::fmt::Display for Error {
@@ -437,6 +442,10 @@ impl std::fmt::Display for Error {
 			Self::Unknown(field) => write!(f, "unknown filter field: {field}"),
 			Self::Invalid { field, value } => write!(f, "invalid {field}: {value}"),
 			Self::Repeated(field) => write!(f, "repeated filter field: {field}"),
+			Self::Path => write!(
+				f,
+				"the path filter field is gone: use prefix, which matches a path and every path beneath it"
+			),
 		}
 	}
 }
@@ -569,8 +578,10 @@ mod tests {
 		let b = request("b", "/demo/two", "198.51.100.2:1");
 		let c = request("c", "/other", "203.0.113.10:1");
 
-		let path = Filter::from_query(Some("path=demo/**")).unwrap();
-		assert!(path.matches(&a) && path.matches(&b) && !path.matches(&c));
+		let prefix = Filter::from_query(Some("prefix=demo")).unwrap();
+		assert!(prefix.matches(&a) && prefix.matches(&b) && !prefix.matches(&c));
+		assert_eq!(Filter::from_query(Some("path=demo")), Err(Error::Path));
+		assert!(Filter::from_query(Some("prefix=demo/**")).is_err());
 
 		let cidr = Filter::from_query(Some("remote=203.0.113.0/24")).unwrap();
 		assert!(cidr.matches(&a) && !cidr.matches(&b) && cidr.matches(&c));

@@ -204,8 +204,9 @@ impl Producer {
 			return (producer, Publisher(Run::Done));
 		};
 
-		// The prefix is a literal path, so its subtree claim cannot fail.
-		let exclude = moq_net::Pattern::subtree(prefix.as_str()).expect("the stats prefix is a literal path");
+		// A grant prefix refuses a `*` until the pattern spelling of grants is gone; no stats
+		// prefix holds one.
+		let exclude: moq_net::Prefix = prefix.as_str().parse().expect("the stats prefix holds no `*`");
 		let mut registry = moq_net::stats::Config::new().with_exclude(exclude.clone());
 		if roots {
 			// Where a relay mounts each root's view: a read there counts as no root's traffic.

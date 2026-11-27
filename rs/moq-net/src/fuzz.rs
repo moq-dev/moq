@@ -27,7 +27,7 @@ pub use crate::lite::{CoverageBench, UpdateBench};
 use bytes::Bytes;
 
 use crate::{
-	Hops, Path, Pattern, broadcast, cache, coding,
+	Hops, Path, broadcast, cache, coding,
 	coding::{Decode, Decoder, Encode, Encoder, Form, varint},
 	frame, group, ietf, lite,
 	path::Relative,
@@ -252,7 +252,6 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("ietf", ietf_wire),
 	("varint", varint),
 	("path", path),
-	("pattern", pattern),
 	("ingest", ingest),
 	("request", request),
 	("session_lite", session_lite),
@@ -607,7 +606,6 @@ pub fn replay(events: Vec<crate::origin::RouteEvent>) -> Vec<crate::announce::An
 pub fn announce(prefix: &str, cost: u64) -> crate::announce::Announce {
 	crate::announce::Announce {
 		prefix: crate::Path::new(prefix).unwrap(),
-		captures: None,
 		route: route_info([], cost, None),
 	}
 }
@@ -1807,55 +1805,6 @@ pub struct Seed {
 	pub data: Vec<u8>,
 }
 
-/// A pattern's text, a newline, and a path: the pattern algebra's invariants.
-///
-/// Parsing is the fixed point Display prints; a pattern contains and overlaps itself;
-/// rebasing at the path describes exactly what the pattern matches beneath it; and
-/// rooting at a literal path inverts rebasing.
-pub fn pattern(data: &[u8]) -> bool {
-	let Ok(text) = std::str::from_utf8(data) else {
-		return false;
-	};
-	let (pattern, path) = text.split_once('\n').unwrap_or((text, ""));
-	let Ok(pattern) = pattern.parse::<Pattern>() else {
-		return false;
-	};
-
-	assert_eq!(pattern.to_string(), pattern.as_str());
-	assert_eq!(
-		pattern.to_string().parse::<Pattern>().as_ref(),
-		Ok(&pattern),
-		"text is not canonical"
-	);
-	assert_eq!(
-		Pattern::new(pattern.segments().to_vec()).as_ref(),
-		Ok(&pattern),
-		"segments do not rebuild"
-	);
-	assert!(pattern.contains(&pattern) && pattern.overlaps(&pattern));
-	assert!(pattern.matches(pattern.head()) || !pattern.is_literal());
-
-	let rebased = pattern.rebase(path);
-	assert_eq!(
-		rebased.matches(""),
-		pattern.matches(path),
-		"rebase disagrees with matches at the root"
-	);
-	for member in rebased.iter() {
-		// Arbitrary roots may contain wildcard bytes or exceed the segment limit.
-		if let Ok(rooted) = member.rooted(path) {
-			assert!(
-				pattern.contains(&rooted),
-				"rebase produced a pattern outside the original"
-			);
-		}
-	}
-	if let Ok(rooted) = pattern.rooted(path) {
-		assert!(rooted.rebase(path).contains(&pattern), "rooted did not invert rebase");
-	}
-	true
-}
-
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
 /// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message, and
 /// an ANNOUNCE_REQUEST and its ANNOUNCE_OK (the sweep sets ROUTE's type byte but
@@ -2127,24 +2076,6 @@ pub fn seeds() -> Vec<Seed> {
 	] {
 		seeds.push(Seed {
 			target: "path",
-			kind: 0,
-			data: text.as_bytes().to_vec(),
-		});
-	}
-
-	for text in [
-		"**\na",
-		"**/a\na",
-		"a/*/**/b\na/x",
-		"**/*.hang\npid/cam.hang",
-		"foo.*.hang/**\nfoo.1.hang/x",
-		"*\n",
-		"\n",
-		"a/b\na/b",
-		"a*b*c\n",
-	] {
-		seeds.push(Seed {
-			target: "pattern",
 			kind: 0,
 			data: text.as_bytes().to_vec(),
 		});

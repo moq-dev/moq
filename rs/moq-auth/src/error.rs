@@ -114,7 +114,7 @@ pub enum Error {
 
 	/// A grant prefix did not parse, such as one holding a wildcard.
 	#[error(transparent)]
-	Prefix(#[from] moq_pattern::InvalidPrefix),
+	Prefix(#[from] moq_net::InvalidPrefix),
 
 	/// The grant allows nothing, so the session is refused.
 	#[error("grant names nothing; the session is refused")]
@@ -142,7 +142,7 @@ pub enum Error {
 
 	/// A stats label is not a literal path.
 	#[error("invalid stats label: {0}")]
-	InvalidLabel(moq_pattern::InvalidPattern),
+	InvalidLabel(moq_net::InvalidPrefix),
 
 	/// A stats tier is not `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
 	#[error("invalid stats tier {0:?}: use segments of ASCII letters, digits, '.', '_', and '-' joined by '/'")]

@@ -342,13 +342,8 @@ impl Invocation {
 				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
-				// An origin refuses a broadcast a pattern could not name, so no viewer could
-				// publish its `<NAME>.echo` beneath this.
-				let feedback = prefix.join(&moq_net::Path::from_static("viewer.echo"));
-				let literal = feedback
-					.map_err(anyhow::Error::from)
-					.and_then(|feedback| Ok(moq_net::Pattern::literal(feedback.as_str())?));
-				if let Err(err) = literal {
+				// A path too long to hold a viewer's `<NAME>.echo` beneath it takes no feedback.
+				if let Err(err) = prefix.join(&moq_net::Path::from_static("viewer.echo")) {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
 					);

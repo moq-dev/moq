@@ -1,5 +1,5 @@
 use crate::{Access, path};
-use moq_pattern::{Prefix, Prefixes};
+use moq_net::{Prefix, Prefixes};
 use serde::{Deserialize, Serialize};
 
 /// The immutable ceiling on what a key may grant, embedded in its JWK.

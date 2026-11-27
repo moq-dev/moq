@@ -1,5 +1,5 @@
 use kio::clock::Wall;
-use moq_pattern::Prefixes;
+use moq_net::Prefixes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -156,7 +156,7 @@ impl Grant {
 			crate::tier::validate(tier)?;
 		}
 		if let Some(label) = &self.label {
-			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
+			label.parse::<moq_net::Prefix>().map_err(crate::Error::InvalidLabel)?;
 		}
 		if self.expires.is_some_and(|expires| expires <= kio::clock::wall()) {
 			return Err(crate::Error::GrantExpired);

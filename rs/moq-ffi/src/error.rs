@@ -334,9 +334,9 @@ pub enum MoqError {
 	#[error("already committed to another way of reading")]
 	AlreadyCommitted,
 
-	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
-	#[error("invalid pattern: {reason}")]
-	InvalidPattern {
+	/// A path prefix had an empty segment, a malformed escape, too many segments, or a `*`.
+	#[error("{reason}")]
+	InvalidPrefix {
 		/// A diagnostic message describing the failure.
 		reason: String,
 	},
@@ -616,7 +616,7 @@ from_message! {
 	url::ParseError => Url,
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
-	moq_net::InvalidPattern => InvalidPattern,
+	moq_net::InvalidPrefix => InvalidPrefix,
 	moq_net::InvalidIdentity => InvalidIdentity,
 }
 

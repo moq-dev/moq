@@ -255,9 +255,9 @@ pub struct SessionFilter {
 	#[usage(long)]
 	id: Option<String>,
 
-	/// Pattern matched against the dialed path, e.g. `demo/**`.
+	/// A prefix covering the dialed path, e.g. `demo` for `demo` and every path beneath it.
 	#[usage(long)]
-	path: Option<String>,
+	prefix: Option<String>,
 
 	/// Peer IP or CIDR; the port is dropped.
 	#[usage(long)]
@@ -306,8 +306,8 @@ impl SessionFilter {
 		if let Some(value) = &self.id {
 			query.push(("id", value.as_str()));
 		}
-		if let Some(value) = &self.path {
-			query.push(("path", value.as_str()));
+		if let Some(value) = &self.prefix {
+			query.push(("prefix", value.as_str()));
 		}
 		if let Some(value) = &self.remote {
 			query.push(("remote", value.as_str()));
@@ -1402,8 +1402,8 @@ link = "none"
 			"http://127.0.0.1:9101",
 			"--id",
 			"abc",
-			"--path",
-			"demo/**",
+			"--prefix",
+			"demo",
 			"--remote",
 			"203.0.113.0/24",
 			"--tls-name",
@@ -1413,7 +1413,7 @@ link = "none"
 		match args.command {
 			Command::Revalidate(filter) => {
 				assert_eq!(filter.id.as_deref(), Some("abc"));
-				assert_eq!(filter.path.as_deref(), Some("demo/**"));
+				assert_eq!(filter.prefix.as_deref(), Some("demo"));
 				assert_eq!(filter.remote.as_deref(), Some("203.0.113.0/24"));
 				assert_eq!(filter.tls_name.as_deref(), Some("edge0"));
 			}
@@ -1454,7 +1454,7 @@ link = "none"
 			.await
 			.expect("revalidate");
 
-		run(&["moq", "auth", "sessions", "--internal-url", &url, "--path", "demo/**"])
+		run(&["moq", "auth", "sessions", "--internal-url", &url, "--prefix", "demo"])
 			.await
 			.expect("sessions");
 	}

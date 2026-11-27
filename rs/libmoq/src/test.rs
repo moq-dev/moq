@@ -239,8 +239,6 @@ fn announce_info(announced: u32) -> moq_announce_event {
 	let mut info = moq_announce_event {
 		prefix: std::ptr::null(),
 		prefix_len: 0,
-		captures: std::ptr::null(),
-		captures_len: 0,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
 		route: moq_route_info {
 			cost: 0,
@@ -4228,44 +4226,42 @@ fn local_announce() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A prefix lists itself and what lies beneath it, and refuses a wildcard.
 #[test]
-fn announced_filters_patterns_and_reports_captures() {
-	for (filter, captures) in [("*/chat", vec!["alice"]), ("alice/chat", vec![])] {
-		let origin = id(moq_origin_create());
-		let cb = Callback::new();
-		let prefix = b"room";
-		let config = moq_announce_config {
-			prefix: prefix.as_ptr().cast(),
-			prefix_len: prefix.len(),
-			filter: filter.as_ptr().cast(),
-			filter_len: filter.len(),
-			hidden: false,
-		};
-		let announced_task = id(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), cb.ptr) });
+fn announced_lists_a_prefix_and_refuses_a_wildcard() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let prefix = b"room/alice";
+	let config = moq_announce_config {
+		prefix: prefix.as_ptr().cast(),
+		prefix_len: prefix.len(),
+		hidden: false,
+	};
+	let announced_task = id(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), cb.ptr) });
 
-		let audio = publish_broadcast(origin, b"room/alice/audio");
-		let chat = publish_broadcast(origin, b"room/alice/chat");
-		let (announced_id, info) = cb.recv_route();
+	let other = publish_broadcast(origin, b"room/bob/chat");
+	let chat = publish_broadcast(origin, b"room/alice/chat");
+	let (announced_id, info) = cb.recv_route();
+	let announced_prefix =
+		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
+	assert_eq!(announced_prefix, "room/alice/chat");
 
-		let announced_prefix = unsafe {
-			std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap()
-		};
-		assert_eq!(announced_prefix, "room/alice/chat");
-		assert_eq!(info.captures_len, captures.len());
-		for (index, expected) in captures.iter().enumerate() {
-			let capture = unsafe { &*info.captures.add(index) };
-			let capture =
-				unsafe { std::str::from_utf8(std::slice::from_raw_parts(capture.data.cast(), capture.len)).unwrap() };
-			assert_eq!(capture, *expected);
-		}
+	assert_eq!(moq_origin_announced_free(announced_id), 0);
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
+	assert_eq!(cb.recv_terminal(), 0);
 
-		assert_eq!(moq_origin_announced_free(announced_id), 0);
-		assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-		assert_eq!(cb.recv_terminal(), 0);
-		assert_eq!(moq_publish_close(audio), 0);
-		assert_eq!(moq_publish_close(chat), 0);
-		assert_eq!(moq_origin_close(origin), 0);
-	}
+	let wildcard = b"room/*";
+	let config = moq_announce_config {
+		prefix: wildcard.as_ptr().cast(),
+		prefix_len: wildcard.len(),
+		hidden: false,
+	};
+	let refused = Callback::new();
+	assert!(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), refused.ptr) } < 0);
+
+	assert_eq!(moq_publish_close(other), 0);
+	assert_eq!(moq_publish_close(chat), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 /// A `.`-named broadcast is listed only when `hidden` opts in or the prefix names it.
@@ -4284,8 +4280,6 @@ fn announced_hides_dot_paths_unless_asked() {
 		let config = moq_announce_config {
 			prefix: prefix.as_ptr().cast(),
 			prefix_len: prefix.len(),
-			filter: std::ptr::null(),
-			filter_len: 0,
 			hidden,
 		};
 		let task = id(unsafe { moq_origin_announced(origin, &config, Some(channel_callback), cb.ptr) });

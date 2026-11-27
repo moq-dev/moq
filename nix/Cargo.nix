@@ -330,16 +330,6 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
-    "moq-pattern" = rec {
-      packageId = "moq-pattern";
-      build = internal.buildRustCrateWithFeatures {
-        packageId = "moq-pattern";
-      };
-
-      # Debug support which might change between releases.
-      # File a bug if you depend on any for non-debug work!
-      debug = internal.debugCrate { inherit packageId; };
-    };
     "moq-quic" = rec {
       packageId = "moq-quic";
       build = internal.buildRustCrateWithFeatures {
@@ -18252,9 +18242,8 @@ rec {
             features = [ "cpu" ];
           }
           {
-            name = "moq-pattern";
-            packageId = "moq-pattern";
-            features = [ "serde" ];
+            name = "moq-net";
+            packageId = "moq-net";
           }
           {
             name = "pkcs1";
@@ -20334,11 +20323,6 @@ rec {
             features = [ "macros" ];
           }
           {
-            name = "moq-pattern";
-            packageId = "moq-pattern";
-            features = [ "serde" ];
-          }
-          {
             name = "num_enum";
             packageId = "num_enum";
           }
@@ -20480,11 +20464,6 @@ rec {
           {
             name = "path";
             path = "fuzz_targets/path.rs";
-            requiredFeatures = [ ];
-          }
-          {
-            name = "pattern";
-            path = "fuzz_targets/pattern.rs";
             requiredFeatures = [ ];
           }
           {
@@ -20652,51 +20631,6 @@ rec {
           "ent-dump" = [ "dep:hex" ];
         };
         resolvedDefaultFeatures = [ "ent-dump" ];
-      };
-      "moq-pattern" = rec {
-        crateName = "moq-pattern";
-        version = "0.1.2";
-        edition = "2024";
-        src = lib.cleanSourceWith {
-          filter = sourceFilter;
-          src = ../rs/moq-pattern;
-        };
-        libName = "moq_pattern";
-        authors = [
-          "Luke Curley"
-        ];
-        dependencies = [
-          {
-            name = "serde";
-            packageId = "serde";
-            optional = true;
-            features = [ "derive" ];
-          }
-        ];
-        devDependencies = [
-          {
-            name = "bench-harness";
-            packageId = "bench-harness";
-            rename = "criterion";
-          }
-          {
-            name = "moq-pattern";
-            packageId = "moq-pattern";
-            features = [ "serde" ];
-          }
-          {
-            name = "serde_json";
-            packageId = "serde_json";
-          }
-          {
-            name = "workspace-hack";
-            packageId = "workspace-hack";
-          }
-        ];
-        features = {
-          "serde" = [ "dep:serde" ];
-        };
-        resolvedDefaultFeatures = [ "serde" ];
       };
       "moq-quic" = rec {
         crateName = "moq-quic";
