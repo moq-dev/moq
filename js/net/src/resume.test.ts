@@ -7706,9 +7706,9 @@ test("a wired front reader widening past a skipped key still receives the skip",
 	}
 });
 
-// Queued skip runs outside a raised cursor start are evicted from the front reader's drop queue
-// and untold on the copies so widening back over them reports them again.
-test("empty-clipped skip runs leave a front reader drop queue and reappear on widen", () => {
+// Queued skip runs outside a raised cursor start stay queued in the front reader so widening back
+// over them still reports them even if the serving copy cannot replay them.
+test("empty-clipped skip runs stay queued in a front reader and reappear on widen", () => {
 	const front = new Front();
 	const source = new BroadcastProducer();
 	const handle = source.consume();

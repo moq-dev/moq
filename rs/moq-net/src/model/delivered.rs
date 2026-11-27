@@ -12,6 +12,10 @@ use std::collections::BTreeMap;
 pub(super) struct Delivered {
 	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
+	/// Highest key retired solely by the reader's freshness budget (see [`Self::retire_below`]).
+	/// Kept apart from handed-out keys so debt folding never promotes a budget-retired prefix
+	/// into the report floor.
+	budget: u64,
 }
 
 impl Delivered {
@@ -153,6 +157,19 @@ impl Delivered {
 			gaps = gaps.into_iter().flat_map(|gap| taken.gaps(gap)).collect();
 		}
 		gaps
+	}
+
+	/// Count every key below `floor` as handed out because it fell past the freshness budget.
+	/// Unlike [`Self::forget_below`], this records the budget boundary so debt folding never
+	/// promotes budget-retired keys into the report floor.
+	pub fn retire_below(&mut self, floor: u64) {
+		self.budget = self.budget.max(floor);
+		self.forget_below(floor);
+	}
+
+	/// Highest key retired by the reader's freshness budget.
+	pub fn budget_floor(&self) -> u64 {
+		self.budget
 	}
 
 	/// Count every key below `floor` as handed out.

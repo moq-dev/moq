@@ -11816,10 +11816,10 @@ impl Cursor {
 			if let Some(kept) = kept.into_iter().chain(outside).min()
 				&& kept < last
 			{
-				delivered.forget_below(kept);
+				delivered.retire_below(kept);
 				break;
 			}
-			delivered.forget_below(last);
+			delivered.retire_below(last);
 		}
 	}
 
@@ -35969,23 +35969,7 @@ mod test {
 			sub.record_mut().tell(key..key + 1, Report::Final);
 			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
 		}
-		let misses_runs = match &sub.inner {
-			Inner::Plain(cursor) => cursor.misses.as_ref().map_or(0, |m| {
-				use super::super::record::Beside;
-				m.runs()
-			}),
-			Inner::Resume(..) => 0,
-		};
-		assert!(
-			most <= 4,
-			"delivered/reported grew to {most} runs (now={}, delivered={}, reported={}, pending={}, written_off={}, skipped={}, misses={misses_runs})",
-			pool.recorded() / super::super::record::RUN_OVERHEAD,
-			sub.delivered_runs(),
-			sub.record().reported.len(),
-			sub.record().pending.len(),
-			sub.record().written_off.len(),
-			sub.record().skipped.runs(),
-		);
+		assert!(most <= 4, "delivered/reported grew to {most} runs");
 		assert_eq!(sub.delivered_runs(), 1);
 	}
 

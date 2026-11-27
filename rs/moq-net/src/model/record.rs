@@ -129,6 +129,22 @@ impl Record {
 		key < self.floor || self.reported.contains_key(&key)
 	}
 
+	/// Whether the wire was told of every key in `range`.
+	pub fn told_all(&self, range: Range<u64>) -> bool {
+		let range = range.start.max(self.floor)..range.end;
+		range.is_empty() || self.reported.gaps(&range).next().is_none()
+	}
+
+	/// The first untold gap in `range` that `find` accepts, evaluated lazily without
+	/// materializing the remaining gaps.
+	pub fn find_untold_gap<T>(&self, range: Range<u64>, mut find: impl FnMut(Range<u64>) -> Option<T>) -> Option<T> {
+		let range = range.start.max(self.floor)..range.end;
+		if range.is_empty() {
+			return None;
+		}
+		self.reported.gaps(&range).find_map(&mut find)
+	}
+
 	/// The parts of `range` the wire was told nothing of.
 	pub fn untold(&self, range: Range<u64>) -> RangeSet<u64> {
 		let range = range.start.max(self.floor)..range.end;
@@ -409,6 +425,13 @@ impl Record {
 			}
 			self.rescan = true;
 		}
+		let budget = self.delivered.budget_floor();
+		if budget > self.floor {
+			// Keys retired by the delivery budget are already in `delivered` and never offered
+			// again; under pool debt, drop stale write-offs below that prefix without raising
+			// the report floor over keys that were never reported.
+			self.written_off.remove(0..budget);
+		}
 		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
 		if floor > self.floor {
 			self.raise(floor);
@@ -422,7 +445,17 @@ impl Record {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
-			from = self.next_told(stretch.end.max(start + 1));
+			let next = stretch.end.max(start + 1);
+			from = [
+				self.delivered.next_from(next.max(budget)),
+				self.reported
+					.overlapping(&(next..u64::MAX))
+					.next()
+					.map(|(run, _)| run.start.max(next)),
+			]
+			.into_iter()
+			.flatten()
+			.min();
 		}
 		folded
 	}
@@ -539,7 +572,9 @@ impl Record {
 				None => {
 					let local = match fold {
 						Fold::Debt => [
-							self.delivered.run_end(end),
+							(end >= self.delivered.budget_floor())
+								.then(|| self.delivered.run_end(end))
+								.flatten(),
 							self.written_off.get(&end).map(|run| run.end),
 							self.skipped.run_end(end),
 							beside.given_up_end(end),
@@ -1298,5 +1333,67 @@ mod test {
 		assert!(!record.told(6) && !record.told(7), "untold keys are revocable");
 		assert!(record.told(8) && record.told(9), "above untold stays told");
 		assert_eq!(record.report(6..10, &Hole::Skip, false), Some(6..8));
+	}
+
+	/// Keys retired solely by the freshness budget (`Delivered::retire_below`) stay out of the
+	/// report floor under cache debt, so widening back over them still reports skips there.
+	#[test]
+	fn a_debt_does_not_promote_budget_retired_delivery_prefix_into_report_floor() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(2);
+		record.delivered.insert(4);
+		record.delivered.retire_below(5);
+		assert!(record.delivered.contains(1), "delivery prefix covers key 1");
+		// Bill a run so pool debt actually triggers `Record::fold`.
+		record.tell(10..11, Report::Final);
+		record.settle(
+			|| track.clone(),
+			&mut (),
+			Standing {
+				from: 2,
+				..Default::default()
+			},
+		);
+		owe(&track, pool.used());
+		record.settle(
+			|| track.clone(),
+			&mut (),
+			Standing {
+				from: 2,
+				..Default::default()
+			},
+		);
+		assert!(!record.told(1), "budget-retired prefix must not raise the report floor");
+		assert!(!record.told_all(1..2));
+
+		// Once 0..5 is actually reported, debt folding raises the floor over it normally.
+		record.tell(0..5, Report::Final);
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert!(record.told(1) && record.told_all(0..5));
+	}
+
+	/// `told_all` and `find_untold_gap` match `untold` while stopping at the first accepted gap.
+	#[test]
+	fn told_all_and_find_untold_gap_match_untold_lazily() {
+		let mut record = Record::default();
+		for k in (0..200).step_by(2) {
+			record.tell(k..k + 1, Report::Final);
+		}
+		assert!(!record.told_all(0..200));
+		assert!(record.told_all(2..3));
+
+		let mut visited = 0usize;
+		let found = record.find_untold_gap(0..200, |gap| {
+			visited += 1;
+			(gap.start >= 5).then_some(gap)
+		});
+		assert_eq!(found, Some(5..6));
+		assert_eq!(
+			visited, 3,
+			"stopped at 5..6 without materializing the remaining 97 gaps"
+		);
 	}
 }

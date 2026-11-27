@@ -1717,23 +1717,9 @@ class Reader implements ResumeSource {
 			}
 		}
 		const cursor = this.#shell.cursor.peek();
-		const outside: Run[] = [];
-		this.#drops = this.#drops.filter((run) => {
-			const done = run.skip
-				? this.#shell.untold(run.start, run.end).length === 0
-				: delivered.covers(run.start, run.end);
-			if (done) return false;
-			if (run.skip) {
-				const from = max(run.start, cursor.start);
-				const end = min(run.end, cursor.end ?? run.end);
-				if (from >= end) {
-					outside.push({ start: run.start, end: run.end });
-					return false;
-				}
-			}
-			return true;
-		});
-		for (const run of outside) this.untell(run.start, run.end);
+		this.#drops = this.#drops.filter((run) =>
+			run.skip ? this.#shell.untold(run.start, run.end).length > 0 : !delivered.covers(run.start, run.end),
+		);
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
 			if (copy === serving || !this.#feeds(copy)) continue;
