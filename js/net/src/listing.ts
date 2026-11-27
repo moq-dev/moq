@@ -34,8 +34,9 @@ export type Listed = { datagrams?: false; info: track.Info } | { datagrams: true
  * What a {@link Tracks} listing reports, in order.
  *
  * `added`: a track the broadcast lists, with its kind and fixed properties. `synced`: every
- * track listed when the listing began, and still listed, was reported; sent once, and later
- * events are live. `removed`: a track an earlier `added` reported is no longer listed,
+ * track listed once the listing was complete (at once for a local broadcast, on its upstream's
+ * SYNCED for a session's copy), and still listed, was reported; sent once, and later events are
+ * live. `removed`: a track an earlier `added` reported is no longer listed,
  * unfinished: its producer aborted, or the answer that listed it withdrew it; a handler may still
  * serve its name on request. `finished`: a track an earlier `added` reported is no longer listed
  * because it finished. A removal of a datagram track sets `datagrams`, as its `added` did.
@@ -414,7 +415,7 @@ export function listTracks(listing: Listing, owner?: object): Tracks {
 /**
  * The tracks a broadcast lists, from its consumer's `tracks()`.
  *
- * Reports every track listed when it was created, then `synced`, then each change as it
+ * Reports every track listed once the listing is complete, then `synced`, then each change as it
  * happens, until the broadcast ends: a clean end comes after each track that left before it, and
  * a track still listed then ends unfinished. Listing a broadcast never requests a track: subscribe to
  * each listed one through the consumer's `track(name)`.

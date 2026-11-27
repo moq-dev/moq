@@ -32,7 +32,7 @@ import type {
 	Subscription,
 	WireRecord,
 } from "./track.ts";
-import { max, min } from "./util/key.ts";
+import { max, min, UNBOUNDED } from "./util/key.ts";
 import * as Varint from "./varint.ts";
 import type { Budget, Holdings, Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
@@ -386,6 +386,31 @@ export function skipHole(): Hole {
 /** A group judged stale under `budget` milliseconds, within the exclusive group end `cap` when it has one. */
 export function staleHole(budget: number, cap?: bigint): Hole {
 	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget, cap };
+}
+
+/** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
+export type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
+
+/**
+ * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
+ * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
+ * that reads every group above the run's start: its own successor and edge are then no older than
+ * those the verdict was judged against, since a group's verdict looks only above it. An uncapped
+ * reader reads them past the live edge; a capped one only when the upstream judged within the very
+ * cap it has (`run.cap`), else the verdict may rest on groups above the cap it never sees. A reader
+ * whose budget varies by group is held to its widest. Mirrors the Rust `settles`.
+ */
+export function settles(run: Run & Hole, budget: Budget, coverage: Coverage): boolean {
+	if (run.stale === undefined) return true;
+	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
+	if (coverage === undefined) return false;
+	const { cap } = coverage;
+	if (cap !== undefined && run.cap !== cap) return false;
+	const above = run.start + 1n;
+	const end = cap ?? UNBOUNDED;
+	if (above >= end) return true;
+	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
+	return held !== undefined && held.end >= end;
 }
 
 /** A run of keys given up, with why. */
@@ -1368,6 +1393,17 @@ export const hooks: {
 	/** The error the subscriber's track gave `key` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, key: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
+	 * An upstream subscription feeding this copy asks a live join under `budget` milliseconds, before
+	 * it reaches the wire: that upstream may judge a group too old under it from then on. Mirrors
+	 * the Rust crate-private `track::Producer::judge_under`.
+	 */
+	judgeUnder: (producer: Producer, budget: number) => void;
+	/**
+	 * The narrowest budget in milliseconds an upstream subscription feeding the subscriber's copy
+	 * asked, undefined while none asked one. Mirrors the Rust `track::Consumer::judged_under`.
+	 */
+	judgedUnder: (subscriber: Subscriber) => number | undefined;
+	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
 	 * a new upstream subscription superseded is gone. Mirrors the Rust crate-private
 	 * `track::Subscriber::stale_held`.
@@ -1911,6 +1947,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	givenUp: () => {
+		throw new Error("track.ts not loaded");
+	},
+	judgeUnder: () => {
+		throw new Error("track.ts not loaded");
+	},
+	judgedUnder: () => {
 		throw new Error("track.ts not loaded");
 	},
 	mayLand: () => {

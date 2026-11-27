@@ -33,7 +33,7 @@ tla spec *args:
 # A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
 # and moq-gst; pass `--workspace` for all of it.
 
-# Compile, lint, format-check, doc-check, and verify dependency hygiene.
+# Compile, lint, format-check, doc-check (under CI_STRICT), and verify dependency hygiene.
 [positional-arguments]
 check *args:
     bash sh/local.sh cargo clippy --locked --all-targets "$@" -- -D warnings
@@ -64,7 +64,11 @@ lint *args:
         [ "$rc" -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     ) & pids+=($!)
     run cargo fmt --all --check & pids+=($!)
-    RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    # Rustdoc is never shared across checkouts by the build cache, so only
+    # `just ci` (CI_STRICT), which the merge queue runs, builds the docs.
+    if [[ -n "${CI_STRICT:-}" ]]; then
+        RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    fi
     run cargo shear --deny-warnings & pids+=($!)
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
     (
@@ -106,6 +110,7 @@ check-test-changed $LIST:
 
 # Clippy for macOS and Windows from this host, on the crates in a changed-file
 # list (or `--all`) plus their dependents; the gate runs it on every Rust diff.
+# Outside CI_STRICT it lints only those that name a platform (sh/rs/select.sh).
 cross-lint-changed $LIST:
     sh/rs/select.sh cross "$LIST"
 
@@ -132,7 +137,7 @@ windows-test:
     set -euo pipefail
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
-    run just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    run just rs test -p kio -p hang -p moq-tokio -p moq-sock -p moq-relay
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
     finish
 
@@ -169,7 +174,7 @@ macos-test:
     set -euo pipefail
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
-    run just rs test -p hang -p moq-tokio -p moq-sock
+    run just rs test -p kio -p hang -p moq-tokio -p moq-sock
     # AVFoundation, the reader behind QuickTime Player and Safari, lists a finished MP4's chapters.
     run just rs test -p moq-mux --lib -E 'test(=container::mp4::tests::apple_lists_the_chapters)'
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
@@ -186,10 +191,10 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
-# moq-net without its `async` feature: the lib, its tests, and its docs.
+# moq-net without its `async` feature: the lib, its tests, and (under CI_STRICT, as for `lint`) its docs.
 no-async:
     bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+    [ -z "${CI_STRICT:-}" ] || RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
 
 # moq-net's `fuzz` module alone, as the fuzz crates build it: every other build
 # unifies `test-support` back in, which hides a call into a test-only door.
@@ -302,6 +307,8 @@ coroutines:
     #!/usr/bin/env bash
     set -euo pipefail
     source sh/checks.sh
+    run bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
     run bash sh/rs/coroutines.sh moq-net -- --no-default-features
     run bash sh/rs/coroutines.sh moq-json -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-json --no-deps --no-default-features
@@ -394,10 +401,28 @@ doctest *args:
 # Needs nightly with miri and rust-src; executes only in Nightly. See sh/rs/miri.sh
 # for what runs and why it splits in two.
 
-# Run moq-net's, moq-sock's, and moq-uring's hand-written in-memory unsafe under Miri.
+# Run kio's and moq-net's hand-written in-memory unsafe under Miri.
 [positional-arguments]
 miri *args:
     bash sh/rs/miri.sh "$@"
+
+# Run kio's thread-spawning unit tests under Miri across many scheduler seeds (nightly with miri). Random schedules, not exhaustive: a pass is evidence, not proof.
+miri-seeds seeds="8":
+    bash sh/rs/miri-seeds.sh {{ seeds }}
+
+# Run kio's library tests under ThreadSanitizer (nightly with rust-src, Linux). Observes the schedules that happen to run: a pass is evidence, not proof.
+tsan:
+    bash sh/rs/tsan.sh
+
+# Run kio's suite under each adversarial sim schedule with the lost-wakeup probe. Each run draws a fresh seed and prints it on failure.
+sweep:
+    for schedule in random pct; do KIO_SIM_PROBE=1 KIO_SIM_SCHEDULE=$schedule just rs test -p kio || exit 1; done
+
+# Prove rs/kio/src/log.rs's Verus proof. Needs Verus: run it in `nix develop .#verus`
+# (Linux only). The `verify` package builds kio's sources with `vstd`, which kio itself
+# never depends on.
+verify:
+    cargo verus verify --locked --manifest-path rs/kio/verify/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}/verus"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, each datagram checked against QUIC's rules, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:

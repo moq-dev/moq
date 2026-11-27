@@ -14,7 +14,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn stops_on(signal: libc::c_int) {
-	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	let mut command =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"));
 	// The guard on host timers is for tests, not the binaries they run.
 	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.

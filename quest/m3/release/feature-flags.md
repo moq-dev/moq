@@ -49,7 +49,7 @@ judged, so this pass reads only the difference:
   - `async` in moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
     moq-e2ee, and moq-auth: the poll-first design (decided 2026-11-05 in
     [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607)), checked
-    by `just rs coroutines` (`kio` moved to `kixel-ai/kio` on 2026-11-25).
+    by `just rs coroutines`.
   - Vendor or system: moq-video's `nvidia`, `vaapi`, `mediacodec`, `v4l2`,
     `openh264` (a vendored C++ build), `vpx` (system libvpx), `pipewire`
     (libpipewire), and `render` (wgpu); moq-audio's `capture`, `playback`,

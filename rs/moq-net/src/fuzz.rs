@@ -2586,7 +2586,9 @@ mod tests {
 	/// found stays fixed on the stable toolchain, in the suite CI already runs.
 	#[test]
 	fn regressions() {
-		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/regressions");
+		let root =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("fuzz/regressions");
 
 		for (name, target) in TARGETS {
 			let dir = root.join(name);

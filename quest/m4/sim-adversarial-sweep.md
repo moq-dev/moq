@@ -14,10 +14,10 @@ Decided 2026-11-27 (maintainer, /quest-plan on kio's follow-ups).
 - ✅ The sweep runs on every PR if each pass stays within a few seconds,
   otherwise post-merge, with the measured cost in the PR (rejected: always
   post-merge).
-- Pattern: kio's `sweep` recipe in its
-  [justfile](https://github.com/kixel-ai/kio/blob/main/justfile) and the
-  module docs in its `src/clock/sim.rs`
-  ([kixel-ai/kio#10](https://github.com/kixel-ai/kio/pull/10)).
+- Pattern: `just rs sweep`, which Nightly runs over kio's own suite, and the
+  module docs in `rs/kio/src/clock/sim.rs`
+  ([kixel-ai/kio#10](https://github.com/kixel-ai/kio/pull/10)). Widen that
+  recipe rather than adding another.
 - Scope: 107 files name `kio::clock::sim` (moq-net 77, moq-relay 10,
   moq-tokio 9, moq-net-tests 5, a few others), and `#[kio::test]` runs every
   test it marks in the sim too, so the sweep covers far more than those files.
@@ -27,7 +27,3 @@ Decided 2026-11-27 (maintainer, /quest-plan on kio's follow-ups).
   such tests on one thread.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [kio main](/quest/m0/kio-main.md) - moves moq's kio pin past kixel-ai/kio#10, which added the schedules and the probe
