@@ -20,8 +20,10 @@ confirmed: the test feeds one frame to a freshly started codec. `submit` waits a
 then finds nothing pending and returns, so nothing comes out. A cold software encoder on a
 loaded emulator can take longer than 10 ms to hand out its first input buffer.
 
-1. Confirm the drop: run the test in a loop on an emulator under CPU load, with `RUST_LOG` at
-   debug for `no input buffer available, dropping a frame`.
+1. Confirm the drop: run the test in a loop on an emulator under CPU load, instrumented to
+   report whether the codec accepted the first input frame. `RUST_LOG` will not show the
+   existing debug line, since `just rs android-test` runs the binary through `adb shell`
+   without forwarding it, and the test installs no tracing subscriber.
 2. If it is the drop, the encoder is right to drop a frame it has no buffer for (a live source
    does not wait), and it already keeps a requested keyframe pending across a dropped frame.
    Recommended: the test feeds frames at the configured rate, as a live source does, and asserts

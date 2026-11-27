@@ -2,9 +2,9 @@
 
 ## Goal
 
-Nightly's `Media (firefox player)` (`just test media`, Firefox on the `ubuntu-24.04-arm`
-runner) passes every lifecycle step on every run, each failure fixed at its cause, never by a
-looser bound, a retry, or a longer wait.
+Nightly's `Media (firefox player)` (`just test media --media-engines firefox` on the
+`ubuntu-24.04-arm` runner) passes every lifecycle step on every run, each failure fixed at its
+cause, never by a looser bound, a retry, or a longer wait.
 
 ## Plan
 
@@ -21,8 +21,7 @@ Found by the Nightly triage of 2026-11-27. The job failed 6 of the 15 Nightly ru
   tone: after reattach`, 61 of 69 samples.
 - [45989796092](https://github.com/moq-dev/moq/actions/runs/45989796092) (`1322b2f681`):
   `rejoin reaches live`, a frame held 1533 ms behind against 1500 ms, `audio running and
-  buffering with nothing anchored`, last sample 302 ms old, and no long animation frames on
-  either page.
+  buffering with nothing anchored`, last sample 302 ms old.
 
 [moq-dev/moq#9620](https://github.com/moq-dev/moq/pull/9620) deleted the rejoin and reattach
 child after 12 of 12 focused ARM runs passed. Nothing in the player changed after that
@@ -33,8 +32,10 @@ measurement, so focused runs miss what the full job hits. The 11-26 triage dropp
    dispatching only that job (never the full Nightly), until it fails at least twice. Keep the
    pages' clocks, the relay log, and the player's buffer state at each failing step.
 2. Find whether the steps share a cause. Most failures read as audio that is running but
-   unanchored, or short of tone after a resume, which points at the player's audio re-anchor
-   after a lifecycle change rather than at host load, since neither page logged a long frame.
+   unanchored, or short of tone after a resume: either the player's audio re-anchor after a
+   lifecycle change, or a starved host. The harness's long-animation-frame count reads 0 on
+   Firefox, which has no such API, so it rules out neither: tell them apart by lining the
+   player's sample gaps up with the host trace the harness prints (`busiest host processes`).
 3. Fix each cause with a failing test first, in `js/watch` where the player is at fault, on a
    paused clock.
 
