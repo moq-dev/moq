@@ -4749,9 +4749,12 @@ export class Subscriber {
 			drift ??= this.#drift();
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
-			const read = max(max(this.#cursor.peek().start, this.#nextKey), this.#pastBudget(drift));
+			const read = max(this.#cursor.peek().start, this.#nextKey);
 			for (const runs of [this.#asked, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
-			cutRun(this.#adopted, 0n, read);
+			// Below where the budget passed, no fill is judged again, so no verdict is needed there. What
+			// this reader asked or gave up stays until its read passes it: a bounded read ends on those.
+			const passed = max(read, this.#pastBudget(drift));
+			cutRun(this.#adopted, 0n, passed);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -4759,7 +4762,7 @@ export class Subscriber {
 			// Below where the feed starts, only the history the copy's start rule leaves fillable.
 			const floor = fillFloor(producer, this.#window.start());
 			const { drops, refused } = this.#state;
-			const low = max(floor === undefined ? start : max(start, floor), read);
+			const low = max(floor === undefined ? start : max(start, floor), passed);
 			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
 			const above = max(low, edge);
 			const unknown = this.#unknownRuns(budget, coverage);
@@ -4860,17 +4863,20 @@ export class Subscriber {
 	// it handed out above a gap once that group is past the widest budget, since every key below is
 	// older and so past it too, as #forgetPastBudget reasons. That floor holds below a cached group
 	// no range covers, and an arrival read never raises its key cursor, so without this its fill
-	// verdicts since the join pile up and are judged again on every change. Only a widening lowers it.
+	// verdicts since the join pile up and are judged again on every change. Only a widening lowers it,
+	// found by bisecting what it passed, since staleness only grows with age.
 	#pastBudget(drift: Drift): bigint {
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		const widest = drift.budget.widest();
-		if (!this.#passed || widest > this.#passed.widest) this.#passed = { widest, key: floor };
-		const passed = this.#passed;
-		passed.widest = widest;
 		const judge = { ...drift, budget: Budget.uniform(widest) };
+		const stale = (key: bigint) => this.#staleAt(key, judge);
+		if (!this.#passed) this.#passed = { widest, key: floor };
+		const passed = this.#passed;
+		if (widest > passed.widest) passed.key = this.#delivered.lastAboveGap(floor, passed.key, stale) ?? floor;
+		passed.widest = widest;
 		for (
 			let next = this.#delivered.nextAboveGap(max(passed.key, floor));
-			next !== undefined && this.#staleAt(next, judge);
+			next !== undefined && stale(next);
 			next = this.#delivered.nextAboveGap(next)
 		) {
 			passed.key = next;

@@ -76,3 +76,19 @@ test("a run joins every run it touches, leaving the gaps around it", () => {
 	expect(delivered.runs).toBe(1);
 	expect([...delivered.gaps(0n, 20n)]).toEqual([]);
 });
+
+test("lastAboveGap bisects the run starts in its span", () => {
+	const delivered = new Delivered();
+	delivered.forgetBelow(10n);
+	for (const key of [20n, 21n, 30n, 40n, 50n]) delivered.add(key);
+	expect(delivered.nextAboveGap(9n)).toBe(20n);
+	expect(delivered.nextAboveGap(21n)).toBe(30n);
+	expect(delivered.nextAboveGap(50n)).toBeUndefined();
+	const below = (end: bigint) => (key: bigint) => key < end;
+	expect(delivered.lastAboveGap(10n, 50n, below(45n))).toBe(40n);
+	// Only starts in `(from, to]`: neither the floor's run nor one past `to`.
+	expect(delivered.lastAboveGap(20n, 40n, below(100n))).toBe(40n);
+	expect(delivered.lastAboveGap(10n, 35n, below(100n))).toBe(30n);
+	expect(delivered.lastAboveGap(10n, 50n, below(20n))).toBeUndefined();
+	expect(delivered.lastAboveGap(50n, 60n, below(100n))).toBeUndefined();
+});
