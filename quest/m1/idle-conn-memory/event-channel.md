@@ -21,8 +21,9 @@ once a burst crosses a block boundary. The 2026-11-27 idle profile
 ([epic](/quest/m1/idle-conn-memory/README.md)) measured 6.8 KiB at channel
 creation and 5.7 KiB from `Tx::find_block` growth per connection.
 
-Shrink the slot, not the queue: box the datagram event, or move the bulky
-fields out of the enum, so a block is a few hundred bytes. Check with the
-`fanout-heavy` heap profile that the added box does not show up as churn;
-if it does, keep a small per-connection queue that releases its storage once
-drained instead of tokio's block list.
+Reclaim the idle storage rather than boxing each event: the endpoint enqueues
+one event per routed datagram, so a box per event adds an allocation to every
+receive on a busy relay. Replace tokio's block list with a per-connection
+queue that reuses its storage under load and releases it once drained, or
+that starts small and grows, and confirm with the `fanout-heavy` heap profile
+that its churn does not rise.
