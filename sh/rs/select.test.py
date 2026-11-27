@@ -261,6 +261,39 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
 
+    def test_a_local_cross_lint_keeps_the_crates_that_name_a_platform(self):
+        def cross(strict):
+            with tempfile.TemporaryDirectory() as directory:
+                scratch = Path(directory)
+                # sh/rs/cross-lint.sh asks Nix for its toolchain first; stop there.
+                nix = scratch / "nix"
+                nix.write_text("#!/bin/sh\nexit 1\n")
+                nix.chmod(0o755)
+                changed = scratch / "changed"
+                changed.write_text("rs/hang/src/lib.rs\n")
+                env = dict(
+                    os.environ,
+                    LOCAL_SUPERVISED="1",
+                    PATH=f"{scratch}:{os.environ['PATH']}",
+                    BASH_ENV=os.devnull,
+                    GITHUB_ACTIONS="false",
+                    CI_STRICT="1" if strict else "",
+                )
+                result = subprocess.run(
+                    ["bash", "sh/rs/select.sh", "cross", str(changed)],
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                return re.search(r"^rs: cross-linting the crates that name a platform: (.*)$", result.stdout, re.M)
+
+        # hang names no platform, while moq-mux (a dependent) has macOS tests.
+        kept = cross(strict=False).group(1).split()
+        self.assertIn("moq-mux", kept)
+        self.assertNotIn("hang", kept)
+        self.assertIsNone(cross(strict=True))
+
     def test_io_uring_changes_test_the_relay(self):
         for path in ("rs/moq-uring/src/lib.rs", "rs/moq-relay/src/lib.rs"):
             with self.subTest(path=path):

@@ -76,7 +76,9 @@ async fn run(relay: bool, js_publishes: bool) {
 	let client = client.init(Default::default()).unwrap();
 
 	let spawn = |mode: &str| {
-		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/datagram-tracks/client.ts");
+		let script =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("../../test/datagram-tracks/client.ts");
 		let mut child = tokio::process::Command::new("bun")
 			.arg(script)
 			.arg(url.as_str())

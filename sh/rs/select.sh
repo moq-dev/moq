@@ -172,6 +172,20 @@ seeded() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$seed_names"
 }
 
+# The crates whose source or manifest names a platform: a cfg on the OS,
+# family, environment, vendor, or architecture, an OS-specific `std::os`
+# module, a build script reading the target, or a target-specific dependency.
+# Target pointer width and endianness are left out: the host and both cross
+# targets are 64-bit little-endian.
+platform_crates() {
+    local files rc=0
+    files=$(git grep --untracked -lE \
+        'target_(os|family|env|vendor|arch)([^a-z_]|$)|cfg(_attr)?!?\(.*[^a-z_:](unix|windows)([^a-z_]|$)|^[[:space:]]*(unix|windows)[[:space:]]*[,)]|std::os::|CARGO_CFG_TARGET_|^\[target\.([^.]*-|.*(unix|windows|target_))' \
+        -- 'rs/*.rs' 'rs/*/Cargo.toml' ':!rs/*/fuzz/**') || rc=$?
+    ((rc <= 1)) || return "$rc"
+    cut -d/ -f2 <<<"$files" | sort -u
+}
+
 # The `package/feature` pairs named by `required-features` on the targets of
 # the crates in $1 (every non-fuzz crate under ALL). Cargo skips a target whose
 # required features are off without a word. $2 is `tests` for tested targets
@@ -345,6 +359,26 @@ case "$action" in
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;
     platform | cross)
+        # A local cross lint covers only the selected crates that name a
+        # platform, where a macOS- or Windows-only error can hide. `just ci`
+        # (CI_STRICT), which the merge queue runs, lints every selected crate.
+        if [[ "$action" == cross && -z "${CI_STRICT:-}" ]]; then
+            if [[ "$packages" == ALL ]]; then
+                packages=$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[] | "--package \(.id)"' | tr '\n' ' ')
+            fi
+            platform=" $(
+                set -e
+                platform_crates | tr '\n' ' '
+            ) "
+            kept=()
+            for id in $packages; do
+                name=${id%%#*}
+                [[ "$id" == --package || "$platform" != *" ${name##*/} "* ]] || kept+=(--package "$id")
+            done
+            packages=${kept[*]-}
+            names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
+            echo "rs: cross-linting the crates that name a platform: ${names:-none}"
+        fi
         # moq-gst links GStreamer via pkg-config, which neither the runners nor
         # a cross build have.
         if [[ "$packages" == ALL ]]; then
