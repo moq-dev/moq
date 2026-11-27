@@ -1000,10 +1000,10 @@ GROUP Message {
 ### FRAME {#frame-message}
 ~~~
 FRAME Message {
-  Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END)
+  Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END); metadata: inflated size + 1
   [Timestamp Delta (i)],  ; zigzag-encoded signed delta; omitted if Timescale == 0
-  [Inflated Size (i)],    ; present iff Track Compression != none
-  Payload (..),
+  [Inflated Size (i)],    ; present iff Track Compression != none and not metadata
+  [Payload (..)],         ; absent on a metadata subscription
 }
 ~~~
 `Timestamp Delta` is a signed delta in `Timescale` ticks from the prior `FRAME`'s timestamp on this stream; the first `FRAME` of a stream counts from the `GROUP`'s Group Start, so frame 0's delta is `0`.
