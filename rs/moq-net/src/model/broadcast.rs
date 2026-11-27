@@ -1159,10 +1159,17 @@ impl Consumer {
 		self.lookup(name, false)
 	}
 
+	/// Get a lazy handle to a track's metadata: its groups and each frame's header, without
+	/// the payload. See [`meta`](crate::meta).
+	///
+	/// Fails as [`Self::track`] does.
+	pub fn meta(&self, name: &str) -> Result<crate::meta::Consumer, Error> {
+		self.track_meta(name).map(crate::meta::Consumer::new)
+	}
+
 	/// [`Self::track`] for what a metadata subscription reads: the metadata copy where the
 	/// broadcast's handler serves one apart, as a lite-07 session does with a metadata
 	/// subscription upstream, and otherwise the payload copy, whose headers the reader takes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn track_meta(&self, name: &str) -> Result<track::Consumer, Error> {
 		self.lookup(name, true)
 	}

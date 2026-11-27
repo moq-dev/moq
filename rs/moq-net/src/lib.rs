@@ -23,6 +23,9 @@
 //! Each level lives in its own module (`broadcast`, `track`, `group`, `frame`, `origin`,
 //! `announce`) that owns the short `Producer` / `Consumer` / `Info` names.
 //!
+//! [`meta`] reads a track's groups and each frame's header without the payload, as a
+//! subscription of its own beside payload subscriptions ([`broadcast::Consumer::meta`]).
+//!
 //! Traffic counters for the levels above live in [`stats`]: build a [`stats::Registry`]
 //! and hand each session a [`stats::Session`] via `Client::with_stats` /
 //! `Server::with_stats`. Publishing the counters as MoQ broadcasts lives in the

@@ -4944,7 +4944,6 @@ impl Consumer {
 
 	/// Give up the payload of the frame last handed out, as a header-only read does, so a copy
 	/// failing partway through that frame tears nothing and the read goes on from another route.
-	#[cfg(feature = "async")]
 	pub(crate) fn forget_payload(&mut self) {
 		self.cursor.partial = false;
 	}
