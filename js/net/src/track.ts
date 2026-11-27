@@ -4197,7 +4197,9 @@ export class Subscriber {
 	#lowestBuffered(delivered: Delivered, fresh = false): bigint | undefined {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		const drift = fresh ? this.#driftFetched() : undefined;
+		// Judged within this read's own window and cap, at the max age alone.
+		const own = fresh ? this.#drift() : undefined;
+		const drift = own && { ...own, budget: Budget.uniform(NO_MAX_DELAY).clamped(own.bound) };
 		for (let index = timelineIndex(groups, start); index < groups.length; index++) {
 			const key = groups[index].start;
 			if (end !== undefined && key >= end) return undefined;

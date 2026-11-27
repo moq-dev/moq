@@ -1447,22 +1447,6 @@ impl Subscriber {
 		let Some((_, newest)) = ready.next() else {
 			return;
 		};
-		// Searched once for every copy's verdicts.
-		let live = Arc::<track::Live>::default();
-		let unread = |copy: &Copy, sub: &track::Subscriber| {
-			let mut from = delivered.floor();
-			while let Some(group) = sub.lowest_unread(from) {
-				// Stale even at the track's max age, which bounds every budget: no budget reads it.
-				let stale = (copy.track)
-					.poll_stale(group.start, Duration::MAX, None, &live, &kio::Waiter::noop())
-					.is_ready();
-				if !delivered.contains(group.start) && !stale {
-					return Some(group.start);
-				}
-				from = group.start.checked_add(1)?;
-			}
-			None
-		};
 		// Every copy but the newest is replaced. Judged as the pick judges a copy under any
 		// budget, not by the verdict letting it go last made: a widened budget reads an expired
 		// copy again, so what it holds unread stays owed meanwhile, as on one track, until the
@@ -1474,7 +1458,7 @@ impl Subscriber {
 					.reads(copy, Duration::MAX, delivered, &kio::Waiter::noop())
 					.is_some()
 			})
-			.filter_map(|(copy, sub)| unread(copy, sub))
+			.filter_map(|(_, sub)| sub.lowest_owed(delivered.floor(), delivered))
 			.chain(keep)
 			.min();
 		newest.forget_past_budget(delivered, terms, kept);
@@ -1499,6 +1483,18 @@ impl Subscriber {
 				Sub::Pending(_) => None,
 			})
 			.min_by_key(|group| (group.start, !group.fetches_from(0), group.first_frame()))
+	}
+
+	/// The lowest group at or above `from` any copy holds unread that `delivered` lacks and
+	/// some budget still reads; see [`track::Subscriber::lowest_owed`].
+	pub(super) fn lowest_owed(&self, from: u64, delivered: &Delivered) -> Option<u64> {
+		let reader = self.reader();
+		(reader.copies.iter())
+			.filter_map(|copy| match &copy.sub {
+				Sub::Ready(sub) => sub.lowest_owed(from, delivered),
+				Sub::Pending(_) => None,
+			})
+			.min()
 	}
 
 	/// Poll for where the serving copy's live feed starts; see
@@ -3067,7 +3063,6 @@ impl Reader {
 		// Before any copy's group is judged against it, not when the read settles: one may have
 		// landed under an update another handle made since the last read.
 		self.reopen_folded(delivered);
-		self.rescan_drains(delivered, waiter);
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
 		let widest = self.mirrored.widest();
@@ -3226,6 +3221,10 @@ impl Reader {
 		if let Some(first) = first {
 			return Some(Poll::Ready(Ok(Some(first))));
 		}
+		// Nothing to hand out, so a group a copy was left to drain and no longer drains is asked
+		// of the serving route now, as a cursor asks a fill only once it holds nothing to read:
+		// a backlog draining meanwhile costs no rescan per group.
+		self.rescan_drains(delivered, waiter);
 		// A copy answering this pass may have placed the ranges the switch's backfill waits
 		// for: ask for it now, since no later group is sure to wake the read.
 		if self.resumed.is_some() && self.window().floor().is_some() {

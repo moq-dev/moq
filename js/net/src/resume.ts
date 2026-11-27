@@ -1549,8 +1549,13 @@ class Reader implements ResumeSource {
 			}
 		}
 		const resumed = this.#resumed;
+		// Nothing to hand out, so a group a copy was left to drain and no longer drains is asked of
+		// the serving route now, as a cursor asks a fill only once it holds nothing to read: a
+		// backlog draining meanwhile costs no rescan per group.
+		this.#rescanDrains(delivered);
 		this.#letGo(delivered);
-		// A copy let go with a group left to drain owes the serving route a backfill: ask now.
+		// A copy that stopped draining a group, or was let go with one, owes the serving route a
+		// backfill: ask now.
 		if (this.#resumed && !resumed) owed = true;
 		// A replaced copy that failed or was let go with a group to drain this pass owes the
 		// serving route a backfill once the window is placed: ask now, before any end, since its
@@ -1804,7 +1809,6 @@ class Reader implements ResumeSource {
 			copy.done = undefined;
 			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
 		}
-		this.#rescanDrains(this.#delivered);
 	}
 
 	// Re-arm the walk once a group a walk left a copy to drain, which the reader still lacks, no
@@ -1817,7 +1821,13 @@ class Reader implements ResumeSource {
 			if (copy.drains === undefined) continue;
 			for (const key of copy.drains) if (delivered.has(key)) copy.drains.delete(key);
 			const taking = copy.drains.size > 0 ? hooks.taking(copy.sub) : undefined;
-			if ([...copy.drains].every((key) => this.#mayDrain(copy, key, cursor, taking))) continue;
+			let drains = true;
+			for (const key of copy.drains) {
+				if (this.#mayDrain(copy, key, cursor, taking)) continue;
+				drains = false;
+				break;
+			}
+			if (drains) continue;
 			copy.drains = undefined;
 			this.#resumed = true;
 		}
@@ -2003,9 +2013,11 @@ class Reader implements ResumeSource {
 		const serving = this.#serving();
 		if (serving) this.#boundAtEnd(serving);
 		const resumed = this.#resumed;
+		// A group a copy no longer drains, which no read since has asked of the serving route.
+		this.#rescanDrains(this.#delivered);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
-		// A copy let go with a group left to drain owes the serving route a backfill first, which
-		// the next read asks.
+		// A copy that stopped draining a group, or was let go with one, owes the serving route a
+		// backfill first, which the next read asks.
 		if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
 			this.wake();
 			return false;

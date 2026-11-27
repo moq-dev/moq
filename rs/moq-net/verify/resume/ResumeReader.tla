@@ -237,7 +237,8 @@ DrainsBy(c, g) ==
 
 \* `Reader::rescan_drains`: a group `BackfillGaps` left a copy to drain, which
 \* the reader still lacks, that no longer drains there (its route evicted it,
-\* or the copy ran out or failed) re-arms the walk.
+\* or the copy ran out or failed) re-arms the walk. Checked only on a pass with
+\* nothing to hand out.
 Rescan(r) ==
     LET n == Len(r.copies)
         owed(i) == r.copies[i].drains \ r.dlv
@@ -357,14 +358,19 @@ Pass(r1) ==
     IF sc.best.g # None THEN [r |-> Take(r2, sc.best), cid |-> r2.copies[sc.best.i].id, g |-> sc.best.g]
     ELSE IF sc.late THEN Pass(BackfillGaps(r2))
     ELSE
-        LET drained == \E c \in Serving(r2) : c.done = "ok"
-            lg == LetGo(r2)
-            r4 == [r2 EXCEPT !.copies = lg.copies]
+        \* Nothing to hand out: only now are the drains rescanned.
+        LET r3 == Rescan(r2)
+        IN
+        IF r3.resumed THEN Pass(BackfillGaps(r3))
+        ELSE
+        LET drained == \E c \in Serving(r3) : c.done = "ok"
+            lg == LetGo(r3)
+            r4 == [r3 EXCEPT !.copies = lg.copies]
         IN
         IF lg.gaveUp THEN Pass(BackfillGaps([r4 EXCEPT !.resumed = TRUE]))
         ELSE [r |-> [r4 EXCEPT !.ended = PollEnd(r4, drained, lg.waits)], cid |-> 0, g |-> None]
 
-Poll(r) == Pass(BackfillGaps(Rescan(Sync(r, front))))
+Poll(r) == Pass(BackfillGaps(Sync(r, front)))
 
 \* What a clean end owes the reader: every group its serving route held once
 \* complete, and, as `resume_model`'s oracle owes, every group all live routes
