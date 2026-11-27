@@ -26,11 +26,13 @@ moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true }
 rustls = { version = "0.23", default-features = false }
-rustls-native-certs = { workspace = true }
+# The OS trust store for `wss://` dials given no TLS config, as moq-tokio verifies.
+rustls-platform-verifier = "0.7"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 tokio-rustls = { workspace = true }
-tokio-tungstenite = { workspace = true, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+# Only rustls itself: `ws::Client` always passes its own config, so tungstenite loads no roots.
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake", "__rustls-tls"] }
 # `poll_read_buf`, which reads into a `BytesMut` without zeroing it first.
 tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }
@@ -41,7 +43,7 @@ libc = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
-kio = { workspace = true, features = ["sim"] }
+kio = { path = "../kio", features = ["sim"] }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
 # A self-signed identity and the relay's crypto provider, for the bench example's TLS transports.

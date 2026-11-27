@@ -190,7 +190,9 @@ impl Running {
 		.await?;
 		let downstream_serve = Serving(downstream_serve);
 
-		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/relay-fill/relay.ts");
+		let script =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("../../test/relay-fill/relay.ts");
 		let mut child = tokio::process::Command::new("bun")
 			.arg(script)
 			.arg(upstream.as_str())

@@ -1140,7 +1140,8 @@ max_streams = 64
 	/// Real relay examples, packaging and test fixtures use the same loader as an embedding CLI.
 	#[test]
 	fn repository_configs_load() {
-		let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+		let manifest =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
 		// Only repository inputs belong here; installed clients and build output below
 		// test/ can contain unrelated TOML. Git's tracked list also includes new fixtures.
 		// Each glob names its files from this crate, so sh/rs/reads.sh finds the read
@@ -1152,7 +1153,7 @@ max_streams = 64
 		] {
 			let tracked = std::process::Command::new("git")
 				.args(["ls-files", "-z", "--", &format!(":(glob){area}")])
-				.current_dir(manifest)
+				.current_dir(&manifest)
 				.output()
 				.expect("list repository fixtures");
 			assert!(tracked.status.success());
@@ -1422,8 +1423,10 @@ ws = false
 	/// name in the NixOS module would stop every NixOS relay; catch it here first.
 	#[test]
 	fn the_nixos_module_sets_only_known_variables() {
-		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../nix/modules/moq-relay.nix");
-		let module = std::fs::read_to_string(path).unwrap();
+		let path =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("../../nix/modules/moq-relay.nix");
+		let module = std::fs::read_to_string(&path).unwrap();
 		let registry = crate::settings();
 
 		let mut unknown = Vec::new();
@@ -1443,7 +1446,8 @@ ws = false
 		}
 		assert!(
 			unknown.is_empty(),
-			"{path} sets variables moq-relay doesn't read: {unknown:?}"
+			"{} sets variables moq-relay doesn't read: {unknown:?}",
+			path.display()
 		);
 	}
 

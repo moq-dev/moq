@@ -41,7 +41,7 @@ use kio::clock::Instant;
 /// Microseconds from the moq epoch (2020) to `wall`, negative before it.
 fn moq_micros(wall: Wall) -> i128 {
 	let since = |from: Wall, to: Wall| to.saturating_duration_since(from).as_micros() as i128;
-	since(Wall::MOQ_EPOCH, wall) - since(wall, Wall::MOQ_EPOCH)
+	since(moq_net::time::EPOCH, wall) - since(wall, moq_net::time::EPOCH)
 }
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
@@ -396,7 +396,7 @@ mod tests {
 	}
 
 	fn moq_epoch() -> Wall {
-		Wall::MOQ_EPOCH
+		moq_net::time::EPOCH
 	}
 
 	fn us(v: u64) -> moq_net::Timestamp {
@@ -561,7 +561,7 @@ mod tests {
 	#[test]
 	fn unrepresentable_walls_are_refused() {
 		// One micro past the JSON-safe integer range: browsers would read a different number.
-		let far = Wall::MOQ_EPOCH + Duration::from_micros(MAX_SAFE_INTEGER + 1);
+		let far = moq_net::time::EPOCH + Duration::from_micros(MAX_SAFE_INTEGER + 1);
 		assert!(Clock::at(epoch(), far).is_err());
 
 		// Before 2020 cannot be named on the wire; saturating to the epoch would lie.

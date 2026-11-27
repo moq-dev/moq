@@ -12,7 +12,7 @@ use kio::clock::Instant;
 use moq_quic::TransportError;
 
 use crate::Error;
-use crate::session::{Inner, State};
+use crate::session::{Inner, Socket, State};
 use crate::transport::Transport;
 
 /// How long a closing session keeps the transport open to deliver its close and finish graceful
@@ -56,7 +56,10 @@ impl<T: Transport> Driver<T> {
 			woken: AtomicBool::new(true),
 			task: Mutex::new(None),
 		});
-		let socket = inner.socket_stats.clone();
+		let socket = match &inner.lock().socket {
+			Socket::Live(stats) => Some(stats.clone()),
+			Socket::Released { .. } => None,
+		};
 		let mut run = Run {
 			inner,
 			transport,
@@ -64,6 +67,7 @@ impl<T: Transport> Driver<T> {
 			inbound: Vec::new(),
 			reading: true,
 			unflushed: false,
+			unconfirmed: 0,
 			room: true,
 			phase: Phase::Open,
 			wire_read: None,
@@ -152,12 +156,8 @@ impl<T> Drop for Driver<T> {
 	fn drop(&mut self) {
 		if !matches!(self.run.phase, Phase::Done) {
 			self.run.read_wire(kio::clock::now());
+			self.run.release_socket();
 			finish(&self.run.inner, Err(Error::Closed));
-		}
-		// The socket statistics hold a duplicate of the descriptor, which would keep the
-		// connection open past the transport for as long as any session handle lives.
-		if let Some(socket) = &self.run.socket {
-			socket.shutdown();
 		}
 	}
 }
@@ -213,6 +213,9 @@ struct Run<T> {
 	reading: bool,
 	/// The last flush did not finish.
 	unflushed: bool,
+	/// Records the transport took that no flush has pushed out yet, so the connection still
+	/// counts their stream data and resets as unacknowledged.
+	unconfirmed: usize,
 	/// The transport took everything and flushed it, so the connection may hand over more.
 	room: bool,
 	phase: Phase,
@@ -311,9 +314,8 @@ impl<T: Transport> Run<T> {
 		drop(state);
 
 		// Take a record from the connection only once the transport is ready for it, so a
-		// stalled transport leaves unreliable datagrams in the connection to be shed, and report
-		// each one the transport took, which delivers its stream data. With nothing to send,
-		// `poll_transmit` parks us until a handle queues something.
+		// stalled transport leaves unreliable datagrams in the connection to be shed. With
+		// nothing to send, `poll_transmit` parks us until a handle queues something.
 		let mut written = 0;
 		let mut blocked = false;
 		while self.room && written < self.batch {
@@ -332,7 +334,7 @@ impl<T: Transport> Run<T> {
 			if let Err(err) = self.transport.send(record) {
 				return Step::Failed(err);
 			}
-			self.inner.lock().conn.transmitted();
+			self.unconfirmed += 1;
 		}
 
 		let mut state = self.inner.lock();
@@ -364,6 +366,14 @@ impl<T: Transport> Run<T> {
 			false => true,
 		};
 		self.unflushed = !flushed;
+		// Only a flush delivers what the transport buffered, a reset's stream data included, so
+		// only then may the connection count it acknowledged.
+		if flushed && self.unconfirmed > 0 {
+			let mut state = self.inner.lock();
+			for _ in 0..std::mem::take(&mut self.unconfirmed) {
+				state.conn.transmitted();
+			}
+		}
 		// Count only what reached the socket: the transport may hold records until its flush
 		// finishes, which then steps the driver again to publish them.
 		let moved = written > 0 || received;
@@ -441,11 +451,29 @@ impl<T: Transport> Run<T> {
 		self.phase = Phase::Done;
 		// The last count, which the stats keep after the session closes.
 		self.read_wire(kio::clock::now());
+		self.release_socket();
 		finish(&self.inner, result);
 	}
 }
 
 impl<T> Run<T> {
+	/// Shut the socket statistics down and drop them, keeping their last figures. They hold a
+	/// duplicate of the descriptor, which would keep the connection open past the transport for
+	/// as long as any session handle lives.
+	fn release_socket(&mut self) {
+		let Some(socket) = self.socket.take() else {
+			return;
+		};
+		let released = Socket::Released {
+			rtt: socket.rtt(),
+			rate: socket.estimated_send_rate(),
+		};
+		socket.shutdown();
+		drop(socket);
+		// The session's own reference, after which only a caller's copy keeps the descriptor.
+		self.inner.lock().socket = released;
+	}
+
 	/// Copy the socket's byte counts to the session's wire counters now.
 	fn read_wire(&mut self, now: Instant) {
 		self.wire_read = Some(now);

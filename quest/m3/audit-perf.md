@@ -95,6 +95,14 @@ such as `relay_auth_refresh`, is not attributable this way.
   decoder copies each sample twice (`js/hang/src/cmaf/decode.ts`), the FLV
   import each tag body twice, fMP4 and MKV export several times per payload,
   and WebRTC egress twice per frame per viewer (`rs/moq-webrtc/src/egress.rs`).
+- From the 2026-11-27 watch replay flake, profiled: `js/hang`'s container
+  `Consumer` visits every buffered group on each decoded frame (`#look` tries
+  each group's `tryReadFrame`, `#updateBuffered` rebuilds every range with an
+  `isSkipped` per pair, then `#checkMaxDelay`), so a long lookahead of
+  one-frame audio groups costs O(buffered groups) per frame: about a third of
+  the CPU of a replay whose 60 s lookahead held over a thousand groups
+  (`js/watch/src/audio/replay.test.ts`'s stalled utterance). Check whether
+  `rs/moq-mux`'s consumer shares it.
 - Single-axis fan-out benches to widen: `session_delivery_paced`,
   `track_fanout_*`, `memory`, and `bench/workloads/fanout*.toml`.
 - From the 2026-11-21 pre-cut full-codebase audit (maintainer, /quest-plan;

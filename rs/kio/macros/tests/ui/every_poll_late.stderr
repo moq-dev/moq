@@ -1,0 +1,5 @@
+error: `#[every_poll]` statements lead the body
+  --> tests/ui/every_poll_late.rs:19:3
+   |
+19 |         let now = 1;
+   |         ^^^^^^^^^^^^

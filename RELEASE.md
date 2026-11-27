@@ -31,8 +31,8 @@ packages, and an additive cut publishes patches under the current minor. Patch
 versions stay independent per package, including Rust: release-plz has no
 `version_group`.
 
-`qmux` and npm `@moq/qmux` keep their own version lines (`kio` and `kio-macros`
-live in `kixel-ai/kio`); `@moq/signals` joins the shared minor. New experiments start at `0.0.x`.
+`kio`, `kio-macros`, `qmux`, and npm `@moq/qmux` keep their own version lines;
+`@moq/signals` joins the shared minor. New experiments start at `0.0.x`.
 Dart's `moq` wrapper keeps its own 0.x version too, since Dart is
 experimental: no interop client runs it and nobody has loaded it on iOS. An
 interop client or a passing iOS run ends the exemption. `moq_ffi` stays on the

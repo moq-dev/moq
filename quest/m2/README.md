@@ -32,7 +32,7 @@ Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 - ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
   five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
   and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
-  and [kio crates.io publish](/quest/m0/kio-crates-io.md) to m0 as a direct
+  and kio's crates.io publish (since dropped: kio moved back into `rs/kio`) to m0 as a direct
   `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
   in m2).
 

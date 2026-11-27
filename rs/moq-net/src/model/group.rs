@@ -2730,8 +2730,9 @@ impl Producer {
 	/// frame its fastest reader took. Ingest passes its stream's receive credit (see
 	/// [`super::pace::window`]); a local writer passes [`super::pace::AHEAD`].
 	///
-	/// Ready at once while no reader holds the group, so a group nobody watches keeps
-	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
+	/// Ready at once while no reader is owed the group (see [`Handle::poll_unowed`]), so a
+	/// group nobody watches keeps writing and sheds its front, and once it is closed, so the
+	/// next write surfaces why.
 	/// A reader that took every committed frame is waiting on the writer, so a frame
 	/// larger than the window never stalls it, and one whose next frame was shed has
 	/// fallen off the group and is not waited on.
@@ -2742,8 +2743,8 @@ impl Producer {
 		if !pace.ahead(partial, window) {
 			return Poll::Ready(());
 		}
-		// Either wakes the writer: the last reader leaving, or the group closing.
-		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
+		// Either wakes the writer: nobody left to read the rest, or the group closing.
+		if self.handle.poll_unowed(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
 		match pace.paced(pace.park(waiter), partial, window) {
@@ -2760,7 +2761,7 @@ impl Producer {
 		if self.handle.state.is_closed() {
 			return None;
 		}
-		self.handle.alive.pace.room(partial, window, self.handle.state.wanted())
+		self.handle.alive.pace.room(partial, window, || self.handle.owed())
 	}
 
 	/// The non-writing observer used by the cache and built-in sessions.
@@ -3679,14 +3680,18 @@ impl Handle {
 	/// Create a new consumer for the group.
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn consume(&self) -> Consumer {
-		self.consumer(self.state.consume())
+		let state = self.state.consume();
+		self.alive.pace.hold();
+		self.consumer(state)
 	}
 
 	/// Create a consumer, or `None` once the group is aborted. Paired with
 	/// [`abort_unwanted`](Self::abort_unwanted): the closed check and the count share its
 	/// lock, so a consumer either exists in time to decline the abort or is never made.
 	pub(super) fn try_consume(&self) -> Option<Consumer> {
-		self.state.weak().try_consume().map(|state| self.consumer(state))
+		let state = self.state.weak().try_consume()?;
+		self.alive.pace.hold();
+		Some(self.consumer(state))
 	}
 
 	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
@@ -3794,6 +3799,59 @@ impl Handle {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_wanted_changed(waiter, true).map(drop)
+	}
+
+	/// Whether a reader is owed the rest of the group: one holds it, or none has yet and its
+	/// track still has a subscriber to hand it to.
+	fn owed(&self) -> bool {
+		// Held before counted: a reader is marked only once it counts, so seeing the mark first
+		// means its count shows too, unless it already left.
+		let held = self.alive.pace.held();
+		self.state.wanted() || (!held && self.cache.track().is_some_and(|track| track.wanted()))
+	}
+
+	/// Poll until no reader is owed the rest of the group: none holds it, and either one did
+	/// and left, or none has yet and its track has nobody left to hand it to. Ready once the
+	/// group closes too.
+	///
+	/// A group not yet handed out is owed to its track's subscribers, since a session ingests
+	/// only groups some reader asked for, and the first to pick it up reads from the start:
+	/// reading on before then would hold more than a window, or shed what that reader wants.
+	fn poll_unowed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			// Read before the count, as in `owed`.
+			let held = self.alive.pace.held();
+			if self.state.wanted() {
+				match self.state.poll_wanted_changed(waiter, true) {
+					Poll::Pending => return Poll::Pending,
+					Poll::Ready(Ok(_)) => continue,
+					Poll::Ready(Err(_)) => return Poll::Ready(()),
+				}
+			}
+			if held {
+				return Poll::Ready(());
+			}
+			// Nobody consuming the track, or the track gone or closed, leaves nobody to hand it to.
+			let Some(track) = self.cache.track() else {
+				return Poll::Ready(());
+			};
+			if track.poll_wanted_changed(waiter, true).is_ready() {
+				return Poll::Ready(());
+			}
+			match self.state.poll_wanted_changed(waiter, false) {
+				Poll::Ready(Ok(_)) => continue,
+				Poll::Ready(Err(_)) => return Poll::Ready(()),
+				// A reader that arrived and left before that registered shows only here.
+				// One that arrived since is still counted, and its arrival wakes `waiter`.
+				Poll::Pending => {
+					return if self.alive.pace.held() && !self.state.wanted() {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					};
+				}
+			}
+		}
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.

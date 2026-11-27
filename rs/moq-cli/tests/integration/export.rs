@@ -111,7 +111,8 @@ async fn relay() -> Relay {
 const LITE_07: &str = "moq-lite-07-wip";
 
 fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
-	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	let mut command =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"));
 	// The guard on host timers is for tests, not the binaries they run.
 	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
@@ -1147,11 +1148,12 @@ async fn repair_refuses_a_locked_recording() {
 
 /// Run `moq repair mp4` on the file.
 async fn moq_repair(path: &std::path::Path) -> std::process::Output {
-	let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
-		.env_remove("KIO_DENY_HOST_TIMERS")
-		.args(["repair", "mp4"])
-		.arg(path)
-		.output();
+	let output =
+		tokio::process::Command::new(std::env::var_os("CARGO_BIN_EXE_moq").expect("cargo sets CARGO_BIN_EXE_moq"))
+			.env_remove("KIO_DENY_HOST_TIMERS")
+			.args(["repair", "mp4"])
+			.arg(path)
+			.output();
 	kio::clock::timeout(TIMEOUT, output)
 		.await
 		.expect("repair never exited")

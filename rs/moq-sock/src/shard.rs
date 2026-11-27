@@ -141,7 +141,8 @@ pub enum Error {
 	/// address spelling that can overlap on a port (`[::]`, `0.0.0.0`, and any
 	/// specific address) must share one lock. Two groups on distinct addresses
 	/// sharing a port are refused although they could coexist, which is a loud
-	/// failure in place of silent traffic loss.
+	/// failure in place of silent traffic loss. Only a named port fails this way;
+	/// an ephemeral one draws another port.
 	#[error("another reuseport group already holds port {port}")]
 	Overlap {
 		/// The port both groups asked for.
@@ -298,8 +299,8 @@ pub struct Bound {
 	///
 	/// Declared first so it drops first: while a member is still bound, a probe
 	/// refuses the port anyway, but a lock outliving the last member would refuse
-	/// a group that drew the freed port, an ephemeral one included, with
-	/// [`Error::Overlap`].
+	/// a named group on the freed port with [`Error::Overlap`], and send an
+	/// ephemeral one to draw again.
 	_lock: Option<Lock>,
 	/// Every member in kernel order: one generation of `count`, or two with a handoff.
 	slots: Vec<UdpSocket>,
@@ -534,20 +535,31 @@ impl Socket {
 /// after binding, which lets the first member bind beside it without joining it:
 /// the kernel groups reuseport sockets by the group they were bound into, and
 /// this one was bound outside any.
+///
+/// The lock is keyed by port alone, so a group on another address can hold the
+/// lock for a port this address draws freely. Such a draw is kept and another
+/// drawn: holding it keeps the kernel from offering the port again, so the loop
+/// ends at a free lock or when the address runs out of ports.
 #[cfg(target_os = "linux")]
 fn ephemeral(addr: SocketAddr) -> Result<(SocketAddr, Option<Lock>, UdpSocket), Error> {
-	let held = crate::bind::udp(crate::bind::Udp::new(addr)).map_err(Error::Resolve)?;
-	socket2::SockRef::from(&held)
-		.set_reuse_port(true)
-		.map_err(Error::Resolve)?;
-	let mut addr = addr;
-	addr.set_port(held.local_addr().map_err(Error::Resolve)?.port());
+	let mut locked = Vec::new();
+	loop {
+		let held = crate::bind::udp(crate::bind::Udp::new(addr)).map_err(Error::Resolve)?;
+		let mut drawn = addr;
+		drawn.set_port(held.local_addr().map_err(Error::Resolve)?.port());
 
-	let port = addr.port();
-	let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
-	let first = crate::bind::udp(crate::bind::Udp::new(addr).with_reuse_port(true))
-		.map_err(|source| Error::Bind { index: 0, source })?;
-	Ok((addr, lock, first))
+		let Ok(lock) = Lock::acquire(drawn.port()) else {
+			locked.push(held);
+			continue;
+		};
+
+		socket2::SockRef::from(&held)
+			.set_reuse_port(true)
+			.map_err(Error::Resolve)?;
+		let first = crate::bind::udp(crate::bind::Udp::new(drawn).with_reuse_port(true))
+			.map_err(|source| Error::Bind { index: 0, source })?;
+		return Ok((drawn, lock, first));
+	}
 }
 
 /// Reuseport groups exist only on Linux, so there is no first member to bind.
@@ -703,6 +715,11 @@ impl Lock {
 /// the fallback instead of costing more protection than no value at all.
 #[cfg(target_os = "linux")]
 fn dir() -> Option<std::path::PathBuf> {
+	#[cfg(test)]
+	if let Some(dir) = tests::LOCK_DIR.with_borrow(Clone::clone) {
+		return Some(dir);
+	}
+
 	if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())
 		&& let Some(dir) = prepare(std::path::PathBuf::from(runtime).join("moq"))
 	{
@@ -984,6 +1001,12 @@ impl Program {
 
 #[cfg(test)]
 mod tests {
+	thread_local! {
+		/// A test's private lock directory in place of the shared one, which every
+		/// test process on the host contends on.
+		pub(super) static LOCK_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+	}
+
 	use super::*;
 
 	/// The length of the connection IDs a sharded endpoint issues.
@@ -1494,6 +1517,31 @@ mod tests {
 			let group = bind("127.0.0.1:0".parse().unwrap(), 1).unwrap();
 			assert!(!ports.contains(&group.addr().port()), "joined a held group");
 		}
+	}
+
+	/// An ephemeral group binds although another address's groups lock ports the
+	/// draw could land on: the lock is keyed by port alone, so a draw that lands on
+	/// one draws again instead of failing with [`Error::Overlap`].
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn an_ephemeral_group_draws_past_another_address_lock() {
+		// Locks of its own, so the 200 it holds refuse no other test's named port.
+		let dir = std::env::temp_dir().join(format!("moq-sock-test-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		LOCK_DIR.set(Some(dir.clone()));
+
+		let held: Vec<_> = (0..200)
+			.map(|_| bind("127.0.0.2:0".parse().unwrap(), 1).unwrap())
+			.collect();
+		let ports: std::collections::HashSet<_> = held.iter().map(|group| group.addr().port()).collect();
+
+		for _ in 0..1000 {
+			let group = bind("127.0.0.1:0".parse().unwrap(), 1).expect("an ephemeral group failed to bind");
+			assert!(!ports.contains(&group.addr().port()), "drew a locked port");
+		}
+
+		drop(held);
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 
 	/// A same-UID reuseport socket already on the address, one the lock cannot
