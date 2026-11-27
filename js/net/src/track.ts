@@ -3695,9 +3695,9 @@ export class Subscriber {
 	// or once it expires, which must not reopen what this reader already gave up. Only a wider budget
 	// takes a stale one back, and the read passing it forgets it. Mirrors the Rust `Misses::adopt_drops`.
 	#adopted: DropRun[] = [];
-	// The newest group handed out above a gap that is past the widest budget it was judged under;
-	// see #pastBudget.
-	#passed?: { widest: number; key: bigint };
+	// Each group handed out above a gap, from the hand-out floor up, whose reach media time put past
+	// the widest budget it was judged under, with that reach; see #pastBudget.
+	#passed?: { widest: number; steps: { key: bigint; reach: number }[] };
 	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
 	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
 	// what it still reads, so a widening back over one asks it afresh.
@@ -4059,8 +4059,9 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
-		// A late group below what the fill floor passed may reach later than the groups it was judged by.
-		if (this.#passed && key < this.#passed.key) this.#passed = undefined;
+		// A late group below what the fill floor passed opens the gaps above it to be judged again.
+		const steps = this.#passed?.steps;
+		while (steps && steps.length > 0 && steps[steps.length - 1].key >= key) steps.pop();
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -4872,26 +4873,40 @@ export class Subscriber {
 	// every key below past it too (see #staleByMedia). That floor holds below a cached group no range
 	// covers, and an arrival read never raises its key cursor, so without this its fill verdicts since
 	// the join pile up and are judged again on every change. A scale-less track has no media time, and
-	// an unchecked one's timestamps may rewind, so their floor stays. What it passed is only proven
-	// under the budget and the groups it judged by, so a widening, or a group handed out below it (see
-	// #handOut), walks it again from the hand-out floor.
+	// an unchecked one's timestamps may rewind, so their floor stays.
+	//
+	// The groups it passed are kept as steps with the reach each was judged by, which never falls
+	// from one step to the next. A widening takes back the newest steps until one is past the wider
+	// budget, and a group handed out below a step (see #handOut) takes back the steps from it up, so
+	// each costs what it undoes rather than the history since the join.
 	#pastBudget(drift: Drift): bigint {
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		if (this.#state.info.peek()?.unchecked === true) return floor;
 		const widest = drift.budget.widest();
-		const judge = { ...drift, budget: Budget.uniform(widest) };
-		const stale = (key: bigint) => this.#staleByMedia(key, judge);
-		if (!this.#passed || widest > this.#passed.widest) this.#passed = { widest, key: floor };
+		const edge = this.#arrivals ? undefined : drift.presentation;
+		const past = (key: bigint, reach: number | undefined) =>
+			edge !== undefined && reach !== undefined && edge.key > key && edge.at - reach >= widest;
+		this.#passed ??= { widest, steps: [] };
 		const passed = this.#passed;
+		const steps = passed.steps;
+		let below = 0;
+		while (below < steps.length && steps[below].key < floor) below++;
+		if (below > 0) steps.splice(0, below);
+		if (widest > passed.widest) {
+			while (steps.length > 0 && !past(steps[steps.length - 1].key, steps[steps.length - 1].reach)) steps.pop();
+		}
 		passed.widest = widest;
+		const top = () => max(steps[steps.length - 1]?.key ?? floor, floor);
 		for (
-			let next = this.#delivered.nextAboveGap(max(passed.key, floor));
-			next !== undefined && stale(next);
+			let next = this.#delivered.nextAboveGap(top());
+			next !== undefined;
 			next = this.#delivered.nextAboveGap(next)
 		) {
-			passed.key = next;
+			const reach = this.#reach(next, drift.end, drift.scope);
+			if (reach === undefined || !past(next, reach)) break;
+			steps.push({ key: next, reach });
 		}
-		return max(passed.key, floor);
+		return top();
 	}
 
 	// Take what changed since the last probe as unjudged again: every key once the terms it
