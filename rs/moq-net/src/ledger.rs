@@ -180,6 +180,33 @@ impl Ledger {
 		}
 	}
 
+	/// Stop counting `key` as accounted for: a group that left before it was whole, which a
+	/// later feed sends again. The gap it leaves opened at `now`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn forget(&mut self, key: u64, now: Instant) {
+		let Some((&start, run)) = self.runs.range(..=key).next_back() else {
+			return;
+		};
+		if key >= run.end {
+			return;
+		}
+		let (end, since) = (run.end, run.since);
+		self.remove(start);
+		if start < key {
+			self.ages.insert((since, start));
+			self.runs.insert(start, Run { end: key, since });
+			self.changes.insert(start..key);
+		}
+		if let Some(next) = key.checked_add(1)
+			&& next < end
+		{
+			self.ages.insert((now, next));
+			self.runs.insert(next, Run { end, since: now });
+			self.changes.insert(next..end);
+		}
+		while self.runs.len() > MAX_RUNS && self.fold_oldest().is_some() {}
+	}
+
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
 		let Some((&first, _)) = self.runs.first_key_value() else {
@@ -412,6 +439,24 @@ mod tests {
 		);
 		assert_eq!(ledger.gaps(4..6).collect::<Vec<_>>(), vec![(4..5, Some(later))]);
 		assert_eq!(ledger.gaps(5..6).count(), 0, "covered");
+	}
+
+	/// A forgotten key reopens as a gap as late as when it was forgotten, splitting its run;
+	/// one never accounted for changes nothing.
+	#[test]
+	fn a_forgotten_key_is_a_fresh_gap() {
+		let now = Instant::now();
+		let later = now.saturating_add(GRACE);
+		let mut ledger = Ledger::default();
+		arrive(&mut ledger, 0..5, now);
+		ledger.forget(2, later);
+		assert_eq!(groups(&ledger), vec![0..2, 3..5]);
+		assert_eq!(ledger.gaps(0..5).collect::<Vec<_>>(), vec![(2..3, Some(later))]);
+		ledger.forget(0, later);
+		ledger.forget(4, later);
+		assert_eq!(groups(&ledger), vec![1..2, 3..4]);
+		ledger.forget(7, later);
+		assert_eq!(groups(&ledger), vec![1..2, 3..4]);
 	}
 
 	/// A gap older than the grace folds away, so a lossy track keeps only the gaps it can

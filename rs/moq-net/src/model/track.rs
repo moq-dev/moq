@@ -513,10 +513,6 @@ enum TailState {
 	/// Received copy whose wire subscription is still delivering up to `at`, waiting since the
 	/// recorded instant.
 	Pending(crate::time::Instant),
-	/// Received copy whose feed went idle with a group below `at` still open, which left the
-	/// cache with it: what the copy holds is no longer the whole track, so only the next
-	/// feed's settled tail ends it, however long that feed takes to come.
-	Owed,
 	/// Received copy whose wire subscription settled its tail: no further live groups arrive.
 	Settled,
 }
@@ -525,19 +521,19 @@ impl TailState {
 	fn pending(self) -> Option<crate::time::Instant> {
 		match self {
 			Self::Pending(at) => Some(at),
-			Self::Local | Self::Owed | Self::Settled => None,
+			Self::Local | Self::Settled => None,
 		}
 	}
 
 	fn pending_mut(&mut self) -> Option<&mut crate::time::Instant> {
 		match self {
 			Self::Pending(at) => Some(at),
-			Self::Local | Self::Owed | Self::Settled => None,
+			Self::Local | Self::Settled => None,
 		}
 	}
 
 	fn is_received(self) -> bool {
-		matches!(self, Self::Pending(_) | Self::Owed | Self::Settled)
+		matches!(self, Self::Pending(_) | Self::Settled)
 	}
 }
 
@@ -4460,8 +4456,7 @@ impl TrackState {
 	/// Only such a hole holds readers, so a tail with nothing missing ends them at once.
 	fn awaits_tail(&self, fin: u64) -> bool {
 		// Nothing arrives after an abort, so a hole left then is final.
-		self.outcome.aborted().is_none()
-			&& (self.outcome.end().is_some_and(|end| end.tail == TailState::Owed) || self.owes(fin))
+		self.outcome.aborted().is_none() && self.owes(fin)
 	}
 
 	/// Whether the tail misses a key from where the feed starts up to `fin` that is
@@ -4649,17 +4644,21 @@ impl TrackState {
 			.filter(|(_, slot)| slot.visible && !slot.is_aborted() && !slot.copies().any(group::Handle::is_finished))
 			.map(|(&key, _)| key)
 			.collect();
-		// Below a declared end, the arrivals still count such a group delivered, so the end
-		// would read the cache as the whole track without it: the next feed owes the tail.
+		// Nor does it count as delivered, or an end, declared already or by the next feed, would
+		// read the cache as the whole track without it: the tail waits for it again, a grace
+		// from now, as for any group still to come below the end.
+		let now = self.cache.pool().now_wall();
 		if !open.is_empty()
 			&& let Outcome::Ending(end) = &mut self.outcome
 			&& end.tail.is_received()
 		{
-			end.tail = TailState::Owed;
+			end.tail = TailState::Pending(now);
 		}
 		for key in open {
 			self.displace(key);
+			self.arrivals.forget(key, now);
 		}
+		self.bill_arrivals();
 		// Largest names an object, so an empty group holds nothing to judge.
 		let held = self
 			.lookup
@@ -17424,18 +17423,29 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![3]);
 	}
 
-	/// A copy that goes idle with a group below its declared end still open drops that group,
-	/// so its cache is no longer the whole track: a returning reader waits for the next feed
-	/// to send it again, rather than ending without it, whether or not the ended feed had
-	/// settled its tail.
+	/// A copy that goes idle with a group still open drops that group, which the next feed
+	/// sends again, so a returning reader waits for it whatever end was declared and in
+	/// whichever order: an end the ended feed declared, pending or settled, or one the next
+	/// feed declares before the group arrives. One that never comes leaves an abort, not a
+	/// clean end without it.
 	#[test]
-	fn an_idle_copy_owes_a_group_it_dropped_below_its_end() {
-		for settled in [false, true] {
+	fn an_idle_copy_waits_for_a_group_it_dropped() {
+		#[derive(Clone, Copy, Debug, PartialEq)]
+		enum Case {
+			EndedPending,
+			EndedSettled,
+			EndedLater,
+			Aborted,
+		}
+		for case in [Case::EndedPending, Case::EndedSettled, Case::EndedLater, Case::Aborted] {
 			let mut producer = track_producer("test", Info::default());
 			producer.received();
+			producer.proven();
 			let open = framed(&producer, 0, 1);
-			producer.finish_at(Position::group(1)).unwrap();
-			if settled {
+			if case != Case::EndedLater {
+				producer.finish_at(Position::group(1)).unwrap();
+			}
+			if case == Case::EndedSettled {
 				producer.finish_shared().unwrap();
 			}
 			// The last reader left before the group's stream finished.
@@ -17443,29 +17453,35 @@ mod test {
 			drop(open);
 
 			let mut reader = producer.subscribe(Subscription::default());
+			let noop = kio::Waiter::noop();
+			if case == Case::Aborted {
+				producer.abort(Error::Cancel).unwrap();
+				assert!(
+					matches!(reader.poll_recv_group(&noop), Poll::Ready(Err(_))),
+					"{case:?}: the copy never held the whole track"
+				);
+				continue;
+			}
 			let (woken, waiter) = Flag::waiter();
-			assert!(
-				reader.poll_recv_group(&waiter).is_pending(),
-				"settled={settled}: the copy no longer holds group 0"
-			);
+			assert!(reader.poll_recv_group(&waiter).is_pending(), "{case:?}");
 
-			// The next feed answers and sends the group again, then settles the same end.
+			// The next feed answers and may repeat the end before the group lands again.
 			producer
 				.set_live(Some(Position::group(0)), Some(true), Some(0))
 				.unwrap();
-			framed(&producer, 0, 1).finish().unwrap();
 			producer.finish_at(Position::group(1)).unwrap();
+			assert!(reader.poll_recv_group(&waiter).is_pending(), "{case:?}: the end alone");
+			framed(&producer, 0, 1).finish().unwrap();
 			producer.finish_shared().unwrap();
-			assert!(woken.take(), "settled={settled}: the group wakes the reader");
-			let noop = kio::Waiter::noop();
+			assert!(woken.take(), "{case:?}: the group wakes the reader");
 			let Poll::Ready(Ok(Some(mut group))) = reader.poll_recv_group(&noop) else {
-				panic!("settled={settled}: group 0 arrives");
+				panic!("{case:?}: group 0 arrives");
 			};
-			assert_eq!(group.start, 0, "settled={settled}");
+			assert_eq!(group.start, 0, "{case:?}");
 			assert!(matches!(group.poll_read_frame(&noop), Poll::Ready(Ok(Some(_)))));
 			assert!(
 				matches!(reader.poll_recv_group(&noop), Poll::Ready(Ok(None))),
-				"settled={settled}: then the track ends"
+				"{case:?}: then the track ends"
 			);
 		}
 	}
