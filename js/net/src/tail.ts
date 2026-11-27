@@ -14,7 +14,7 @@ export interface TailOptions {
 
 /** A group stream a {@link Tail} counts, from its header until it is read to its end. */
 export interface Counted {
-	/** Mark it read to its end. Idempotent. */
+	/** Stop holding the end open for it: read to its end, or a drop accounted for its group. Idempotent. */
 	done(): void;
 	/** Stop holding the end open while it waits, unread, on a copy another stream delivers. Idempotent. */
 	park(): void;
@@ -183,10 +183,10 @@ export class Tail {
 	 * Wait until every stream is read to its end and `complete()` holds, or the grace passes
 	 * with nothing left being read, or `closed` settles.
 	 *
-	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset, or on
-	 * lite-07 the drop naming its group, never because its track ended. The grace gives up on
-	 * streams that never arrived, and `limit` caps it. With no grace nothing is timed: every start
-	 * waits for the wire to account for it.
+	 * A stream still being read is waited for, until its own FIN or reset, or a drop naming its
+	 * group lets go of it (see {@link Counted.done}): a group never ends because its track ended. The
+	 * grace gives up on streams that never arrived, and `limit` caps it. With no grace nothing is
+	 * timed: every start waits for the wire to account for it.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
