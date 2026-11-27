@@ -121,9 +121,7 @@ function containerFormat(config: Catalog.VideoConfig | Catalog.AudioConfig, kind
 }
 
 async function video(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.VideoConfig): Promise<number> {
-	const sub = bc
-		.track(name)
-		.subscribe({ ranges: [{ start: { live: { min: MAX_DELAY, max: MAX_DELAY } } }] });
+	const sub = bc.track(name).subscribe({ ranges: [{ start: { live: { min: MAX_DELAY, max: MAX_DELAY } } }] });
 	const consumer = new Container.Consumer(sub, {
 		format: containerFormat(config, "video"),
 		delay: { min: null, max: MAX_DELAY },
