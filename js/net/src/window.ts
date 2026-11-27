@@ -848,6 +848,27 @@ export class Window {
 	}
 
 	/**
+	 * The ranges covering group `key`, by key, each with the budget in milliseconds `rangeOf` its key
+	 * gives, these ranges as given by default: a range not yet placed may cover any group up to its
+	 * end, as in {@link budget}. Mirrors the Rust `Window::covering`.
+	 */
+	covering(key: bigint, rangeOf = (id: bigint) => this.#ranges.get(id)): [bigint, number][] {
+		const ids: bigint[] = [];
+		for (const [id, span] of this.#spans)
+			if (span.reads && span.reads.start <= key && key < span.reads.end) ids.push(id);
+		for (const id of [...this.#pending, ...this.#reaching]) {
+			const range = rangeOf(id);
+			if (range !== undefined && !isEmpty(range) && (range.end === undefined || range.end >= key)) ids.push(id);
+		}
+		const covering: [bigint, number][] = [];
+		for (const id of ids) {
+			const range = rangeOf(id);
+			if (range !== undefined) covering.push([id, rangeBudget(range)]);
+		}
+		return covering;
+	}
+
+	/**
 	 * {@link budget} with each range's staleness taken from `ranges`, by key, rather than from the
 	 * range it was placed as: a front's reader places a live join where a copy resolved it, as a time
 	 * start, and the join's groups still go stale past its max. Mirrors the Rust `Window::budget_of`.

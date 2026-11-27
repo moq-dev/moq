@@ -1505,6 +1505,16 @@ impl Subscriber {
 		})
 	}
 
+	/// The reader's ranges covering group `key`; see [`track::Subscriber::covering`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn covering(&self, key: u64) -> Vec<(u64, std::time::Duration)> {
+		let mut reader = self.reader();
+		reader.window();
+		let reader = &*reader;
+		// Placed where its copies resolved them, each stale as the reader asked.
+		reader.window.covering(key, |id| reader.mirrored.ranges.get(&id))
+	}
+
 	/// The reader's ranges keyed in `keys` while their time starts wait; see
 	/// [`track::Subscriber::waiting_keys`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

@@ -639,6 +639,28 @@ impl Window {
 			.collect()
 	}
 
+	/// The range keyed `key`, as given.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn range(&self, key: u64) -> Option<&Range> {
+		self.ranges.get(&key)
+	}
+
+	/// The ranges covering group `key`, by key, each with the budget `range` of its key gives: a
+	/// range not yet placed may cover any group up to its end, as in [`Self::budget`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn covering<'a>(&self, key: u64, range: impl Fn(u64) -> Option<&'a Range>) -> Vec<(u64, Duration)> {
+		let placed = (self.spans.iter())
+			.filter(|(_, span)| span.groups.as_ref().is_some_and(|run| run.contains(&key)))
+			.map(|(id, _)| *id);
+		let unplaced = (self.pending.iter().chain(&self.reaching))
+			.copied()
+			.filter(|id| range(*id).is_some_and(|range| !range.is_empty() && range.end.is_none_or(|last| last >= key)));
+		placed
+			.chain(unplaced)
+			.filter_map(|id| range(id).map(|range| (id, range.budget())))
+			.collect()
+	}
+
 	/// [`Self::budget`] with each range's staleness taken from `ranges`, by key, rather than
 	/// from the range it was placed as: a front's reader places a live join where a copy
 	/// resolved it, as a time start, and the join's groups still go stale past its `max`.

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { NO_MAX_DELAY } from "../internal.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import type { Range } from "../track.ts";
@@ -9,9 +10,11 @@ import { MAX_MESSAGE_SIZE } from "./message.ts";
 import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
+	groupPolicy,
 	inclusiveGroupEnd,
 	LiveRanges,
 	legacyStart,
+	type Policy,
 	positionFrames,
 	positionStops,
 	type Retune,
@@ -748,6 +751,41 @@ test("a subscription runs at its most urgent range's policy", () => {
 		order: "descending",
 	});
 	expect(subscriptionPolicy([])).toEqual({ priority: 0, order: "descending" });
+});
+
+// A group goes out at the highest priority among the ranges still wanting it, at that priority's
+// order with newest first breaking a tie, and falls to the next once it ages past the budget of
+// every range at the top.
+test("lite draft-07: a group goes out at the top range still wanting it", () => {
+	const policies = new Map<bigint, Policy>([
+		[0n, { priority: 5, order: "ascending" }],
+		[1n, { priority: 5, order: "descending" }],
+		[2n, { priority: 1, order: "ascending" }],
+	]);
+	const steer = { whole: { priority: 9, order: "ascending" as const }, policy: (id: bigint) => policies.get(id) };
+	const [short, long] = [1000, 2000];
+
+	const covers: [bigint, number][] = [
+		[0n, long],
+		[1n, short],
+		[2n, NO_MAX_DELAY],
+	];
+	// Newest first breaks a tie.
+	expect(groupPolicy(steer, covers)).toEqual({ policy: { priority: 5, order: "descending" }, lasts: short });
+	// The order of the range left at the top.
+	expect(groupPolicy(steer, covers, short)).toEqual({ policy: { priority: 5, order: "ascending" }, lasts: long });
+	// History keeps the group at its own priority.
+	expect(groupPolicy(steer, covers, long)).toEqual({ policy: { priority: 1, order: "ascending" } });
+	// A range ranked below that ages first lowers nothing.
+	expect(
+		groupPolicy(steer, [
+			[0n, long],
+			[2n, short],
+		]),
+	).toEqual({ policy: { priority: 5, order: "ascending" } });
+	// A retired range leaves the subscription's.
+	expect(groupPolicy(steer, [[7n, long]])).toEqual({ policy: steer.whole });
+	expect(groupPolicy(steer, [])).toEqual({ policy: steer.whole });
 });
 
 // No earlier wire has `Group Order`, so an ascending subscription falls back to descending,
