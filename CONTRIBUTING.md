@@ -35,7 +35,7 @@ Run `just ci` before every push, and mark the PR ready yourself when the work is
 
 # Landing gate
 
-No CI runs on pull requests: run `just ci` locally before every push. PRs into `main` get their verdict from the merge queue; **Queue** reports as skipped until queued. `release` has no merge queue, so a PR into it runs `just gate` locally before pushing, plus `just api-diff --deny` for a backport (see [RELEASE.md](RELEASE.md)).
+No CI runs on pull requests: run `just ci` locally before every push. PRs into `main` get their verdict from the merge queue; **Queue** reports as skipped until queued. `release` has no merge queue, so once the next cut lands, a PR into it runs `just gate` locally before pushing, plus `just api-diff --deny` for a backport (see [RELEASE.md](RELEASE.md)).
 `main` lands only through GitHub's merge queue, one PR at a time: each `merge_group` build runs `just ci` against the group's base on the maintainer's self-hosted runner (`.github/workflows/queue.yml`, which calls main's `queue-build.yml`, whose last job posts the required **Queue** context), and the queue squashes exactly the tree it tested.
 Request landing with `quest merge <pr> --land <full-head-sha>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
