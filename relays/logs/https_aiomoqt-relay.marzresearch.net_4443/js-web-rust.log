@@ -1,15 +1,15 @@
-[2m2026-11-27T12:56:19.341338Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m2385804827034250 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-27T12:56:19.354038Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-27T12:56:19.354064Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-27T12:56:19.366570Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-27T12:56:19.368115Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://aiomoqt-relay.marzresearch.net:4443
-[2m2026-11-27T12:56:19.577727Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-27T12:56:19.577771Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://aiomoqt-relay.marzresearch.net:4443
-[2m2026-11-27T12:56:20.845488Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-js-web-4277-11624.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-27T12:56:21.013999Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-js-web-4277-11624.hang [3mtrack[0m[2m=[0mvideo
-[2m2026-11-27T12:56:21.186342Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-js-web-4277-11624.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-27T12:56:21.186392Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-js-web-4277-11624.hang [3mtrack[0m[2m=[0mvideo
-[2m2026-11-27T12:56:21.244407Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m subscribe_namespace failed, continuing without [3merr[0m[2m=[0mtransport: invalid RESET_STREAM: 386759528
-[2m2026-11-27T12:56:21.244603Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m goaway error [3merr[0m[2m=[0mtransport: invalid RESET_STREAM: 386759528
-[2m2026-11-27T12:56:21.349662Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
+[2m2026-11-27T17:55:18.875372Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m3826623108339425 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-27T17:55:18.884644Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-27T17:55:18.884666Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-27T17:55:18.891734Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-27T17:55:18.891758Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://aiomoqt-relay.marzresearch.net:4443
+[2m2026-11-27T17:55:19.097067Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-27T17:55:19.097105Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://aiomoqt-relay.marzresearch.net:4443
+[2m2026-11-27T17:55:20.042306Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-js-web-4049-6145.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-27T17:55:20.213183Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-js-web-4049-6145.hang [3mtrack[0m[2m=[0mvideo
+[2m2026-11-27T17:55:22.396616Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-js-web-4049-6145.hang [3mtrack[0m[2m=[0mvideo
+[2m2026-11-27T17:55:22.396657Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-js-web-4049-6145.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-27T17:55:22.450705Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m goaway error [3merr[0m[2m=[0mtransport: invalid RESET_STREAM: 386759528
+[2m2026-11-27T17:55:22.450761Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m subscribe_namespace failed, continuing without [3merr[0m[2m=[0mtransport: invalid RESET_STREAM: 386759528
+[2m2026-11-27T17:55:22.561747Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
 Error: Broken pipe (os error 32)

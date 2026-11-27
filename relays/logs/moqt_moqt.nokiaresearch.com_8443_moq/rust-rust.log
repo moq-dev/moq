@@ -1,21 +1,18 @@
-[2m2026-11-27T12:59:40.545722Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6677134845634009 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-27T12:59:40.549013Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-27T12:59:40.549028Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-27T12:59:40.552441Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-27T12:59:40.553213Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
-[2m2026-11-27T12:59:40.756247Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-27T12:59:40.756291Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m629.302168ms
-[2m2026-11-27T12:59:41.387066Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
-[2m2026-11-27T12:59:41.501308Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-27T12:59:41.501339Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.044264501s
-[2m2026-11-27T12:59:42.546553Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
-[2m2026-11-27T12:59:42.667396Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-27T12:59:42.667431Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.805784977s
-[2m2026-11-27T12:59:45.474337Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
-[2m2026-11-27T12:59:45.593403Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-27T12:59:45.593437Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m3.796234044s
-[2m2026-11-27T12:59:49.390665Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
-[2m2026-11-27T12:59:49.543300Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
-[2m2026-11-27T12:59:49.543336Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.00987202s
-[2m2026-11-27T12:59:50.554536Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: aborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-27T17:58:13.069722Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m5731238140225862 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-27T17:58:13.073642Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-27T17:58:13.073657Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-27T17:58:13.078701Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
+[2m2026-11-27T17:58:13.078930Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-27T17:58:13.277297Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-27T17:58:13.277315Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m984.033768ms
+[2m2026-11-27T17:58:14.262467Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
+[2m2026-11-27T17:58:14.411117Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-27T17:58:14.411155Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.656756661s
+[2m2026-11-27T17:58:16.068989Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
+[2m2026-11-27T17:58:16.226738Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-27T17:58:16.226783Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.208501989s
+[2m2026-11-27T17:58:18.436207Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moqt.nokiaresearch.com:8443
+[2m2026-11-27T17:58:18.594347Z[0m [33m WARN[0m [2mmoq_tokio::client[0m[2m:[0m QUIC connection failed [3merr[0m[2m=[0maborted by peer: the cryptographic handshake failed: error 120
+[2m2026-11-27T17:58:18.594384Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m4.484313151s
+[2m2026-11-27T17:58:23.079732Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: aborted by peer: the cryptographic handshake failed: error 120
 Error: reconnect timed out after 10s: aborted by peer: the cryptographic handshake failed: error 120
