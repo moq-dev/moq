@@ -50,7 +50,7 @@ Public API: a preflight check and its report type, and a CLI sink. Wire: none.
 ## Required
 
 - [Rust reporters](/quest/m3/stats/rust.md) - a publisher with a stats track for the end-to-end proof
-- [Client health in use](/quest/m1/health-consumers.md) - re-exports `hang::health` and restores `doc/concept/stats.md#health`
+- [Client health in use](/quest/m1/health-consumers.md) - the per-connection media counter and re-measured limits the health verdict grades on
 
 ## Related
 
