@@ -4192,14 +4192,17 @@ export class Subscriber {
 		if (forgot !== undefined && delivered === this.#delivered) this.#judge(0n, forgot);
 	}
 
-	// The lowest group buffered unread within this reader's range and window, not in `delivered`.
-	#lowestBuffered(delivered: Delivered): bigint | undefined {
+	// The lowest group buffered unread within this reader's range and window, not in `delivered`. With
+	// `fresh`, only one not stale even at the track's max age, which bounds every budget.
+	#lowestBuffered(delivered: Delivered, fresh = false): bigint | undefined {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
+		const drift = fresh ? this.#driftFetched() : undefined;
 		for (let index = timelineIndex(groups, start); index < groups.length; index++) {
 			const key = groups[index].start;
 			if (end !== undefined && key >= end) return undefined;
-			if (this.#window.contains(key) && !delivered.has(key)) return key;
+			if (!this.#window.contains(key) || delivered.has(key)) continue;
+			if (!drift || !this.#staleAt(key, drift)) return key;
 		}
 		return undefined;
 	}
@@ -5503,8 +5506,10 @@ export class Subscriber {
 		};
 		hooks.keyAfter = (subscriber, key) => subscriber.#keyAfter(key);
 		hooks.refused = (subscriber) => subscriber.#settle() ?? subscriber.#resume?.refused();
-		hooks.lowestBuffered = (subscriber, delivered) =>
-			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
+		hooks.lowestBuffered = (subscriber, delivered, fresh) =>
+			subscriber.#resume
+				? subscriber.#resume.lowestBuffered(delivered, fresh)
+				: subscriber.#lowestBuffered(delivered, fresh);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.untell = (subscriber, start, end) => {
 			if (start >= end) return;

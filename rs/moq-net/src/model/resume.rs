@@ -1447,27 +1447,34 @@ impl Subscriber {
 		let Some((_, newest)) = ready.next() else {
 			return;
 		};
-		let unread = |sub: &track::Subscriber| {
+		// Searched once for every copy's verdicts.
+		let live = Arc::<track::Live>::default();
+		let unread = |copy: &Copy, sub: &track::Subscriber| {
 			let mut from = delivered.floor();
 			while let Some(group) = sub.lowest_unread(from) {
-				if !delivered.contains(group.start) {
+				// Stale even at the track's max age, which bounds every budget: no budget reads it.
+				let stale = (copy.track)
+					.poll_stale(group.start, Duration::MAX, None, &live, &kio::Waiter::noop())
+					.is_ready();
+				if !delivered.contains(group.start) && !stale {
 					return Some(group.start);
 				}
 				from = group.start.checked_add(1)?;
 			}
 			None
 		};
-		// Every copy but the newest is replaced. Judged as the pick judges a copy under the
-		// widest budget its track's max age bound allows, not by the verdict letting it go last
-		// made: a widened budget reads an expired copy again, so what it holds unread stays owed
-		// meanwhile, as on one track. Past that bound no budget does, so a lease on the copy
-		// never holds back the fold for good.
+		// Every copy but the newest is replaced. Judged as the pick judges a copy under any
+		// budget, not by the verdict letting it go last made: a widened budget reads an expired
+		// copy again, so what it holds unread stays owed meanwhile, as on one track, until the
+		// group is stale by its own successor there even at the track's max age. So a lease on
+		// the copy never holds back the fold for good.
 		let kept = ready
 			.filter(|(copy, _)| {
-				let bound = copy.track.max_age_bound().unwrap_or(Duration::MAX);
-				reader.reads(copy, bound, delivered, &kio::Waiter::noop()).is_some()
+				reader
+					.reads(copy, Duration::MAX, delivered, &kio::Waiter::noop())
+					.is_some()
 			})
-			.filter_map(|(_, sub)| unread(sub))
+			.filter_map(|(copy, sub)| unread(copy, sub))
 			.chain(keep)
 			.min();
 		newest.forget_past_budget(delivered, terms, kept);
@@ -16326,6 +16333,43 @@ mod test {
 		}
 		// No more than after the first of them, however long the lease lasts.
 		assert_eq!(sub.delivered_runs(), 3);
+	}
+
+	/// An expired copy's unread group still fresh by its own successor at the track's max age
+	/// stays owed, so a budget widened past that age reads it, while one stale even at that age
+	/// is forgotten.
+	#[kio::test]
+	async fn a_widened_budget_reads_an_expired_copys_group_fresh_at_its_max_age() {
+		let ms = Duration::from_millis;
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let info = crate::track::Info::timed().with_max_age(ms(2000));
+		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, ms(1000));
+		write(&a, 0);
+		write(&a, 5);
+		// Held, so the replaced copy stays subscribed once it expires.
+		let _held = recv(&mut sub);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(ms(900)).await;
+		// 3 lands with its successor 4, while 4's successor 5 landed long before.
+		write(&a, 3);
+		write(&a, 4);
+		write(&b, 7);
+		// Newest first, so the late groups are left unread.
+		assert_eq!(recv(&mut sub).start, 7);
+		// The replaced copy expires, past the track's max age since it was replaced.
+		kio::clock::sleep(ms(1200)).await;
+		write(&b, 8);
+		assert_eq!(drain(&mut sub, false), [8]);
+		// Wider than the max age, which still keeps 3 fresh by 4, but not 4 by 5.
+		sub.update(Subscription::default().with_max(ms(3000))).unwrap();
+		assert_eq!(drain(&mut sub, false), [3]);
 	}
 
 	/// A replaced copy a full budget past the newer group that superseded it hands out none of

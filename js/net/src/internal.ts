@@ -753,7 +753,7 @@ export interface ResumeSource {
 	 */
 	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
-	lowestBuffered(delivered: Delivered): bigint | undefined;
+	lowestBuffered(delivered: Delivered, fresh?: boolean): bigint | undefined;
 	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
 	keyAfter(key: bigint): bigint | undefined;
 	/** Why a copy still serving refuses the reader's ranges; see `hooks.refused`. */
@@ -1328,9 +1328,9 @@ export const hooks: {
 	/**
 	 * The lowest group the subscriber holds unread that another reader's `delivered` lacks, in its
 	 * range and window, on any copy it reads. Mirrors the Rust `track::Subscriber::lowest_unread`
-	 * as a front's compaction reads it.
+	 * as a front's compaction reads it. With `fresh`, only one not stale even at the track's max age.
 	 */
-	lowestBuffered: (subscriber: Subscriber, delivered: Delivered) => bigint | undefined;
+	lowestBuffered: (subscriber: Subscriber, delivered: Delivered, fresh?: boolean) => bigint | undefined;
 	/** The first key the subscriber holds unread past `key`, on any copy it reads. Mirrors the Rust `TrackState::key_after`. */
 	keyAfter: (subscriber: Subscriber, key: bigint) => bigint | undefined;
 	/** Why the subscriber's ranges can't be served, which its reads fail with. Mirrors the Rust `Subscriber::refused`. */

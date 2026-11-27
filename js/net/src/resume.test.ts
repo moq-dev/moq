@@ -6291,6 +6291,55 @@ test("an expired copy past its max age bound holds back no gap", async () => {
 	}
 });
 
+// An expired copy's unread group still fresh by its own successor at the track's max age stays
+// owed, so a budget widened past that age reads it, while one stale even at that age is forgotten.
+// Mirrors the Rust `a_widened_budget_reads_an_expired_copys_group_fresh_at_its_max_age`.
+test("a widened budget reads an expired copy's group fresh at its max age", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copyOf(defined(a.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	const tb = copyOf(defined(b.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(1_000) } }));
+	try {
+		ta.write(0n);
+		ta.write(5n);
+		// Held, so the replaced copy stays subscribed once it expires.
+		const held = defined(sub.tryRecvGroup());
+		expect(drain(sub)).toEqual([0n]);
+		front.serve(b.consume());
+		await settle();
+		tb.write(6n);
+		expect(drain(sub)).toEqual([6n]);
+		await clock.advance(Duration.millis(900));
+		// 3 lands with its successor 4, while 4's successor 5 landed long before.
+		ta.write(3n);
+		ta.write(4n);
+		tb.write(7n);
+		// Newest first, so the late groups are left unread.
+		const seven = defined(sub.tryRecvGroup());
+		expect(seven.start).toBe(7n);
+		// The replaced copy expires, past the track's max age since it was replaced.
+		await clock.advance(Duration.millis(1_200));
+		tb.write(8n);
+		expect(drain(sub)).toEqual([8n]);
+		// Wider than the max age, which still keeps 3 fresh by 4, but not 4 by 5.
+		sub.update(withMax({ delay: { max: Duration.millis(3_000) } }));
+		expect(drain(sub)).toEqual([3n]);
+		seven.close();
+		held.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
 test("an arrival read takes a replaced copy's buffered group before the new copy's later one", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

@@ -1552,6 +1552,13 @@ class Reader implements ResumeSource {
 		this.#letGo(delivered);
 		// A copy let go with a group left to drain owes the serving route a backfill: ask now.
 		if (this.#resumed && !resumed) owed = true;
+		// A replaced copy that failed or was let go with a group to drain this pass owes the
+		// serving route a backfill once the window is placed: ask now, before any end, since its
+		// close already fired and no later group is sure to wake the read. A backfill that failed
+		// is not asked again (`#refused`), so this ends. Mirrors the Rust `Reader::poll_first`.
+		if (owed && this.#resumed && this.#window().floor() !== undefined) {
+			return this.tryGroup(ordered, delivered, dispositions, admit);
+		}
 		// A copy that ran out or was let go no longer holds back a drop.
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -1564,12 +1571,8 @@ class Reader implements ResumeSource {
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 		// A revert serves the copy the failed replacement capped again, which may hold the next
-		// group already. A replaced copy that failed or was let go with a group to drain this pass
-		// owes the serving route a backfill once the window is placed: ask now, since its close
-		// already fired and no later group is sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
-		// ends. Mirrors the Rust `Reader::poll_first`.
-		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
-		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
+		// group already.
+		if (end.kind === "idle" && this.route.generation !== generation) {
 			return this.tryGroup(ordered, delivered, dispositions, admit);
 		}
 		return end;
@@ -1999,7 +2002,14 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		const serving = this.#serving();
 		if (serving) this.#boundAtEnd(serving);
+		const resumed = this.#resumed;
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
+		// A copy let go with a group left to drain owes the serving route a backfill first, which
+		// the next read asks.
+		if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
+			this.wake();
+			return false;
+		}
 		this.#ended = {
 			largest: serving && hooks.peekLargest(serving.sub).largest,
 			object: serving && hooks.objectLargest(serving.sub),
@@ -2321,17 +2331,16 @@ class Reader implements ResumeSource {
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader,
 	// or that would under a wider budget, holds unread: as one cursor keeps what it owes, since a
 	// late group there may be fresh by its own successor on that copy. A widened budget reads an
-	// expired copy again, so only a copy whose channel ran out, or past the track's max age that
-	// bounds every budget, is passed over: a lease on the copy never holds back the fold for good.
-	// Nor past `keep`, an outer reader's own such group.
+	// expired copy again, so only a copy whose channel ran out is passed over, and only a group
+	// stale even at the track's max age, which bounds every budget: a lease on the copy never
+	// holds back the fold for good. Nor past `keep`, an outer reader's own such group.
 	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
-		const bound = this.#shell.info()?.maxAge?.asMillis() ?? Number.POSITIVE_INFINITY;
 		let kept = keep;
 		for (const copy of this.#copies) {
-			if (copy === newest || !copy.replaced || copy.done !== undefined || this.#expired(copy, bound)) continue;
-			const key = hooks.lowestBuffered(copy.sub, delivered);
+			if (copy === newest || !copy.replaced || copy.done !== undefined) continue;
+			const key = hooks.lowestBuffered(copy.sub, delivered, true);
 			if (key !== undefined) kept = min(kept ?? key, key);
 		}
 		hooks.forgetPastBudget(newest.sub, delivered, terms, kept);
@@ -2358,10 +2367,10 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
-	lowestBuffered(delivered: Delivered): bigint | undefined {
+	lowestBuffered(delivered: Delivered, fresh?: boolean): bigint | undefined {
 		let lowest: bigint | undefined;
 		for (const copy of this.#copies) {
-			const key = hooks.lowestBuffered(copy.sub, delivered);
+			const key = hooks.lowestBuffered(copy.sub, delivered, fresh);
 			if (key !== undefined) lowest = min(lowest ?? key, key);
 		}
 		return lowest;
