@@ -6280,7 +6280,7 @@ mod test {
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 		let finished = a.finish().unwrap();
 		short.finish().unwrap();
-		finished.abort(Error::Cancel).unwrap();
+		finished.abort(Error::Stream(crate::StreamError::Cancel)).unwrap();
 		assert_eq!(
 			read(&mut reading),
 			None,
