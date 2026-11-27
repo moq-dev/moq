@@ -1426,7 +1426,7 @@ ws = false
 		let path =
 			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
 				.join("../../nix/modules/moq-relay.nix");
-		let module = std::fs::read_to_string(path).unwrap();
+		let module = std::fs::read_to_string(&path).unwrap();
 		let registry = crate::settings();
 
 		let mut unknown = Vec::new();
@@ -1446,7 +1446,8 @@ ws = false
 		}
 		assert!(
 			unknown.is_empty(),
-			"{path} sets variables moq-relay doesn't read: {unknown:?}"
+			"{} sets variables moq-relay doesn't read: {unknown:?}",
+			path.display()
 		);
 	}
 
