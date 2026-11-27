@@ -605,6 +605,9 @@ impl Consumer {
 				drops: RangeMap::new(),
 				received: RangeSet::new(),
 				received_checked: None,
+				carried: RangeSet::new(),
+				unreported: RangeSet::new(),
+				carrying: kio::WaiterList::new(),
 				declared: None,
 				declared_error: None,
 			})
@@ -2185,6 +2188,16 @@ struct Reader {
 	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
 	/// a new upstream subscription can supersede. Kept apart so a poll costs these runs, not every queued one.
 	received: RangeSet<u64>,
+	/// What a copy let go of declared skipped within the reader's groups: its publisher never
+	/// produced those groups. Every copy is of one identity, so one content, and no route
+	/// will deliver them; unlike a drop, this outlives the copy and any route change. Kept
+	/// whole, so a run the wire is untold is reported again.
+	carried: RangeSet<u64>,
+	/// The part of [`Self::carried`] not yet reported.
+	unreported: RangeSet<u64>,
+	/// Drop polls parked while nothing was left to report, which a copy let go of with skips
+	/// to carry wakes.
+	carrying: kio::WaiterList,
 	/// The serving copy's [`track::Subscriber::stale_revision`] when [`Self::received`] was
 	/// last checked against it, so a poll rechecks those runs only after one may be gone.
 	/// `None` until the serving copy is first checked.
@@ -2745,6 +2758,7 @@ impl Reader {
 			waiter,
 		};
 		let mut waits = false;
+		let mut gone = Vec::new();
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
 		for (index, mut copy) in std::mem::take(&mut self.copies).into_iter().enumerate() {
 			let mut retains = copy.replaced.then(|| copy.retains(&reader));
@@ -2758,10 +2772,33 @@ impl Reader {
 					waits = true;
 					self.copies.push(copy);
 				}
-				Some(Retains::No) => {}
+				Some(Retains::No) => gone.push(copy),
 			}
 		}
+		for copy in gone {
+			self.carry_skips(&copy, delivered);
+		}
 		waits
+	}
+
+	/// Keep what `copy`, let go of now, declared skipped within the reader's groups and not
+	/// handed out, for [`Self::poll_drop`] to report: once the copy is gone, nothing else knows.
+	fn carry_skips(&mut self, copy: &Copy, delivered: &Delivered) {
+		let (start, end) = self.groups;
+		let skipped = copy.skipped_in(start..end.unwrap_or(u64::MAX), &kio::Waiter::noop());
+		let mut carried = false;
+		for run in skipped.iter() {
+			for gap in delivered.gaps(run.clone()) {
+				for new in self.carried.gaps(&gap).collect::<Vec<_>>() {
+					self.unreported.insert(new);
+					carried = true;
+				}
+				self.carried.insert(gap);
+			}
+		}
+		if carried {
+			self.carrying.wake();
+		}
 	}
 
 	/// The parts of `groups` recorded skipped or a copy held now declared skipped. Parks
@@ -3482,12 +3519,26 @@ impl Reader {
 		// The common case: nothing to report on one route, and the serving copy's own poll
 		// above wakes this for the next run it gives up. A replaced copy is still judged:
 		// dropping the last group handed out from it wakes nothing else that lets it go.
-		if self.drops.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
+		if self.drops.is_empty() && self.unreported.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
+			self.carrying.register(waiter);
 			return Poll::Pending;
 		}
 		// Judged as the group path judges it, so a copy kept only for a group still read
 		// holds nothing back, and letting one go wakes this too.
 		self.let_go(delivered, waiter);
+		// A skip a copy let go of declared goes out at once: no copy of the identity will
+		// deliver it, so none it replaced holds it back.
+		while let Some(run) = self.unreported.iter().next().cloned() {
+			self.unreported.remove(run.clone());
+			let mut gaps = delivered.gaps(run).collect::<Vec<_>>().into_iter();
+			if let Some(open) = gaps.next() {
+				for rest in gaps {
+					self.unreported.insert(rest);
+				}
+				return Poll::Ready((open, track::Hole::Skip));
+			}
+		}
+		self.carrying.register(waiter);
 		let serving = self.generation;
 		let (start, end) = self.groups;
 		let mut feeding = RangeSet::new();
@@ -3530,6 +3581,9 @@ impl Reader {
 	/// for it again reports it again: each copy's record would otherwise hold it as reported.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn untell(&mut self, range: std::ops::Range<u64>) {
+		for run in self.carried.overlapping(&range) {
+			self.unreported.insert(run.start.max(range.start)..run.end.min(range.end));
+		}
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
 				sub.untell(range.clone());
