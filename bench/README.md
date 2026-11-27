@@ -830,9 +830,8 @@ The Nightly workflow keeps history on one `gh-pages` branch, where
 `github-action-benchmark` appends each night's points to `bench/{costs,rates}/data.js`
 with its alerts, comments, and charts unused. The publisher runs only on `main`,
 serializes history writes, renders the table from that history even when every
-source failed, and deploys the branch explicitly. Re-running its job in place
-fails, because the earlier attempt's `github-pages` artifact remains; delete
-that artifact first or wait for the next Nightly.
+source failed, and deploys the branch explicitly by the uploaded artifact's ID, so
+re-running its job in place deploys that attempt's upload.
 
 The table includes these measurements:
 

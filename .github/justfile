@@ -126,7 +126,6 @@ test:
     slot; run python3 sh/js/workspace.test.py & pids+=($!)
     slot; run python3 sh/js/audit.test.py & pids+=($!)
     slot; run python3 sh/gh/nightly.test.py & pids+=($!)
-    slot; run python3 sh/gh/pages-clean.test.py & pids+=($!)
     slot; run python3 sh/gh/bench-report.test.py & pids+=($!)
     slot; run python3 sh/gh/ts-paths.test.py & pids+=($!)
     slot; run sh/go/publish-wrapper.test.sh & pids+=($!)
@@ -220,9 +219,9 @@ benchmark-publish *args:
 pages-publish directory report site:
     sh/gh/pages-publish.sh {{ quote(directory) }} {{ quote(report) }} {{ quote(site) }}
 
-# Delete this run's Pages artifact before uploading a replacement on a rerun.
-pages-clean:
-    sh/gh/pages-clean.sh
+# Deploy an uploaded Pages artifact by its ID.
+pages-deploy artifact:
+    sh/gh/pages-deploy.sh {{ quote(artifact) }}
 
 # Re-measure stale planned-break pins and prepare their release update PR.
 remeasure:
