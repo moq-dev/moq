@@ -347,12 +347,17 @@ impl SearchState {
 	fn next_mtu_to_probe(&self) -> Option<u16> {
 		debug_assert_eq!(self.in_flight_probe, None);
 
+		// The largest confirmed size and the largest size not yet ruled out
 		let (lower_bound, upper_bound) = match self.lost_probe_count {
 			0 => (self.last_probed_mtu, self.upper_bound),
 			_ => (self.lower_bound, self.last_probed_mtu - 1),
 		};
 
-		let next_mtu = (lower_bound as i32 + upper_bound as i32) / 2;
+		// Only sizes above the confirmed one are worth a probe
+		if upper_bound <= lower_bound {
+			return None;
+		}
+		let next_mtu = ((lower_bound as i32 + upper_bound as i32) / 2).max(lower_bound as i32 + 1);
 
 		// Binary search stopping condition
 		if ((next_mtu - self.last_probed_mtu as i32).unsigned_abs() as u16) < self.minimum_change {
@@ -887,6 +892,34 @@ mod tests {
 		assert_eq!(iterations, 25);
 		assert_eq!(mtud.current_mtu, 65527);
 		assert!(completed(&mtud));
+	}
+
+	/// Whatever the link drops, the search probes only sizes above the one it already confirmed
+	/// and below its upper bound, then ends
+	#[test]
+	fn search_probes_only_above_its_lower_bound() {
+		for upper_bound in 1_201..1_210 {
+			for minimum_change in 1..4 {
+				// A limit below the 1_200 lower bound loses every probe, as other losses can
+				for link_payload_size_limit in 1_199..=upper_bound {
+					let config = mtu::Config {
+						upper_bound,
+						minimum_change,
+						..mtu::Config::default()
+					};
+					let mut mtud = MtuDiscovery::new(1_200, 1_200, config);
+					let probed = drive_to_completion(&mut mtud, Instant::ZERO, link_payload_size_limit);
+					let case = format!("{upper_bound} {minimum_change} {link_payload_size_limit}: {probed:?}");
+
+					assert!(completed(&mtud), "{case}");
+					assert!(probed.iter().all(|size| (1_201..=upper_bound).contains(size)), "{case}");
+					assert!(
+						(1_200..=link_payload_size_limit.max(1_200)).contains(&mtud.current_mtu),
+						"{case}"
+					);
+				}
+			}
+		}
 	}
 
 	#[test]
