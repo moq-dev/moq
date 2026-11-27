@@ -43,7 +43,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a draining replaced copy's cache evicts (`Copy::drains`, `Evict`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a draining replaced copy's cache evicts (`Copy::drains`, `Evict`) or that copy is let go before handing out (`LetGo`'s `gaveUp`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
