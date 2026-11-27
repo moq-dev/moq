@@ -487,8 +487,9 @@ func (m *TrackProducer) SetEnabled(enabled bool) error {
 // Cut draws a group boundary here.
 //
 // Audio has no boundary of its own (every packet is independently decodable), so this is
-// the only thing that gives it groups: call it after every frame for one group (one QUIC
-// stream) the relay forwards without waiting, or at a segment cadence to align with video.
+// the only thing that gives it groups (one QUIC stream each): call it after the frame that
+// brings a group to about 100 ms, so the relay sees the group finish at once. Frames forward
+// as they are written either way.
 // Video groups at its own keyframes and needs this only to override that.
 func (m *TrackProducer) Cut() error {
 	return m.inner.Cut()

@@ -641,8 +641,8 @@ impl Publish {
 	///
 	/// This ends the open group; the next frame starts a new one. Audio has no boundary of its own
 	/// (every frame is independently decodable), so this is the only thing that gives it groups:
-	/// call it per frame for one group (one QUIC stream) forwarded without waiting, or less often
-	/// to batch frames into fewer groups.
+	/// call it after the frame that brings a group (one QUIC stream) to about 100 ms. Frames
+	/// forward as they are written either way.
 	pub fn media_cut(&mut self, media: Id) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
 		track.cut(None)?;

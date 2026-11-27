@@ -9431,7 +9431,9 @@ fn audio_rendition(broadcast: u32, name: &str) -> hang::catalog::AudioConfig {
 
 /// Publish `count` 20 ms Opus packets of `size` bytes from `start_us`, one group each.
 fn write_opus(media: u32, start_us: u64, count: u64, size: usize) {
-	let payload = vec![0u8; size];
+	let mut payload = vec![0u8; size];
+	// TOC config 1: one 20 ms SILK frame, matching the spacing.
+	payload[0] = 1 << 3;
 	for i in 0..count {
 		let ts = start_us + i * 20_000;
 		assert_eq!(

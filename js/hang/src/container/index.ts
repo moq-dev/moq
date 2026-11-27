@@ -15,5 +15,5 @@ export type { Format } from "./format.ts";
 export * as Legacy from "./legacy.ts";
 /** The raw zero-header container (PTS = transport timestamp). */
 export * as Raw from "./raw.ts";
-export { MAX_AGE, type TrackInfoOptions, trackInfo } from "./track.ts";
+export { JOIN, MAX_AGE, type TrackInfoOptions, trackInfo } from "./track.ts";
 export * from "./types.ts";

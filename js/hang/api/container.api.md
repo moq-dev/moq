@@ -60,6 +60,8 @@ export interface Frame {
 	timestamp: Net.Clock.Duration;
 }
 
+export const JOIN: Net.Clock.Duration;
+
 export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };

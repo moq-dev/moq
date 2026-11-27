@@ -24,6 +24,7 @@
 //!
 //! The raw lane's equivalents are in [`release_test`](super::release_test).
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -351,7 +352,7 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 	let ((from, from_pts), (to, to_pts)) = (at(a_packets), at(b_packets));
 
 	// Each PID's last whole PES in `a`: its PTS, and where an unfinished one started.
-	let mut last = std::collections::HashMap::<u16, (Option<u64>, usize, usize, usize)>::new();
+	let mut last = HashMap::<u16, (Option<u64>, usize, usize, usize)>::new();
 	for (index, packet) in a_packets[..from].iter().enumerate() {
 		let (pid, data, start) = payload(packet);
 		let entry = last.entry(pid).or_insert((None, index, 0, 0));
@@ -399,7 +400,7 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 		out.push(packet);
 	}
 
-	let mut counters = std::collections::HashMap::new();
+	let mut counters = HashMap::new();
 	for packet in &out {
 		if packet[3] & 0x10 != 0 {
 			counters.insert(payload(packet).0, packet[3] & 0x0f);
@@ -600,8 +601,9 @@ struct Bottleneck {
 }
 
 impl Bottleneck {
-	/// Pass every delivery through the link, in arrival order.
-	fn carry(&self, slots: &[(usize, Slot)], deliveries: &mut [Delivery]) {
+	/// Pass every delivery through the link, in arrival order, and return when each group it cut
+	/// would have delivered the frame that overflowed, which is after the group's last delivery.
+	fn carry(&self, slots: &[(usize, Slot)], deliveries: &mut [Delivery]) -> HashMap<(usize, usize), Duration> {
 		let mut order: Vec<usize> = (0..slots.len())
 			.filter(|&i| deliveries[i] != Delivery::Omitted)
 			.collect();
@@ -610,13 +612,13 @@ impl Bottleneck {
 			Delivery::Omitted => unreachable!(),
 		});
 		let mut free = Duration::ZERO;
-		let mut cut = std::collections::HashSet::new();
+		let mut cut = HashMap::new();
 		for i in order {
 			let (track, slot) = slots[i];
 			let Delivery::At(at) = deliveries[i] else {
 				unreachable!()
 			};
-			if cut.contains(&(track, slot.group)) {
+			if cut.contains_key(&(track, slot.group)) {
 				deliveries[i] = Delivery::Omitted;
 				continue;
 			}
@@ -628,13 +630,14 @@ impl Bottleneck {
 			// The frame is admitted only if all of it fits: the backlog ahead plus its own bytes.
 			let leaves = free.max(at) + Duration::from_nanos(slot.size as u64 * 8 * 1_000_000_000 / self.rate);
 			if leaves - at > self.queue {
-				cut.insert((track, slot.group));
+				cut.insert((track, slot.group), leaves);
 				deliveries[i] = Delivery::Omitted;
 				continue;
 			}
 			free = leaves;
 			deliveries[i] = Delivery::At(free);
 		}
+		cut
 	}
 }
 
@@ -798,9 +801,10 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		}
 	}
 	let mut deliveries: Vec<Delivery> = slots.iter().map(|(_, slot)| (arm.schedule)(*slot)).collect();
-	if let Some(path) = &arm.path {
-		path.carry(&slots, &mut deliveries);
-	}
+	let cut = match &arm.path {
+		Some(path) => path.carry(&slots, &mut deliveries),
+		None => HashMap::new(),
+	};
 
 	// Every frame's delivery, and each group's end: (at, track, group, frame or the end).
 	let mut events = Vec::new();
@@ -860,8 +864,13 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 				let last = events.last().map(|(at, ..)| *at).unwrap();
 				events.push((last, Some((t, g, None))));
 			} else if kept > 0 {
-				// Evicted once its next frame would have arrived, after what it delivered.
-				let next = units[units.len() - frames.len() + kept].nominal + LAG;
+				// Evicted once its next frame would have arrived, after what it delivered, so the
+				// abort never lands with that last frame and takes it before the export reads it.
+				let next = cut
+					.get(&(t, g))
+					.copied()
+					.unwrap_or(units[units.len() - frames.len() + kept].nominal)
+					+ LAG;
 				let last = events.last().map(|(at, ..)| *at).unwrap();
 				events.push((next.max(last), Some((t, g, None))));
 			}
@@ -1177,7 +1186,7 @@ fn grade(ledgers: &[Ledger], stats: &stats::Export) -> Result<(), String> {
 
 /// Every PID's continuity counter steps by one on each packet with a payload.
 fn assert_continuous(ts: &[u8]) {
-	let mut last = std::collections::HashMap::new();
+	let mut last = HashMap::new();
 	for (at, packet) in ts.as_chunks::<188>().0.iter().enumerate() {
 		let pid = u16::from_be_bytes([packet[1] & 0x1f, packet[2]]);
 		if pid == 0x1fff || packet[3] & 0x10 == 0 {
@@ -1274,7 +1283,7 @@ fn parse(output: &[u8], video_only: bool) -> Result<Decoded, String> {
 }
 
 /// The continuous source decode's pictures, by presentation time on the catalog clock.
-struct Reference(std::collections::HashMap<u64, String>);
+struct Reference(HashMap<u64, String>);
 
 impl Reference {
 	fn new(profile: Profile, video: &Ledger) -> Self {
@@ -1565,7 +1574,7 @@ async fn disjoint_outages_across_both_tracks_keep_the_clock() {
 			let missing = if slot.video {
 				slot.group == 5 && slot.frame == 11
 			} else {
-				(SPLICE - 5 * FRAME..SPLICE - 4 * FRAME).contains(&slot.nominal)
+				outage(slot, SPLICE - 5 * FRAME..SPLICE - 4 * FRAME)
 			};
 			if missing { Delivery::Omitted } else { clean(slot) }
 		})
@@ -1620,11 +1629,19 @@ async fn a_stalled_track_leaves_the_others_running() {
 
 /// Omit the audio due in [2 s, 3.5 s).
 fn stall_audio(slot: Slot) -> Delivery {
-	let (from, until) = (Duration::from_millis(2000), Duration::from_millis(3500));
-	match !slot.video && (from..until).contains(&slot.nominal) {
+	match !slot.video && outage(slot, Duration::from_millis(2000)..Duration::from_millis(3500)) {
 		true => Delivery::Omitted,
 		false => clean(slot),
 	}
+}
+
+/// Whether an audio frame is lost to an outage over `window`: one due in it, or in a group that
+/// began in it, so each group still delivers a prefix of its frames.
+fn outage(slot: Slot, window: Range<Duration>) -> bool {
+	let start = slot.nominal.saturating_sub(Duration::from_nanos(
+		slot.frame as u64 * AUDIO_TICKS * 1_000_000_000 / 90_000,
+	));
+	slot.nominal >= window.start && start < window.end
 }
 
 /// Audio sent 200 ms behind the video, within the delay, survives a skipped video group whole.

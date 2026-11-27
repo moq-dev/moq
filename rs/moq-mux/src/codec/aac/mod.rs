@@ -416,6 +416,24 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<boo
 	Ok(reader.read(1, Error::IncompleteConfig)? == 1)
 }
 
+/// How long one access unit of the AudioSpecificConfig `asc` plays: 1024 core samples, or 960 by
+/// its frameLengthFlag, at the core's rate, which SBR and PS double along with the samples. `None`
+/// for an object type that codes frames of another length, or a config that doesn't parse.
+pub(crate) fn frame_duration(mut asc: &[u8]) -> Option<moq_net::Timestamp> {
+	let mut reader = BitReader::new(&mut asc);
+	let (object_type, core_rate, _) = read_header(&mut reader).ok()?;
+	let (core, _) = read_core(&mut reader, object_type, core_rate).ok()?;
+	// Main, LC, SSR, and LTP; the GASpecificConfig leads with frameLengthFlag.
+	if !(1..=4).contains(&core) {
+		return None;
+	}
+	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
+		0 => 1024,
+		_ => 960,
+	};
+	moq_net::Timestamp::from_scale(samples, core_rate.into()).ok()
+}
+
 /// Whether the raw data block `block` leads with a program config element.
 pub(crate) fn leads_with_program_config(block: &[u8]) -> bool {
 	block.first().is_some_and(|&byte| u32::from(byte >> 5) == ID_PCE)
@@ -858,6 +876,20 @@ mod tests {
 	/// HE-AACv2 is PS over a mono one.
 	const FDKAAC_HE_AAC: [u8; 4] = [0x2B, 0x11, 0x88, 0x00];
 	const FDKAAC_HE_AAC_V2: [u8; 4] = [0xEB, 0x09, 0x88, 0x00];
+
+	#[test]
+	fn frame_duration_counts_core_samples_at_the_core_rate() {
+		let micros = |asc: &[u8]| frame_duration(asc).map(|d| std::time::Duration::try_from(d).unwrap().as_micros());
+		// AAC-LC at 44.1 kHz: 1024 samples.
+		assert_eq!(micros(&[0x12, 0x10]), Some(23_219));
+		// SBR and PS over a 24 kHz core: 2048 samples at 48 kHz.
+		assert_eq!(micros(&FDKAAC_HE_AAC), Some(42_666));
+		assert_eq!(micros(&FDKAAC_HE_AAC_V2), Some(42_666));
+		// The same SBR config with frameLengthFlag set: 960 core samples.
+		assert_eq!(micros(&[0x2B, 0x11, 0x8A, 0x00]), Some(40_000));
+		// ER AAC LD codes 480 or 512 samples.
+		assert_eq!(micros(&[0xB9, 0x90, 0x00]), None);
+	}
 
 	#[test]
 	fn explicit_sbr_and_ps_parse_as_their_output() {
