@@ -29,18 +29,35 @@ Both libraries write the payload-less FRAME but only tests read it, so the
 ingest decoder here is also the first library check of its layout before the
 cut.
 
-Still standing (maintainer, 2026-11-25 and 2026-11-26, see the history of
-this file and of [subscribe-meta.md](/quest/m2/subscribe-meta.md)):
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ move both this quest and [subscribe-meta.md](/quest/m2/subscribe-meta.md)
+back into `m2` on `moq-lite-07-wip` before the cut (rejected: moving only the
+wire into `m2` and keeping the subscriber API in `m3`; leaving both in `m3` on
+lite-08-wip). This reverses the 2026-11-25 deferral to `m3` (`lite-08-wip`):
+`moq-hls` (both live playlist indexing and zero-payload archive/VOD indexing)
+is an immediate consumer that otherwise pulls 100% of every own rendition's
+payload across the relay mesh and object storage, and landing the subscriber
+API alongside the wire avoids breaking the C `moq_subscription` ABI after
+0.22.
 
-- ✅ No NOT_SUPPORTED refusal: a relay whose upstream session cannot carry the
-  mode (lite-06 or earlier, or moq-transport without the
-  [extension](/quest/m3/route-health/ietf.md)) opens an ordinary payload
-  SUBSCRIBE upstream and serves its metadata readers the headers. That route
-  has one mode, so the track holds one upstream subscription on it.
-  `moq-net` decides this from the negotiated version when it routes the
-  subscription, never by trying the mode and falling back.
+Still standing from 2026-11-25 (maintainer, `/quest-run`,
+[comment](https://github.com/moq-dev/moq/pull/9516#issuecomment-7168011073)):
+
+- ✅ No NOT_SUPPORTED refusal: a relay whose upstream is an older version
+  (lite-06 or earlier, or moq-transport) does an actual SUBSCRIBE upstream and
+  drops the payload, serving the metadata subscription itself (rejected: the
+  refusal narrowed to a relay whose route cannot carry the mode; no refusal
+  code, answering with a generic error). This supersedes the earlier standing
+  rule that an older version never emulates the mode by fetching and discarding
+  payload, and 0x30 stays out of the plan.
+- ✅ moq-transport gets an extension for metadata-only subscriptions, in
+  [its own quest](/quest/m3/route-health/ietf.md); until it lands a
+  moq-transport upstream is served like lite-06.
 - ✅ Relay forwarding of metadata demand belongs to this quest, not
-  [subscribe-meta.md](/quest/m2/subscribe-meta.md).
+  [subscribe-meta.md](/quest/m2/subscribe-meta.md), so this quest stays L and
+  subscribe-meta.md stays M.
+- ✅ A subscription's mode is fixed for its life, so SUBSCRIBE_UPDATE gains no
+  field and GROUP no mode marker (decided 2026-11-16, maintainer).
 
 To build, under subscribe-meta.md's standing relay rules:
 
@@ -55,6 +72,13 @@ To build, under subscribe-meta.md's standing relay rules:
   upstream subscription per mode for a track. When the last payload reader
   leaves and metadata demand remains, it opens the metadata subscription and
   closes the payload one.
+- A relay whose upstream session cannot carry the mode (lite-06 or earlier,
+  or moq-transport without the [extension](/quest/m3/route-health/ietf.md))
+  opens an ordinary payload SUBSCRIBE upstream and serves its metadata
+  readers the headers. That route has one mode, so the track holds one
+  upstream subscription on it. `moq-net` decides this from the negotiated
+  version when it routes the subscription, never by trying the mode and
+  falling back.
 - Check with the TLA+ subscription model (`/verify-subscribe`) that two
   subscriptions to one track in different modes keep the existing
   accounting; with fixed modes no promotion rule is needed.

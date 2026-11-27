@@ -25538,6 +25538,48 @@ mod test {
 		}
 	}
 
+	/// A header-only read, as a metadata Group Stream's, takes no payload, so a copy failing
+	/// partway through a frame it read the header of continues on a held re-offer from the next
+	/// frame, as a whole read would.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_header_read_continues_past_a_frame_its_copy_cut() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(300), &b"a"[..]).unwrap();
+		let mut reader = first.consume();
+		let handle = first.handle();
+		let mut open = first
+			.create_frame(frame::Info {
+				size: 4,
+				timestamp: at(301),
+			})
+			.unwrap();
+		open.write(&b"ab"[..]).unwrap();
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 1);
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 4);
+		reader.forget_payload();
+
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the re-offer waits on the copy still arriving");
+		};
+		handle.abort(Error::Cancel).unwrap();
+		drop(open);
+		let Ok(Received::Group(mut reoffer)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the re-offer takes the group");
+		};
+		drop(hold);
+		reoffer.write_frame(at(300), &b"a"[..]).unwrap();
+		reoffer.write_frame(at(301), &b"abcd"[..]).unwrap();
+		reoffer.write_frame(at(302), &b"c"[..]).unwrap();
+		reoffer.finish().unwrap();
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 1);
+		assert!(reader.next_frame().await.unwrap().is_none());
+	}
+
 	/// A failed copy's end follows its frame reads: it waits out a held re-offer rather than
 	/// report the failure, so a publisher watching it keeps the stream the re-offer continues.
 	#[kio::test]

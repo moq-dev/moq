@@ -8147,9 +8147,11 @@ impl GroupServe {
 											break 'serve Err(err);
 										}
 										// A metadata FRAME is its header: the frame's bytes are
-										// never read, so nothing waits for them.
-										if !self.ctx.meta {
-											*frame = Some(next);
+										// never read, so nothing waits for them, and a route failing
+										// partway through them leaves the group to read on.
+										match self.ctx.meta {
+											true => self.group.forget_payload(),
+											false => *frame = Some(next),
 										}
 									}
 									Poll::Ready(Ok(None)) => match records.take() {
@@ -9180,6 +9182,78 @@ mod serve_group_test {
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
 		assert_eq!(billed(), before);
+	}
+
+	/// A metadata subscription to a live group sends each frame's header as soon as it can, a
+	/// plain frame's while it is still being written, names a compressed frame by its declared
+	/// plain size, and bills nothing.
+	#[kio::test]
+	async fn lite07_meta_serves_a_live_group_header_by_header() {
+		for compression in [crate::track::Compression::None, crate::track::Compression::Deflate] {
+			let registry = crate::stats::Registry::new(crate::stats::Config::new());
+			let billed = || {
+				registry
+					.snapshot()
+					.traffic()
+					.into_iter()
+					.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+					.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+					.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+			};
+			let log = Log::default();
+			let mut subscription = lite07_subscription(SinkSession::new(log.clone()));
+			subscription.meta = true;
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed().with_compression(compression),
+			);
+			let group = track.create_group(group::Info { start: 0 }).unwrap();
+			let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+			let consumer = track.consume().peek_group(0).unwrap().with_meter(meter);
+			let before = billed();
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, consumer));
+			assert!(futures::poll!(serve.as_mut()).is_pending(), "{compression:?}");
+
+			let mut group = group;
+			group
+				.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'a'; 300])
+				.unwrap();
+			let mut open = group
+				.create_frame(crate::frame::Info {
+					size: 10,
+					timestamp: Timestamp::from_millis(3).unwrap(),
+				})
+				.unwrap();
+			open.write(b"hello".as_slice()).unwrap();
+			assert!(futures::poll!(serve.as_mut()).is_pending(), "{compression:?}");
+			// A plain frame's header goes out as it opens. A compressed one is stored only once
+			// written whole, so its header waits for that.
+			let (bytes, _) = first_stream(&log);
+			let opened = match compression {
+				crate::track::Compression::None => vec![300, 10],
+				_ => vec![300],
+			};
+			assert_eq!(read_meta_group(&bytes).1, opened, "{compression:?}");
+
+			open.write(b"world".as_slice()).unwrap();
+			let group = open.finish().unwrap();
+			group.finish_at(4).unwrap();
+			serve.await.unwrap();
+			let (bytes, fin) = first_stream(&log);
+			assert!(fin, "{compression:?}: no FIN");
+			assert_eq!(
+				read_meta_group(&bytes),
+				(0, vec![300, 10], vec![2, 3], Some(4)),
+				"{compression:?}"
+			);
+			assert!(
+				!bytes.windows(5).any(|w| w == b"hello" || w == b"world"),
+				"{compression:?}: a payload went out"
+			);
+			assert_eq!(billed(), before, "{compression:?}");
+		}
 	}
 
 	/// A group left open after its last frame bills that frame once the transport acknowledges
