@@ -1308,7 +1308,6 @@ let ordered_: {
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
-	isSkipped(subscriber: Subscriber, start: bigint, end: bigint): boolean;
 };
 
 // A pending request for a group past every key written. Mirrors the Rust `demand::Pending`.
@@ -5653,7 +5652,6 @@ export class Subscriber {
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
-			isSkipped: (subscriber, start, end) => subscriber.#isSkipped(start, end),
 		};
 	}
 
@@ -5746,8 +5744,12 @@ export class Subscriber {
 		return firstOpen(this.#window.runs(from), (key) => holeEnd(drops, key, true));
 	}
 
-	// Whether the publisher declared every start in `[start, end)` skipped; see Ordered.isSkipped.
-	#isSkipped(start: bigint, end: bigint): boolean {
+	/**
+	 * Whether the publisher declared every start in `[start, end)` skipped, never to be produced,
+	 * so no group can arrive there; see {@link Ordered.isSkipped}. Mirrors the Rust
+	 * `Subscriber::is_skipped`.
+	 */
+	isSkipped(start: bigint, end: bigint): boolean {
 		if (end <= start) return true;
 		const run = [{ start, end }];
 		if (this.#resume) {
@@ -7330,7 +7332,7 @@ export class Ordered {
 	 * the Rust `Ordered::is_skipped`.
 	 */
 	isSkipped(start: bigint, end: bigint): boolean {
-		return ordered_.isSkipped(this.#subscriber, start, end);
+		return this.#subscriber.isSkipped(start, end);
 	}
 
 	/**

@@ -2213,6 +2213,100 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// A rung declares the starts its source skipped between media-timed groups, across a pause
+	/// past a whole group's End and past a lost group, so a lite-07 reader of the rung never waits
+	/// on them, and ends each group where its source group ended.
+	#[tokio::test(start_paused = true)]
+	async fn a_rung_skips_what_its_source_skips() {
+		const FRAME: u64 = 33_333;
+		let source = source_catalog(320, 240);
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		let mut write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
+			encoder.cut().unwrap();
+			for index in frames {
+				encoder.encode(&gray_frame(&gray, index * FRAME)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
+					hang::container::Frame {
+						timestamp: encoded.timestamp,
+						payload: encoded.payload,
+					}
+					.write_to(group)
+					.unwrap();
+				}
+			}
+		};
+		let at = |index: u64| moq_net::Timestamp::from_micros(index * FRAME).unwrap();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let viewer = subscribe(&consumer, "video/120p").await;
+		let mut source_demand = source._track.demand();
+		while !source_demand.wanted_changed().await.unwrap() {}
+		let rung = consumer.track("video/120p").unwrap();
+		let mut edge = rung.clone();
+		let mut reach = async |group: u64| {
+			while edge.largest().await.map(|position| position.group) != Some(group) {}
+		};
+
+		// Two frames, then a pause: the group ends whole two seconds before the next one starts.
+		let mut first = source._track.append_group(at(0)).unwrap();
+		write(&mut first, 0..2);
+		first.finish_at(2 * FRAME).unwrap();
+		reach(0).await;
+		let mut lost = source._track.append_group(at(60)).unwrap();
+		write(&mut lost, 60..62);
+		reach(60 * FRAME).await;
+		lost.abort(moq_net::Error::Old).unwrap();
+		let mut last = source._track.append_group(at(150)).unwrap();
+		write(&mut last, 150..152);
+		last.finish().unwrap();
+		reach(150 * FRAME).await;
+
+		assert!(viewer.is_skipped(1..60 * FRAME), "the pause after the whole group");
+		assert!(viewer.is_skipped(60 * FRAME + 1..150 * FRAME), "past the lost group");
+		assert!(
+			!viewer.is_skipped(60 * FRAME..60 * FRAME + 1),
+			"the lost group is still a group"
+		);
+
+		let mut whole = rung.fetch_group(0, None).await.unwrap();
+		while whole.read_frame().await.unwrap().is_some() {}
+		assert_eq!(
+			whole.end(),
+			Some(2 * FRAME),
+			"the rung's group ends where its source's did"
+		);
+
+		transcoder.abort();
+	}
+
 	/// Two transcoders fed the same source publish groups that mirror the
 	/// source's sequences and timestamps rather than anything numbered per
 	/// instance.
