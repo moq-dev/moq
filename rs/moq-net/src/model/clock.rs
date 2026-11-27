@@ -63,7 +63,7 @@ pub(super) fn anchor() -> (crate::time::Instant, Duration) {
 /// trimming a byte or two off the first frame's varint. Saturates to zero on a wall
 /// clock set before 2020 (an unsynced clock), since only a non-negative start matters.
 fn offset(wall: kio::clock::Wall, jitter: Duration) -> Duration {
-	wall.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+	wall.saturating_duration_since(crate::time::EPOCH)
 		.saturating_sub(jitter)
 }
 

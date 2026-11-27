@@ -15,8 +15,6 @@ import re
 import subprocess
 from pathlib import Path
 
-import tomllib
-
 # Group deliveries per measurement: subscribers times cycles, so every subscriber count
 # runs about as long. The session harness costs about ten times the model's per group, and
 # the group harness's 512-frame groups about five hundred times.
@@ -174,46 +172,9 @@ def summarize(run):
             )
 
 
-def kio_dependency_line(checkout):
-    """Format the `kio` dependency entry for a harness built against `checkout`."""
-    workspace = tomllib.loads((checkout / "Cargo.toml").read_text())
-    kio = workspace.get("workspace", {}).get("dependencies", {}).get("kio")
-    if isinstance(kio, dict) and "path" in kio:
-        resolved = (checkout / kio["path"]).resolve()
-        return f"kio = {{ path = {json.dumps(str(resolved))} }}"
-    if isinstance(kio, dict) and "git" in kio:
-        parts = [f"{key} = {json.dumps(kio[key])}" for key in ("git", "rev", "branch", "tag", "package") if key in kio]
-        return f"kio = {{ {', '.join(parts)} }}"
-    if isinstance(kio, str):
-        return f"kio = {json.dumps(kio)}"
-    if isinstance(kio, dict) and "version" in kio:
-        parts = [f"{key} = {json.dumps(kio[key])}" for key in ("version", "registry", "package") if key in kio]
-        return f"kio = {{ {', '.join(parts)} }}"
-    if (checkout / "rs/kio/Cargo.toml").exists():
-        resolved = (checkout / "rs/kio").resolve()
-        return f"kio = {{ path = {json.dumps(str(resolved))} }}"
-    return None
-
-
-def rewrite_manifest(manifest, checkout):
-    """Point a copied fan-out harness manifest at `checkout`'s local crates and `kio` source."""
-    text = manifest.read_text()
-    rs_prefix = f"path = {json.dumps(str((checkout / 'rs').resolve()) + '/')[:-1]}"
-    text = text.replace('path = "../../../rs/', rs_prefix)
-    kio_line = kio_dependency_line(checkout)
-    if kio_line is not None:
-        text, replaced = re.subn(r"^kio = .*$", lambda _: kio_line, text, count=1, flags=re.M)
-        if not replaced:
-            raise ValueError(f"{manifest} has no `kio = ...` dependency line to rewrite")
-    manifest.write_text(text)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    rewrite = sub.add_parser("rewrite")
-    rewrite.add_argument("manifest", type=Path)
-    rewrite.add_argument("checkout", type=Path)
     measure = sub.add_parser("measure")
     measure.add_argument("run", type=Path)
     measure.add_argument("label")
@@ -240,9 +201,7 @@ def main():
     top.add_argument("--top", type=int, default=40)
     args = parser.parse_args()
     try:
-        if args.command == "rewrite":
-            rewrite_manifest(args.manifest, args.checkout)
-        elif args.command == "measure":
+        if args.command == "measure":
             extra = [args.version] if args.version and args.scenario == "session" else []
             with (args.run / "fanout.jsonl").open("a") as out:
                 for subscribers in args.subscribers:

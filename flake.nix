@@ -606,6 +606,22 @@
           # fetches it.
           route-proof = import ./nix/route-proof.nix { inherit system; };
 
+          # Nightly `just rs verify` proves kio's log with Verus. Its own toolchain
+          # pin (nix/verus.nix), so neither the dev shell nor `nix flake check`
+          # fetches it; Linux only, as Verus's release is.
+          verus = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            let
+              verus = pkgs.callPackage ./nix/verus.nix { inherit (pkgs) rust-bin; };
+            in
+            pkgs.mkShell {
+              packages = [
+                verus
+                verus.toolchain
+                pkgs.just
+              ];
+            }
+          );
+
           # The QUIC Interop Runner's host tools (`just test quic-interop`): tshark
           # reads its pcaps, OpenSSL makes its certificates (the dev shell's LibreSSL
           # has no config for them), and Compose drives Podman where Docker's plugin is

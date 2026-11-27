@@ -116,7 +116,7 @@ class FeaturesTest(unittest.TestCase):
         passed, expected = self.run_features(nested=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
         failures = []
-        for package in ("moq-net", "moq-quic", "moq-crypto", "moq-video"):
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-video"):
             failures.append(
                 next(call for call in expected if call[0] == "cargo" and call[1] != "tree" and package in call)
             )
@@ -124,7 +124,7 @@ class FeaturesTest(unittest.TestCase):
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(calls, expected)
         summary = "\n".join(line for line in failed.stderr.splitlines() if line.startswith("checks: failed: "))
-        for package in ("moq-net", "moq-quic", "moq-crypto", "moq-video"):
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-video"):
             self.assertIn(package, summary)
         self.assertIn("checks: just rs coroutines", failed.stdout)
 
@@ -310,7 +310,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("just gh criterion")]
-        self.assertEqual(len(release), 2)  # moq-net and its CPU clock.
+        self.assertEqual(len(release), 3)  # moq-net, its CPU clock, then kio.
         # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
         self.assertTrue(
             any(
@@ -318,6 +318,7 @@ class NightlyTest(unittest.TestCase):
                 for call in release
             )
         )
+        self.assertEqual(release[-1], "just gh criterion --no-fail-fast -p kio --bench *")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -473,10 +474,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.
-        self.assertEqual(
-            calls[-1],
-            "just gh criterion -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu",
-        )
+        self.assertEqual(calls[-1], "just gh criterion --no-fail-fast -p kio --bench *")
 
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")

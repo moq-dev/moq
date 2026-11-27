@@ -35,7 +35,7 @@ struct Wire {
 /// The broadcast's one continuous clock, advertised at the catalog root.
 ///
 /// [`wall`](Self::wall) is the wall-clock time of PTS zero since the moq epoch
-/// ([`Wall::MOQ_EPOCH`](kio::clock::Wall::MOQ_EPOCH), 2020-01-01). Its embedded timescale is serialized beside it as
+/// ([`moq_net::time::EPOCH`], 2020-01-01). Its embedded timescale is serialized beside it as
 /// `{ wall, timescale }`, preserving the catalog wire shape while keeping the pair inseparable in
 /// Rust. Every media track and every HLS record refer to this mapping after timescale conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,7 @@ impl Clock {
 		let nanos = (num % den).checked_mul(1_000_000_000).ok_or_else(overflow)? / den;
 		let since_moq_epoch = std::time::Duration::new(secs, nanos as u32);
 		// A catalog can name a wall beyond the clock's nanosecond range.
-		kio::clock::Wall::MOQ_EPOCH
+		moq_net::time::EPOCH
 			.checked_add(since_moq_epoch)
 			.ok_or_else(overflow)
 	}
@@ -192,13 +192,13 @@ mod test {
 	#[test]
 	fn wall_clock_converts_across_timescales() {
 		let clock = Clock::new(moq_net::Timestamp::from_micros(1_000_000).unwrap()).unwrap();
-		let epoch = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_000);
+		let epoch = moq_net::time::EPOCH + std::time::Duration::from_millis(1_000);
 		assert_eq!(
 			clock.wall_clock(moq_net::Timestamp::from_millis(0).unwrap()).unwrap(),
 			epoch
 		);
 
-		let second = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(2_000);
+		let second = moq_net::time::EPOCH + std::time::Duration::from_millis(2_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(1000).unwrap())
@@ -222,7 +222,7 @@ mod test {
 	/// Regression: the result was floored to the millisecond, dropping the sub-millisecond part.
 	#[test]
 	fn wall_clock_keeps_sub_millisecond_precision() {
-		let moq_epoch = kio::clock::Wall::MOQ_EPOCH;
+		let moq_epoch = moq_net::time::EPOCH;
 		let micros = |v| moq_net::Timestamp::from_micros(v).unwrap();
 		let nanos = std::time::Duration::from_nanos;
 

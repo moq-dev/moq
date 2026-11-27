@@ -5,8 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import tomllib
-
 spec = importlib.util.spec_from_file_location("fanout", Path(__file__).with_name("fanout.py"))
 fanout = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fanout)
@@ -51,52 +49,6 @@ class Fanout(unittest.TestCase):
             self.assertIn("unsupported", table)
             self.assertIn("12.5", table)
             self.assertEqual(json.loads((run / "fanout-summary.json").read_text()), rows)
-
-    def test_rewrite_manifest_resolves_kio_from_each_checkout(self):
-        harness = (
-            "[package]\n"
-            'name = "fanout-model"\n'
-            "[dependencies]\n"
-            'kio = { git = "https://github.com/kixel-ai/kio", rev = "oldrev" }\n'
-            'moq-net = { path = "../../../rs/moq-net", features = ["async"] }\n'
-        )
-        cases = [
-            (
-                '[workspace.dependencies]\nkio = { path = "rs/kio", version = "0.6.2" }\n',
-                lambda checkout: {"path": str((checkout / "rs/kio").resolve())},
-            ),
-            (
-                '[workspace.dependencies]\nkio = { git = "https://github.com/kixel-ai/kio", rev = "newrev" }\n',
-                lambda _: {"git": "https://github.com/kixel-ai/kio", "rev": "newrev"},
-            ),
-            (
-                '[workspace.dependencies]\nkio = "0.7.0"\n',
-                lambda _: "0.7.0",
-            ),
-        ]
-        for workspace_toml, expected in cases:
-            with self.subTest(workspace_toml=workspace_toml), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                checkout = root / "checkout"
-                checkout.mkdir()
-                (checkout / "Cargo.toml").write_text(workspace_toml)
-                manifest = root / "Cargo.toml"
-                manifest.write_text(harness)
-                fanout.rewrite_manifest(manifest, checkout)
-                parsed = tomllib.loads(manifest.read_text())
-                self.assertEqual(parsed["dependencies"]["kio"], expected(checkout))
-                self.assertEqual(
-                    parsed["dependencies"]["moq-net"],
-                    {"path": str((checkout / "rs/moq-net").resolve()), "features": ["async"]},
-                )
-
-    def test_fanout_manifests_match_workspace_kio_source(self):
-        root = Path(__file__).resolve().parents[1]
-        expected = tomllib.loads(f"[dependencies]\n{fanout.kio_dependency_line(root)}\n")["dependencies"]["kio"]
-        for manifest in sorted((root / "bench/fanout").glob("*/Cargo.toml")):
-            with self.subTest(manifest=manifest.relative_to(root)):
-                parsed = tomllib.loads(manifest.read_text())
-                self.assertEqual(parsed["dependencies"]["kio"], expected)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,37 @@
+# Proves the Verus proof in src/log.rs. It builds kio's sources with the `vstd` dependency
+# and the `cargo verus` opt-in that kio's own manifest leaves out, so plain and downstream
+# builds of kio, Verus ones included, never resolve `vstd`. Its own workspace, so cargo
+# runs over kio's never build `vstd` either.
+[workspace]
+
+[package]
+name = "kio-verify"
+edition = "2024"
+publish = false
+
+[lib]
+name = "kio"
+path = "../src/lib.rs"
+
+# kio's non-optional dependencies, at its versions: the proof covers the default build.
+[dependencies]
+crossbeam-epoch = "0.9.21"
+rand = "0.10.1"
+smallvec = { version = "1.15", features = ["union"] }
+# Verus's specs and ghost types. Pinned to the release in nix/verus.nix.
+vstd = "=0.0.0-2026-11-22-0344"
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+libc = "0.2"
+
+# kio's features, which this package leaves off, and the cfgs `cargo verus` sets.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("async", "runtime", "sim", "manual", "serde", "macros"))',
+    "cfg(verus_only)",
+    "cfg(verus_keep_ghost)",
+    "cfg(verus_keep_ghost_body)",
+] }
+
+[package.metadata.verus]
+verify = true

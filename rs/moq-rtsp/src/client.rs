@@ -838,7 +838,7 @@ impl Ingest {
 
 		// A host whose wall clock is unset has no wall to place on: the timebase then anchors on the
 		// first frame's arrival, as any importer's does.
-		if kio::clock::wall() >= kio::clock::Wall::MOQ_EPOCH {
+		if kio::clock::wall() >= moq_net::time::EPOCH {
 			let wall = u64::try_from(reference)
 				.ok()
 				.and_then(|micros| kio::clock::Wall::UNIX_EPOCH.checked_add(std::time::Duration::from_micros(micros)))
