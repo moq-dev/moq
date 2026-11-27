@@ -549,6 +549,7 @@ fn from(key: u64) -> track::Range {
 	track::Range {
 		start: track::Start::Time(key),
 		end: None,
+		..Default::default()
 	}
 }
 

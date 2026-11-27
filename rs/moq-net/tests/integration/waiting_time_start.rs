@@ -4,6 +4,7 @@
 //! drives them: the publisher writes group 66, a viewer fetches group 67, which the publisher
 //! serves only from a fill, and a viewer then subscribes from time 66.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
 
@@ -122,11 +123,12 @@ impl Fixture {
 	async fn subscribe(&self, index: usize) -> moq_net::track::Ordered {
 		let subscription = Subscription::default()
 			.with_max(None)
-			.with_order(Order::Ascending)
 			.with_ranges([Range {
 				start: moq_net::track::Start::Time(LIVE),
 				end: None,
-			}]);
+				..Default::default()
+			}])
+			.ordered(Order::Ascending);
 		kio::clock::timeout(
 			TIMEOUT,
 			self.viewers[index].track("value").unwrap().subscribe(subscription),
@@ -204,17 +206,19 @@ async fn a_range_before_every_group_reads_past_it() {
 	fixture.write_live();
 	let subscription = Subscription::default()
 		.with_max(None)
-		.with_order(Order::Ascending)
 		.with_ranges([
 			Range {
 				start: moq_net::track::Start::Time(10),
 				end: Some(20),
+				..Default::default()
 			},
 			Range {
 				start: moq_net::track::Start::Time(LIVE),
 				end: None,
+				..Default::default()
 			},
-		]);
+		])
+		.ordered(Order::Ascending);
 	let mut direct = fixture.track.subscribe(subscription.clone()).ordered();
 	let direct = read(&mut direct, 1).await;
 	let mut reader = kio::clock::timeout(
@@ -254,17 +258,19 @@ async fn a_looked_up_time_start_reads_before_a_held_later_group() {
 	write(track.create_group(moq_net::group::Info { start: LIVE }).unwrap());
 	let subscription = Subscription::default()
 		.with_max(None)
-		.with_order(Order::Ascending)
 		.with_ranges([
 			Range {
 				start: moq_net::track::Start::Time(10),
 				end: Some(20),
+				..Default::default()
 			},
 			Range {
 				start: moq_net::track::Start::Time(LIVE),
 				end: None,
+				..Default::default()
 			},
-		]);
+		])
+		.ordered(Order::Ascending);
 	let mut reader = track.subscribe(subscription).ordered();
 	assert_eq!(read(&mut reader, 1).await, [Ok(10)]);
 	serving.abort();
@@ -312,11 +318,12 @@ async fn a_time_between_held_groups_starts_where_the_publisher_would() {
 
 	let from = Subscription::default()
 		.with_max(None)
-		.with_order(Order::Ascending)
 		.with_ranges([Range {
 			start: moq_net::track::Start::Time(18),
 			end: None,
-		}]);
+			..Default::default()
+		}])
+		.ordered(Order::Ascending);
 	let mut direct = track.subscribe(from.clone()).ordered();
 	assert_eq!(read_groups(&mut direct, 2).await, [15, 20]);
 	let subscribing = remote.track("value").unwrap().subscribe(from);

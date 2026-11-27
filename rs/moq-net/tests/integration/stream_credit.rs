@@ -3,6 +3,7 @@
 //! A peer granting few streams still gets everything asked of it, on each protocol: opens
 //! wait their turn for credit rather than failing.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use std::time::Duration;
 
@@ -121,7 +122,7 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 			.unwrap()
 			.unwrap();
 		let prefs = track::Subscription::default()
-			.with_order(track::Order::Descending)
+			.ordered(track::Order::Descending)
 			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
@@ -188,7 +189,7 @@ async fn a_reset_group_is_fetched_whole() {
 			.unwrap()
 			.unwrap();
 		let prefs = track::Subscription::default()
-			.with_order(track::Order::Descending)
+			.ordered(track::Order::Descending)
 			.with_max(Duration::from_secs(30));
 		let remote = remote.track("0").unwrap();
 		let mut subscriber = remote.subscribe(prefs).await.unwrap();
@@ -431,7 +432,7 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 			.unwrap()
 			.unwrap();
 		let prefs = track::Subscription::default()
-			.with_order(track::Order::Descending)
+			.ordered(track::Order::Descending)
 			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 		macro_rules! next {
@@ -503,7 +504,7 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 			.unwrap()
 			.unwrap();
 		let prefs = track::Subscription::default()
-			.with_order(track::Order::Descending)
+			.ordered(track::Order::Descending)
 			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 		macro_rules! next {
@@ -573,7 +574,7 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 			.unwrap()
 			.unwrap();
 		let prefs = track::Subscription::default()
-			.with_order(track::Order::Ascending)
+			.ordered(track::Order::Ascending)
 			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 		macro_rules! next {
@@ -646,7 +647,7 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 			.unwrap()
 			.unwrap();
 		let prefs = track::Subscription::default()
-			.with_order(track::Order::Descending)
+			.ordered(track::Order::Descending)
 			.with_max(Duration::from_secs(30));
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 

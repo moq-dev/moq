@@ -511,7 +511,8 @@ impl Window {
 
 	/// Retire the ranges keyed `retired`, then resolve `added`, leaving every other range
 	/// where it resolved. A key added again replaces its range, but a live join added again
-	/// with only its `max` changed keeps where it started. Costs the ranges edited, never the
+	/// with only its `max` or policy changed keeps where it started, as does any other range
+	/// with only its policy changed. Costs the ranges edited, never the
 	/// rest.
 	pub fn edit(
 		&mut self,
@@ -537,12 +538,16 @@ impl Window {
 			Joining::At(group) => Some(group),
 			Joining::Since(_) => None,
 		};
+		// A live join keeps where it started whatever its `max`, and any range whose policy
+		// alone moved keeps where it resolved.
 		let retuned: BTreeSet<u64> = (added.iter())
 			.filter(|(key, range)| {
-				range
-					.join()
-					.is_some_and(|join| self.ranges.get(key).and_then(Range::join) == Some(join))
-					&& self.joining.get(key).copied().and_then(placed) == placed(joining(*key))
+				let old = self.ranges.get(key);
+				let kept = match range.join() {
+					Some(join) => old.and_then(Range::join) == Some(join),
+					None => old.is_some_and(|old| old != range && old.with_policy(range.policy()) == *range),
+				};
+				kept && self.joining.get(key).copied().and_then(placed) == placed(joining(*key))
 			})
 			.map(|(key, _)| *key)
 			.collect();
@@ -1673,7 +1678,7 @@ mod tests {
 			Some(time) => Start::Time(time),
 			None => Start::Oldest,
 		};
-		Range { start, end: end.into() }
+		Range { start, end: end.into(), ..Default::default() }
 	}
 
 	/// A live join `min` behind the live edge, or with no lag limit for `None`.
@@ -1684,6 +1689,7 @@ mod tests {
 				max: None,
 			},
 			end: end.into(),
+			..Default::default()
 		}
 	}
 
@@ -1929,6 +1935,7 @@ mod tests {
 				max,
 			},
 			end,
+			..Default::default()
 		};
 		let ranges: BTreeMap<u64, Range> = [
 			(0, join(40, Some(narrow), None)),
@@ -2002,6 +2009,7 @@ mod tests {
 		let history = Range {
 			start: Start::Time(5001),
 			end: Some(8999),
+			..Default::default()
 		};
 		let max = Duration::from_secs(1);
 		let join = Range::from(Start::Live {

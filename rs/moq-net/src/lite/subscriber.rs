@@ -1685,7 +1685,7 @@ impl GroupRecv {
 		let (priority, order) = match &target {
 			OpenedTarget::Copy(track) => track
 				.subscription()
-				.map_or((0, Default::default()), |sub| (sub.priority, sub.order)),
+				.map_or((0, Default::default()), |sub| (sub.policy().priority, sub.policy().order)),
 			OpenedTarget::Fill(_, priority) => (*priority, Default::default()),
 		};
 		self.reader
@@ -3230,7 +3230,7 @@ impl DatagramServe {
 					let priority = request.priority().unwrap_or_default();
 					if !version.has_datagram_tracks() {
 						let source = self.source.take().expect("asked once");
-						let subscription = track::Subscription::default().with_priority(priority);
+						let subscription = track::Subscription::default().prioritized(priority);
 						let subscribing = source.track(request.name())?.subscribe(subscription).into_inner();
 						let DatagramState::Open { request } = std::mem::replace(&mut self.state, DatagramState::Done)
 						else {
@@ -3296,7 +3296,7 @@ impl DatagramServe {
 					};
 					let info = subscriber.info();
 					let timescale = info.timescale;
-					let priority = subscriber.subscription().priority;
+					let priority = subscriber.subscription().policy().priority;
 					let producer = request.accept(
 						datagram::Info::default()
 							.with_priority(info.priority)
@@ -3373,7 +3373,7 @@ impl DatagramServe {
 						continue;
 					}
 					*priority = ready!(Self::poll_demand(producer, waiter, *priority))?;
-					let subscription = subscriber.subscription().with_priority(*priority);
+					let subscription = subscriber.subscription().prioritized(*priority);
 					subscriber.update(subscription)?;
 				}
 				DatagramState::Ending { applied, writer } => {
@@ -3751,6 +3751,7 @@ mod tests {
 						.with_ranges([track::Range {
 							start: crate::track::Start::Time(time),
 							end: None,
+							..Default::default()
 						}])
 						.with_max(None),
 				)
@@ -3802,6 +3803,7 @@ mod tests {
 					.with_ranges([track::Range {
 						start: crate::track::Start::Time(40),
 						end: None,
+						..Default::default()
 					}])
 					.with_max(None),
 			)
@@ -3858,6 +3860,7 @@ mod tests {
 						.with_ranges([track::Range {
 							start: crate::track::Start::Time(10),
 							end: None,
+							..Default::default()
 						}])
 						.with_max(None),
 				)
@@ -7146,6 +7149,7 @@ mod tests {
 					max: Some(budget),
 				},
 				end: Some(3),
+				..Default::default()
 			}]));
 		serving.serving.answer_join(lag, Some(3), Some(0), Duration::MAX);
 		let old = lite::SubscribeResponse::Drop(lite::SubscribeDrop::stale(1..3, Some(budget), version));
@@ -7581,6 +7585,7 @@ mod tests {
 					.with_ranges([track::Range {
 						start: crate::track::Start::Time(u64::MAX),
 						end: None,
+						..Default::default()
 					}])
 					.with_max(None),
 			)
@@ -8228,7 +8233,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new(), Vec::new()]);
 			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
-			let (mut waiting, mut run) = subscribing(&subscriber, Subscription::default().with_priority(3));
+			let (mut waiting, mut run) = subscribing(&subscriber, Subscription::default().prioritized(3));
 			assert!(kio::Task::poll(&mut run, &kio::Waiter::noop()).is_pending());
 
 			let track = sent(&session.log, 0);
@@ -8446,7 +8451,7 @@ mod tests {
 		);
 		// Every group, oldest first, however late.
 		let every = Subscription::default()
-			.with_order(crate::track::Order::Ascending)
+			.ordered(crate::track::Order::Ascending)
 			.with_start(0)
 			.with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
@@ -8562,7 +8567,7 @@ mod tests {
 			crate::track::Info::default().with_timescale(Timescale::MILLI),
 		);
 		let every = Subscription::default()
-			.with_order(crate::track::Order::Ascending)
+			.ordered(crate::track::Order::Ascending)
 			.with_start(0)
 			.with_max(Duration::from_secs(60));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
@@ -9569,7 +9574,7 @@ mod tests {
 			}
 
 			// The update races it, and its write fails.
-			reader.update(Subscription::default().with_priority(1)).unwrap();
+			reader.update(Subscription::default().prioritized(1)).unwrap();
 			let gate = serve.gate();
 			let mut running = TrackServeRun {
 				serve,
@@ -9733,7 +9738,7 @@ mod tests {
 				assert!(serving.poll(&serve, &waiter).is_pending());
 				let urgent = serving
 					.serving
-					.subscribe(Some(Subscription::default().with_start(0).with_priority(5)));
+					.subscribe(Some(Subscription::default().with_start(0).prioritized(5)));
 				#[derive(Default)]
 				struct Wakes(std::sync::atomic::AtomicUsize);
 				impl std::task::Wake for Wakes {
@@ -9748,7 +9753,7 @@ mod tests {
 				// The change after the deferred one still wakes the loop, as a cancel must.
 				let later = serving
 					.serving
-					.subscribe(Some(Subscription::default().with_start(0).with_priority(9)));
+					.subscribe(Some(Subscription::default().with_start(0).prioritized(9)));
 				assert!(
 					wakes.0.load(atomic::Ordering::Relaxed) > 0,
 					"{version:?}: a change after a deferred one wakes the loop"
@@ -10032,6 +10037,7 @@ mod tests {
 		let timed = Subscription::default().with_ranges([track::Range {
 			start: crate::track::Start::Time(5),
 			end: Some(9),
+			..Default::default()
 		}]);
 		assert_eq!(
 			wire_ranges(&timed, true),
@@ -10053,6 +10059,7 @@ mod tests {
 		let empty = Subscription::default().with_ranges([track::Range {
 			start: crate::track::Start::Time(5),
 			end: Some(4),
+			..Default::default()
 		}]);
 		assert_eq!(wire_ranges(&empty, true), None);
 
@@ -10307,7 +10314,7 @@ mod tests {
 		assert_eq!(wanted(&h), [1, 2], "the requested group re-arms the next request");
 
 		// A parameter change restates the pending wanted group rather than clearing it.
-		let _urgent = track.subscribe(Subscription::default().with_priority(9)).await.unwrap();
+		let _urgent = track.subscribe(Subscription::default().prioritized(9)).await.unwrap();
 		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
 		assert_eq!(wanted(&h), [1, 2, 2], "every update restates the wanted group");
 	}
@@ -12096,7 +12103,8 @@ mod tests {
 	}
 }
 
-/// The ranges a SUBSCRIBE carries for `subscription`, without the empty ones.
+/// The ranges a SUBSCRIBE carries for `subscription`, each at its own priority and order,
+/// without the empty ones.
 ///
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, from the frame it resumes at (see
@@ -12151,19 +12159,11 @@ fn wire_ranges(subscription: &Subscription, ranged: bool) -> Option<Vec<lite::Ra
 		ranges.push(lite::Range {
 			start,
 			end,
-			..lite::Range::OPEN
+			priority: range.priority,
+			order: range.order,
 		});
 	}
 	(!ranges.is_empty()).then_some(ranges)
-}
-
-/// `ranges` at `subscription`'s priority and order, which lite-07 carries on each range.
-fn with_policy(ranges: Vec<lite::Range>, subscription: &Subscription) -> Vec<lite::Range> {
-	let policy = lite::Policy {
-		priority: subscription.priority,
-		order: subscription.order,
-	};
-	ranges.into_iter().map(|range| range.with_policy(policy)).collect()
 }
 
 /// `subscription` narrowed to the one span a wire without ranges carries, which the
@@ -13229,7 +13229,7 @@ impl TrackServe {
 				let asks = demand.as_ref().map_or(&[][..], |demand| &demand.asks[..]);
 				let joins = demand.as_ref().map_or(&[][..], |demand| &demand.joins[..]);
 				let count = demand_ranges.len() + asks.len() + joins.len() + fills.groups.iter().count();
-				let fields = self.subscribe_fields(demand.as_ref().unwrap_or(&fills.subscription()));
+				let fields = self.subscribe_fields(demand.as_ref().unwrap_or(&FillAsk::subscription()));
 				let budget = fit::Budget::new(self.subscriber.version, fields, next, count);
 				let (demand_ranges, groups) = fit::fit(demand_ranges, &fills.groups, &range_fills.avoid(), budget)?;
 				// A fill's range starting past its run speaks only while that run is asked whole.
@@ -13241,7 +13241,10 @@ impl TrackServe {
 					Sub::None => None,
 				};
 				let (probes, reasked) = wanted_probes(active, asks, joins, &demand_ranges);
-				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
+				// A probe asks on behalf of the demand's readers, at what the demand asks as a whole.
+				let policy = demand.as_ref().map(Subscription::policy).unwrap_or_default();
+				let probes = probes.into_iter().map(|probe| probe.with_policy(policy)).collect();
+				let fill_ranges: Vec<_> = range_fills.ask.wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
 				let reasked = fitted_reasks(active, reasked, &probes);
 				(
@@ -13265,17 +13268,16 @@ impl TrackServe {
 			true => &range_fills.ask,
 			false => &none,
 		};
-		// What goes on the wire: the demand's ranges, then the fills', under the demand's
-		// parameters. The demand alone sets the floor.
+		// What goes on the wire: the demand's ranges, then the fills', each at its own priority
+		// and order, under the demand's other parameters. The demand alone sets the floor.
 		let request = match request {
 			Some((demand, demand_ranges, probes, reasked, max_age)) => {
-				let subscription = fills.merge(demand.clone());
 				let mut ranges = demand_ranges.clone();
 				ranges.extend(probes.iter().copied());
-				ranges.extend(FillAsk::wire(&groups));
+				ranges.extend(fills.wire(&groups));
 				Some(Wire {
-					ranges: with_policy(ranges, &subscription),
-					subscription,
+					ranges,
+					subscription: demand.clone(),
 					demand: Some(demand),
 					demand_ranges,
 					probes: probes.len(),
@@ -13285,13 +13287,13 @@ impl TrackServe {
 			}
 			None if fills.is_empty() => None,
 			None => Some(Wire {
-				subscription: fills.subscription(),
+				subscription: FillAsk::subscription(),
 				demand: None,
 				demand_ranges: Vec::new(),
 				probes: 0,
 				reasked: Default::default(),
-				ranges: with_policy(FillAsk::wire(&groups).collect(), &fills.subscription()),
-				max_age: fills.subscription().max_age(),
+				ranges: fills.wire(&groups).collect(),
+				max_age: None,
 			}),
 		};
 
@@ -13319,8 +13321,8 @@ impl TrackServe {
 						let start_moved = demand.is_some() && active.start != subscription.start();
 						let terms = (active.priority, active.order, active.max_delay);
 						let live = active.live.unchanged();
-						active.priority = subscription.priority;
-						active.order = subscription.order;
+						let policy = lite::Policy::top(ranges.iter().map(lite::Range::policy));
+						(active.priority, active.order) = (policy.priority, policy.order);
 						active.max_delay = max_age;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
@@ -13422,10 +13424,10 @@ impl TrackServe {
 			id: u64::MAX,
 			broadcast: self.path.clone(),
 			track: self.name.as_str().into(),
-			priority: subscription.priority,
+			priority: subscription.policy().priority,
 			max_delay: subscription.max_age(),
 			ranges: vec![lite::Range::OPEN],
-			order: subscription.order,
+			order: subscription.policy().order,
 		};
 		// One that can't go out leaves no room, and fails as it would have.
 		msg.encode_bytes(self.subscriber.version)
@@ -13464,7 +13466,7 @@ impl TrackServe {
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
 			subscription.start().is_none()
-				&& (!ranged || subscription.ranges.iter().all(|range| *range == track::Range::ALL))
+				&& (!ranged || subscription.ranges.iter().all(track::Range::is_all))
 		});
 		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);
@@ -13473,7 +13475,7 @@ impl TrackServe {
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
 		}
-		let ranges = with_policy(wire_ranges(&subscription, ranged)?, &subscription);
+		let ranges = wire_ranges(&subscription, ranged)?;
 		Some(Request {
 			subscription,
 			ranges,
@@ -13805,16 +13807,17 @@ impl Establish {
 			self.serve.subscriber.version,
 			waiter
 		))?;
+		let policy = self.policy();
 		let msg = lite::Subscribe {
 			identity: self.serve.identity.clone(),
 			node: self.serve.node,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
-			priority: self.subscription.priority,
+			priority: policy.priority,
 			max_delay: self.max_age,
 			ranges: self.ranges.clone(),
-			order: self.subscription.order,
+			order: policy.order,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -13852,8 +13855,15 @@ impl Establish {
 		}
 	}
 
+	/// What the ranges ask as a whole: the one priority and order a wire before lite-07
+	/// carries, whose one range carries them too.
+	fn policy(&self) -> lite::Policy {
+		lite::Policy::top(self.ranges.iter().map(lite::Range::policy))
+	}
+
 	/// The live subscription, `answered` once the publisher's first response arrived.
 	fn activate(&self, stream: Stream<Transport, Version>, answered: bool) -> SubStream {
+		let policy = self.policy();
 		let demand = self.demand_ranges.len();
 		let probes = demand + self.probes;
 		let live = lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges);
@@ -13870,8 +13880,8 @@ impl Establish {
 			probe_ids: (demand as u64..probes as u64).collect(),
 			fill_ids: (probes as u64..self.ranges.len() as u64).collect(),
 			fill_groups: self.fill_groups.clone(),
-			priority: self.subscription.priority,
-			order: self.subscription.order,
+			priority: policy.priority,
+			order: policy.order,
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			started: None,
@@ -13982,7 +13992,7 @@ impl FinishedServe {
 			return Ok(());
 		};
 		while let Poll::Ready(Ok(demand)) = serving.poll_subscription_changed(waiter) {
-			(self.asks, self.priority) = demand.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
+			(self.priority, self.asks) = demand.map_or((0, Vec::new()), |demand| (demand.policy().priority, demand.asks));
 		}
 		let asks = &self.asks;
 		// Sorted, as the demand counts them by time: a copy's readers can wait on thousands.
@@ -14573,8 +14583,8 @@ impl TrackServeRun {
 								let per_run = !self.serve.subscriber.version.has_ranges();
 								let mut range_fills = serve_loop.range_fills;
 								// The time starts readers waited on already, which the live loop saw.
-								let (asks, priority) = (serve_loop.serving.subscription())
-									.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
+								let (priority, asks) = (serve_loop.serving.subscription())
+									.map_or((0, Vec::new()), |demand| (demand.policy().priority, demand.asks));
 								let mut finished = FinishedServe {
 									serving: Some(serve_loop.serving),
 									asks,

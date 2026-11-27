@@ -4,6 +4,7 @@
 //! after another: each reader gets the group, however its subscription names the start and
 //! whenever it joins as the reader before it lets go.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
 
@@ -258,8 +259,8 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 				kio::clock::sim::spawn(async move {
 					let subscription = Subscription::default()
 						.with_max(budget)
-						.with_order(moq_net::track::Order::Ascending)
-						.with_ranges([support::keys(0..START)]);
+						.with_ranges([support::keys(0..START)])
+						.ordered(moq_net::track::Order::Ascending);
 					read(&relay, history_version.parse().unwrap(), subscription).await
 				})
 			};

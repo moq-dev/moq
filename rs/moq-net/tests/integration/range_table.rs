@@ -7,6 +7,7 @@
 //! may. Every group arrives whole: a switch stalls the first route partway through, so the second
 //! supplies the groups the first never delivered and the tail of one it delivered only the head of.
 
+use crate::support::EveryRange;
 use crate::support;
 
 use std::time::Duration;
@@ -83,6 +84,7 @@ impl Ask {
 				.map(|range| Range {
 					start: start(range),
 					end: range.get("end").map(|end| end.as_u64().expect("a time")),
+					..Default::default()
 				})
 				.collect(),
 			None => vec![Range::ALL],
@@ -92,8 +94,8 @@ impl Ask {
 
 	fn subscription(&self) -> Subscription {
 		Subscription::default()
-			.with_order(Order::Ascending)
 			.with_ranges(self.ranges.clone())
+			.ordered(Order::Ascending)
 	}
 }
 
@@ -637,6 +639,7 @@ async fn chain_serves_a_placed_range_before_older_history() {
 	let held = Range {
 		start: Start::Time(5000),
 		end: Some(6000),
+		..Default::default()
 	};
 	let chain = Chain::new(&source, &[Ask { ranges: vec![held] }]).await;
 
@@ -644,11 +647,12 @@ async fn chain_serves_a_placed_range_before_older_history() {
 	let older = Range {
 		start: Start::Time(1000),
 		end: Some(2000),
+		..Default::default()
 	};
 	let read = Ask {
 		ranges: vec![older, held],
 	};
-	let subscription = read.subscription().with_order(Order::Descending);
+	let subscription = read.subscription().ordered(Order::Descending);
 	let mut reader = kio::clock::timeout(ARRIVAL, chain.remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("the subscribe answers")

@@ -1734,7 +1734,7 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 		// Lite-07 carries a priority and order per range, which this serves the subscription at
 		// as a whole.
 		if live.reports_starts() {
-			let policy = lite::Policy::of(live.iter().map(|(_, range)| range));
+			let policy = lite::Policy::top(live.iter().map(|(_, range)| range.policy()));
 			self.priority = policy.priority;
 			self.order = policy.order;
 		}
@@ -3214,12 +3214,7 @@ impl SubscribeServe {
 		legacy: Option<Box<Legacy>>,
 		one_shot: Option<Box<PendingOneShot>>,
 	) -> Self {
-		let subscription = crate::track::Subscription {
-			priority: msg.priority,
-			order: msg.order,
-			..bounds.groups()
-		};
-		let subscribing = track.subscribe(subscription).into_inner();
+		let subscribing = track.subscribe(bounds.groups()).into_inner();
 		Self::Confirm {
 			msg: Box::new(msg),
 			bounds,
@@ -5448,7 +5443,12 @@ impl Bounds {
 					continue;
 				}
 			};
-			let range = Range { start, end };
+			let range = Range {
+				start,
+				end,
+				priority: range.priority,
+				order: range.order,
+			};
 			if range.is_empty() || matches!((joined, end), (Some(group), Some(end)) if end < group) {
 				bounds.ranges.push(Range::EMPTY);
 				continue;
@@ -6147,10 +6147,10 @@ impl TrackRun {
 				retired,
 				added,
 				retuned,
-			} => self.edit(retired, added, retuned, upd.priority, upd.order),
+			} => self.edit(retired, added, retuned),
 			lite::Applied::Replace(ranges) => {
 				let legacy = Bounds::legacy(self.ctx.version, upd.max_delay);
-				self.replace_ranges(ranges, legacy, upd.priority, upd.order)
+				self.replace_ranges(ranges, legacy)
 			}
 		};
 		if !edited {
@@ -6232,8 +6232,6 @@ impl TrackRun {
 		retired: Vec<u64>,
 		added: Vec<(u64, lite::Range)>,
 		retuned: Vec<(u64, lite::Range)>,
-		priority: i8,
-		order: Order,
 	) -> bool {
 		let (mut positions, mut stopping) = (Vec::new(), Vec::new());
 		let mut placed = std::collections::BTreeMap::new();
@@ -6272,8 +6270,6 @@ impl TrackRun {
 			retire: retired.iter().copied().chain(replaced().map(|(id, _)| *id)).collect(),
 			add: replaced().chain(&added).copied().collect(),
 			placed: placed.clone(),
-			priority,
-			order,
 		};
 		// A refusal leaves the model's ranges as they were, so this side keeps them too.
 		if let Err(err) = self.track.edit(edit) {
@@ -6348,10 +6344,14 @@ impl TrackRun {
 			// group 0 holds nothing.
 			let pinned = match (range.end, resolved.end) {
 				(Some(_), Some(end)) => match end.checked_sub(1) {
-					Some(last) => Range { start, end: Some(last) },
+					Some(last) => Range {
+						start,
+						end: Some(last),
+						..range
+					},
 					None => Range::EMPTY,
 				},
-				(end, _) => Range { start, end },
+				(end, _) => Range { start, end, ..range },
 			};
 			// The start settled; the end is due again once it may settle.
 			let next = match resolved.end {
@@ -6371,16 +6371,10 @@ impl TrackRun {
 		&mut self,
 		ranges: Vec<(u64, lite::Range)>,
 		legacy: Option<crate::track::Start>,
-		priority: i8,
-		order: Order,
 	) -> bool {
 		let (ids, ranges): (Vec<u64>, Vec<lite::Range>) = ranges.into_iter().unzip();
 		let bounds = Bounds::new(&ranges, legacy);
-		let model = crate::track::Subscription {
-			priority,
-			order,
-			..bounds.groups()
-		};
+		let model = bounds.groups();
 		// Restated whole, so an absent start is placed afresh within the new max age rather
 		// than retuned where the old one joined. A refusal leaves the model's ranges as they
 		// were, so this side keeps them too.
@@ -8335,6 +8329,7 @@ mod serve_group_test {
 			[crate::track::Range {
 				start: crate::track::Start::Time(0),
 				end: Some(0),
+				..Default::default()
 			}]
 		);
 
@@ -8469,6 +8464,7 @@ mod serve_group_test {
 				.map(|_| track::Range {
 					start: anchor(&mut rng).map_or(crate::track::Start::Oldest, crate::track::Start::Time),
 					end: rng.random_bool(0.6).then(|| anchor(&mut rng)).flatten(),
+					..Default::default()
 				})
 				.collect();
 			let positions: Vec<(u64, u64)> = (0..rng.random_range(0..4))
@@ -9967,6 +9963,7 @@ mod serve_group_test {
 				Range {
 					start: crate::track::Start::Time(1500),
 					end: Some(1999),
+					..Default::default()
 				},
 				// Empty, so it starts nowhere.
 				Range::EMPTY,
@@ -9977,6 +9974,7 @@ mod serve_group_test {
 						max: Some(std::time::Duration::ZERO),
 					},
 					end: Some(1999),
+					..Default::default()
 				},
 			])
 			.with_max(Duration::from_secs(3600))
@@ -10252,6 +10250,7 @@ mod serve_group_test {
 					max: None
 				},
 				end: None,
+				..Default::default()
 			}
 		);
 	}

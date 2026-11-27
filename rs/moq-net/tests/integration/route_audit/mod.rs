@@ -15,6 +15,7 @@ mod domains;
 mod failures;
 mod ingest;
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::path_routes::{DEBOUNCE, HOLD, cut, land, lite07};
 use crate::route_change::{produce_origin, timed};
@@ -359,7 +360,7 @@ impl Reader {
 						max: None,
 					})])
 					.with_max(Duration::from_secs(60))
-					.with_order(track::Order::Ascending);
+					.ordered(track::Order::Ascending);
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};

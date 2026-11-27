@@ -5,6 +5,7 @@
 //! below it. A handler that knows its groups' times answers with the group containing the
 //! time; one serving key by key serves the key, which is that group when one starts there.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
 
@@ -103,8 +104,8 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 
 	let subscription = Subscription::default()
 		.with_max(FOREVER)
-		.with_order(Order::Ascending)
-		.with_ranges([range]);
+		.with_ranges([range])
+		.ordered(Order::Ascending);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -129,6 +130,7 @@ async fn a_time_start_is_answered_by_the_group_containing_it() {
 	let range = Range {
 		start: moq_net::track::Start::Time(2500),
 		end: Some(4500),
+		..Default::default()
 	};
 	let (read, seen) = read(range, true).await;
 	assert_eq!(read, [2000, 3000, 4000].into());
@@ -145,6 +147,7 @@ async fn a_time_start_at_a_key_is_served_key_by_key() {
 	let range = Range {
 		start: moq_net::track::Start::Time(2000),
 		end: Some(4500),
+		..Default::default()
 	};
 	let (read, seen) = read(range, false).await;
 	assert_eq!(read, [2000, 3000, 4000].into());

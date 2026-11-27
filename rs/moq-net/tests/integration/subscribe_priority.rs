@@ -3,6 +3,7 @@
 //! One upstream subscription carries the aggregate priority of the subscribers it serves,
 //! and follows it as they come and go, directly and through a relay.
 
+use crate::support::EveryRange;
 use crate::support;
 
 use std::time::Duration;
@@ -38,7 +39,7 @@ async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), Stri
 	let reached = kio::clock::timeout(TIMEOUT, async {
 		while track
 			.subscription()
-			.is_none_or(|subscription| subscription.priority != want)
+			.is_none_or(|subscription| subscription.ranges.iter().map(|range| range.priority).max() != Some(want))
 		{
 			track.subscription_changed().await.expect("track open");
 		}
@@ -47,7 +48,7 @@ async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), Stri
 	reached.map_err(|_| {
 		format!(
 			"priority stuck at {:?}, wanted {want}",
-			track.subscription().map(|s| s.priority)
+			track.subscription().map(|s| s.ranges.iter().map(|range| range.priority).max())
 		)
 	})
 }
@@ -86,7 +87,7 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 		async move {
 			kio::clock::timeout(
 				TIMEOUT,
-				track.subscribe(Subscription::default().with_priority(priority)),
+				track.subscribe(Subscription::default().prioritized(priority)),
 			)
 			.await
 			.expect("subscribe timeout")

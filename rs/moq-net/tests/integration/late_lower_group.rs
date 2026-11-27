@@ -34,7 +34,7 @@ fn floored(start: Option<u64>) -> Range {
 		Some(start) => moq_net::track::Start::Time(start),
 		None => moq_net::track::Start::Oldest,
 	};
-	Range { start, end: None }
+	Range { start, end: None, ..Default::default() }
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {

@@ -3176,6 +3176,7 @@ mod tests {
 						let history = Range {
 							start: Start::Oldest,
 							end: Some(next(KEYS)),
+							..Default::default()
 						};
 						ranges.push((2, history));
 					}

@@ -20,9 +20,6 @@ pub(super) use window::{Budget, Containing, Found, Holdings, Join, Joining, Unhe
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subscription {
-	/// Delivery priority, higher first, defaulting to 0. Higher values preempt lower ones
-	/// when bandwidth is constrained.
-	pub priority: i8,
 	/// The spans of the track to deliver; see [`Range`].
 	///
 	/// The default is one range from [`Start::LATEST`]: the latest group, skipping each the
@@ -34,13 +31,6 @@ pub struct Subscription {
 	/// [`crate::track::Subscriber::with_range`] narrows the reads further. See [Local cursor
 	/// vs wire preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub ranges: Vec<Range>,
-	/// Which pending group the publisher sends first; see [`Order`].
-	///
-	/// Aggregated across every live subscriber: any [`Order::Descending`] subscriber makes
-	/// the aggregate descending, so a relay fanning one upstream request out keeps its live
-	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
-	/// still serves it in its own order.
-	pub order: Order,
 	/// Whether this reader needs the source's live feed, not only its history: a wire
 	/// publisher owes its peer an answer naming the live edge, which only the upstream's own
 	/// answer gives. A session holding no upstream subscription for its copy subscribes again
@@ -121,7 +111,7 @@ pub(crate) fn max_of(budget: Duration) -> Option<Duration> {
 /// range ([`Start::Time`] or [`Start::Oldest`]) delivers every group it covers, and a
 /// [`Start::Live`] range skips what its `max` judges stale, so an ascending subscriber that
 /// wants a backlog drains it from a history range or a `max` that covers it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Order {
 	/// Oldest first, draining a backlog in key order.
 	Ascending,
@@ -141,6 +131,9 @@ pub enum Order {
 /// Only a group reached through a [`Start::Live`] range alone can go stale. A group several
 /// ranges cover takes the largest `max` among them, and never goes stale while any history
 /// range covers it.
+///
+/// Each range carries its own [`Self::priority`] and [`Self::order`], so one subscription can
+/// follow the live edge urgently while it backfills history at a lower priority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Range {
 	/// Where delivery starts; see [`Start`].
@@ -148,6 +141,55 @@ pub struct Range {
 	/// Where delivery stops, including the group containing this time, or `None` to keep
 	/// following the live edge.
 	pub end: Option<u64>,
+	/// How urgently this range's groups go out, higher first, defaulting to 0. Higher values
+	/// preempt lower ones when bandwidth is constrained. A group several ranges cover goes out
+	/// at the highest priority among the ranges still wanting it.
+	pub priority: i8,
+	/// Which of this range's pending groups the publisher sends first, and the order
+	/// `recv_group` hands them out in; see [`Order`]. Among ranges of one priority, any
+	/// [`Order::Descending`] one wins, so a live range sheds the backlog first.
+	pub order: Order,
+}
+
+/// A range's priority and group order: how urgently, and in what order, its groups go out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Policy {
+	/// Higher goes out first; 0 is the midpoint.
+	pub priority: i8,
+	/// Which pending group goes out first.
+	pub order: Order,
+}
+
+impl Policy {
+	/// What `policies` ask as a whole, as a wire without a policy per range carries it: the
+	/// highest priority, newest first if any at that priority is. The default without any.
+	pub(crate) fn top(policies: impl IntoIterator<Item = Self>) -> Self {
+		policies
+			.into_iter()
+			.reduce(|top, policy| match top.covers(&policy) {
+				true => top,
+				false => policy,
+			})
+			.unwrap_or_default()
+	}
+
+	/// What `ranges` ask as a whole; see [`Self::top`].
+	pub(crate) fn of<'a>(ranges: impl IntoIterator<Item = &'a Range>) -> Self {
+		Self::top(ranges.into_iter().map(Range::policy))
+	}
+
+	/// Whether a group sent at this policy already serves one asked at `other`, so a range at
+	/// `other` that this one's ranges cover adds nothing: a higher priority, or the same one in
+	/// the same order or newest first, which wins a tie.
+	pub(crate) fn covers(&self, other: &Self) -> bool {
+		self.priority > other.priority
+			|| (self.priority == other.priority && (self.order == other.order || self.order == Order::Descending))
+	}
+
+	/// A key sorting every policy after each one that [covers](Self::covers) it.
+	pub(crate) fn rank(&self) -> (std::cmp::Reverse<i8>, std::cmp::Reverse<Order>) {
+		(std::cmp::Reverse(self.priority), std::cmp::Reverse(self.order))
+	}
 }
 
 /// Where a [`Range`] starts.
@@ -265,14 +307,67 @@ impl Start {
 	}
 }
 
-/// Every group from where the start places it, following the live edge.
+/// Every group from where the start places it, following the live edge, at priority 0 newest
+/// first.
 impl From<Start> for Range {
 	fn from(start: Start) -> Self {
-		Self { start, end: None }
+		Self {
+			start,
+			end: None,
+			priority: 0,
+			order: Order::Descending,
+		}
+	}
+}
+
+/// What [`Subscription::default`] asks: the latest group, skipping each the moment a newer one
+/// arrives, at priority 0 newest first.
+impl Default for Range {
+	fn default() -> Self {
+		Self::from(Start::LATEST)
 	}
 }
 
 impl Range {
+	/// Set the delivery priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: i8) -> Self {
+		self.priority = priority;
+		self
+	}
+
+	/// Set which pending group the publisher sends first, returning `self` for chaining.
+	pub fn with_order(mut self, order: Order) -> Self {
+		self.order = order;
+		self
+	}
+
+	/// This range's priority and order.
+	pub(crate) fn policy(&self) -> Policy {
+		Policy {
+			priority: self.priority,
+			order: self.order,
+		}
+	}
+
+	/// This range at `policy`'s priority and order.
+	pub(crate) fn with_policy(self, policy: Policy) -> Self {
+		Self {
+			priority: policy.priority,
+			order: policy.order,
+			..self
+		}
+	}
+
+	/// Whether `other` names the same span whatever its policy and live join's `max`: the
+	/// change a reader retunes in place, keeping where the range started.
+	pub(crate) fn retunes(&self, other: &Self) -> bool {
+		let start = match (self.start, other.start) {
+			(Start::Live { min, .. }, Start::Live { min: other, .. }) => min == other,
+			(start, other) => start == other,
+		};
+		start && self.end == other.end
+	}
+
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.
 	pub(crate) fn is_empty(&self) -> bool {
 		matches!((self.start, self.end), (Start::Time(start), Some(end)) if end < start)
@@ -315,13 +410,22 @@ impl Range {
 	pub(crate) const EMPTY: Self = Self {
 		start: Start::Time(1),
 		end: Some(0),
+		priority: 0,
+		order: Order::Descending,
 	};
 
-	/// Every group the publisher holds, following the live edge.
+	/// Every group the publisher holds, following the live edge, at priority 0 newest first.
 	pub const ALL: Self = Self {
 		start: Start::Oldest,
 		end: None,
+		priority: 0,
+		order: Order::Descending,
 	};
+
+	/// Whether this range asks for every group the publisher holds, whatever its policy.
+	pub(crate) fn is_all(&self) -> bool {
+		self.start == Start::Oldest && self.end.is_none()
+	}
 
 	/// The range from group `start` up to the exclusive group `end`, or onward for `None`:
 	/// what a legacy wire's bounds become. `None` when it holds nothing, which an exclusive
@@ -333,7 +437,7 @@ impl Range {
 			None => None,
 		};
 		let start = start.map_or(Start::Oldest, Start::Time);
-		let range = Self { start, end };
+		let range = Self { start, end, ..Self::ALL };
 		(!range.is_empty()).then_some(range)
 	}
 }
@@ -347,6 +451,35 @@ pub(crate) fn live_millis(min: Duration) -> u64 {
 /// The union of `ranges` in a canonical order, without empty or redundant ranges: the
 /// reference for the track's incremental union.
 ///
+/// Ranges of one [`Policy`] merge as [`spans`] does. Across policies a range folds only into
+/// what ranges at policies [covering](Policy::covers) its own already ask, since folding it
+/// anywhere else would lose its priority or order: it is dropped once those cover its span.
+#[cfg(test)]
+pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
+	let mut classes = BTreeMap::<_, (Policy, Vec<Range>)>::new();
+	for range in ranges {
+		let policy = range.policy();
+		classes.entry(policy.rank()).or_insert((policy, Vec::new())).1.push(range);
+	}
+	// Every policy before one in this order covers it.
+	let mut above: Vec<Range> = Vec::new();
+	let mut union = Vec::new();
+	for (policy, class) in classes.into_values() {
+		let merged = spans(class);
+		let covered = spans(above.iter().copied());
+		for range in &merged {
+			if spans(above.iter().copied().chain([*range])) != covered {
+				union.push(range.with_policy(policy));
+			}
+		}
+		above.extend(merged);
+	}
+	union.sort_unstable();
+	union
+}
+
+/// The union of `ranges`' spans whatever their policies, each at the default one.
+///
 /// Time spans merge where they overlap or touch, as the group starts they cover. The rest
 /// can't be placed without the live edge, so only an open range drops what it certainly
 /// covers: the open time span drops ranges starting inside it, and a range from the oldest
@@ -354,8 +487,11 @@ pub(crate) fn live_millis(min: Duration) -> u64 {
 /// its lag, so it covers nothing else, and live joins of the same lag and end are one range
 /// under the largest `max` among them: where a join lands doesn't depend on it.
 #[cfg(test)]
-pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
-	let ranges: Vec<Range> = ranges.into_iter().filter(|range| !range.is_empty()).collect();
+fn spans(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
+	let ranges: Vec<Range> = (ranges.into_iter())
+		.filter(|range| !range.is_empty())
+		.map(|range| range.with_policy(Policy::default()))
+		.collect();
 	if ranges.contains(&Range::ALL) {
 		return vec![Range::ALL];
 	}
@@ -388,6 +524,7 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 		.map(|(start, end)| Range {
 			start: Start::Time(start),
 			end: end.map(|end| end - 1),
+			..Range::ALL
 		})
 		.collect();
 	// A range with no time start can't be placed against the time spans. One from the oldest
@@ -403,6 +540,7 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 			max: max_of(budget),
 		},
 		end,
+		..Range::ALL
 	}));
 	union.sort_unstable();
 	union.dedup();
@@ -412,9 +550,7 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 impl Default for Subscription {
 	fn default() -> Self {
 		Self {
-			priority: 0,
-			ranges: vec![Range::from(Start::LATEST)],
-			order: Order::Descending,
+			ranges: vec![Range::default()],
 			feed: false,
 			resume: None,
 			placed: BTreeMap::new(),
@@ -426,12 +562,6 @@ impl Default for Subscription {
 }
 
 impl Subscription {
-	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: i8) -> Self {
-		self.priority = priority;
-		self
-	}
-
 	/// The one `Subscriber Max Age` a wire before lite-07 carries for this subscription: no
 	/// limit while a history range is asked for, and otherwise the largest live join's `max`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -461,12 +591,6 @@ impl Subscription {
 	pub fn with_ranges(mut self, ranges: impl IntoIterator<Item = Range>) -> Self {
 		self.ranges = ranges.into_iter().collect();
 		self.placed.clear();
-		self
-	}
-
-	/// Set which pending group the publisher sends first, returning `self` for chaining.
-	pub fn with_order(mut self, order: Order) -> Self {
-		self.order = order;
 		self
 	}
 
@@ -525,9 +649,39 @@ impl Subscription {
 		self.with_span(start, end.into())
 	}
 
+	/// The one span keeps the policy the ranges ask as a whole, as a wire carrying one span
+	/// carries one policy.
 	#[cfg(any(feature = "async", test))]
 	fn with_span(self, start: Option<u64>, end: Option<u64>) -> Self {
-		self.with_ranges(Range::span(start, end))
+		let policy = self.policy();
+		self.with_ranges(Range::span(start, end).map(|range| range.with_policy(policy)))
+	}
+
+	/// These preferences with every range sent in `order`: what a wire carrying one order
+	/// per subscription asks.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn ordered(mut self, order: Order) -> Self {
+		for range in &mut self.ranges {
+			range.order = order;
+		}
+		self
+	}
+
+	/// These preferences with every range sent at `priority`: what a wire carrying one
+	/// priority per subscription asks.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn prioritized(mut self, priority: i8) -> Self {
+		for range in &mut self.ranges {
+			range.priority = priority;
+		}
+		self
+	}
+
+	/// The priority and order these ranges ask as a whole: see [`Policy::top`]. What a wire
+	/// carrying one policy per subscription carries, and the order a reader hands its groups
+	/// out in.
+	pub(crate) fn policy(&self) -> Policy {
+		Policy::of(&self.ranges)
 	}
 }
 
@@ -562,7 +716,7 @@ impl Range {
 			(Some(requested), Some(Some(last))) => Some(requested.min(last)),
 			(_, Some(Some(last))) => Some(last),
 		};
-		Self { start, end }
+		Self { start, end, ..*self }
 	}
 }
 
@@ -583,6 +737,7 @@ impl Range {
 				Self {
 					start: self.start,
 					end: clamped.end,
+					..*self
 				},
 				Some(group),
 			),
@@ -614,8 +769,11 @@ impl Range {
 #[cfg(test)]
 impl Subscription {
 	/// These preferences reading only the groups starting in `range`.
+	///
+	/// The one range keeps the policy the ranges ask as a whole.
 	pub(crate) fn with_range(self, range: impl RangeBounds<u64>) -> Self {
-		self.with_ranges([Range::groups(range)])
+		let policy = self.policy();
+		self.with_ranges([Range::groups(range).with_policy(policy)])
 	}
 
 	/// These preferences under a staleness budget the way a subscription-wide max age used to
@@ -644,9 +802,9 @@ impl Subscription {
 #[derive(Default)]
 pub(super) struct Combined {
 	sub: Option<Subscription>,
-	/// The placed joins folded in, by the group each was placed at and its end, with the
-	/// widest budget asked of each.
-	placed: BTreeMap<(u64, Option<u64>), Duration>,
+	/// The placed joins folded in, by the group each was placed at, its end, and its policy,
+	/// with the widest budget asked of each.
+	placed: BTreeMap<(u64, Option<u64>, Policy), Duration>,
 }
 
 #[cfg(test)]
@@ -657,7 +815,7 @@ impl Combined {
 		for (index, range) in (0..).zip(&sub.ranges) {
 			match sub.placed.get(&index) {
 				Some(group) => {
-					let budget = self.placed.entry((*group, range.end)).or_default();
+					let budget = self.placed.entry((*group, range.end, range.policy())).or_default();
 					*budget = (*budget).max(range.budget());
 				}
 				None => unplaced.push(*range),
@@ -670,12 +828,7 @@ impl Combined {
 			});
 			return;
 		};
-		combined.priority = combined.priority.max(sub.priority);
 		combined.ranges.extend(unplaced);
-		// Key-first prioritization is enabled only when every subscriber wants it.
-		if let Order::Descending = sub.order {
-			combined.order = Order::Descending;
-		}
 		combined.feed |= sub.feed;
 		combined.resume = combined.resume.zip(sub.resume).map(|(a, b)| a.min(b));
 		combined.cap = combined.cap.zip(sub.cap).map(|(a, b)| a.max(b));
@@ -686,15 +839,19 @@ impl Combined {
 		let mut combined = self.sub?;
 		combined.ranges = union(std::mem::take(&mut combined.ranges));
 		// Each placed join after the union, its lag placing nothing.
-		for ((group, end), budget) in self.placed {
+		for ((group, end, policy), budget) in self.placed {
 			combined.placed.insert(combined.ranges.len() as u64, group);
-			combined.ranges.push(Range {
-				start: Start::Live {
-					min: Some(Duration::ZERO),
-					max: max_of(budget),
-				},
-				end,
-			});
+			combined.ranges.push(
+				Range {
+					start: Start::Live {
+						min: Some(Duration::ZERO),
+						max: max_of(budget),
+					},
+					end,
+					..Range::ALL
+				}
+				.with_policy(policy),
+			);
 		}
 		Some(combined)
 	}
@@ -785,6 +942,7 @@ mod tests {
 		Range {
 			start: Start::Time(start),
 			end: end.into().map(|end| end - 1),
+			..Default::default()
 		}
 	}
 
@@ -792,6 +950,7 @@ mod tests {
 		Range {
 			start: start.into().map_or(Start::Oldest, Start::Time),
 			end: end.into(),
+			..Default::default()
 		}
 	}
 
@@ -933,6 +1092,7 @@ mod tests {
 		let oldest = |end| Range {
 			start: Start::Oldest,
 			end: Some(end),
+			..Default::default()
 		};
 		assert_eq!(
 			ranges(&[sub(&[oldest(5)]), sub(&[oldest(3)]), sub(&[oldest(5)])]),
@@ -956,6 +1116,7 @@ mod tests {
 				max,
 			},
 			end,
+			..Default::default()
 		};
 		let at = |start, end| {
 			Some(Resolved {
@@ -1010,23 +1171,75 @@ mod tests {
 		);
 	}
 
+	/// The policy a set of ranges asks as a whole: the highest priority, and newest first if
+	/// any range at it is.
 	#[test]
-	fn combined_order_prefers_descending() {
-		let ascending = Subscription::default().with_order(Order::Ascending);
-		let descending = Subscription::default();
+	fn the_top_policy_is_the_highest_priority_newest_first() {
+		let at = |priority, order| Range::ALL.with_priority(priority).with_order(order);
+		let policy = |ranges: &[Range]| {
+			let policy = Policy::of(ranges);
+			(policy.priority, policy.order)
+		};
+		assert_eq!(policy(&[]), (0, Order::Descending));
+		assert_eq!(policy(&[at(0, Order::Ascending)]), (0, Order::Ascending));
+		assert_eq!(
+			policy(&[at(0, Order::Ascending), at(0, Order::Descending)]),
+			(0, Order::Descending)
+		);
+		assert_eq!(
+			policy(&[at(0, Order::Descending), at(0, Order::Ascending)]),
+			(0, Order::Descending)
+		);
+		assert_eq!(
+			policy(&[at(-1, Order::Descending), at(2, Order::Ascending)]),
+			(2, Order::Ascending)
+		);
+	}
 
+	/// A covered range folds only into one at a policy covering its own: a higher priority,
+	/// or the same one newest first or in its order. Otherwise both stay, so neither the
+	/// priority nor the order of the covered one is lost upstream.
+	#[test]
+	fn a_range_folds_only_into_a_covering_policy() {
+		let sub = |ranges: &[Range]| Subscription::default().with_ranges(ranges.iter().copied());
+		let live = Range::default().with_priority(5);
+		let all = |priority, order| Range::ALL.with_priority(priority).with_order(order);
+
+		// A live join under a lower-priority ALL stays, so its priority is still asked.
 		assert_eq!(
-			combine(std::slice::from_ref(&ascending)).unwrap().order,
-			Order::Ascending
+			ranges(&[sub(&[live]), sub(&[all(0, Order::Descending)])]),
+			vec![all(0, Order::Descending), live]
+		);
+		// Under a higher-priority one it adds nothing.
+		assert_eq!(
+			ranges(&[sub(&[live]), sub(&[all(9, Order::Ascending)])]),
+			vec![all(9, Order::Ascending)]
+		);
+		// At one priority, newest first covers oldest first but not the reverse.
+		assert_eq!(
+			ranges(&[sub(&[groups(2, 5).with_order(Order::Ascending)]), sub(&[all(0, Order::Descending)])]),
+			vec![all(0, Order::Descending)]
 		);
 		assert_eq!(
-			combine(&[ascending.clone(), ascending.clone()]).unwrap().order,
-			Order::Ascending
+			ranges(&[sub(&[groups(2, 5)]), sub(&[all(0, Order::Ascending)])]),
+			vec![all(0, Order::Ascending), groups(2, 5)]
 		);
+		// Time spans of one policy merge; across policies a span only partly
+		// covered stays whole.
 		assert_eq!(
-			combine(&[ascending.clone(), descending.clone()]).unwrap().order,
-			Order::Descending
+			ranges(&[
+				sub(&[groups(2, 5).with_priority(1), groups(4, 8).with_priority(1)]),
+				sub(&[groups(3, 7), groups(6, 9)])
+			]),
+			vec![groups(2, 8).with_priority(1), groups(3, 9)]
 		);
-		assert_eq!(combine(&[descending, ascending]).unwrap().order, Order::Descending);
+		// Ranges of several covering policies together cover a span.
+		assert_eq!(
+			ranges(&[
+				sub(&[groups(2, 5).with_priority(2), groups(5, 8).with_priority(1)]),
+				sub(&[groups(3, 7)])
+			]),
+			vec![groups(2, 5).with_priority(2), groups(5, 8).with_priority(1)]
+		);
 	}
 }

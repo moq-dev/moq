@@ -4236,7 +4236,7 @@ impl SubscribeOnce {
 		let aggregate = target.subscription();
 		let sent = Sent {
 			flate: peer.flate,
-			priority: aggregate.as_ref().map(|s| s.priority).unwrap_or(0),
+			priority: aggregate.as_ref().map(|s| s.policy().priority).unwrap_or(0),
 			// Without an Established subscription, a relay includes the request it holds.
 			new_group: target.new_group(),
 			// A timed copy asks for the units its Group IDs are in.
@@ -4245,7 +4245,7 @@ impl SubscribeOnce {
 				Target::Resume(idle) => idle.properties.timescale.is_some(),
 			},
 		};
-		let order = aggregate.map(|s| s.order).unwrap_or_default();
+		let order = aggregate.map(|s| s.policy().order).unwrap_or_default();
 		let request_id = req.id;
 		let join = &self.plan.join;
 		// Buffered only: the wait for the answer flushes it, so the local terminals still end
@@ -4740,7 +4740,7 @@ impl SubscribeOnce {
 				.as_ref()
 				.is_some_and(|subscription| !subscription.ranges.is_empty());
 			if let Some(subscription) = subscription {
-				live.priority = subscription.priority;
+				live.priority = subscription.policy().priority;
 				live.wanted_bounds = wire_bounds(&subscription, live.joined);
 			}
 		}
@@ -5564,7 +5564,7 @@ impl JoinFetch {
 				authorization_token: None,
 				request_id: fetch_id,
 				subscriber_priority: super::priority::to_wire(
-					self.track.subscription().map(|s| s.priority).unwrap_or(0),
+					self.track.subscription().map(|s| s.policy().priority).unwrap_or(0),
 				),
 				group_order: GroupOrder::Ascending,
 				fetch_type: FetchType::RelativeJoining {
@@ -6224,7 +6224,7 @@ impl RecvGroup {
 		drop(state);
 		let (priority, order) = track
 			.subscription()
-			.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
+			.map_or((0, Default::default()), |sub| (sub.policy().priority, sub.policy().order));
 		stream.set_priority(crate::priority::recv_group(priority, group.group_id, order));
 
 		// Peek before creating a group: a standalone END_OF_TRACK has no payload
@@ -10347,10 +10347,7 @@ mod tests {
 
 		let (session, serving, track, _first) = update_under_window(Some(subscribe + 1)).await;
 		let _raised = track
-			.subscribe(track::Subscription {
-				priority: 5,
-				..Default::default()
-			})
+			.subscribe(track::Subscription::default().prioritized(5))
 			.await
 			.unwrap();
 		settle().await;
@@ -10371,10 +10368,7 @@ mod tests {
 		));
 		// The script push wakes nothing, so a subscription change re-polls the loop.
 		let _again = track
-			.subscribe(track::Subscription {
-				priority: 7,
-				..Default::default()
-			})
+			.subscribe(track::Subscription::default().prioritized(7))
 			.await
 			.unwrap();
 		// Past the grace PUBLISH_DONE waits out for its data streams; the copy then lingers.
@@ -14724,6 +14718,7 @@ mod filter_tests {
 				track::Range {
 					start: crate::track::Start::Time(start),
 					end: None,
+					..Default::default()
 				},
 			])
 		};
@@ -14757,6 +14752,7 @@ mod filter_tests {
 		let bounded = [track::Range {
 			start: track::Start::Oldest,
 			end: Some(4),
+			..Default::default()
 		}];
 		assert_eq!(wire_bounds(&asking(&bounded), None), (Some(0), Some(5)));
 		// A live join alone asks from the live edge, whatever its max.
@@ -15283,7 +15279,7 @@ mod stitch_tests {
 			.track
 			.subscribe(Some(
 				track::Subscription::default()
-					.with_order(crate::track::Order::Ascending)
+					.ordered(crate::track::Order::Ascending)
 					.with_max(None),
 			))
 			.with_range(..);
@@ -16715,7 +16711,7 @@ mod stitch_tests {
 			.track
 			.subscribe(Some(
 				track::Subscription::default()
-					.with_order(crate::track::Order::Ascending)
+					.ordered(crate::track::Order::Ascending)
 					.with_max(None),
 			))
 			.with_range(0..)
@@ -17410,7 +17406,7 @@ mod stitch_tests {
 					.subscribe(Some(
 						track::Subscription::default()
 							.with_range(0..last + 1)
-							.with_order(crate::track::Order::Ascending)
+							.ordered(crate::track::Order::Ascending)
 							.with_max(None),
 					))
 					.await
@@ -17556,7 +17552,7 @@ mod stitch_tests {
 				.subscribe(Some(
 					track::Subscription::default()
 						.with_range(0..7)
-						.with_order(crate::track::Order::Ascending)
+						.ordered(crate::track::Order::Ascending)
 						.with_max(None),
 				))
 				.await
@@ -19969,6 +19965,7 @@ mod new_group_tests {
 			let wanted = track::Subscription::default().with_ranges([track::Range {
 				start: track::Start::LATEST,
 				end: end.map(|end| end - 1),
+				..Default::default()
 			}]);
 			first.update(wanted).unwrap();
 			let (id, body) = read(&mut stream).await;

@@ -4,6 +4,7 @@
 //! group below the end, then the error, and so does one subscribing after the first ended.
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
@@ -34,7 +35,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 	let subscription = Subscription::default()
 		.with_ranges([support::keys(0..)])
 		.with_max(Duration::from_secs(30))
-		.with_order(moq_net::track::Order::Ascending);
+		.ordered(moq_net::track::Order::Ascending);
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")

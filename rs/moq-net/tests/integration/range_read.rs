@@ -4,6 +4,7 @@
 //! ends, on every wire, from the publisher directly or through a relay. A range reaching
 //! past the live edge ends once the groups up to its end arrive.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
@@ -113,7 +114,7 @@ fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
 		.with_ranges([support::keys(groups)])
 		.with_max(None)
-		.with_order(Order::Ascending)
+		.ordered(Order::Ascending)
 }
 
 async fn history(version: Version, relay: bool, finished: bool) {

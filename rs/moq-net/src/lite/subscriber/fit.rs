@@ -381,7 +381,7 @@ mod tests {
 	}
 
 	fn total(budget: Budget, ranges: &[Range], groups: &RangeSet<u64>) -> usize {
-		let fills = FillAsk::wire(groups);
+		let fills = FillAsk::default().wire(groups);
 		ranges
 			.iter()
 			.copied()

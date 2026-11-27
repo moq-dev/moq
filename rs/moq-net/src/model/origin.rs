@@ -12885,7 +12885,7 @@ mod tests {
 				let mut dynamic = broadcast.broadcast().requests();
 				let resolved = consumer.request("room/alice", None).await.expect("resolves");
 				let track = resolved.track("video").unwrap();
-				let mut subscribing = track.subscribe(crate::track::Subscription::default().with_priority(3));
+				let mut subscribing = track.subscribe(crate::track::Subscription::default().prioritized(3));
 				assert!((&mut subscribing).now_or_never().is_none());
 				let request = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_track())
 					.await
@@ -12909,12 +12909,12 @@ mod tests {
 				}
 				settle(|| resolved.is_closed()).await;
 				subscribing
-					.update(crate::track::Subscription::default().with_priority(7))
+					.update(crate::track::Subscription::default().prioritized(7))
 					.unwrap();
 				settle(|| {
 					request
 						.subscription()
-						.is_some_and(|subscription| subscription.priority == 7)
+						.is_some_and(|subscription| subscription.policy().priority == 7)
 				})
 				.await;
 
@@ -16665,10 +16665,9 @@ mod tests {
 		let request = handler.requested_track().await.unwrap();
 		assert_eq!(request.subscription().unwrap().start(), Some(5));
 		let track = request.accept(crate::track::Info::timed());
-		let mut preferences = rig.subscription.subscription();
-		preferences.priority = 7;
+		let preferences = rig.subscription.subscription().prioritized(7);
 		rig.subscription.update(preferences).unwrap();
-		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
+		settle(|| track.subscription().is_some_and(|sub| sub.policy().priority == 7)).await;
 		assert_eq!(track.subscription().unwrap().start(), Some(5));
 	}
 
@@ -17775,6 +17774,7 @@ mod tests {
 				ranges: vec![crate::track::Range {
 					start: crate::track::Start::Time(3),
 					end: None,
+					..Default::default()
 				}],
 				..Default::default()
 			})
@@ -17831,17 +17831,13 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		assert_eq!(replacement.subscription().map(|wanted| wanted.priority), Some(0));
+		assert_eq!(replacement.subscription().map(|wanted| wanted.policy().priority), Some(0));
 
-		let preferences = crate::track::Subscription {
-			priority: 9,
-			..subscription.subscription()
-		};
-		subscription.update(preferences).unwrap();
+		subscription.update(subscription.subscription().prioritized(9)).unwrap();
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		assert_eq!(replacement.subscription().map(|wanted| wanted.priority), Some(9));
+		assert_eq!(replacement.subscription().map(|wanted| wanted.policy().priority), Some(9));
 	}
 
 	/// Before the incumbent delivered anything, the newcomer answers "video" with matching

@@ -7,6 +7,7 @@
 //! by the Min Age: a live join that far behind the live edge where lite-07 carries it, the
 //! oldest group when it is not stated.
 
+use crate::support::EveryRange;
 use crate::support;
 
 use std::time::Duration;
@@ -122,8 +123,8 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 		_ => range,
 	};
 	let subscription = Subscription::default()
-		.with_order(Order::Ascending)
-		.with_ranges([range]);
+		.with_ranges([range])
+		.ordered(Order::Ascending);
 	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")?;
@@ -177,7 +178,7 @@ fn range(start: Option<u64>, end: Option<u64>) -> Range {
 		Some(start) => moq_net::track::Start::Time(start),
 		None => moq_net::track::Start::Oldest,
 	};
-	Range { start, end }
+	Range { start, end, ..Default::default() }
 }
 
 /// Time ranges, with what a reader of the held track reads.
@@ -357,10 +358,11 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 			max: Some(FOREVER),
 		},
 		end: Some(8),
+		..Default::default()
 	};
 	let subscription = Subscription::default()
-		.with_order(Order::Ascending)
-		.with_ranges([range(Some(1), Some(2)), join]);
+		.with_ranges([range(Some(1), Some(2)), join])
+		.ordered(Order::Ascending);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")

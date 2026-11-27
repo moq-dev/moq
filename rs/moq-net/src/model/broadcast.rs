@@ -1589,7 +1589,7 @@ mod test {
 		let consumer = producer.consume().track("catalog").unwrap();
 		let waiter = kio::Waiter::new(std::task::Waker::from(serve.clone()));
 		assert!(serve.dynamic.lock().unwrap().poll_requested_track(&waiter).is_pending());
-		let expected = track::Subscription::default().with_priority(3);
+		let expected = track::Subscription::default().prioritized(3);
 		let _pending = consumer.subscribe(expected.clone());
 		assert_eq!(*serve.subscription.lock().unwrap(), Some(Some(expected)));
 	}
@@ -1622,7 +1622,7 @@ mod test {
 			} else {
 				inspect.track.consume()
 			};
-			let expected = track::Subscription::default().with_priority(3);
+			let expected = track::Subscription::default().prioritized(3);
 			let _pending = consumer.subscribe(expected.clone());
 			assert_eq!(*inspect.seen.lock().unwrap(), Some(Some(expected)), "lookup: {lookup}");
 		}
@@ -1654,7 +1654,7 @@ mod test {
 		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
 		assert!(track.poll_subscription_changed(&waiter).is_pending());
 		let consumer = producer.consume().track("catalog").unwrap();
-		let _pending = consumer.subscribe(track::Subscription::default().with_priority(3));
+		let _pending = consumer.subscribe(track::Subscription::default().prioritized(3));
 		assert!(reenter.woken.load(std::sync::atomic::Ordering::Relaxed));
 	}
 

@@ -53,31 +53,7 @@ impl Subscribe<'_> {
 	}
 }
 
-/// A range's priority and group order: how urgently, and in what order, its groups go out.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Policy {
-	/// Higher goes out first; 0 is the midpoint.
-	pub priority: i8,
-	/// Which pending group goes out first.
-	pub order: Order,
-}
-
-impl Policy {
-	/// What a subscription of `ranges` asks as a whole, as a wire without a policy per range
-	/// carries it: the highest priority, newest first if any range at that priority is.
-	pub(crate) fn of<'a>(ranges: impl IntoIterator<Item = &'a Range>) -> Self {
-		let mut top: Option<Self> = None;
-		for range in ranges {
-			let policy = range.policy();
-			top = Some(match top {
-				Some(top) if top.priority > policy.priority => top,
-				Some(top) if top.priority == policy.priority && top.order == Order::Descending => top,
-				_ => policy,
-			});
-		}
-		top.unwrap_or_default()
-	}
-}
+pub(crate) use crate::track::Policy;
 
 /// A lite-07 SUBSCRIBE_UPDATE's change to a live range in place, which keeps where it started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,24 +216,29 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let node = super::identity::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
+		// An older wire's one priority and order apply to its one range.
 		let (priority, order, max_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => (
-				super::priority::from_wire(r.u8()?),
-				Order::Descending,
-				None,
-				vec![Range::OPEN],
-			),
+			Version::Lite01 | Version::Lite02 => {
+				let priority = super::priority::from_wire(r.u8()?);
+				let range = Range::OPEN.with_policy(Policy {
+					priority,
+					order: Order::Descending,
+				});
+				(priority, Order::Descending, None, vec![range])
+			}
 			// Each range carries its own priority and order.
 			_ if version.has_ranges() => {
 				let ranges = decode_ranges(r, version)?;
-				let policy = Policy::of(&ranges);
+				let policy = Policy::top(ranges.iter().map(Range::policy));
 				(policy.priority, policy.order, None, ranges)
 			}
 			_ => {
 				let priority = super::priority::from_wire(r.u8()?);
 				let order = decode_order(r, version)?;
 				let max_delay = decode_max_delay(r, version)?;
-				(priority, order, max_delay, decode_ranges(r, version)?)
+				let ranges = decode_ranges(r, version)?;
+				let ranges = stamped(ranges, Policy { priority, order });
+				(priority, order, max_delay, ranges)
 			}
 		};
 		Ok(Self {
@@ -295,6 +276,11 @@ impl<'a> Message<'a> for Subscribe<'a> {
 
 		Ok(())
 	}
+}
+
+/// `ranges` at `policy`, the one an older wire carries for the whole subscription.
+fn stamped(ranges: Vec<Range>, policy: Policy) -> Vec<Range> {
+	ranges.into_iter().map(|range| range.with_policy(policy)).collect()
 }
 
 /// What lite03-06 send for no `Subscriber Max Age` limit, which their bare milliseconds can't
@@ -939,7 +925,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 				}
 				RangeEdit::Edit { remove, add, retune }
 			}
-			false => RangeEdit::Replace(decode_ranges(r, version)?),
+			false => RangeEdit::Replace(stamped(decode_ranges(r, version)?, Policy { priority, order })),
 		};
 
 		let wanted_group = match version.has_refresh() {
@@ -1905,6 +1891,15 @@ mod test {
 			.into_owned()
 	}
 
+	/// `ranges` as a wire before lite-07 decodes them: at `msg`'s one priority and order.
+	fn legacy(msg: &Subscribe<'_>, ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
+		let policy = Policy {
+			priority: msg.priority,
+			order: msg.order,
+		};
+		ranges.into_iter().map(|range| range.with_policy(policy)).collect()
+	}
+
 	fn encode(msg: &Subscribe<'_>, version: Version) -> Result<Vec<u8>, EncodeError> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)?;
@@ -1935,7 +1930,7 @@ mod test {
 	#[test]
 	fn subscribe_frame_bounds_roundtrip() {
 		let msg = framed_sample();
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
+		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, msg.ranges.clone()));
 	}
 
 	/// The whole-group defaults are what a version without the fields decodes to, so
@@ -1972,7 +1967,7 @@ mod test {
 			Subscribe::decode_msg(r, v)
 		})
 		.unwrap();
-		assert_eq!(got.ranges, msg.ranges);
+		assert_eq!(got.ranges, legacy(&msg, msg.ranges.clone()));
 	}
 
 	/// Lite06 carries the raw floor; pre-06 wires encode the key + 1 with 0 meaning
@@ -1989,8 +1984,8 @@ mod test {
 
 		let lite05 = encode(&msg, Version::Lite05).unwrap();
 		let lite06 = encode(&msg, Version::Lite06).unwrap();
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, msg.ranges);
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
+		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, legacy(&msg, msg.ranges.clone()));
+		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, msg.ranges.clone()));
 		// The raw byte differs: 7 on the wire, not 7 + 1.
 		assert_ne!(lite05, lite06);
 
@@ -2005,16 +2000,16 @@ mod test {
 			Subscribe::decode_msg(r, v)
 		})
 		.unwrap();
-		assert_eq!(got.ranges, [Range::OPEN]);
+		assert_eq!(got.ranges, legacy(&msg, [Range::OPEN]));
 
 		// On the pre-06 wire an explicit group 0 is key + 1, distinct from an
 		// absent start (the latest group).
 		let explicit = encode(&msg, Version::Lite05).unwrap();
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, msg.ranges);
+		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, legacy(&msg, msg.ranges.clone()));
 		msg.ranges = vec![Range::OPEN];
 		let latest = encode(&msg, Version::Lite05).unwrap();
 		assert_ne!(explicit, latest);
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, [Range::OPEN]);
+		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, legacy(&msg, [Range::OPEN]));
 		assert_eq!(encode(&msg, Version::Lite06).unwrap(), absent);
 	}
 
@@ -2024,7 +2019,7 @@ mod test {
 	fn frame_start_may_qualify_group_zero_on_lite06() {
 		let mut msg = framed_sample();
 		msg.ranges[0].start = absolute(0, 4);
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, msg.ranges);
+		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, msg.ranges.clone()));
 	}
 
 	/// Silently widening to the whole group would deliver frames the caller excluded.
@@ -2719,7 +2714,7 @@ mod test {
 			end: None,
 			..Range::OPEN
 		}];
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, vec![Range::OPEN]);
+		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, [Range::OPEN]));
 
 		// A live end is refused both ways.
 		msg.ranges = vec![Range {

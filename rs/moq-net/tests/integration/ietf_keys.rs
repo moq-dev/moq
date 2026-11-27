@@ -3,6 +3,7 @@
 //! moq-transport carries group keys verbatim as Group IDs through a relay on every
 //! supported draft.
 
+use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
 
@@ -69,7 +70,7 @@ async fn a_relay_keeps_keys_and_the_gaps_between_them() {
 					Subscription::default()
 						.with_ranges([support::keys(2..=8)])
 						.with_max(None)
-						.with_order(moq_net::track::Order::Ascending),
+						.ordered(moq_net::track::Order::Ascending),
 				)
 				.await
 				.unwrap();

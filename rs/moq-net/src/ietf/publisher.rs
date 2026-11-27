@@ -43,9 +43,8 @@ fn subscribe_refusal<'a>(
 /// Serve at the subscriber's priority, bounded by the publisher's max age alone.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
-		priority: super::priority::from_wire(subscriber_priority),
 		// History from the oldest group: this draft's SUBSCRIBE carries no Max Age.
-		ranges: vec![track::Range::ALL],
+		ranges: vec![track::Range::ALL.with_priority(super::priority::from_wire(subscriber_priority))],
 		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
 		// answer: never from its cache, nor from an edge reported before.
 		feed: true,
@@ -1886,7 +1885,7 @@ impl Serving {
 			// What an update changed while forwarding outlives the pause.
 			let applied = serve.track.subscription();
 			let msg = &mut request.msg;
-			msg.subscriber_priority = super::priority::to_wire(applied.priority);
+			msg.subscriber_priority = super::priority::to_wire(applied.policy().priority);
 			msg.filter = serve.filter;
 			let mut serve = serve;
 			serve.close_groups();
@@ -1989,7 +1988,7 @@ impl SubscribeTrack {
 		// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself a join,
 		// which the track's refresh ratio judges.
 		let mut subscription: Subscription =
-			serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
+			serving_subscription(msg.subscriber_priority).ordered(msg.group_order.to_order());
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the ratio never judges it. From the
 		// start of its group, so a relay's copy holds the group's head for its other readers,
@@ -6772,16 +6771,16 @@ impl TrackServe {
 		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
 		let track = track.with_range((Bound::Included(floor), end));
 		let dynamic = track.info().refresh.enabled();
-		let priority = kio::Producer::new(track.subscription().priority);
+		let priority = kio::Producer::new(track.subscription().policy().priority);
 		let publisher = track.info().priority;
 		let session = session;
 		let ranking = Ranking {
 			queue: PriorityQueue::default(),
-			group: session.send_group(crate::priority::group(track.subscription().priority, publisher)),
+			group: session.send_group(crate::priority::group(track.subscription().policy().priority, publisher)),
 			request_id,
 			priority: priority.consume(),
 			publisher,
-			order: track.subscription().order,
+			order: track.subscription().policy().order,
 			lapse: Lapse::default(),
 		};
 
@@ -6815,7 +6814,7 @@ impl TrackServe {
 	/// Also forward `datagrams` as OBJECT_DATAGRAM with object ID 0.
 	fn with_datagrams(mut self, mut datagrams: crate::datagram::Consumer, demand: bool) -> Self {
 		if demand {
-			datagrams.set_priority(self.track.subscription().priority);
+			datagrams.set_priority(self.track.subscription().policy().priority);
 		}
 		let stats = datagrams.delegate();
 		self.datagrams = Some(DatagramForward {
@@ -6868,7 +6867,7 @@ impl TrackServe {
 		let fill = update.fill.map(|fill| fill_range(fill, self.filter, edge.largest));
 		if let Some(next) = range.fill_tail(fill, edge) {
 			let options = group::Fetch {
-				priority: self.track.subscription().priority,
+				priority: self.track.subscription().policy().priority,
 				..Default::default()
 			};
 			// A stream still serving this group from the fill's edge keeps what it covers, so
@@ -6930,8 +6929,7 @@ impl TrackServe {
 
 	/// Move the subscriber priority, for the group streams already open as well as later ones.
 	fn set_priority(&mut self, priority: i8) -> Result<(), Error> {
-		let mut subscription = self.track.subscription();
-		subscription.priority = priority;
+		let subscription = self.track.subscription().prioritized(priority);
 		self.track.update(subscription)?;
 		// Only a closed channel refuses the write, and this is the producer, which never closes it.
 		if let Ok(mut current) = self.priority.write() {
@@ -8996,7 +8994,7 @@ mod group_priority_test {
 		);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_priority(3)
+				.prioritized(3)
 				.with_max(std::time::Duration::from_secs(3600)),
 		);
 		let mut serve = TrackServe::new(
@@ -10065,7 +10063,7 @@ mod serve_tests {
 			&mut updates,
 		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
-		assert_eq!(h.track.subscription().unwrap().priority, 117);
+		assert_eq!(h.track.subscription().unwrap().policy().priority, 117);
 		assert_eq!(occurrences(&session.log, &[0x07, 0, 1, 0]), 2);
 	}
 
@@ -10117,7 +10115,7 @@ mod serve_tests {
 		for _ in 0..4 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
 		}
-		assert_eq!(h.track.subscription().unwrap().priority, 117);
+		assert_eq!(h.track.subscription().unwrap().policy().priority, 117);
 		let after = h.log.priorities();
 		assert_eq!(after.last(), Some(&255), "above the other subscription: {after:?}");
 	}
@@ -13123,7 +13121,7 @@ mod serve_tests {
 					warm.track("video").unwrap().subscribe(
 						crate::track::Subscription::default()
 							.with_range(0..)
-							.with_order(crate::track::Order::Ascending)
+							.ordered(crate::track::Order::Ascending)
 							.with_max(None),
 					),
 				)
@@ -17652,7 +17650,7 @@ mod serve_tests {
 		);
 		let subscriber = track.subscribe(Some(
 			track::Subscription::default()
-				.with_order(track::Order::Ascending)
+				.ordered(track::Order::Ascending)
 				.with_max(None),
 		));
 		let write = |group: group::Producer| {
@@ -19311,7 +19309,7 @@ mod tests {
 		let subscription = serving_subscription(128);
 		assert_eq!(
 			subscription.ranges,
-			[track::Range::ALL],
+			[track::Range::ALL.with_priority(-1)],
 			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
@@ -22082,10 +22080,12 @@ impl ServeRange {
 /// SUBSCRIBE_OK then name the oldest group replayed so far as Largest. No group of it
 /// expires short of the publisher's max age, since this draft's SUBSCRIBE carries none.
 fn live_join(subscription: &mut Subscription) {
-	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live {
+	let policy = subscription.policy();
+	let join = track::Range::from(track::Start::Live {
 		min: Some(Duration::ZERO),
 		max: None,
-	})]);
+	});
+	*subscription = std::mem::take(subscription).with_ranges([join.with_policy(policy)]);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
