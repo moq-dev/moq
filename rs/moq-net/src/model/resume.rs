@@ -609,6 +609,7 @@ impl Consumer {
 				received_checked: None,
 				carried: RangeSet::new(),
 				unreported: RangeSet::new(),
+				carried_for: (revision, (0, None)),
 				carrying: kio::WaiterList::new(),
 				declared: None,
 				declared_error: None,
@@ -2194,6 +2195,9 @@ struct Reader {
 	carried: RangeSet<u64>,
 	/// The part of [`Self::carried`] not yet reported.
 	unreported: RangeSet<u64>,
+	/// The ranges' revision and local bounds [`Self::unreported`] was last clipped to: a run
+	/// they left out is reported once they grow over it.
+	carried_for: (u64, (u64, Option<u64>)),
 	/// Drop polls parked while nothing was left to report, which a copy let go of with skips
 	/// to carry wakes.
 	carrying: kio::WaiterList,
@@ -3553,6 +3557,14 @@ impl Reader {
 		// The common case: nothing to report on one route, and the serving copy's own poll
 		// above wakes this for the next run it gives up. A replaced copy is still judged:
 		// dropping the last group handed out from it wakes nothing else that lets it go.
+		// Ranges or bounds that moved may now take in a run clipped away before.
+		let view = (self.revision, self.groups);
+		if self.carried_for != view {
+			self.carried_for = view;
+			for run in self.carried.iter() {
+				self.unreported.insert(run.clone());
+			}
+		}
 		if self.drops.is_empty() && self.unreported.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
 			self.carrying.register(waiter);
 			return Poll::Pending;
@@ -8820,6 +8832,48 @@ mod test {
 			skips.push((run.start, run.end));
 		}
 		assert_eq!(skips, vec![(2, 3)], "nothing below the reader's floor");
+	}
+
+	/// A carried skip outside the reader's ranges is reported once the ranges grow over it.
+	#[test]
+	fn a_carried_skip_is_reported_once_the_ranges_take_it_in() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let from = |start| {
+			Subscription::default().with_max(None).with_ranges([track::Range {
+				start: crate::track::Start::Time(start),
+				end: None,
+			}])
+		};
+		let mut sub = logical.consume().subscribe(from(3)).now_or_never().unwrap().unwrap();
+		a.skip_groups(0..3);
+		write(&a, 3);
+		let mut b = received_copy();
+		b.anchored();
+		write(&b, 3);
+		write(&b, 4);
+		routes.serve(b.consume());
+		b.finish_at(Position::group(5)).unwrap();
+		let skips = |sub: &mut track::Subscriber| {
+			while let Poll::Ready(Ok(Some(_))) = sub.poll_recv_group(&kio::Waiter::noop()) {}
+			let mut skips = Vec::new();
+			while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+				if matches!(hole, track::Hole::Skip) {
+					skips.push((run.start, run.end));
+				}
+			}
+			skips
+		};
+		assert_eq!(
+			skips(&mut sub),
+			Vec::<(u64, u64)>::new(),
+			"the ranges start past the skip"
+		);
+		sub.update(from(0)).unwrap();
+		assert!(skips(&mut sub).contains(&(0, 3)), "the widened ranges take the skip in");
 	}
 
 	/// A reader that read a copy's groups around a skip that copy's publisher declared is told
