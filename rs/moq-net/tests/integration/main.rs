@@ -61,6 +61,7 @@ mod model;
 mod mount;
 mod multi_cdn;
 mod nested_claim;
+mod open_group_past_ceiling;
 mod partial_group;
 mod path_routes;
 mod quiet_catalog;
