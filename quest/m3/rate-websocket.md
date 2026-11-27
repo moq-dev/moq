@@ -37,8 +37,10 @@ excess:
   relay's side.
 - Reads stop at the bucket, so the client's TCP window closes; writes stop
   at the bucket, so a subscriber sees the cap. Set at auth and reset on
-  revalidation. The io_uring stream sessions get the same wrapper once they
-  serve WebSocket. WebSocket admission accepts capped roles only once this wrapper enforces them.
+  revalidation. On Linux, also evaluate `SO_MAX_PACING_RATE` (FQ qdisc) to
+  offload egress bitrate pacing to the kernel with no user-space timers. The
+  io_uring stream sessions get the same wrapper once they serve WebSocket.
+  WebSocket admission accepts capped roles only once this wrapper enforces them.
 
 Tests: a client writing flat out is held to the cap plus the bounded
 buffers; delivery to a capped subscriber never exceeds it; a cap change on a

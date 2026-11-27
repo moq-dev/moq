@@ -18,7 +18,3 @@ Guidance:
 - Reject `mtu.minimum_change == 0` in `transport::Config::validate()` with `ConfigError::Mtu`, preventing the infinite probe loop and `upper_bound` underflow in `mtud.rs:319-329`.
 
 Public API: breaking (`moq_quic::stream::Lease` drops `Default`; `transport::Config::validate` rejects `mtu.minimum_change == 0`). Wire: none.
-
-## Related
-
-- [Receive-window eviction deadlocks](/quest/m1/quic-eviction-deadlock.md) - fixes the `stuck_waiting` and `Chunks::finalize_inner` deadlocks in `lease.rs`

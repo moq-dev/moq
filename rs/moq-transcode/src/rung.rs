@@ -50,6 +50,8 @@ const MAX_CONCURRENT_FETCHES: usize = 4;
 /// than finishes because only a source finish ends a rung for good (see [`serve`]).
 /// The abort waits on the fetches still in flight, so a group a consumer asked for
 /// before retirement still reaches it.
+///
+/// The same one-shot flag also carries the source catalog's end and a rung's fetches draining.
 #[derive(Clone)]
 pub(crate) struct Retire(tokio::sync::watch::Receiver<bool>);
 
@@ -65,6 +67,11 @@ impl Retire {
 		// An error means the transcoder dropped the sending half, which only
 		// happens on its way out: retire rather than park here forever.
 		let _ = self.0.wait_for(|retired| *retired).await;
+	}
+
+	/// Whether it has fired.
+	fn is_fired(&self) -> bool {
+		*self.0.borrow()
 	}
 }
 
@@ -93,6 +100,10 @@ pub(crate) struct Rung {
 	pub rendition: crate::active::Rendition,
 	/// Fires when the ladder resizes past this rung.
 	pub retire: Retire,
+	/// Fires once the source catalog has finished, shared by every rung of the ladder. An idle
+	/// rung then ends rather than waiting on demand, and its fetches drain as on retirement,
+	/// while a serving one carries on until its source track ends.
+	pub ending: Retire,
 }
 
 impl Rung {
@@ -307,13 +318,18 @@ impl Want {
 
 /// Whether `subscription` reaches the live edge, the newest source group `edge`: some range is
 /// open or ends at or past it. As moq-net judges a copy's feed,
-/// ranges wholly below it read only history, which fills serve. Before any group, every range
-/// does.
+/// ranges wholly below it read only history, which fills serve.
+///
+/// Before any group, only an open range or a live join does. A paused source's feed may never
+/// deliver a group to place the edge by, so a bounded history range counted as live would hold
+/// the serving session its own fills then wait behind.
 fn reaches_live(subscription: &moq_net::track::Subscription, edge: Option<u64>) -> bool {
 	subscription.ranges.iter().any(|range| match (range.end, edge) {
+		(None, _) => true,
 		// A time end is the last key it reads.
 		(Some(last), Some(edge)) => last >= edge,
-		_ => true,
+		// A live join starts at the edge, wherever it turns out to be.
+		(Some(_), None) => matches!(range.start, moq_net::track::Start::Live { .. }),
 	})
 }
 
@@ -330,6 +346,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 	// The newest source group this rung has seen start, which a subscription has to reach.
 	let mut edge = None;
 	let mut retire = rung.retire.clone();
+	let mut ending = rung.ending.clone();
 	// Set once the ladder retires this rung. The track ends at the next group
 	// boundary rather than mid-group, so the last thing a subscriber gets is a
 	// complete group.
@@ -356,6 +373,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				retiring = true;
 				continue;
 			}
+			() = ending.fired() => return Ok(Ended::Unfinished),
 		}
 
 		// The session's encoder holds its place in the budget for as long as it serves,
@@ -377,7 +395,13 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				retiring = true;
 				continue;
 			}
+			// Before attaching a new feed: a source ending may never end the wait for a session.
+			() = ending.fired() => return Ok(Ended::Unfinished),
 		};
+		// The wait is unbiased, so a session freed as the catalog ends can still win it.
+		if ending.is_fired() {
+			return Ok(Ended::Unfinished);
+		}
 
 		// Attach the meter here rather than at the first frame: it counts nothing
 		// until this pipeline encodes one, so a subscriber waiting on a stalled
@@ -551,7 +575,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					return Ok(Ended::Finished);
 				}
 				None => {
-					// The feed died mid-stream (source or decode error).
+					// The feed died mid-stream (a source error, or a decoder that would not open).
 					if let Some(output) = current.take() {
 						let _ = output.abort(moq_net::Error::Cancel);
 					}
@@ -568,11 +592,13 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 /// The fetch path: serve fills of specific (past) groups, each one group at a time.
 ///
 /// Fill tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
-/// detached. Retirement takes whatever the handler already had queued, closes
-/// admission by dropping it, and drains those fetches before the track is
-/// aborted. Other teardown aborts them, so no source subscription or encoder
-/// session survives a failed track. A semaphore bounds how many groups transcode at
-/// once; a fill waiting on its readers between groups holds none.
+/// detached. Retirement, or the live path ending after the source catalog did, takes
+/// whatever the handler already had queued, closes admission by dropping it, and drains
+/// those fetches before the track ends. Until then each fill keeps pace with its readers,
+/// even once the catalog has ended, since the live path may still be serving. Other
+/// teardown aborts them, so no source subscription or encoder session survives a failed
+/// track. A semaphore bounds how many groups transcode at once; a fill waiting on its
+/// readers between groups holds none.
 ///
 /// Owns the handler rather than borrowing it, since closing admission is
 /// dropping it.
@@ -582,6 +608,8 @@ async fn fetches(
 	finishing: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Error> {
 	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+	// Fires as admission closes, so the fills serve what they owe without waiting on readers.
+	let (drainer, draining) = Retire::channel();
 	let mut tasks = tokio::task::JoinSet::new();
 	let mut retire = rung.retire.clone();
 	let mut retired = false;
@@ -604,10 +632,12 @@ async fn fetches(
 			},
 		};
 
-		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
+		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone(), draining.clone());
 	}
 
-	if retired {
+	// A rung ending with its source catalog has its live path done, so it drains what it owes.
+	if retired || rung.ending.is_fired() {
+		drainer.send_replace(true);
 		// A consumer that asked for a group before retirement is already waiting on
 		// it, whether or not this loop had reached it yet: the fill queues on the
 		// dynamic handler the moment the fetch is made. Take what is queued now, so
@@ -624,7 +654,7 @@ async fn fetches(
 			tokio::select! {
 				biased;
 				fill = dynamic.requested_fill() => match fill {
-					Ok(fill) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone()),
+					Ok(fill) => spawn_fill(&mut tasks, rung.clone(), fill, limit.clone(), draining.clone()),
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
@@ -651,14 +681,15 @@ async fn fetches(
 }
 
 /// Spawn one fill, taking a slot of `limit` for each group it transcodes, once the source
-/// group is in hand: waiting on the source holds no encoder session.
+/// group is in hand: waiting on the source holds no encoder session. It stops waiting on its
+/// readers once `draining` fires.
 fn spawn_fill(
 	tasks: &mut tokio::task::JoinSet<()>,
 	rung: Rung,
 	mut fill: moq_net::track::FillGroups,
 	limit: Arc<Semaphore>,
+	mut draining: Retire,
 ) {
-	let mut retire = rung.retire.clone();
 	tasks.spawn(async move {
 		let mut last = None;
 		loop {
@@ -666,12 +697,12 @@ fn spawn_fill(
 			// own earlier groups before they are read. The slot is released before waiting on
 			// them, so a reader that stops reading never holds an encoder session.
 			//
-			// Once retired, the track ends only after this drain, so serve what is still owed
+			// Once draining, the track ends only after this drain, so serve what is still owed
 			// without waiting on a reader that may never read again. Each group once: one this
 			// fill left unanswered is not asked for again.
 			let sequence = tokio::select! {
 				biased;
-				() = retire.fired() => fill.wanted().filter(|sequence| last != Some(*sequence)),
+				() = draining.fired() => fill.wanted().filter(|sequence| last != Some(*sequence)),
 				sequence = fill.wanted_changed() => sequence,
 			};
 			let Some(sequence) = sequence else { break };
@@ -1156,6 +1187,9 @@ mod tests {
 			level: 30,
 		});
 		let (trigger, retire) = Retire::channel();
+		// A catalog that never finishes: a dropped sender fires, so this one lives for the test.
+		let (catalog, ending) = Retire::channel();
+		std::mem::forget(catalog);
 		let info = Resolved {
 			name: "video/120p".into(),
 			short_side: 120,
@@ -1184,6 +1218,7 @@ mod tests {
 			},
 			active,
 			retire,
+			ending,
 		};
 		(rung, source, trigger)
 	}
@@ -1228,7 +1263,8 @@ mod tests {
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		let mut tasks = tokio::task::JoinSet::new();
-		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		let (_drainer, draining) = Retire::channel();
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)), draining);
 		let wait = std::time::Duration::from_secs(5);
 		let first = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
@@ -1301,7 +1337,8 @@ mod tests {
 		assert_eq!((fill.start().group, fill.end()), (1, 2));
 
 		let mut tasks = tokio::task::JoinSet::new();
-		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		let (_drainer, draining) = Retire::channel();
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)), draining);
 		let wait = std::time::Duration::from_secs(5);
 		let fetched = kio::clock::timeout(wait, fetching)
 			.await
@@ -1367,11 +1404,14 @@ mod tests {
 		assert_eq!((fill.start().group, fill.end()), (1, HOUR));
 		assert_eq!(fill.order(), order);
 
+		// A retired rung's fetches drain too.
+		let (drainer, draining) = Retire::channel();
 		if retired {
 			retire.send(true).unwrap();
+			drainer.send(true).unwrap();
 		}
 		let mut tasks = tokio::task::JoinSet::new();
-		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)), draining);
 		let wait = std::time::Duration::from_secs(5);
 		if empty {
 			assert!(
@@ -1398,8 +1438,23 @@ mod tests {
 	/// are served without waiting for that reader to pick up the last one.
 	#[tokio::test(start_paused = true)]
 	async fn retirement_serves_a_fill_past_a_reader_that_stopped() {
+		drain_past_a_reader_that_stopped(false).await;
+	}
+
+	/// The source catalog ending drains a fill the same way once the live path is done, or the
+	/// rung would wait on that reader before its track could end. Until then the fill keeps
+	/// pace with its readers, or a wide fill would evict groups a slow reader has yet to read.
+	#[tokio::test(start_paused = true)]
+	async fn a_finished_catalog_serves_a_fill_past_a_reader_that_stopped() {
+		drain_past_a_reader_that_stopped(true).await;
+	}
+
+	/// Drain a fill whose reader stopped, on retirement or, when `ending`, the catalog's end.
+	async fn drain_past_a_reader_that_stopped(ending: bool) {
 		use std::task::Poll;
-		let (rung, source, retire) = idle_rung();
+		let (mut rung, source, retire) = idle_rung();
+		let (catalog, signal) = Retire::channel();
+		rung.ending = signal;
 		let timed =
 			hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::MILLI);
 		let source_fills = source.create_track("video", timed.clone()).unwrap().requests();
@@ -1428,34 +1483,47 @@ mod tests {
 		assert_eq!((start.start().group, start.floor()), (7, 0));
 		start.accept(6, None).unwrap().expect("a fresh group").finish().unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
-		let fill = fills.requested_fill().await.unwrap();
-		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
-		// Group 7 is served, and the reader never reads again to pick it up.
-		fill.clone()
-			.accept(7, None)
-			.unwrap()
-			.expect("a fresh group")
-			.finish()
+		// The live path delivers group 7, and the reader never reads again to pick it up.
+		let mut seven = track.create_group(moq_net::group::Info { start: 7 }).unwrap();
+		seven
+			.write_frame(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..])
 			.unwrap();
-		let mut tasks = tokio::task::JoinSet::new();
-		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		seven.finish().unwrap();
+
+		let (finished, mut finishing) = tokio::sync::watch::channel(false);
+		let mut running = tokio::spawn(async move { fetches(&rung, fills, &mut finishing).await });
 		let wait = std::time::Duration::from_secs(5);
 		assert!(
 			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
 			"group 8 waits for a reader to pick up group 7"
 		);
 
-		retire.send(true).unwrap();
+		match ending {
+			true => {
+				catalog.send(true).unwrap();
+				assert!(
+					kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
+					"group 8 still waits while the live path serves"
+				);
+				finished.send(true).unwrap();
+			}
+			false => retire.send(true).unwrap(),
+		}
 		let requested = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
-			.expect("a retired rung serves what its fill still owes")
+			.expect("a draining rung serves what its fill still owes")
 			.unwrap();
 		assert_eq!(requested.start().group, 8);
+		if ending {
+			// The source's media is still there to transcode, which is the drain's business from here.
+			running.abort();
+			return;
+		}
 		// The source no longer has it. It holds no group to place the gap after it by, and the
 		// drain can't wait for one, so the rest of the fill is refused with it, not named lost.
 		requested.drop_groups(8..9);
-		kio::clock::timeout(wait, tasks.join_next())
+		kio::clock::timeout(wait, &mut running)
 			.await
 			.expect("the drain finishes")
 			.unwrap()
@@ -1464,6 +1532,44 @@ mod tests {
 			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
 			"the rest of the fill is refused at once, not fetched a group at a time"
 		);
+		drop(finished);
+	}
+
+	/// A session freed as the catalog ends goes unused by a rung waiting for one: it ends
+	/// rather than attach a feed the source no longer stands behind. Which ready branch the
+	/// wait takes is random, so the race runs many times.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_freed_as_the_catalog_ends_attaches_no_feed() {
+		use std::future::Future;
+		for _ in 0..64 {
+			let (mut rung, source, _retire) = idle_rung();
+			let (catalog, ending) = Retire::channel();
+			rung.ending = ending;
+			rung.transcode.sessions = crate::Sessions::new(std::num::NonZeroUsize::MIN);
+			let held = rung.transcode.sessions.serve().await;
+			let video = source.create_track("video", None).unwrap();
+
+			let output = moq_net::broadcast::Info::default().produce();
+			let mut track = output.create_track("video/120p", None).unwrap();
+			let _viewer = track.subscribe(None);
+			let mut running = std::pin::pin!(live(&rung, &mut track));
+			assert!(
+				running
+					.as_mut()
+					.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+					.is_pending(),
+				"the rung waits for the held session"
+			);
+
+			drop(held);
+			catalog.send(true).unwrap();
+			let ended = kio::clock::timeout(std::time::Duration::from_secs(5), running)
+				.await
+				.expect("an ending rung does not serve");
+			assert!(matches!(ended, Ok(Ended::Unfinished)));
+			assert!(!video.demand().wanted(), "no feed subscribed to the source");
+			assert_eq!(rung.transcode.sessions.available(), 1);
+		}
 	}
 
 	/// A restarted source cancels the serving future even while a rung waits for media.
@@ -1597,6 +1703,21 @@ mod tests {
 		// The rendition reports the opened encoder's preset, the one the caller requested by default.
 		let applied = rung.rendition.applied().expect("the encoder opened");
 		assert_eq!(applied.preset, Some(moq_video::encode::Preset::LowLatency));
+	}
+
+	/// Before the feed has placed the edge, a range reaches it only if it is open or joins live:
+	/// a bounded history range would hold a session through a paused source.
+	#[test]
+	fn before_any_group_only_open_ranges_and_live_joins_reach_live() {
+		use moq_net::track::{Range, Start, Subscription};
+		let reaches =
+			|start, end, edge| reaches_live(&Subscription::default().with_ranges([Range { start, end }]), edge);
+		let live = Start::Live { min: None, max: None };
+		assert!(reaches(Start::Time(3), None, None));
+		assert!(!reaches(Start::Time(3), Some(4), None));
+		assert!(reaches(live, Some(4), None));
+		assert!(reaches(Start::Time(3), Some(4), Some(4)));
+		assert!(!reaches(Start::Time(3), Some(4), Some(5)));
 	}
 
 	/// A fetched NVDEC group reaches the encoder at native size when
