@@ -57,7 +57,7 @@ pub(super) struct Pace {
 	front: AtomicU64,
 	// Set while the writer waits on `read`, so a read wakes it without locking otherwise.
 	parked: AtomicBool,
-	// Set once a reader first holds the group, before it counts as one: until then the group
+	// Set once a reader first holds the group, after it counts as one: until then the group
 	// is still owed to its track's subscribers (see `group::Handle::poll_unowed`).
 	held: AtomicBool,
 	// The writer's waker: a group has one writer, so one slot, far smaller than a list.
@@ -137,11 +137,11 @@ impl Pace {
 		}
 	}
 
-	/// A reader is about to hold the group, so its readers all leaving means nobody is owed the
-	/// rest.
+	/// A reader, already counted, holds the group, so its readers all leaving means nobody is
+	/// owed the rest.
 	pub fn hold(&self) {
-		// SeqCst pairs with the writer's check after it registers for a reader arriving: a
-		// reader that came and left before then still shows here.
+		// SeqCst pairs with the writer's reads: one that finds this set then finds the reader's
+		// count, and one that registers for a reader arriving finds a reader that came and left.
 		self.held.store(true, Ordering::SeqCst);
 	}
 

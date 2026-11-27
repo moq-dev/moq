@@ -76,7 +76,7 @@ In a receive trace, follow `pc`, `q[s]`'s `arr`, `taken`, `rel`, and `msd`, `cha
 
 ## Coverage
 
-Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/model/group.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

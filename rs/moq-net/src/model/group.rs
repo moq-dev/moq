@@ -3581,16 +3581,19 @@ impl Handle {
 	/// Create a new consumer for the group.
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn consume(&self) -> Consumer {
+		let state = self.state.consume();
+		// Counted first, so ingest that finds the group held finds this reader too.
 		self.alive.pace.hold();
-		self.consumer(self.state.consume())
+		self.consumer(state)
 	}
 
 	/// Create a consumer, or `None` once the group is aborted. Paired with
 	/// [`abort_unwanted`](Self::abort_unwanted): the closed check and the count share its
 	/// lock, so a consumer either exists in time to decline the abort or is never made.
 	pub(super) fn try_consume(&self) -> Option<Consumer> {
+		let state = self.state.weak().try_consume()?;
 		self.alive.pace.hold();
-		self.state.weak().try_consume().map(|state| self.consumer(state))
+		Some(self.consumer(state))
 	}
 
 	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
@@ -3703,7 +3706,9 @@ impl Handle {
 	/// Whether a reader is owed the rest of the group: one holds it, or none has yet and its
 	/// track still has a subscriber to hand it to.
 	fn owed(&self) -> bool {
-		self.state.wanted() || (!self.alive.pace.held() && self.cache.track().is_some_and(|track| track.wanted()))
+		// Read before the count: a reader counts before it marks the group held.
+		let held = self.alive.pace.held();
+		self.state.wanted() || (!held && self.cache.track().is_some_and(|track| track.wanted()))
 	}
 
 	/// Poll until no reader is owed the rest of the group: none holds it, and either one did
@@ -3715,6 +3720,9 @@ impl Handle {
 	/// reading on before then would hold more than a window, or shed what that reader wants.
 	fn poll_unowed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
+			// Read before the count: a reader counts before it marks the group held, so one
+			// found held is either still counted or gone.
+			let held = self.alive.pace.held();
 			if self.state.wanted() {
 				match self.state.poll_wanted_changed(waiter, true) {
 					Poll::Pending => return Poll::Pending,
@@ -3722,7 +3730,7 @@ impl Handle {
 					Poll::Ready(Err(_)) => return Poll::Ready(()),
 				}
 			}
-			if self.alive.pace.held() {
+			if held {
 				return Poll::Ready(());
 			}
 			// Nobody consuming the track, or the track gone or closed, leaves nobody to hand it to.
@@ -3735,14 +3743,9 @@ impl Handle {
 			match self.state.poll_wanted_changed(waiter, false) {
 				Poll::Ready(Ok(_)) => continue,
 				Poll::Ready(Err(_)) => return Poll::Ready(()),
-				// A reader that arrived and left before that registered shows only here.
-				Poll::Pending => {
-					return if self.alive.pace.held() {
-						Poll::Ready(())
-					} else {
-						Poll::Pending
-					};
-				}
+				// A reader that arrived since the read above is checked again from the top.
+				Poll::Pending if self.alive.pace.held() => continue,
+				Poll::Pending => return Poll::Pending,
 			}
 		}
 	}
