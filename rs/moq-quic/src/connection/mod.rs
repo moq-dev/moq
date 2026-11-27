@@ -3581,6 +3581,12 @@ impl Connection {
 						sequence,
 						allow_more_cids,
 					));
+					// The peer catching up on a Retire Prior To lets the next expiry proceed, and a
+					// retirement may drop the batch the timer was armed for
+					match self.local_cid_state.next_timeout() {
+						Some(at) => self.timers.set(Timer::PushNewCid, at),
+						None => self.timers.stop(Timer::PushNewCid),
+					}
 				}
 				Frame::NewConnectionId(frame) => {
 					trace!(

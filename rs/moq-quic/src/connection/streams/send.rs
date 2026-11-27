@@ -84,6 +84,10 @@ impl Send {
 		if self.stopped.is_some() {
 			return Err(Error::Stopped);
 		}
+		// Nothing to queue, so neither flow control nor an empty STREAM frame is involved
+		if !data.has_remaining() {
+			return Ok(Some(0));
+		}
 		let budget = self.max_data - self.pending.offset();
 		if budget == 0 || limit == 0 {
 			return Ok(None);
@@ -285,12 +289,17 @@ impl Send {
 
 	/// Whether the peer acknowledged everything before `offset`, noting to report it if not
 	pub(super) fn acked(&mut self, offset: u64) -> Result<bool, Error> {
-		// An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
-		if self.peer_stopped() || offset > self.pending.offset() {
+		// An acknowledgment no longer means the peer reads the data
+		if self.peer_stopped() {
 			return Err(Error::Closed);
 		}
-		if offset <= self.pending.acked() {
+		// Includes data acknowledged before a reset truncated it
+		if offset <= self.acked_len() {
 			return Ok(true);
+		}
+		// A reset dropped the rest
+		if offset > self.pending.offset() {
+			return Err(Error::Closed);
 		}
 		self.notify = Some(self.notify.map_or(offset, |notify| notify.min(offset)));
 		Ok(false)
@@ -499,6 +508,9 @@ impl<'a> Stream<'a> {
 			}
 			return Ok(None);
 		};
+		if written == 0 {
+			return Ok(Some(0));
+		}
 		self.state.data_sent += written as u64;
 		self.state.buffered_data += written as u64;
 		trace!(stream = %self.id, "wrote {} bytes", written);

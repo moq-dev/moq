@@ -168,7 +168,7 @@ impl Assembler {
 		let threshold = 32768.max(buffered * 3 / 2);
 		// Small gapped frames hold over-allocation below the threshold, so bound the count too.
 		if over_allocation > threshold || self.data.len() > COMPACT_THRESHOLD {
-			self.defragment(0);
+			self.defragment(self.bytes_read);
 			// ngtcp2 uses a threshold of 4000 -- try to be a little more conservative?
 			if self.data.len() > MAX_CHUNKS {
 				return Err(TooManyChunks);
@@ -205,6 +205,8 @@ impl Assembler {
 
 	/// Discard buffered data at or past `end`
 	pub(super) fn truncate(&mut self, end: u64) {
+		// Bytes past `end` will never be buffered again; `insert` bounds unique bytes by `self.end`
+		self.end = self.end.min(end.max(self.bytes_read));
 		let (mut buffered, mut allocated) = (self.buffered, self.allocated);
 		self.data.retain_mut(|buffer| {
 			if buffer.offset >= end {
@@ -779,6 +781,35 @@ mod test {
 		assert_eq!(next(&mut x, usize::MAX), None);
 		assert_eq!(x.unread_before(5), 0);
 		assert_eq!(x.unread_before(9), 4);
+	}
+
+	#[test]
+	fn compaction_discards_read_duplicates() {
+		let mut x = Assembler::new();
+		x.insert(0, Bytes::from_static(b"0123456789"), 10).unwrap();
+		x.insert(2, Bytes::from_static(b"23456789abcdef"), 14).unwrap();
+		assert_eq!(next(&mut x, 5), Some(Bytes::from_static(b"01234")));
+		// A badly over-allocated frame forces a compaction from `insert`
+		x.insert(20, Bytes::from_static(b"x"), 40_000).unwrap();
+		assert_sorted(&x);
+		// Only the unread `56789abcdef` and `x` remain
+		assert_eq!(x.buffered, 12);
+		assert_eq!(x.allocated, 12);
+		assert_eq!(next(&mut x, usize::MAX), Some(Bytes::from_static(b"56789abcdef")));
+	}
+
+	#[test]
+	fn truncate_clamps_end() {
+		let mut x = Assembler::new();
+		x.insert(0, Bytes::from_static(b"abcdefgh"), 8).unwrap();
+		x.truncate(5);
+		assert_eq!(x.end, 5);
+		assert_eq!(next(&mut x, 3), Some(Bytes::from_static(b"abc")));
+		// Truncating below what was already read keeps `end` at the read offset
+		x.truncate(1);
+		assert_eq!(x.end, 3);
+		x.insert(0, Bytes::from_static(b"ab"), 2).unwrap();
+		assert_eq!(next(&mut x, usize::MAX), None);
 	}
 
 	fn next(x: &mut Assembler, size: usize) -> Option<Bytes> {
