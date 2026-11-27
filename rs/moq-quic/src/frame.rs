@@ -425,6 +425,12 @@ impl Ack {
 		self.into_iter()
 	}
 
+	/// The ACK Delay in microseconds, given the sender's `ack_delay_exponent`, saturating so a huge
+	/// field never wraps to a small delay
+	pub(crate) fn delay_micros(&self, exponent: u64) -> u64 {
+		self.delay.saturating_mul(1 << exponent)
+	}
+
 	/// The receive timestamps it reports, newest arrival first, or `None` for a plain ACK
 	pub(crate) fn receive_timestamps(&self) -> Option<ReceiveTimestamps<'_>> {
 		let mut data = &self.timestamps.as_ref()?[..];
@@ -1335,6 +1341,22 @@ mod test {
 			4
 		);
 		assert_eq!(short, [1, 5, 4, 0x41, 0x8b, 1, 2, 2]);
+	}
+
+	/// An ACK Delay too large to scale reads as the longest delay, not a wrapped short one
+	#[test]
+	fn ack_delay_saturates() {
+		let mut ranges = ArrayRangeSet::new();
+		ranges.insert_one(0);
+		for (delay, exponent, micros) in [(100, 3, 800), (1 << 61, 3, u64::MAX), (VarInt::MAX.0, 20, u64::MAX)] {
+			let mut buf = Vec::new();
+			Ack::encode(delay, &ranges, None, false, &mut buf);
+			let frames = frames(buf);
+			let [Frame::Ack(ack)] = &frames[..] else {
+				panic!("incorrect frames {frames:?}");
+			};
+			assert_eq!(ack.delay_micros(exponent), micros, "{delay} << {exponent}");
+		}
 	}
 
 	/// A delta that steps back past the basis, or a range below packet zero, is malformed

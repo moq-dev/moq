@@ -722,8 +722,9 @@ impl Connection {
 			&& self.spaces[SpaceId::Handshake].unacked_crypto().next().is_some();
 
 		// Check whether we need to send an ACK_FREQUENCY frame
+		// A lost frame already queued its retransmission, which this must not clear
 		if let Some(config) = &self.config.ack_frequency {
-			self.spaces[SpaceId::Data].pending.ack_frequency =
+			self.spaces[SpaceId::Data].pending.ack_frequency |=
 				self.ack_frequency
 					.should_send_ack_frequency(self.path.rtt.get(), config, &self.peer_params)
 					&& self.highest_space == SpaceId::Data
@@ -822,6 +823,13 @@ impl Connection {
 			if space_id == SpaceId::Data {
 				ack_eliciting |= self.can_send_1rtt(frame_space_1rtt) || bandwidth_probe;
 			}
+			// ACKs due now go out alone when a limit holds back the data they would ride with:
+			// an ACK-only packet is not congestion controlled (RFC 9002 §7), and holding it stalls
+			// the peer's own sending.
+			let acks_alone = space_id == SpaceId::Data && can_send.acks;
+			// Set once a limit held this space's data back and its ACKs went out alone, after
+			// which nothing ack-eliciting may follow in this call
+			let mut held = false;
 
 			pad_datagram_to_mtu |= space_id == SpaceId::Data && self.config.pad_to_mtu;
 
@@ -883,17 +891,19 @@ impl Connection {
 					// send counts for those.
 					let bytes_to_send = segment_size as u64 + untracked_bytes;
 					if self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
-						space_idx += 1;
 						send_blocked = true;
 						cwnd_blocked |= !bandwidth_probe;
-						// We continue instead of breaking here in order to avoid
-						// blocking loss probes queued for higher spaces.
 						trace!("blocked by congestion control");
-						continue;
+						if !acks_alone {
+							// We continue instead of breaking here in order to avoid
+							// blocking loss probes queued for higher spaces.
+							space_idx += 1;
+							continue;
+						}
+						held = true;
 					}
-
 					// Check whether the next datagram is blocked by pacing
-					if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
+					else if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
 						if !bandwidth_probe {
@@ -902,7 +912,10 @@ impl Connection {
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
-						break;
+						if !acks_alone {
+							break;
+						}
+						held = true;
 					}
 				}
 
@@ -910,15 +923,23 @@ impl Connection {
 				// congestion window, so a probe only waits, and a peer faking loss cannot draw
 				// probes past the cap.
 				if ack_eliciting
-					&& !close && let Some(delay) = self
-					.send_rate
-					.as_mut()
-					.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
+					&& !held && !close
+					&& let Some(delay) = self
+						.send_rate
+						.as_mut()
+						.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
 				{
 					self.timers.set(Timer::Pacing, delay);
 					rate_blocked = true;
 					trace!("blocked by the send rate cap");
-					break;
+					if !acks_alone {
+						break;
+					}
+					held = true;
+				}
+				if held {
+					trace!("sending ACKs alone");
+					ack_eliciting = false;
 				}
 
 				// Finish current packet
@@ -996,12 +1017,14 @@ impl Connection {
 					}
 				}
 
-				datagram_cleared = ack_eliciting || padded || close || self.spaces[space_id].loss_probes > 0;
+				// ACKs going alone are no probe, so they leave the probe to a later datagram
+				let probe = !held && self.spaces[space_id].loss_probes > 0;
+				datagram_cleared = ack_eliciting || padded || close || probe;
 
 				// Allocate space for another datagram
-				let next_datagram_size_limit = match self.spaces[space_id].loss_probes {
-					0 => segment_size,
-					_ => {
+				let next_datagram_size_limit = match probe {
+					false => segment_size,
+					true => {
 						self.spaces[space_id].loss_probes -= 1;
 						// Clamp the datagram to at most the minimum MTU to ensure that loss probes
 						// can get through and enable recovery even if the path MTU has shrank
@@ -1040,11 +1063,16 @@ impl Connection {
 					&& self.spaces[space_id].loss_probes == 0
 					&& self.path.in_flight.bytes + untracked_bytes > self.path.congestion.window()
 				{
-					space_idx += 1;
 					send_blocked = true;
 					cwnd_blocked |= !bandwidth_probe;
 					trace!("blocked by congestion control");
-					continue;
+					if !acks_alone {
+						space_idx += 1;
+						continue;
+					}
+					trace!("sending ACKs alone");
+					held = true;
+					ack_eliciting = false;
 				}
 				// Finish current packet without adding extra padding
 				if let Some(builder) = builder_storage.take() {
@@ -1106,6 +1134,7 @@ impl Connection {
 						buf,
 						&mut self.stats,
 						builder.max_size - frame::ConnectionClose::SIZE_BOUND,
+						0,
 					);
 				}
 
@@ -1169,9 +1198,10 @@ impl Connection {
 			}
 
 			// Send an off-path PATH_RESPONSE. Prioritized over on-path data to ensure that path
-			// validation can occur while the link is saturated.
+			// validation can occur while the link is saturated. Not in place of ACKs going alone,
+			// as the response counts in flight.
 			if space_id == SpaceId::Data
-				&& num_datagrams == 1
+				&& !held && num_datagrams == 1
 				&& let Some((token, remote)) = self.path_responses.pop_off_path(self.path.remote)
 			{
 				// `unwrap` guaranteed to succeed because `builder_storage` was populated just
@@ -1187,6 +1217,7 @@ impl Connection {
 					self,
 					Some(SentFrames {
 						non_retransmits: true,
+						off_path: true,
 						..SentFrames::default()
 					}),
 					buf,
@@ -1223,12 +1254,20 @@ impl Connection {
 
 			if sent.largest_acked.is_some() {
 				self.spaces[space_id].pending_acks.acks_sent();
-				self.timers.stop(Timer::MaxAckDelay);
-				self.next_bundled_ack_time = Some(now.saturating_add(self.next_bundled_ack_delay()));
+				// The timer and the bundling delay belong to 1-RTT ACKs alone
+				if space_id == SpaceId::Data {
+					self.timers.stop(Timer::MaxAckDelay);
+					self.next_bundled_ack_time = Some(now.saturating_add(self.next_bundled_ack_delay()));
+				}
 			}
 
 			// Keep information about the packet around until it gets finalized
 			sent_frames = Some(sent);
+
+			// The data a limit held back waits for it to clear, behind the ACKs that went alone
+			if held {
+				break;
+			}
 
 			// Don't increment space_idx.
 			// We stay in the current space and check if there is more data to send.
@@ -2026,6 +2065,8 @@ impl Connection {
 		}
 
 		let mut ack_eliciting_acked = false;
+		// Newly acknowledged packets sent marked on this path, which the peer's ECN counts cover
+		let mut ecn_acked = 0;
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
 		for packet in newly_acked.elts() {
@@ -2039,6 +2080,9 @@ impl Connection {
 					self.spaces[space].pending_acks.subtract_below(acked);
 				}
 				ack_eliciting_acked |= info.ack_eliciting;
+				let this_path = info.path_generation == self.path.generation();
+				ecn_acked += u64::from(info.ecn && this_path);
+				self.spaces[space].ecn_prior_path |= info.ecn && !this_path;
 
 				// Notify MTU discovery that a packet was acked, because it might be an MTU probe
 				let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
@@ -2046,8 +2090,11 @@ impl Connection {
 					self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
 				}
 
-				// Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
-				self.ack_frequency.on_acked(packet);
+				// Packet numbers repeat across spaces, and only 1-RTT packets carry ACK_FREQUENCY. A
+				// probe may have taken the packet's retransmits, so its own frames go unrecorded.
+				if space == SpaceId::Data {
+					self.ack_frequency.on_acked(packet);
+				}
 
 				let received = received
 					.binary_search_by_key(&packet, |&(packet, _)| packet)
@@ -2063,7 +2110,7 @@ impl Connection {
 			} else {
 				cmp::min(
 					self.ack_frequency.peer_max_ack_delay,
-					Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
+					Duration::from_micros(ack.delay_micros(self.peer_params.ack_delay_exponent.0)),
 				)
 			};
 			let rtt = now.saturating_duration_since(self.spaces[space].largest_acked_packet_sent);
@@ -2099,11 +2146,11 @@ impl Connection {
 				// of newly acked packets that remains well-defined in the presence of arbitrary packet
 				// reordering.
 				if new_largest {
-					let sent = self.spaces[space].largest_acked_packet_sent;
-					self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent);
+					self.process_ecn(now, space, ecn_acked, ecn);
 				}
-			} else {
-				// We always start out sending ECN, so any ack that doesn't acknowledge it disables it.
+			} else if ecn_acked > 0 {
+				// A marked packet acknowledged without counts means the marks went unseen
+				// (RFC 9000 §13.4.2.1).
 				debug!("ECN not acknowledged by peer");
 				self.path.sending_ecn = false;
 			}
@@ -2114,25 +2161,33 @@ impl Connection {
 	}
 
 	fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId) -> bool {
-		let lost_packets = &mut self.spaces[space].lost_packets;
+		let generation = self.path.generation();
+		let space = &mut self.spaces[space];
 
-		if lost_packets.is_empty() {
+		if space.lost_packets.is_empty() {
 			return false;
 		}
 
+		let mut answered = false;
 		for range in ack.iter() {
-			let spurious_losses: Vec<u64> = lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
+			let spurious_losses: Vec<u64> = space.lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
 
 			for pn in spurious_losses {
-				lost_packets.remove(pn);
+				// A late packet still carried its mark into the peer's counts
+				let lost = space.lost_packets.remove(pn).expect("listed above");
+				space.ecn_prior_path |= lost.ecn_path.is_some_and(|path| path != generation);
+				answered |= lost.congestion_path == Some(generation);
 			}
 		}
 
-		// If this ACK frame acknowledged all deemed lost packets,
-		// then we have raised a spurious congestion event in the past.
-		// We cannot conclude when there are remaining packets,
-		// but future ACK frames might indicate a spurious loss detection.
-		lost_packets.is_empty()
+		// Once this ACK covers every loss this path's controller answered, its response was
+		// spurious. Losses it never heard, such as an ACK-only packet's, prove nothing: a late ACK
+		// of one would undo an unrelated cut.
+		answered
+			&& !space
+				.lost_packets
+				.range(..)
+				.any(|(_, lost)| lost.congestion_path == Some(generation))
 	}
 
 	/// Drain lost packets that we reasonably think will never arrive
@@ -2152,14 +2207,8 @@ impl Connection {
 	}
 
 	/// Process a new ECN block from an in-order ACK
-	fn process_ecn(
-		&mut self,
-		now: Instant,
-		space: SpaceId,
-		newly_acked: u64,
-		ecn: frame::EcnCounts,
-		largest_sent_time: Instant,
-	) {
+	fn process_ecn(&mut self, now: Instant, space: SpaceId, newly_acked: u64, ecn: frame::EcnCounts) {
+		let prior_path = mem::take(&mut self.spaces[space].ecn_prior_path);
 		match self.spaces[space].detect_ecn(newly_acked, ecn) {
 			Err(e) => {
 				debug!("halting ECN due to verification failure: {}", e);
@@ -2169,6 +2218,8 @@ impl Connection {
 				self.spaces[space].ecn_feedback = frame::EcnCounts::ZERO;
 			}
 			Ok(false) => {}
+			// The marks may be the earlier path's, whose controller this path's never answers for
+			Ok(true) if prior_path => debug!("CE marks may belong to an earlier path"),
 			// While the path validates, its controller hears no congestion signal, as it hears no
 			// ACK (see `on_packet_acked`): BBR3 would leave Startup with no bandwidth sample and
 			// pace at zero.
@@ -2177,7 +2228,7 @@ impl Connection {
 				self.stats.path.congestion_events += 1;
 				self.path.congestion.on_ce(congestion::Ce {
 					now,
-					sent: largest_sent_time,
+					sent: self.spaces[space].largest_acked_packet_sent,
 				});
 			}
 		}
@@ -2442,23 +2493,16 @@ impl Connection {
 				// A packet from another path carries another controller's state. While the path
 				// validates, its controller hears no loss, as it hears no ACK (see
 				// `on_packet_acked`): losses alone read as a path that delivers nothing.
-				if let Some(state) = info
+				let generation = self.path.generation();
+				let state = info
 					.congestion
-					.filter(|_| self.path.challenge.is_none() && info.path_generation == self.path.generation())
-				{
+					.filter(|_| self.path.challenge.is_none() && info.path_generation == generation);
+				if let Some(state) = state {
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
 						packet: state,
 					});
-					// Only a loss the controller answered can prove its response spurious: a late
-					// ACK of an ACK-only packet would undo an unrelated cut
-					self.spaces[pn_space].lost_packets.insert(
-						packet,
-						LostPacket {
-							time_sent: info.time_sent,
-						},
-					);
 				}
 				self.qlog
 					.emit_packet_lost(packet, &info, loss_delay, pn_space, now, self.orig_rem_cid);
@@ -2470,8 +2514,20 @@ impl Connection {
 						self.streams.retransmit(frame);
 					}
 				}
+				if pn_space == SpaceId::Data {
+					self.ack_frequency.on_lost(packet);
+				}
 				self.spaces[pn_space].pending |= info.retransmits;
 				self.path.mtud.on_non_probe_lost(pn_space, packet, info.size);
+
+				self.spaces[pn_space].lost_packets.insert(
+					packet,
+					LostPacket {
+						time_sent: info.time_sent,
+						ecn_path: info.ecn.then_some(info.path_generation),
+						congestion_path: state.is_some().then_some(generation),
+					},
+				);
 			}
 
 			if self.path.mtud.black_hole_detected(now) {
@@ -3806,8 +3862,6 @@ impl Connection {
 	fn replace_path(&mut self, now: Instant, path: PathData) -> PathData {
 		// The old path's congestion wait ends with it.
 		self.observe_congestion(now, true);
-		// A loss the old controller answered cannot show that the new one's response was spurious
-		self.spaces[SpaceId::Data].lost_packets = Default::default();
 		mem::replace(&mut self.path, path)
 	}
 
@@ -3868,9 +3922,12 @@ impl Connection {
 		space.pending_acks.maybe_ack_non_eliciting();
 
 		let pre_payload_len = buf.len();
+		// A packet planned as ACK-only skipped the limits on ack-eliciting packets, so it must
+		// stay that way (RFC 9002 §7): every other frame waits for a packet the limits let through.
+		let ack_eliciting = builder.ack_eliciting;
 
 		// HANDSHAKE_DONE
-		if mem::replace(&mut space.pending.handshake_done, false) {
+		if ack_eliciting && mem::replace(&mut space.pending.handshake_done, false) {
 			buf.write(frame::FrameType::HANDSHAKE_DONE);
 			sent.retransmits.get_or_create().handshake_done = true;
 			// This is just a u8 counter and the frame is typically just sent once
@@ -3878,7 +3935,7 @@ impl Connection {
 		}
 
 		// PING
-		if mem::replace(&mut space.ping_pending, false) {
+		if ack_eliciting && mem::replace(&mut space.ping_pending, false) {
 			trace!("PING");
 			buf.write(frame::FrameType::PING);
 			sent.non_retransmits = true;
@@ -3886,7 +3943,7 @@ impl Connection {
 		}
 
 		// IMMEDIATE_ACK
-		if mem::replace(&mut space.immediate_ack_pending, false) {
+		if ack_eliciting && mem::replace(&mut space.immediate_ack_pending, false) {
 			trace!("IMMEDIATE_ACK");
 			buf.write(frame::FrameType::IMMEDIATE_ACK);
 			sent.non_retransmits = true;
@@ -3894,7 +3951,7 @@ impl Connection {
 		}
 
 		// ACK_FREQUENCY, ahead of the ACK, whose receive timestamps fill the space left
-		if mem::replace(&mut space.pending.ack_frequency, false) {
+		if ack_eliciting && mem::replace(&mut space.pending.ack_frequency, false) {
 			let sequence_number = self.ack_frequency.next_sequence_number();
 
 			// Safe to unwrap because this is always provided when ACK frequency is enabled
@@ -3927,14 +3984,9 @@ impl Connection {
 		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
 		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
 
-		// ACK
+		// ACK, its receive timestamps leaving half the room to the frames that follow
 		if space.pending_acks.can_send() {
-			// Only a bandwidth probe's duplicates make its packet ack-eliciting, so an ACK, whose
-			// receive timestamps fill the room left, leaves room for one
-			let ack_max_size = match bandwidth_probe {
-				true => max_size.saturating_sub(frame::Stream::SIZE_BOUND + 1),
-				false => max_size,
-			};
+			let reserve = if ack_eliciting { (max_size - buf.len()) / 2 } else { 0 };
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
@@ -3943,14 +3995,13 @@ impl Connection {
 				space,
 				buf,
 				&mut self.stats,
-				ack_max_size,
+				max_size,
+				reserve,
 			);
 		}
 
-		// A packet planned as ACK-only skipped the congestion window, so it must stay that way
-		// (RFC 9002 §7): a frame that rides along, such as the challenge an unvalidated path
-		// repeats, waits for a packet the window let through.
-		if !builder.ack_eliciting {
+		// A frame that rides along, such as the challenge an unvalidated path repeats, waits too
+		if !ack_eliciting {
 			return sent;
 		}
 
@@ -4123,11 +4174,12 @@ impl Connection {
 		// Bundle ACK with other frames when there is room for them.
 		// We want to reuse encryption and underlying protocol overhead,
 		// but sending multiple ACKs for a single incoming packet is a waste of peer's resources,
-		// so we have next_bundled_ack_time to control when to send ACKs.
+		// so we have next_bundled_ack_time to control when to send ACKs. It spaces out 1-RTT ACKs
+		// alone: the handshake spaces acknowledge every packet at once anyway.
 		let any_frames_sent = buf.len() > pre_payload_len;
 		if any_frames_sent
 			&& sent.largest_acked.is_none()
-			&& self.next_bundled_ack_time.is_some_and(|time| time <= now)
+			&& (space_id != SpaceId::Data || self.next_bundled_ack_time.is_some_and(|time| time <= now))
 			&& space.pending_acks.can_send_with_other_frames()
 		{
 			Self::try_populate_acks(
@@ -4139,6 +4191,7 @@ impl Connection {
 				buf,
 				&mut self.stats,
 				max_size,
+				0,
 			);
 		}
 
@@ -4152,6 +4205,8 @@ impl Connection {
 	///
 	/// This method assumes ACKs are pending, and should only be called if
 	/// `!PendingAcks::ranges().is_empty()` returns `true`.
+	///
+	/// Receive timestamps leave `reserve` bytes free for the frames that follow.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "an associated function, so a caller can lend it disjoint fields of the connection"
@@ -4165,6 +4220,7 @@ impl Connection {
 		buf: &mut Vec<u8>,
 		stats: &mut Stats,
 		max_size: usize,
+		reserve: usize,
 	) {
 		debug_assert!(!space.pending_acks.ranges().is_empty());
 
@@ -4181,17 +4237,26 @@ impl Connection {
 		let no_acks_len = buf.len();
 		let ranges = space.pending_acks.ranges();
 		// Timestamps fill the space left after the ranges, rather than a packet of their own
-		let timestamps = timestamps.filter(|log| log.any(ranges));
-		frame::Ack::encode(delay as _, ranges, ecn, timestamps.is_some(), buf);
-		if let Some(log) = timestamps
-			&& let Some(space) = max_size.checked_sub(buf.len())
-		{
-			log.encode(ranges, space, buf);
+		let mut report = timestamps.as_deref().is_some_and(|log| log.any(ranges));
+		frame::Ack::encode(delay as _, ranges, ecn, report, buf);
+		// The Receive Timestamps field takes a byte for its count at least; with no room for it,
+		// the ACK goes without the field
+		let room = max_size.saturating_sub(reserve).saturating_sub(buf.len());
+		if report && room == 0 {
+			report = false;
+			buf.truncate(no_acks_len);
+			frame::Ack::encode(delay as _, ranges, ecn, false, buf);
 		}
 		if buf.len() > max_size {
 			// The ACK frame is too large. Remove it.
 			buf.truncate(no_acks_len);
 			return;
+		}
+		if let Some(log) = timestamps {
+			if report {
+				log.encode(ranges, room, buf);
+			}
+			log.clear();
 		}
 		sent.largest_acked = space.pending_acks.ranges().max();
 		stats.frame_tx.acks += 1;
@@ -4955,6 +5020,8 @@ struct SentFrames {
 	requires_padding: bool,
 	/// Whether the packet carries the current path's PATH_CHALLENGE
 	path_challenge: bool,
+	/// Whether the packet goes to an address off the path, unmarked for ECN
+	off_path: bool,
 }
 
 impl SentFrames {
@@ -5087,6 +5154,64 @@ mod tests {
 		for (left, right, result) in test_params {
 			assert_eq!(negotiate_max_idle_timeout(left, right), result);
 			assert_eq!(negotiate_max_idle_timeout(right, left), result);
+		}
+	}
+
+	/// An ACK whose ranges leave no room for the Receive Timestamps field, or only room reserved for
+	/// other frames, goes out plain rather than not at all, one with room reports what fits, and
+	/// either way the log forgets every arrival the ACK covered
+	#[test]
+	fn ack_fits_receive_timestamps_to_its_room() {
+		let now = Instant::now();
+		let mut space = PacketSpace::new(now);
+		for pn in [0, 2, 4] {
+			space.pending_acks.insert_one(pn, now);
+		}
+		let ranges = space.pending_acks.ranges().clone();
+		let header = |timestamps| {
+			let mut buf = Vec::new();
+			frame::Ack::encode(0, &ranges, None, timestamps, &mut buf);
+			buf.len()
+		};
+		for (room, reserve, ty, reported) in [
+			(header(true), 0, frame::FrameType::ACK, 0),
+			(header(true) + 1, 0, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 0),
+			(1200, 0, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 3),
+			(1200, 1200 - header(true), frame::FrameType::ACK, 0),
+		] {
+			let mut log = receive_timestamps::Log::new(32, 0);
+			for pn in [0, 2, 4] {
+				log.received(pn, now, usize::MAX);
+			}
+			let mut sent = SentFrames::default();
+			let mut buf = Vec::new();
+			Connection::try_populate_acks(
+				now,
+				false,
+				Some(&mut log),
+				&mut sent,
+				&mut space,
+				&mut buf,
+				&mut Stats::default(),
+				room,
+				reserve,
+			);
+			assert_eq!(sent.largest_acked, Some(4), "room {room}, reserve {reserve}");
+			assert!(buf.len() <= room, "room {room}, reserve {reserve}");
+			let frames = frame::Iter::new(buf.into())
+				.unwrap()
+				.collect::<Result<Vec<_>, _>>()
+				.unwrap();
+			let [Frame::Ack(ack)] = &frames[..] else {
+				panic!("incorrect frames {frames:?}");
+			};
+			assert_eq!(frames[0].ty(), ty, "room {room}, reserve {reserve}");
+			assert_eq!(
+				ack.receive_timestamps().map_or(0, Iterator::count),
+				reported,
+				"room {room}, reserve {reserve}"
+			);
+			assert!(!log.any(&ranges), "room {room}, reserve {reserve}");
 		}
 	}
 }
