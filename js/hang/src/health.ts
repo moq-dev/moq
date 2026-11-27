@@ -325,7 +325,8 @@ function assess<R>(sample: Sample<Snapshot<R>>, kind: Kind<R>, thresholds: Thres
 		transport,
 		renditions,
 	};
-	if (interval !== undefined) health.interval = interval.asMillis();
+	// Whole milliseconds, as Rust truncates the interval it serializes.
+	if (interval !== undefined) health.interval = Math.floor(interval.asMillis());
 	if (reset) health.reset = reset;
 	if (sample.age.gt(thresholds.stale)) {
 		health.stale = true;

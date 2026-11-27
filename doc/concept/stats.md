@@ -137,7 +137,7 @@ connection and each rendition: `unknown`, `healthy`, `degraded`, or
 `unhealthy`. Each verdict carries its evidence, every input with its value and
 grade, and is the worst graded input. An input the report cannot show is
 listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
-publisher that knows only its PROBE RTT grades on RTT alone. A report older
+publisher that knows only its PROBE RTT grades its connection on RTT alone. A report older
 than the stale limit is `unknown` throughout, as is a transport sample whose
 `age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
 path or identity (`replaced`) or a decreasing counter (`decrease`) is a reset:

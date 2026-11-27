@@ -82,3 +82,10 @@ test("a bitrate past u64 saturates where Rust's does", () => {
 	});
 	expect(health.renditions.video.bitrate).toBe(Number("18446744073709551615"));
 });
+
+test("a fractional interval reports whole milliseconds, as Rust's does", () => {
+	const c = cases.find((c) => (c.health as Health.Health).interval !== undefined);
+	if (!c) throw new Error("missing fixture");
+	const health = grade({ ...c, interval: c.interval + 0.5 });
+	expect(health.interval).toBe(c.interval);
+});
