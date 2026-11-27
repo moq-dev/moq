@@ -10,6 +10,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use super::StreamId;
 use super::recv::{Error, Reader, Stream};
 use super::{StreamsState, state::Holder, state::get_or_insert_recv};
+use crate::connection::ConnectionTag;
 use crate::connection::assembler::Assembler;
 use crate::connection::waits::Wait;
 
@@ -212,12 +213,20 @@ impl Leased {
 
 /// Bytes of a receive stream leased with [`Stream::poll_lease()`], read as a [`Buf`]
 ///
-/// Reading moves past bytes for good. Hand the lease back with [`Stream::release()`] to return
-/// the connection credit of the bytes read, or with [`Stream::restore()`] to keep it, as for a
-/// message read only in part. Either way the bytes not read are leased again next time.
-#[derive(Debug, Default)]
+/// Reading moves past bytes for good. Hand the lease back to the stream it came from with
+/// [`Stream::release()`] to return the connection credit of the bytes read, or with
+/// [`Stream::restore()`] to keep it, as for a message read only in part. Either way the bytes not
+/// read are leased again next time.
+///
+/// A lease dropped instead leaves its stream leased: the stream keeps the credit of every byte it
+/// held, holds eviction off for the whole connection, and panics on its next lease, until
+/// [`Stream::stop()`] discards it.
+#[derive(Debug)]
 #[must_use = "hand a lease back with `restore` or `release`"]
 pub struct Lease {
+	/// The stream and connection it came from, the only ones that take it back.
+	id: StreamId,
+	tag: ConnectionTag,
 	chunks: VecDeque<Bytes>,
 	/// Bytes in `chunks`.
 	len: usize,
@@ -373,11 +382,14 @@ impl Stream<'_> {
 			Ok(transmit) => transmit,
 			Err(err) => return (Some(Err(err)), false),
 		};
+		let tag = self.state.tag;
 		let lease = self.state.lease_mut(self.id).expect("filled above");
 		if lease.len >= want || lease.is_fin() {
 			lease.out = true;
 			lease.lent = lease.len;
 			let out = Lease {
+				id: self.id,
+				tag,
 				chunks: std::mem::take(&mut lease.chunks),
 				len: std::mem::take(&mut lease.len) as usize,
 				fin: lease.is_fin(),
@@ -412,6 +424,9 @@ impl Stream<'_> {
 	/// does. Restoring assumes the reader will continue reading or releasing this stream; a
 	/// reader that parks elsewhere while holding leased bytes must release them or stop the
 	/// stream so a stuck receive window is not left holding them.
+	///
+	/// # Panics
+	/// - when `lease` came from another stream or connection
 	pub fn restore(&mut self, lease: Lease) {
 		let credit = self.put_back(lease);
 		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
@@ -423,6 +438,9 @@ impl Stream<'_> {
 
 	/// Hand a lease back, returning the connection credit of every byte read from it or from an
 	/// earlier one, once the units they belong to are complete
+	///
+	/// # Panics
+	/// - when `lease` came from another stream or connection
 	pub fn release(&mut self, lease: Lease) {
 		let credit = self.put_back(lease);
 		let transmit = self.release_credit();
@@ -498,6 +516,11 @@ impl Stream<'_> {
 	///
 	/// Dropped instead once the stream was stopped, which discarded its lease and its credit.
 	fn put_back(&mut self, lease: Lease) -> bool {
+		// Another stream's byte counts would underflow this one's.
+		assert!(
+			lease.id == self.id && lease.tag == self.state.tag,
+			"lease handed back to another stream"
+		);
 		let Some(recv) = self.state.recv_mut(self.id) else {
 			return false;
 		};
