@@ -6918,6 +6918,10 @@ impl TrackRun {
 		// Deliver the buffered range messages before selecting more work.
 		ready!(writer.poll_flush(waiter))?;
 
+		// Drive the in-flight group machines first, so a retune moves their streams before the
+		// group waiting for credit ranks against them; completions just retire.
+		let mut running = self.children.len();
+		let _ = self.children.poll(waiter);
 		// The group waiting for stream credit joins the others once it has one, or fails
 		// without one.
 		if let Some(opening) = &mut self.opening
@@ -6927,13 +6931,14 @@ impl TrackRun {
 			Idle::disarm(&mut self.idle);
 			let mut opening = self.opening.take().expect("polled above");
 			match res {
-				Ok(()) => self.children.push(opening),
+				Ok(()) => {
+					self.children.push(opening);
+					running += 1;
+					let _ = self.children.poll(waiter);
+				}
 				Err(err) => opening.settle_failed(&err),
 			}
 		}
-		// Drive the in-flight group machines; completions just retire.
-		let running = self.children.len();
-		let _ = self.children.poll(waiter);
 		// A retired machine releases its group, and the track side waits on the machines
 		// to finish or cover the subscription, neither of which the track notifies.
 		if self.children.len() < running {
@@ -12130,6 +12135,59 @@ mod serve_group_test {
 			.map(|(_, hole)| hole.clone())
 			.collect();
 		assert_eq!(given_up, [Hole::stale(max), Hole::stale(max)]);
+	}
+
+	/// A retune raising an oldest-first range moves its open streams before the group waiting
+	/// for credit ranks against them, so the waiting one, newer, never preempts an older one the
+	/// same range sends first.
+	#[kio::test]
+	async fn lite07_a_retune_moves_open_streams_before_the_waiting_group_ranks() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_open_uni(gate.consume()).with_groups();
+		let log = session.log.clone();
+		let range = history_at(2, Order::Ascending);
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[range]);
+		let waiter = kio::Waiter::noop();
+		// Left open, so its stream keeps serving.
+		let mut open = Vec::new();
+		for key in [0, 1000] {
+			if key == 1000 {
+				*gate.write().ok().unwrap() = false;
+			}
+			let mut group = track.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
+				.unwrap();
+			open.push(group);
+			while run.poll_step(&mut writer, &waiter).is_ready() {}
+		}
+		assert!(run.opening.is_some(), "group 1000 waits for credit");
+
+		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 7,
+			max_delay: None,
+			ranges: lite::Applied::Edit {
+				retired: Vec::new(),
+				added: Vec::new(),
+				retuned: vec![(
+					0,
+					range.with_policy(lite::Policy {
+						priority: 7,
+						order: Order::Ascending,
+					}),
+				)],
+			},
+			order: Order::Ascending,
+		});
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(log.resets(), Vec::<u32>::new(), "group 0 still goes first");
+		assert!(run.opening.is_some(), "group 1000 still waits");
 	}
 
 	/// An update retuning a range's priority moves the in-flight groups it ranks.

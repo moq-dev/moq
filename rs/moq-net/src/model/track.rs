@@ -2725,6 +2725,20 @@ impl TrackState {
 		}
 	}
 
+	/// What a group judged stale under `budget`, clamped to [`Self::max_age_bound`], is named
+	/// by: `budget`, unless the local cache ceiling decided the verdict, which names the ceiling,
+	/// since upstream may still hold the group. A verdict the publisher's own max age decided
+	/// names `budget`, so a reader wider than that max age settles on it rather than ask again.
+	fn stale_name(&self, budget: Duration) -> Duration {
+		let Some(info) = self.info.as_ref() else {
+			return budget;
+		};
+		match self.broadcast.cache_duration {
+			Some(ceiling) if ceiling < budget && info.max_age.is_none_or(|age| ceiling < age) => ceiling,
+			_ => budget,
+		}
+	}
+
 	/// The bound on the aggregate subscription: the local cache ceiling alone, or `None`
 	/// when unlimited. It needs no info, so a track asks upstream for the same demand
 	/// before and after its info lands, and the publisher enforces its own max age.
@@ -9675,10 +9689,11 @@ impl group::Expiry for FetchExpiry {
 		let route = recover.and_then(|recover| recover.poll_budget(waiter));
 		let state = self.state.read();
 		let budget = route.map_or(Duration::MAX, |route| route.at(self.key));
-		// Judged under the bound but named by the budget, as the cursor names one it writes off:
-		// a group past the publisher's max age is gone for every budget above it.
+		// Judged under the bound, but named by the budget where the publisher's max age decided:
+		// the group is gone for every budget above it. See `TrackState::stale_name`.
 		let judged = clamp_max_delay(budget, state.max_age_bound());
-		(state.poll_drifted(self.key, &Servable::ALL, judged, Some(&self.superseded), waiter)).then_some(budget)
+		(state.poll_drifted(self.key, &Servable::ALL, judged, Some(&self.superseded), waiter))
+			.then(|| state.stale_name(budget))
 	}
 }
 
@@ -9773,10 +9788,11 @@ impl group::Expiry for GroupExpiry {
 		});
 
 		let state = self.state.read();
-		// Named by the budget rather than the bound it was judged under; see `FetchExpiry`.
+		// Named as `FetchExpiry` names it.
 		let budget = budget.at(self.key);
 		let judged = clamp_max_delay(budget, state.max_age_bound());
-		(state.poll_drifted(self.key, &servable, judged, Some(&self.superseded), waiter)).then_some(budget)
+		(state.poll_drifted(self.key, &servable, judged, Some(&self.superseded), waiter))
+			.then(|| state.stale_name(budget))
 	}
 }
 
@@ -22869,11 +22885,23 @@ mod test {
 
 	/// A history reader's group stale past the publisher's max age is named by the reader's
 	/// budget, not the bound it was judged under, so its drop says the publisher's max age and
-	/// no wider reader asks for it again.
+	/// no wider reader asks for it again. One a local cache ceiling below that max age decided is
+	/// named by the ceiling, since upstream may still hold it.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_group_stale_past_the_max_age_is_named_by_the_readers_budget() {
-		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(500)));
+		let short = Duration::from_millis(500);
+		let published = track_producer("test", Info::timed().with_max_age(short));
+		let capped = track_producer_capped("test", Info::timed().with_max_age(Duration::from_secs(60)), short);
+		for (mut producer, named) in [(published, Duration::MAX), (capped, short)] {
+			assert_eq!(stalled_under(&mut producer).await, Some(named));
+		}
+	}
+
+	/// What a history reader's group, left open, is judged stale under once two seconds of groups
+	/// land above it.
+	#[cfg(feature = "async")]
+	async fn stalled_under(producer: &mut Producer) -> Option<Duration> {
 		let mut subscriber = producer.subscribe(Subscription::default().with_max(None));
 		let mut open = producer.append_next().unwrap();
 		open.write_frame(open.key_time(), bytes::Bytes::from_static(b"a"))
@@ -22888,12 +22916,12 @@ mod test {
 		kio::clock::sim::yield_now().await;
 
 		// Its successor at 1s bounds where it reaches, a second behind the 2s edge.
-		append_at(&mut producer, 1000);
-		append_at(&mut producer, 2000);
+		append_at(producer, 1000);
+		append_at(producer, 2000);
 
 		let (read, under) = stalled.await.unwrap();
 		assert!(matches!(read, Err(Error::Old)), "the group fails: {read:?}");
-		assert_eq!(under, Some(Duration::MAX));
+		under
 	}
 
 	/// A drained group the budget gives up on fails with [`Error::Old`] on every probe,
