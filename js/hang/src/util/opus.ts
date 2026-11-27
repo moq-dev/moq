@@ -62,6 +62,12 @@ export function preSkip(description: Uint8Array): number {
 	return new DataView(description.buffer, description.byteOffset + offset, 11).getUint16(2, littleEndian);
 }
 
+/** The output channel count an OpusHead or dOps payload declares. Throws on a malformed one. */
+export function channelCount(description: Uint8Array): number {
+	const { offset } = header(description);
+	return description[offset + 1];
+}
+
 /**
  * Convert an OpusHead decoder description into an ISO BMFF dOps payload.
  *

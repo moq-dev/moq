@@ -4,7 +4,7 @@ abbrev: "moq-active-count"
 category: info
 
 docname: draft-lcurley-moq-active-count-latest
-submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
+submissiontype: IETF
 number:
 date:
 v: 3
@@ -23,7 +23,7 @@ informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many NAMESPACE messages answering its SUBSCRIBE_NAMESPACE come before the first change.
+This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many NAMESPACE messages answering its SUBSCRIBE_NAMESPACE come before the first live change.
 The subscriber then knows when it has synced, instead of guessing from a quiet stream.
 
 --- note_Note_to_Readers
@@ -43,19 +43,17 @@ A subscriber is **synced** on a SUBSCRIBE_NAMESPACE once it has read Count ({{co
 # Introduction
 A publisher answers SUBSCRIBE_NAMESPACE with a NAMESPACE message for each suffix it already advertises under the subscription's prefix, then keeps the stream open to report changes.
 Nothing on the wire separates the two, so a subscriber cannot tell "there are no broadcasts" from "they have not arrived yet".
-The best it can do is wait for the stream to go quiet, which is slow when there is nothing to send and wrong when the network stalls partway.
-
-This extension has the publisher put on its REQUEST_OK how many NAMESPACE messages come before the first change.
+This extension puts on REQUEST_OK how many NAMESPACE messages come before the first change.
 
 
 # Setup Negotiation
 
-An endpoint declares this extension with the following Setup Option ({{moqt}} Section 10.3):
+An endpoint declares this extension with the ACTIVE_COUNT Setup Option in SETUP ({{moqt}}):
 
 ~~~
 ACTIVE_COUNT Setup Option {
-  Option Key (vi64) = 0x40B64
-  Option Value (vi64) = 1
+  Option Key (vi64) = 0x40B64,
+  Option Value (vi64) = 1,
 }
 ~~~
 
@@ -66,21 +64,21 @@ An endpoint MUST NOT declare the option on a version of {{moqt}} without the NAM
 
 # Counting {#count}
 
-When the extension is negotiated, a publisher MUST include the following parameter in the REQUEST_OK answering a SUBSCRIBE_NAMESPACE:
+When negotiated, a publisher MUST include ACTIVE_COUNT in the REQUEST_OK answering a SUBSCRIBE_NAMESPACE:
 
 ~~~
 ACTIVE_COUNT Parameter {
-  Type (vi64) = 0x40B66
-  Value (vi64) = Count
+  Type (vi64) = 0x40B66,
+  Value (vi64) = Count,
 }
 ~~~
 
-The publisher MUST send exactly Count NAMESPACE messages immediately after REQUEST_OK, before any other message on the stream, making active each suffix it advertises to the subscriber when it answers, one message per suffix; later changes follow as usual.
+The publisher MUST send exactly Count NAMESPACE messages immediately after REQUEST_OK, before any other message on the stream, making active each suffix it advertises to the subscriber when it answers (one message per suffix); later changes follow as usual.
 A suffix the publisher does not advertise to this subscriber, such as one whose path loops back through it, is neither sent nor counted.
 
 A subscriber counts every NAMESPACE message toward Count, including any it discards on receipt.
 
-A subscriber MUST close the session with a PROTOCOL_VIOLATION if the REQUEST_OK answering a SUBSCRIBE_NAMESPACE omits the parameter when the extension is negotiated, or carries it when it is not.
+A subscriber MUST close the session with a PROTOCOL_VIOLATION if the REQUEST_OK answering a SUBSCRIBE_NAMESPACE omits the parameter when negotiated, or carries it when not.
 An endpoint MUST close the session with a PROTOCOL_VIOLATION if a REQUEST_OK answering any other request carries the parameter.
 
 
@@ -92,26 +90,21 @@ A publisher that promises more than it sends can only delay the subscriber's not
 
 # IANA Considerations
 
-This document requests the following registrations.
+This document requests the following registrations in the registries established by {{moqt}}.
 High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions.
+Both values are even, so each is a bare varint.
 
 ## MOQT Setup Options
 
-This document requests one registration in the "MOQT Setup Options" registry ({{moqt}} Section 15.4), whose policy is Specification Required.
-
-| Value   | Name            | Reference     |
-|:--------|:----------------|:--------------|
+| Value   | Name         | Reference     |
+|:--------|:-------------|:--------------|
 | 0x40B64 | ACTIVE_COUNT | This Document |
 
 ## MOQT Message Parameters
 
-This document requests one registration in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-
-| Value   | Name            | Carried In | Reference     |
-|:--------|:----------------|:-----------|:--------------|
+| Value   | Name         | Carried In | Reference     |
+|:--------|:-------------|:-----------|:--------------|
 | 0x40B66 | ACTIVE_COUNT | REQUEST_OK | This Document |
-
-Both values are even, so each is a bare varint.
 
 
 --- back

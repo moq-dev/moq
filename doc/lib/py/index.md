@@ -34,7 +34,7 @@ Whole-frame media writes require caller time; container imports keep their own t
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
-`media.GroupConsumer(group, container)`; frames carry container media time as they land.
+`media.GroupConsumer(group, id, rendition)`; frames carry container media time as they land.
 
 ```bash
 pip install moq-rs      # or: uv add moq-rs

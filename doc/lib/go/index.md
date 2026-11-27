@@ -34,7 +34,7 @@ and do not keep it open; release the handle with `Close` on the calling goroutin
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
 `Fmp4ContainerFormat()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
-`media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
+`media.NewGroupConsumer` and the track's catalog `Rendition`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
 
 ```bash

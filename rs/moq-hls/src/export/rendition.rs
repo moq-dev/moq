@@ -293,6 +293,17 @@ fn target_duration(length: Duration) -> u64 {
 	(twice.as_secs() + u64::from(twice.subsec_nanos() > 0)).max(1)
 }
 
+/// Refuse a container whose groups have no defined place on the segment grid.
+///
+/// A CTS group could land by its successor's decode time or by a decoded frame's presentation
+/// time, so where it went would depend on which arrived first.
+fn gridded(container: &hang::catalog::Container) -> moq_mux::Result<()> {
+	match container {
+		hang::catalog::Container::Cts => Err(moq_mux::Error::UnsupportedContainer("cts".to_string())),
+		_ => Ok(()),
+	}
+}
+
 /// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` by the grid's
 /// [rules](grid::RULES) and muxed under the normalized `config`, hashing its catalog JSON, which
 /// every edge encodes alike.
@@ -659,8 +670,8 @@ impl Rendition {
 	/// by the catalog's `sync.clock`.
 	///
 	/// Fails when the config's `broadcast` reference escapes above the origin root, so it names no
-	/// broadcast, or its container is unknown or malformed, so its media can't be read: either way
-	/// there would be no media to serve.
+	/// broadcast, or its container is unknown, malformed, or has no grid placement (CTS), so its
+	/// media can't be served.
 	pub(crate) fn video(
 		name: String,
 		config: &VideoConfig,
@@ -670,6 +681,7 @@ impl Rendition {
 		fanout: renditions::Fanout,
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
+		gridded(&config.container)?;
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
 		let normalized = normalize_video(config);
@@ -713,6 +725,7 @@ impl Rendition {
 		fanout: renditions::Fanout,
 	) -> moq_mux::Result<Self> {
 		let track = config.track(&name);
+		gridded(&config.container)?;
 		let container = Arc::new(moq_mux::catalog::hang::Container::try_from(config)?);
 		let media = Media::bind(source, config, track, fanout.lazy)?;
 		let normalized = normalize_audio(config);

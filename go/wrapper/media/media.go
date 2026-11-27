@@ -43,7 +43,8 @@ type (
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
 	// Container selects how subscribed media frames are demuxed. Build one with
-	// LegacyContainer, CmafContainer, or LocContainer. A catalog reports ContainerUnknown
+	// LegacyContainer, CmafContainer, LocContainer, RawContainer, or CtsContainer; raw and
+	// CTS need a timed track. A catalog reports ContainerUnknown
 	// for a container this version cannot name yet, which a subscription refuses.
 	Container = ffi.MoqContainer
 	// ContainerLegacy is the legacy hang container variant of Container; build one with LegacyContainer.
@@ -52,6 +53,10 @@ type (
 	ContainerCmaf = ffi.MoqContainerCmaf
 	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
 	ContainerLoc = ffi.MoqContainerLoc
+	// ContainerRaw is the zero-overhead raw container variant of Container; build one with RawContainer.
+	ContainerRaw = ffi.MoqContainerRaw
+	// ContainerCts is the CTS-varint container variant of Container; build one with CtsContainer.
+	ContainerCts = ffi.MoqContainerCts
 	// ContainerUnknown is a container this version of the bindings cannot name yet.
 	ContainerUnknown = ffi.MoqContainerUnknown
 	// Rendition is a catalog rendition: its ID (catalog key) and config. Build one with VideoRendition or AudioRendition.
@@ -309,14 +314,18 @@ func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config Gr
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// NewGroupConsumer decodes a raw group with the track's container, as each frame lands.
+// NewGroupConsumer decodes a raw group with the catalog rendition's container and media role, as each frame lands.
 //
-// Pair it with moq.TrackConsumer.RecvGroup to read media in arrival order: frame timestamps are
-// container media time, not the transport's. Which groups arrive, and how long a stalled one
-// stays readable, is the subscription's Delay.Max. Takes over group, whose handle is closed
-// afterward; errors if it has already read a frame.
-func NewGroupConsumer(group *moq.GroupConsumer, container Container) (*GroupConsumer, error) {
-	inner, err := ffi.NewMoqMediaGroupConsumer(bridge.GroupConsumer(group), container)
+// Only the rendition's role and container are used, since group is already the track's; the role
+// tells a video or audio endpoint marker from a frame. Pair it with moq.TrackConsumer.RecvGroup to
+// read media in arrival order: frame timestamps are container media time, not the transport's.
+// Which groups arrive, and how long a stalled one stays readable, is the subscription's Delay.Max.
+// Takes over group, whose handle is closed afterward; errors if it has already read a frame.
+func NewGroupConsumer(group *moq.GroupConsumer, rendition Rendition) (*GroupConsumer, error) {
+	if err := bridge.Rendition(rendition); err != nil {
+		return nil, err
+	}
+	inner, err := ffi.NewMoqMediaGroupConsumer(bridge.GroupConsumer(group), rendition)
 	if err != nil {
 		return nil, err
 	}
@@ -347,6 +356,16 @@ func CmafContainer(init []byte) Container {
 // LocContainer selects the low-overhead container for a media subscription.
 func LocContainer() Container {
 	return ContainerLoc{}
+}
+
+// RawContainer selects the zero-overhead raw container for a media subscription.
+func RawContainer() Container {
+	return ContainerRaw{}
+}
+
+// CtsContainer selects the CTS-varint container for a media subscription.
+func CtsContainer() Container {
+	return ContainerCts{}
 }
 
 // AacAudioFormat selects Advanced Audio Coding, configured by an AudioSpecificConfig.

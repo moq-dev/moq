@@ -5324,8 +5324,8 @@ fn is_complete_section(section: &[u8]) -> bool {
 
 fn ensure_raw(container: &Container, kind: &str, name: &str) -> Result<()> {
 	match container {
-		// TS carries raw codec payloads, like the Legacy varint and LOC formats.
-		Container::Legacy | Container::Loc => Ok(()),
+		// TS carries raw codec payloads, like Legacy, LOC, Raw, and CTS formats.
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts => Ok(()),
 		Container::Cmaf { .. } => bail_unsupported!("TS export does not support CMAF {kind} track '{name}'"),
 		Container::Unknown(unknown) => bail_unsupported!(
 			"TS export does not support container '{}' on {kind} track '{name}'",

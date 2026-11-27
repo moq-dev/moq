@@ -91,11 +91,13 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// Caption and subtitle tracks become text renditions; custom roles do too when their codec
 /// identifies text. Unsupported text packaging is an error so a gateway cannot silently lose it.
 /// Tracks with no role, sign language, audio description, other custom roles, and audio/video
-/// with packaging other than [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Cmaf`], or
-/// [`moq_msf::Packaging::Legacy`] are skipped with a warning.
+/// with packaging other than [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Cmaf`],
+/// [`moq_msf::Packaging::Legacy`], [`moq_msf::Packaging::Raw`], or [`moq_msf::Packaging::Cts`]
+/// are skipped with a warning.
 ///
-/// [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to their own containers:
-/// they carry the same codec payload but frame it differently.
+/// [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Legacy`], [`moq_msf::Packaging::Raw`], and
+/// [`moq_msf::Packaging::Cts`] map to their own containers: they carry the same codec payload but
+/// frame it differently.
 /// [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present (base64-encoded ftyp+moov);
 /// a missing or malformed init segment is an error.
 ///
@@ -199,6 +201,8 @@ fn container_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache) ->
 		// timestamp prefix. Reading one as the other misparses the head of every frame.
 		moq_msf::Packaging::Loc => Ok(Some(Container::Loc)),
 		moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
+		moq_msf::Packaging::Raw => Ok(Some(Container::Raw)),
+		moq_msf::Packaging::Cts => Ok(Some(Container::Cts)),
 		moq_msf::Packaging::Cmaf => {
 			let init =
 				decode_init_data(track, init_cache)?.ok_or_else(|| Error::MissingCmafInit(track.name.clone()))?;
@@ -243,7 +247,9 @@ fn decode_init_data(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> R
 /// returns `Ok(None)` for them to avoid duplicating the bytes.
 fn legacy_description(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> Result<Option<bytes::Bytes>> {
 	match track.packaging {
-		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => decode_init_data(track, init_cache),
+		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy | moq_msf::Packaging::Raw | moq_msf::Packaging::Cts => {
+			decode_init_data(track, init_cache)
+		}
 		_ => Ok(None),
 	}
 }
@@ -354,7 +360,7 @@ struct DerivedAudio {
 
 /// Derive sample rate and channel count from an MSF audio track's `init_data`.
 ///
-/// - **Legacy / LOC**: the bytes are the codec config directly. For AAC we parse the
+/// - **Legacy / LOC / raw / cts**: the bytes are the codec config directly. For AAC we parse the
 ///   `AudioSpecificConfig` and for Opus we parse the `OpusHead`.
 /// - **CMAF**: the bytes are an `ftyp+moov` init segment. We walk the moov to find the
 ///   audio `trak` and read its codec config the same way: the `esds` AudioSpecificConfig or
@@ -371,7 +377,9 @@ fn derive_audio_params(
 	let init = decode_init_data(track, init_cache)?.ok_or_else(|| Error::MissingAudioParams(track.name.clone()))?;
 
 	match track.packaging {
-		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => derive_from_codec_config(track, codec, init),
+		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy | moq_msf::Packaging::Raw | moq_msf::Packaging::Cts => {
+			derive_from_codec_config(track, codec, init)
+		}
 		moq_msf::Packaging::Cmaf => derive_from_cmaf_moov(track, init),
 		_ => Err(Error::UnsupportedDerivationPackaging {
 			name: track.name.clone(),
@@ -934,6 +942,29 @@ mod test {
 		assert_eq!(a.codec, AudioCodec::Flac);
 		assert_eq!(a.sample_rate, 96_000);
 		assert_eq!(a.channel_count, 2);
+	}
+
+	#[test]
+	fn raw_and_cts_aac_params_derived_from_audio_specific_config() {
+		// AAC-LC, 44.1 kHz, stereo. raw and cts carry the bare codec config like LOC and Legacy.
+		let init_b64 = base64::engine::general_purpose::STANDARD.encode([0x12, 0x10]);
+		for (packaging, container) in [
+			(moq_msf::Packaging::Raw, Container::Raw),
+			(moq_msf::Packaging::Cts, Container::Cts),
+		] {
+			let kind = packaging.to_string();
+			let mut audio = audio_track("audio0", packaging);
+			audio.codec = Some("mp4a.40.2".to_string());
+			audio.samplerate = None;
+			audio.channel_config = None;
+			audio.init_data = Some(init_b64.clone().into());
+
+			let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![audio]), &moq_net::Path::empty())
+				.unwrap_or_else(|err| panic!("{kind} AAC should convert: {err}"));
+			let a = &catalog.audio.renditions["audio0"];
+			assert_eq!(a.container, container);
+			assert_eq!((a.sample_rate, a.channel_count), (44_100, 2), "{kind}");
+		}
 	}
 
 	#[test]

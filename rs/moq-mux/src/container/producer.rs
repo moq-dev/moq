@@ -223,6 +223,15 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 			return Err(crate::Error::UnsupportedContainer("a streamed frame".into()));
 		}
 		timed(timestamp, duration)?;
+		// Only an empty frame is whole before its bytes arrive, so only it can be checked up front.
+		if size == 0 {
+			self.container.check(&Frame {
+				timestamp,
+				payload: Bytes::new(),
+				keyframe,
+				duration,
+			})?;
+		}
 		let source = timestamp;
 		let Some(timestamp) = self.prepare(timestamp, keyframe)? else {
 			return Ok(Streamed {
@@ -724,6 +733,9 @@ where
 	/// broadcast.
 	pub fn write(&mut self, mut frame: Frame) -> crate::Result<()> {
 		timed(frame.timestamp, frame.duration)?;
+		// Before a keyframe cuts the open group or the buffer takes the frame, so a refused frame
+		// leaves both as they were.
+		self.container.check(&frame)?;
 		let source = frame.timestamp;
 		let Some(timestamp) = self.prepare(frame.timestamp, frame.keyframe)? else {
 			return Ok(());

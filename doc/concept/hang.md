@@ -185,12 +185,19 @@ The `container.kind` on each rendition says how frames are framed:
 
 | Kind | Frame layout | Use |
 | --- | --- | --- |
-| `legacy` | varint microsecond timestamp + codec payload | The default. Cheapest. |
+| `legacy` | varint microsecond timestamp + codec payload | The default. Carries its own timestamp on any transport. |
 | `cmaf` | `moof` + `mdat` | fMP4 passthrough for HLS/DASH interop; ~100 bytes per frame. |
 | `loc` | small property block + payload | The IETF [LOC](/concept/standard#loc) container. |
+| `raw` | codec payload; the transport timestamp is the presentation time | No overhead, for streams without B-frames. |
+| `cts` | varint composition offset (track timescale) + codec payload | Reordered video on a decode-ordered track. Decode only for now. |
 
-A consumer skips renditions with a kind it doesn't recognize and carries them
-through when republishing the catalog.
+`raw` and `cts` take the time from each frame's transport timestamp, so they
+need a timed track whose every hop carries per-frame timestamps. moq-lite does;
+a moq-transport hop gives every object its group's time until
+[moq-timestamp](/draft/moq-timestamp) object timestamps land, so use `legacy`
+or `loc` for viewers behind one. Publishers refuse `cts` until they can write it. A consumer skips
+renditions with a kind it doesn't recognize and carries them through when
+republishing the catalog.
 
 A CMAF frame's timestamp is its fragment's earliest presentation time, and the
 broadcast timeline: `tfdt` only places the samples relative to each other. A
@@ -199,15 +206,16 @@ timestamp alone, without rewriting the fragment. An untimed track's frames carry
 no timestamp, so their samples present at `tfdt`. A timed CMAF track declares the
 init segment's `mdhd` timescale, so the frame timestamp lands on a media tick.
 
-A Legacy or LOC video publisher can close the last frame's duration with an empty
+A Legacy, LOC, or raw video publisher can close the last frame's duration with an empty
 codec payload whose timestamp is that frame's exclusive end. Consumers treat it
 as metadata and never pass it to a decoder. This lets a group close immediately
 without waiting for the next frame. Audio has codec-defined durations, and CMAF
 carries sample durations directly, so neither needs per-group duration markers.
 Audio retains its separate terminal marker before codec drain packets, allowing
-consumers to discard encoder padding beyond the source endpoint. Empty payloads
-on data tracks remain data, including empty text cues, so a data track marks a
-discontinuity with a group of one object with no bytes instead.
+consumers to discard encoder padding beyond the source endpoint. On a data
+track, a group of one object with no bytes marks a discontinuity. Every other
+empty payload stays data, such as an empty text cue, except under `raw`, whose
+empty payload is that object: a `raw` data track can't carry one.
 
 ## Groups and keyframes
 

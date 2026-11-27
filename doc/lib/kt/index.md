@@ -37,7 +37,7 @@ byte stream needs no other importer.
 Construct readers with `CatalogConsumer.subscribe`, `TrackConsumer.subscribe`, or
 `GroupConsumer.fetch`; the last two take a catalog `Rendition` and follow its broadcast and
 track themselves. For arrival-order reads, decode each group from
-`dev.moq.TrackConsumer.recvGroup()` with `dev.moq.media.GroupConsumer(group, container)`; frames
+`dev.moq.TrackConsumer.recvGroup()` with `dev.moq.media.GroupConsumer(group, rendition)`; frames
 carry container media time as they land. Like `TrackProducer`, these names also exist at the
 root for moq-net handles, so qualify them when both packages are star-imported.
 

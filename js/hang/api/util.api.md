@@ -4,9 +4,16 @@
 import { Signals } from "@moq/hang";
 
 export namespace Aac {
+	export interface Config {
+		coreSampleRate: number;
+		frameSamples?: 960 | 1024;
+		numberOfChannels: number;
+		sampleRate: number;
+	}
 	export const SAMPLE_RATES: readonly number[];
 	export function audioSpecificConfig(sampleRate: number, channelCount: number): Uint8Array;
 	export function objectType(codec: string): 2 | 5 | 29 | undefined;
+	export function parseConfig(asc: Uint8Array): Aac.Config | undefined;
 	export function pickRate(rate: number): number;
 	export function supportsRate(rate: number): boolean;
 }
@@ -42,6 +49,7 @@ export namespace Opus {
 	export const DEFAULT_SAMPLE_RATE: 48000;
 	export const SAMPLE_RATES: readonly number[];
 	export const WARMUP: 80;
+	export function channelCount(description: Uint8Array): number;
 	export function packetSamples(packet: Uint8Array): number | undefined;
 	export function pickRate(rate: number): number;
 	export function preSkip(description: Uint8Array): number;
