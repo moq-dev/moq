@@ -506,7 +506,9 @@ impl Record {
 			self.raise(floor);
 			folded.push(0..floor);
 		}
-		let mut from = Some(reader.from.max(self.lowest_settled().unwrap_or(0))).filter(|from| *from > self.floor);
+		let start_at = self.next_after_stretch(self.floor, self.floor);
+		let mut from =
+			Some(reader.from.max(self.lowest_settled(start_at).unwrap_or(0))).filter(|from| *from > self.floor);
 		while let Some(start) = from {
 			// Folded, a stretch costs two runs: only one spanning more is worth it.
 			let stretch = self.final_end(start, reader, beside, Fold::Debt);
@@ -652,17 +654,23 @@ impl Record {
 		(end > key).then_some(end)
 	}
 
-	/// The lowest key above the floor that anything settled.
-	fn lowest_settled(&self) -> Option<u64> {
+	/// The lowest key from `from` on that anything settled.
+	fn lowest_settled(&self, from: u64) -> Option<u64> {
+		let span = from..u64::MAX;
 		[
-			self.delivered.above_gap(),
-			self.skipped.lowest(),
-			self.written_off.iter().next().map(|run| run.start),
-			self.reported.iter().next().map(|(run, _)| run.start),
+			self.delivered.next_settled_from(from),
+			self.skipped.next_from(from),
+			self.written_off
+				.overlapping(&span)
+				.next()
+				.map(|run| run.start.max(from)),
+			self.reported
+				.overlapping(&span)
+				.next()
+				.map(|(run, _)| run.start.max(from)),
 		]
 		.into_iter()
 		.flatten()
-		.filter(|key| *key > self.floor)
 		.min()
 	}
 
@@ -1775,5 +1783,34 @@ mod test {
 		);
 		assert!(record.reported.is_empty());
 		assert!(!record.told(BASE + 1));
+	}
+
+	/// When a `Report::Withdrawable` run sits directly at `self.floor` over a delivered prefix,
+	/// debt folding must still jump past it and fold fragmented final stretches above it.
+	#[test]
+	fn debt_fold_continues_past_withdrawable_report_at_floor() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert_run(0..100);
+		record.tell(0..10, Report::Final);
+		record.tell(10..20, Report::Withdrawable);
+		// Fragmented final reports above the withdrawable report sitting at floor 10.
+		record.tell(30..40, Report::Final);
+		record.tell(50..60, Report::Final);
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+
+		assert_eq!(record.floor, 10, "floor must stop at Report::Withdrawable");
+		assert_eq!(
+			record.reported.get(&15),
+			Some(&Report::Withdrawable),
+			"withdrawable report at floor stays withdrawable"
+		);
+		assert_eq!(
+			record.reported.get_key_value(&20),
+			Some((&(20..100), &Report::Final)),
+			"20..100 above floor-level withdrawable report must fold into one final stretch"
+		);
 	}
 }

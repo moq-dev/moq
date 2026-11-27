@@ -2982,6 +2982,7 @@ impl Reader {
 		};
 		let mut group = sub.take(candidate.reserved)?;
 		sub.settle_if_dropping(group.start);
+		sub.settle_record(Some(group.start));
 		// A mid-group end caps the group it falls in, as it caps a direct track's.
 		if let Some(end) = self.declared.filter(|end| end.frame != 0 && end.group == group.start) {
 			group = group.with_end(end.frame);
@@ -16407,6 +16408,95 @@ mod test {
 		assert!(
 			most <= 60,
 			"ordered front reader record grew to {most} runs (logical reported did not coalesce)"
+		);
+	}
+
+	/// Two nested fronts reading a sparse stream whose serving source retains only the last few
+	/// declared skips must compact both the inner and outer logical delivery records as each
+	/// group is taken, before the serving cache expires those skip proofs.
+	#[test]
+	#[cfg(feature = "async")]
+	fn nested_fronts_compact_fresh_skips_with_short_retention() {
+		const BASE: u64 = 1_000_003;
+		const SPACING: u64 = 17;
+		let outer_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1));
+		let inner_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1));
+		// Tight source capacity keeps the newest few declared skips while evicting older ones
+		// well before the 16-run full-scan watermark.
+		let source_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(3 * 1024));
+
+		let outer_broadcast = Arc::new(broadcast::Info {
+			pool: outer_pool.clone(),
+			..Default::default()
+		});
+		let inner_broadcast = Arc::new(broadcast::Info {
+			pool: inner_pool.clone(),
+			..Default::default()
+		});
+		let source_broadcast = Arc::new(broadcast::Info {
+			pool: source_pool,
+			..Default::default()
+		});
+
+		let outer_routes = Producer::new();
+		let outer = track::Request::new(outer_broadcast, "nested")
+			.routes(outer_routes.consume())
+			.accept(crate::track::Info::timed().with_max_age(None));
+		let inner_routes = Producer::new();
+		let inner = track::Request::new(inner_broadcast, "nested")
+			.routes(inner_routes.consume())
+			.accept(crate::track::Info::timed().with_max_age(None));
+		let source = track::Producer::new(
+			source_broadcast,
+			"nested",
+			crate::track::Info::timed().with_max_age(None),
+		);
+		source.received();
+		inner_routes.serve(source.consume());
+		outer_routes.serve(inner.consume());
+
+		let mut sub = match outer
+			.consume()
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: track::Start::Oldest,
+				end: None,
+			}]))
+			.poll_ok(&kio::Waiter::noop())
+		{
+			Poll::Ready(Ok(sub)) => sub,
+			_ => panic!("outer subscription should resolve"),
+		};
+
+		let mut most_outer = 0;
+		let mut most_inner = 0;
+		for n in 0..200u64 {
+			let key = BASE + n * SPACING;
+			let mut group = source.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), &b"x"[..]).unwrap();
+			group.finish_at(key + SPACING).unwrap();
+			source.skip_groups(key + 1..key + SPACING);
+			assert!(matches!(
+				sub.poll_recv_group(&kio::Waiter::noop()),
+				Poll::Ready(Ok(Some(g))) if g.start == key
+			));
+			most_outer = most_outer.max(outer_pool.recorded() / crate::model::record::RUN_OVERHEAD);
+			most_inner = most_inner.max(inner_pool.recorded() / crate::model::record::RUN_OVERHEAD);
+		}
+		let mut earliest_retained = true;
+		source.consume().with_skips(&mut |skip_end| {
+			earliest_retained = skip_end(BASE + 1).is_some();
+		});
+		assert!(
+			!earliest_retained,
+			"source pool must evict older skips to exercise short skip retention"
+		);
+		assert!(
+			most_outer <= 4,
+			"outer nested front record grew to {most_outer} runs under short skip retention"
+		);
+		assert!(
+			most_inner <= 4,
+			"inner nested front record grew to {most_inner} runs under short skip retention"
 		);
 	}
 }
