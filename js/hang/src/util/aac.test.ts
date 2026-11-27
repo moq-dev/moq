@@ -121,14 +121,15 @@ describe("parseConfig", () => {
 			sampleRate: 48000,
 			numberOfChannels: 2,
 		});
-		// PS decodes to stereo even when a program config element names the core's channels, and the
-		// element isn't parsed, so this channelConfiguration-0 config without one is still accepted.
-		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toEqual({
+		// PS decodes to stereo even when a program config element names a mono core, but a
+		// channelConfiguration of 0 without that element is refused.
+		expect(parseConfig(Hex.toBytes("eb018802c200000000"))).toEqual({
 			coreSampleRate: 24000,
 			frameSamples: 1024,
 			sampleRate: 48000,
 			numberOfChannels: 2,
 		});
+		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toBeUndefined();
 		// A reserved channelConfiguration (8) under PS is refused.
 		expect(parseConfig(new Uint8Array([0xeb, 0x41, 0x88]))).toBeUndefined();
 	});
@@ -176,14 +177,24 @@ describe("parseConfig", () => {
 		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x84, 0x00]))?.frameSamples).toBeUndefined();
 	});
 
-	// A program config element names the channels, which isn't parsed, but the frame clock comes before it.
-	it("reads the frame clock ahead of a program config element", () => {
-		expect(parseConfig(Hex.toBytes("118004c4040021100c4c61766336332e312e31303156e500"))).toEqual({
+	// FFmpeg's quad AAC-LC: a program config element with front and back channel pairs, a comment,
+	// then a sync extension, SBR absent and then present at 96 kHz.
+	it("reads a program config element and the sync extension after it", () => {
+		const quad = "118004c4040021100c4c61766336332e312e31303156e5";
+		expect(parseConfig(Hex.toBytes(`${quad}00`))).toEqual({
 			coreSampleRate: 48000,
 			frameSamples: 1024,
 			sampleRate: 48000,
-			numberOfChannels: undefined,
+			numberOfChannels: 4,
 		});
+		expect(parseConfig(Hex.toBytes(`${quad}80`))).toEqual({
+			coreSampleRate: 48000,
+			frameSamples: 1024,
+			sampleRate: 96000,
+			numberOfChannels: 4,
+		});
+		// Cut short inside the element.
+		expect(parseConfig(Hex.toBytes(quad.slice(0, 12)))).toBeUndefined();
 	});
 
 	it("refuses what it can't read", () => {

@@ -7,7 +7,7 @@ export namespace Aac {
 	export interface Config {
 		coreSampleRate: number;
 		frameSamples?: 960 | 1024;
-		numberOfChannels?: number;
+		numberOfChannels: number;
 		sampleRate: number;
 	}
 	export const SAMPLE_RATES: readonly number[];
