@@ -10,7 +10,7 @@ import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
-import type { Delivered } from "./delivered.ts";
+import type { Delivered, Judged } from "./delivered.ts";
 import type { Edit, Prefs, Subscriptions } from "./demand.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
@@ -303,6 +303,17 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 }
 
 /** A half-open run of group keys, `[start, end)`. */
+/**
+ * What a fold of a reader's handed-out record judges by: the reader's budget, and the groups its
+ * ranges hold, undefined while a range is still being placed. A gap no range holds was never
+ * judged, so a range added later owes it again (see `Delivered.foldBelow`). Mirrors the Rust
+ * `track::FoldTerms`.
+ */
+export interface FoldTerms {
+	budget: Budget;
+	ranges: Judged | undefined;
+}
+
 export interface Run {
 	start: bigint;
 	end: bigint;
@@ -711,11 +722,11 @@ export interface ResumeSource {
 	/** Forget the gaps in `delivered` below each group past the budget, as {@link forgetPast} does. */
 	forgetPastBudget(delivered: Delivered): void;
 	/**
-	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	 * `delivered` this is, judged on the newest copy, but never past a group a replaced copy still
-	 * feeding the reader holds unread, nor past `keep`. Mirrors the Rust `Subscriber::forget_past`.
+	 * Forget the gaps in `delivered` below each group past the budget of `terms`, an outer reader's
+	 * whose `delivered` this is, judged on the newest copy, but never past a group a replaced copy
+	 * still feeding the reader holds unread, nor past `keep`. Mirrors the Rust `Subscriber::forget_past`.
 	 */
-	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void;
+	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
 	lowestBuffered(delivered: Delivered): bigint | undefined;
 	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
@@ -1274,12 +1285,12 @@ export const hooks: {
 	 */
 	taking: (subscriber: Subscriber) => (key: bigint) => boolean;
 	/**
-	 * Forget the gaps in another reader's `delivered` below each group past `budget`, the budget of
-	 * the reader whose `delivered` this is, which a front's copy, its ranges raised to a resume point,
-	 * cannot judge by its own, forgetting no gap at or above `keep`. Mirrors the Rust
+	 * Forget the gaps in another reader's `delivered` below each group past the budget of `terms`,
+	 * the terms of the reader whose `delivered` this is, which a front's copy, its ranges raised to a
+	 * resume point, cannot judge by its own, forgetting no gap at or above `keep`. Mirrors the Rust
 	 * `Subscriber::forget_past_budget`.
 	 */
-	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget, keep?: bigint) => void;
+	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, terms: FoldTerms, keep?: bigint) => void;
 	/**
 	 * The lowest group the subscriber holds unread that another reader's `delivered` lacks, in its
 	 * range and window, on any copy it reads. Mirrors the Rust `track::Subscriber::lowest_unread`
@@ -1509,8 +1520,16 @@ export const hooks: {
 	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
-	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
-	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
+	/**
+	 * Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating.
+	 * A `header` read takes the frame's header alone, leaving no payload in flight to tear on a route failure.
+	 */
+	readGroupFrame: (
+		group: GroupConsumer,
+		compressed: boolean,
+		from?: number,
+		header?: boolean,
+	) => Promise<ReadGroupFrame | undefined>;
 	/** Notify the owning track when a reader reaches its shed front. */
 	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**

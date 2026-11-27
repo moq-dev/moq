@@ -92,7 +92,8 @@ async function turnLeft(page: Page, radians: number): Promise<void> {
 // Each ear's RMS level at the demo's spatial mix, averaged over half a second of live playback.
 async function ears(page: Page): Promise<{ L: number; R: number }> {
 	return page.evaluate(async () => {
-		const output = (window as unknown as { vr: Demo }).vr.scene.listener?.output;
+		const { vr } = window as unknown as { vr: Demo };
+		const output = vr.scene.listener?.output;
 		if (!output) throw new Error("the demo has no spatial audio");
 		const context = output.context;
 		const split = new ChannelSplitterNode(context, { numberOfOutputs: 2 });
@@ -111,6 +112,9 @@ async function ears(page: Page): Promise<{ L: number; R: number }> {
 				sums[channel] += data.reduce((sum, v) => sum + v * v, 0) / data.length;
 			}
 		}
+		// The demo keeps its mix through catalog updates that move nothing, such as the publisher's
+		// settling bitrate. A rebuilt mix would have dropped this tap and left the meters on silence.
+		if (vr.scene.listener?.output !== output) throw new Error("the demo rebuilt its spatial mix mid-measurement");
 		output.disconnect(split);
 		const [L, R] = sums.map((sum) => Math.sqrt(sum / 10));
 		return { L, R };

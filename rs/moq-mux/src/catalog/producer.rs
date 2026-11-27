@@ -222,7 +222,8 @@ impl Declared {
 
 /// The producer's `clock` re-based on a `sync.clock` of `advertised`, or `None` when that is the
 /// mapping it already has. A changed mapping is adopted while nothing has `anchored` the clock and
-/// refused once something has. Clearing it is always refused.
+/// refused once something has. Clearing it is a change like any other: a derivative of a source with
+/// no `sync.clock` advertises none rather than a host wall clock the source never had.
 fn adopt(
 	clock: &crate::Clock,
 	anchored: bool,
@@ -232,15 +233,18 @@ fn adopt(
 		return Ok(None);
 	}
 	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("media clock {advertised:?} {why}"));
-	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
+	let wall = advertised.map(crate::Clock::exact).transpose()?;
 	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
-	if Some(wall) == clock.wall() {
+	if wall == clock.wall() {
 		return Ok(None);
 	}
 	if anchored {
 		return Err(refuse("changes the producer's clock after it was fixed"));
 	}
-	Ok(Some(clock.adopted(wall)?))
+	Ok(Some(match wall {
+		Some(wall) => clock.adopted(wall)?,
+		None => clock.unmapped(),
+	}))
 }
 
 /// `at` on clock `from` moved onto clock `to`, a re-basing of it: shifted by what separates their
@@ -655,7 +659,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`TimestampRewind`](crate::container::TimestampRewind) before any edit unless `timestamp` is
 	/// past the last published catalog's, or the stamp of a change still waiting on the initial
 	/// publish; batch the edits at one frame into one guard. An edit that re-bases the clock by
-	/// writing `sync.clock` moves `timestamp` with it, onto the same instant on the adopted clock.
+	/// writing `sync.clock` is stamped on the clock it adopts, unmoved: a derivative times it on its
+	/// input's timeline, the one it republishes. Don't stamp such an edit with
+	/// [`next_timestamp`](Self::next_timestamp), which reads the clock it replaces.
 	///
 	/// The publish happens when the returned [`Guard`] drops. Use [`mutate`](Self::mutate) for a
 	/// single edit, which is this guard opened and committed for you. Fails once the catalog tracks
@@ -671,8 +677,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// The `sync.clock` is the producer's [`clock`](Self::clock). Writing a different one re-bases
 	/// the clock on it until something fixes the clock ([`Config::with_clock`], taking
 	/// [`clock`](Self::clock), an importer's first frame, or the first publish), so a derivative
-	/// adopts its input's mapping. After that a changed `clock` is refused, as is clearing it at any
-	/// time; writing the same mapping again is no change. Writes through
+	/// adopts its input's mapping, or the lack of one. After that a changed `clock` is refused; writing
+	/// the same mapping again is no change. Writes through
 	/// [`Reserved::video`](super::Reserved::video) and the codec producers keep their timestamps
 	/// verbatim, so they mean something only under the mapping they were written for.
 	pub fn modify(&mut self, timestamp: moq_net::Timestamp) -> crate::Result<Guard<'_, E>> {
@@ -1283,17 +1289,15 @@ impl<E: CatalogExt> Guard<'_, E> {
 
 	/// Move the producer onto `clock`, a re-basing of the one it has, before anything fixed it.
 	///
-	/// Every stamp still pending, this guard's and the one staged for the initial publish, was read
-	/// on the old clock: each moves onto the same moment on the new one. A stamp that can't is
-	/// refused, leaving the clock as it was.
+	/// The stamp staged for the initial publish was given on the old clock, so it moves onto the same
+	/// moment on the new one, and one that can't is refused, leaving the clock as it was. This guard's
+	/// own stamp stays: the edit adopting `clock` timed itself on it.
 	fn retime(&mut self, clock: crate::Clock) -> crate::Result<()> {
 		let old = &self.state.clock;
-		let at = self.at.map(|at| restamp(old, &clock, at)).transpose()?;
 		let staged = match self.state.gate {
 			Gate::Buffering { at: Some(staged), .. } => Some(restamp(old, &clock, staged)?),
 			_ => None,
 		};
-		self.at = at;
 		if let (Gate::Buffering { at, .. }, Some(staged)) = (&mut self.state.gate, staged) {
 			*at = Some(staged);
 		}
@@ -2036,7 +2040,7 @@ mod test {
 
 		let waiter = kio::Waiter::noop();
 		let got = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected a catalog, got {other:?}"),
 		};
 		assert_eq!(got, expected);
@@ -2078,7 +2082,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut last = None;
 		while let Poll::Ready(Ok(Some(c))) = plain.poll_next(&waiter) {
-			last = Some(c);
+			last = Some(c.value);
 		}
 		assert_eq!(last.unwrap(), expected);
 		assert!(expected.audio.renditions.contains_key("audio0"));
@@ -2932,11 +2936,10 @@ mod test {
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		catalog
-			.mutate(|c| c.sync.clock = Some(input), catalog.next_timestamp())
-			.unwrap();
-		// Stamped on the clock it replaced, the edit lands at the same instant on the adopted one.
-		assert_eq!(starts(&catalog), [Some(start(&catalog, 3_600_000)); 2]);
+		// Stamped on its input's timeline, which the adopted clock runs on, the edit stays put.
+		let at = moq_net::Timestamp::from_secs(3_590).unwrap();
+		catalog.mutate(|c| c.sync.clock = Some(input), at).unwrap();
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 3_590_000)); 2]);
 
 		assert_eq!(catalog.snapshot().sync.clock, Some(input), "advertised unchanged");
 		let clock = catalog.clock();
@@ -3053,14 +3056,42 @@ mod test {
 		let future = hang::catalog::Clock::new(moq_net::Timestamp::from_secs(future).unwrap()).unwrap();
 		refused(&mut catalog, Some(future));
 
-		// Clearing it, even before anything fixed it.
-		refused(&mut catalog, None);
-		assert_eq!(catalog.current_clock().wall(), own, "nothing re-based");
-
-		// A change once the clock is handed out.
+		// A change once the clock is handed out, clearing it included.
 		let taken = catalog.clock();
 		refused(&mut catalog, Some(an_hour_ago(moq_net::Timescale::MICRO)));
+		refused(&mut catalog, None);
 		assert_eq!(catalog.clock(), taken);
+	}
+
+	/// A derivative of a source with no `sync.clock` clears the producer's host wall clock before
+	/// anything fixes it, and advertises none, on the same timeline. Once fixed, a mapping is refused.
+	#[tokio::test(start_paused = true)]
+	async fn a_cleared_root_clock_before_the_clock_is_fixed_advertises_none() {
+		let _ = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		assert!(catalog.snapshot().sync.clock.is_some());
+		let before = catalog.current_clock();
+
+		catalog
+			.mutate(|c| c.sync.clock = None, catalog.next_timestamp())
+			.unwrap();
+		assert_eq!(catalog.snapshot().sync.clock, None, "no wall is invented");
+		let clock = catalog.clock();
+		assert_eq!(clock.wall(), None);
+		assert_eq!(clock, before, "the timeline is unchanged");
+
+		// Clearing it again is no change; adopting a mapping now is refused.
+		catalog
+			.mutate(|c| c.sync.clock = None, catalog.next_timestamp())
+			.unwrap();
+		let err = catalog
+			.mutate(
+				|c| c.sync.clock = Some(an_hour_ago(moq_net::Timescale::MICRO)),
+				catalog.next_timestamp(),
+			)
+			.unwrap_err();
+		assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err}");
 	}
 
 	/// A host whose wall clock reads before 2020 (booted before NTP sync) publishes its media on the
@@ -3158,7 +3189,7 @@ mod test {
 		// Video resolves: the complete catalog publishes now, in one snapshot.
 		video.set(h264_config()).unwrap();
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected the complete catalog, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
@@ -3185,7 +3216,7 @@ mod test {
 		audio.set(AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected the incremental audio catalog, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
@@ -3223,7 +3254,7 @@ mod test {
 			.renditions
 			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected a catalog naming the track, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
@@ -3264,7 +3295,7 @@ mod test {
 			.renditions
 			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected a catalog naming the track, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
@@ -3303,7 +3334,7 @@ mod test {
 
 		video.set(VideoConfig::new(hang::catalog::VideoCodec::VP8)).unwrap();
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected a catalog naming the track, got {other:?}"),
 		};
 		assert!(snapshot.video.renditions.contains_key("video0"));
@@ -3341,7 +3372,7 @@ mod test {
 		disabled.enabled = true;
 		audio.set(disabled).unwrap();
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected a catalog naming the track, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions["audio0"].enabled);
@@ -3367,7 +3398,7 @@ mod test {
 		// The video stream never resolves and is cancelled; the audio-only catalog publishes.
 		drop(video);
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected the audio catalog, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
@@ -3405,7 +3436,7 @@ mod test {
 		late.set(AudioConfig::new(AudioCodec::Opus, 48_000, 1)).unwrap();
 
 		let snapshot = match consumer.poll_next(&waiter) {
-			Poll::Ready(Ok(Some(c))) => c,
+			Poll::Ready(Ok(Some(c))) => c.value,
 			other => panic!("expected one complete catalog, got {other:?}"),
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
@@ -3732,7 +3763,7 @@ mod test {
 	fn wire(catalog: &Producer) -> Catalog<()> {
 		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang_track.consume());
 		match consumer.poll_next(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(Some(catalog))) => catalog,
+			Poll::Ready(Ok(Some(catalog))) => catalog.value,
 			_ => panic!("a published catalog"),
 		}
 	}

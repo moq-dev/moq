@@ -10161,6 +10161,14 @@ impl PresentationEdge {
 	}
 }
 
+/// What a fold of a reader's handed-out record judges by: the reader's budget, and the groups
+/// its ranges hold, `None` while a range is still being placed. A gap no range holds was never
+/// judged, so a range added later owes it again (see [`Delivered::fold_below`]).
+pub(super) struct FoldTerms {
+	pub budget: Budget,
+	pub ranges: Option<Cover>,
+}
+
 /// The read cursor behind a [`Subscriber`].
 struct Cursor {
 	state: kio::Consumer<TrackState>,
@@ -11055,10 +11063,18 @@ impl Cursor {
 		};
 		drop(state);
 		if moved {
-			self.filter.revision += 1;
-			self.update_servable();
+			self.window_moved();
 		}
 		moved
+	}
+
+	/// Take in a window that moved: what a fold counted as handed out before any range held it,
+	/// the ranges placed so far now owe, even while another still waits on its anchor, and the
+	/// reads resolve against the new ranges.
+	fn window_moved(&mut self) {
+		self.record.delivered.reopen(self.filter.window.held());
+		self.filter.revision += 1;
+		self.update_servable();
 	}
 
 	/// Settle a parked read's window on the groups that arrived since: a window waiting on a
@@ -11750,7 +11766,11 @@ impl Cursor {
 		self.prune_skipped();
 		self.record.delivered.insert(key);
 		let mut delivered = std::mem::take(&mut self.record.delivered);
-		self.forget_past_budget(&mut delivered, self.filter.window.budget(), None);
+		let terms = FoldTerms {
+			budget: self.filter.window.budget(),
+			ranges: self.filter.window.groups().cloned(),
+		};
+		self.forget_past_budget(&mut delivered, terms, None);
 		self.record.delivered = delivered;
 		self.retire_written_off();
 	}
@@ -11758,20 +11778,22 @@ impl Cursor {
 	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
 	/// holds it or not: one landing there would be written off. A group skipped as stale is
 	/// not forgotten, since a wider budget owes it again, and neither is one a widening still
-	/// owes, which a newest-first re-offer has yet to judge, nor a cached group no range
-	/// covers, which a range added later owes, nor any gap at or above `keep`.
+	/// owes, which a newest-first re-offer has yet to judge, nor any gap at or above `keep`.
+	/// A gap no range holds, which the budget never judged, a range added later owes again
+	/// (see [`Delivered::fold_below`]).
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
-	fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
+	fn forget_past_budget(&self, delivered: &mut Delivered, terms: FoldTerms, keep: Option<u64>) {
 		if delivered.above_gap().is_none() {
 			return;
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
 		let state = self.state.read();
 		let kept = (self.record.skipped.lowest().into_iter()).chain(owed).chain(keep).min();
-		let budgets = budget.clamped(state.max_age_bound());
+		let budgets = terms.budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
+		let judged = terms.ranges.as_ref();
 		while let Some(oldest) = delivered.above_gap() {
 			// The gap below takes this verdict only judged under a budget at least as wide as its own.
 			let budget = (budgets.runs(delivered.floor()..oldest + 1).into_iter())
@@ -11800,35 +11822,14 @@ impl Cursor {
 			let last = delivered
 				.last_before(shared)
 				.expect("the oldest run is below its successor");
-			// Searched only in the gaps this split retires, so a read that folds nothing never
-			// walks the runs it has piled up.
-			let outside = self.lowest_uncovered(delivered, &state, last);
-			if let Some(kept) = kept.into_iter().chain(outside).min()
+			if let Some(kept) = kept
 				&& kept < last
 			{
-				delivered.forget_below(kept);
+				delivered.fold_below(kept, judged);
 				break;
 			}
-			delivered.forget_below(last);
+			delivered.fold_below(last, judged);
 		}
-	}
-
-	/// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover:
-	/// the budget never judged it, and a range added later that covers it owes it. While a range
-	/// is still being placed, any cached group in a gap may be one.
-	fn lowest_uncovered(&self, delivered: &Delivered, state: &TrackState, end: u64) -> Option<u64> {
-		let groups = self.filter.window.groups();
-		delivered.gaps(delivered.floor()..end).into_iter().find_map(|gap| {
-			let gap = gap.start..=gap.end - 1;
-			let outside = match groups {
-				Some(groups) => minus(gap, groups),
-				None => vec![gap],
-			};
-			outside.into_iter().find_map(|run| {
-				let mut slots = state.lookup.range(run);
-				slots.find(|(_, slot)| slot.is_read()).map(|(key, _)| *key)
-			})
-		})
 	}
 
 	/// Hand `group` out whole from its first frame, expiring against its budget.
@@ -11861,8 +11862,7 @@ impl Cursor {
 		// An answer the window takes in may look its time up again from lower down.
 		while self.look_up_pass(waiter, &mut moved) {}
 		if moved {
-			self.filter.revision += 1;
-			self.update_servable();
+			self.window_moved();
 		}
 	}
 
@@ -13309,14 +13309,14 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget the gaps in `delivered` below each group past `budget` now: one landing there
-	/// would be written off. The budget is the reader's whose `delivered` this is, which a
-	/// front's copy, its ranges raised to a resume point, cannot judge by its own. No gap at or
-	/// above `keep` is forgotten.
-	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
+	/// Forget the gaps in `delivered` below each group past the budget of `terms` now: one
+	/// landing there would be written off. The terms are the reader's whose `delivered` this is,
+	/// which a front's copy, its ranges raised to a resume point, cannot judge by its own. No gap
+	/// at or above `keep` is forgotten.
+	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered, terms: FoldTerms, keep: Option<u64>) {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, budget, keep),
-			Inner::Resume(resume, _) => resume.forget_past(delivered, budget, keep),
+			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, terms, keep),
+			Inner::Resume(resume, _) => resume.forget_past(delivered, terms, keep),
 		}
 	}
 
@@ -13815,14 +13815,14 @@ impl Subscriber {
 
 	/// Whether the publisher declared every start in `groups` skipped, never to be produced
 	/// (see [`Producer::skip_groups`], which appending does between groups), so no group can
-	/// arrive there: true for an empty range. Unlike [`Self::next_in_range`], this ignores the
-	/// subscriber's ranges. A copy knows only the skips its wire forwarded.
+	/// arrive there: true for an empty range. This ignores the subscriber's ranges. A copy
+	/// knows only the skips its wire forwarded.
 	///
 	/// What tells a reader that nothing lies between two groups, or before a track's first.
 	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
 	/// still in flight reads `false`, as does one a local producer's cache expired below its
 	/// edge. A reader that asks once treats such a group as one with something before it.
-	pub(crate) fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
 			return true;
 		};
@@ -25727,6 +25727,48 @@ mod test {
 		}
 	}
 
+	/// A header-only read, as a metadata Group Stream's, takes no payload, so a copy failing
+	/// partway through a frame it read the header of continues on a held re-offer from the next
+	/// frame, as a whole read would.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_header_read_continues_past_a_frame_its_copy_cut() {
+		let producer = received_producer(Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(300), &b"a"[..]).unwrap();
+		let mut reader = first.consume();
+		let handle = first.handle();
+		let mut open = first
+			.create_frame(frame::Info {
+				size: 4,
+				timestamp: at(301),
+			})
+			.unwrap();
+		open.write(&b"ab"[..]).unwrap();
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 1);
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 4);
+		reader.forget_payload();
+
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the re-offer waits on the copy still arriving");
+		};
+		handle.abort(Error::Cancel).unwrap();
+		drop(open);
+		let Ok(Received::Group(mut reoffer)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
+			panic!("the re-offer takes the group");
+		};
+		drop(hold);
+		reoffer.write_frame(at(300), &b"a"[..]).unwrap();
+		reoffer.write_frame(at(301), &b"abcd"[..]).unwrap();
+		reoffer.write_frame(at(302), &b"c"[..]).unwrap();
+		reoffer.finish().unwrap();
+		assert_eq!(reader.next_frame().await.unwrap().unwrap().size, 1);
+		assert!(reader.next_frame().await.unwrap().is_none());
+	}
+
 	/// A failed copy's end follows its frame reads: it waits out a held re-offer rather than
 	/// report the failure, so a publisher watching it keeps the stream the re-offer continues.
 	#[kio::test]
@@ -35142,6 +35184,169 @@ mod test {
 			})
 			.unwrap();
 		assert_eq!(drain_groups(&mut subscriber), [0]);
+	}
+
+	/// A range added behind a reader caught up at the live edge of a relay's copy holding only
+	/// its newest groups hands out the older group its upstream sends after the update, though
+	/// the reader's own budget folded that gap before any range held it.
+	#[test]
+	fn a_range_added_behind_a_caught_up_relay_read_hands_out_what_arrives_later() {
+		let mut producer = track_producer("test", Info::default().with_max_age(None));
+		producer.received();
+		producer.set_idle();
+		producer.start_at(5).unwrap();
+		producer.set_live(Some(Position::group(5)), Some(false), None).unwrap();
+		framed(&producer, 5, 1).finish().unwrap();
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+		assert_eq!(drain_groups(&mut subscriber), [5]);
+		framed(&producer, 6, 1).finish().unwrap();
+		framed(&producer, 7, 1).finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [7]);
+		assert!(subscriber.record().delivered.contains(3), "the budget folded the gap");
+		subscriber
+			.edit(Edit {
+				placed: Default::default(),
+				retire: Vec::new(),
+				add: vec![(1, Range::groups(3..=3))],
+				priority: 0,
+				order: Order::default(),
+			})
+			.unwrap();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing held there yet"
+		);
+		framed(&producer, 3, 1).finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [3]);
+	}
+
+	/// A time range added behind a reader caught up at the live edge hands out the group its
+	/// lookup finds, though the reader's budget folded that gap before any range held it: the
+	/// window moves when the answer lands, not when the ranges change.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_range_added_behind_a_caught_up_read_hands_out_the_group_it_looks_up() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+		assert_eq!(drain_groups(&mut subscriber), [10]);
+		write_group(&producer, 11);
+		write_group(&producer, 12);
+		assert_eq!(drain_groups(&mut subscriber), [12]);
+		assert!(subscriber.record().delivered.contains(5), "the budget folded the gap");
+		subscriber
+			.edit(Edit {
+				placed: Default::default(),
+				retire: Vec::new(),
+				add: vec![(
+					1,
+					Range {
+						start: Start::Time(5),
+						end: Some(5),
+					},
+				)],
+				priority: 0,
+				order: Order::default(),
+			})
+			.unwrap();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing until it is found"
+		);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!(start.start().group, 5);
+		write_filled(start.accept(5, None), 5);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), [5]);
+	}
+
+	/// A reader at the live edge of a relay's copy, adding and retiring history ranges behind
+	/// it at random while older groups land late, hands out each group a history range holds
+	/// when it lands, and none twice while a range holds it: what its budget folded before a
+	/// range held it never stands in for a hand-out, nor makes one again.
+	#[test]
+	fn ranges_added_behind_a_live_read_hand_out_every_late_group_they_hold() {
+		use rand::{RngExt, SeedableRng};
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x666f6c64);
+		for _ in 0..50 {
+			let mut producer = track_producer("test", Info::default().with_max_age(None));
+			producer.received();
+			producer.set_idle();
+			producer.start_at(100).unwrap();
+			producer
+				.set_live(Some(Position::group(100)), Some(false), None)
+				.unwrap();
+			framed(&producer, 100, 1).finish().unwrap();
+			let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+			let mut handed: BTreeSet<u64> = drain_groups(&mut subscriber).into_iter().collect();
+			let mut written = BTreeSet::from([100]);
+			let mut ranges: BTreeMap<u64, ops::RangeInclusive<u64>> = BTreeMap::new();
+			let mut owed = BTreeSet::new();
+			let (mut edge, mut next_key) = (100, 1);
+			for _ in 0..60 {
+				match rng.random_range(0..4) {
+					0 => {
+						edge += rng.random_range(1..4);
+						framed(&producer, edge, 1).finish().unwrap();
+						written.insert(edge);
+					}
+					1 => {
+						let start = rng.random_range(0..edge);
+						let end = rng.random_range(start..edge);
+						ranges.insert(next_key, start..=end);
+						subscriber
+							.edit(Edit {
+								placed: Default::default(),
+								retire: Vec::new(),
+								add: vec![(next_key, Range::groups(start..=end))],
+								priority: 0,
+								order: Order::default(),
+							})
+							.unwrap();
+						next_key += 1;
+					}
+					2 if !ranges.is_empty() => {
+						let key = *ranges.keys().nth(rng.random_range(0..ranges.len())).unwrap();
+						ranges.remove(&key);
+						// A record retires what its ranges left behind, so ranges holding it again
+						// may hand it out again (see `Record::retire`).
+						handed.retain(|key| *key >= 100 || ranges.values().any(|range| range.contains(key)));
+						subscriber
+							.edit(Edit {
+								placed: Default::default(),
+								retire: vec![key],
+								add: Vec::new(),
+								priority: 0,
+								order: Order::default(),
+							})
+							.unwrap();
+					}
+					_ => {
+						let key = rng.random_range(0..edge);
+						if written.insert(key) {
+							framed(&producer, key, 1).finish().unwrap();
+							if ranges.values().any(|range| range.contains(&key)) {
+								owed.insert(key);
+							}
+						}
+					}
+				}
+				for key in drain_groups(&mut subscriber) {
+					assert!(handed.insert(key), "group {key} handed out twice");
+					owed.remove(&key);
+				}
+				// A late group a range held as it landed is handed out, unless a retire since let it go.
+				owed.retain(|key| ranges.values().any(|range| range.contains(key)));
+				assert_eq!(owed, BTreeSet::new(), "late groups the ranges hold, with {ranges:?}");
+			}
+		}
 	}
 
 	/// Ranges edited one key at a time resolve and cover what the same ranges given whole do,
