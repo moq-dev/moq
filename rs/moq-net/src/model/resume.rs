@@ -7893,7 +7893,12 @@ mod test {
 		let newest_first = Subscription::default()
 			.with_ranges([track::Range::ALL])
 			.with_order(track::Order::Descending);
-		let mut sub = logical.consume().subscribe(newest_first).now_or_never().unwrap().unwrap();
+		let mut sub = logical
+			.consume()
+			.subscribe(newest_first)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
 		let mut open = a.create_group(group::Info { start: 3 }).unwrap();
 		open.write_frame(ts(3), b"x".as_ref()).unwrap();
 		// Capped below group 3, so the polls that let each copy answer hand nothing out.
