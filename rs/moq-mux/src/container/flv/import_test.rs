@@ -1425,8 +1425,12 @@ async fn audio_groups(data: &[u8]) -> Vec<(u64, Option<u64>)> {
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	importer.decode(data).unwrap();
 	let _finished = importer.finish().unwrap();
-	let snapshot = catalog.snapshot();
-	let name = snapshot.audio.renditions.keys().next().unwrap();
+	let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+	groups_of(&consumer, &name).await
+}
+
+/// Each group of the track `name`, by start, with its declared end.
+async fn groups_of(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(u64, Option<u64>)> {
 	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
 			min: Some(Duration::from_secs(3600)),
@@ -1454,6 +1458,34 @@ async fn groups_end_only_where_their_audio_is_known_to() {
 	// 21.333 ms AAC-LC packets, the last ending at 85 ms, not one 64 ms spacing past it.
 	let groups = audio_groups(&aac_tags_with(&ASC_48K, &[0, 64])).await;
 	assert_eq!(groups, [(0, Some(85_000))]);
+}
+
+/// A seek closes the open audio group as a gap does: where its stated audio ends, capped at the
+/// seek, or with no declared end when a packet's duration is unknown.
+#[tokio::test]
+async fn a_seek_declares_only_known_audio_ends() {
+	for (asc, ends) in [(&ASC_LD[..], [None, None]), (&ASC_48K, [Some(106_000), Some(321_000)])] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = Import::new(broadcast, catalog.reserve());
+		let tags = aac_tags_with(asc, &[0, 85]);
+		importer.decode(&tags).unwrap();
+		importer.seek(300_000).unwrap();
+		let mut tag = Vec::new();
+		write_tag(
+			&mut tag,
+			super::TAG_AUDIO,
+			300,
+			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0xde, 0xad],
+		);
+		importer.decode(&tag).unwrap();
+		let _finished = importer.finish().unwrap();
+
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let groups = groups_of(&consumer, &name).await;
+		assert_eq!(groups, [(0, ends[0]), (300_000, ends[1])], "{asc:x?}");
+	}
 }
 
 /// HE-AAC signaling 960-sample core frames plays 40 ms a packet, so a group closing before the

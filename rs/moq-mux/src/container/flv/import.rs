@@ -836,6 +836,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			stream.seek(start)?;
 		}
 		for stream in self.audio.values_mut() {
+			// Closed as a gap closes it, never past the seek, so the producer doesn't estimate its end
+			// from the spacing of its last frames.
+			let cap = stream
+				.track
+				.track()
+				.info()
+				.timescale
+				.and_then(|scale| Timestamp::new(start, scale).ok())
+				.filter(|cap| stream.previous.is_some_and(|previous| *cap > previous));
+			stream.close(cap)?;
 			stream.track.seek(start)?;
 		}
 		Ok(())
