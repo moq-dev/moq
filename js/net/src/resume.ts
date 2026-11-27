@@ -2863,8 +2863,14 @@ class Recover implements GroupRecover {
 	#copy?: Copy;
 	/** The route generation when `#copy` was acquired; kept separate because `Reader.sync` updates `copy.generation` in place on switch-back. */
 	#generation: number;
-	/** The reader's own fetch delivered the group being read, judged under the reader's own terms. */
-	#fetched = false;
+	/**
+	 * The group being read came from the reader's own fetch, judged under the reader's own terms, or
+	 * from looking past a copy's too-old verdict once already: its own too old stands, which bounds
+	 * the route to one request more per group.
+	 */
+	#judged = false;
+	/** The recovery under way looks past a copy's too-old verdict. */
+	#excusing = false;
 
 	/**
 	 * Puts the group on the reader's list of those still read, so the other copies that hold it,
@@ -2934,12 +2940,18 @@ class Recover implements GroupRecover {
 	 * route is asked, which bounds a hostile route to one bad answer per route change.
 	 */
 	#undelivered(failed: Error, copy: Copy): boolean {
-		return routeFailed(failed) || copyFailed(copy) || (!this.#fetched && this.#outgrows(failed, copy));
+		return routeFailed(failed) || copyFailed(copy) || this.#excuses(failed, copy);
 	}
 
-	/** Whether `err` is a too old verdict from `copy` that the reader outgrows (see {@link #outgrowsJudging}). */
-	#outgrows(err: Error, copy: Copy): boolean {
-		return err instanceof StreamError && err.code === StreamCode.Old && this.#outgrowsJudging(copy);
+	/**
+	 * Whether `err` is a too-old verdict from `copy` that is none on the reader: the reader outgrows
+	 * the budget it was judged under (see {@link #outgrowsJudging}), and the group being read is no
+	 * answer to the reader's own request already. Mirrors the Rust `Recover::excuses`.
+	 */
+	#excuses(err: Error, copy: Copy): boolean {
+		return (
+			err instanceof StreamError && err.code === StreamCode.Old && !this.#judged && this.#outgrowsJudging(copy)
+		);
 	}
 
 	/**
@@ -2983,6 +2995,8 @@ class Recover implements GroupRecover {
 		const closed = cause.kind === "closed";
 		// The copy being read delivers no more of the group.
 		const settled = cause.kind !== "stalled";
+		const reading = this.#copy;
+		this.#excusing = failed !== undefined && reading !== undefined && this.#excuses(failed, reading);
 		let fetch: Fetch | undefined;
 		for (;;) {
 			signal.throwIfAborted();
@@ -3027,13 +3041,9 @@ class Recover implements GroupRecover {
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
 				// it, and a group the route failed is no verdict either.
 				const given = hooks.givenUp(serving.sub, this.key);
-				if (
-					given.error &&
-					!routeFailed(given.error) &&
-					!copyFailed(serving) &&
-					!this.#outgrows(given.error, serving)
-				) {
-					throw given.error;
+				if (given.error && !routeFailed(given.error) && !copyFailed(serving)) {
+					if (!this.#excuses(given.error, serving)) throw given.error;
+					this.#excusing = true;
 				}
 				waits.push(...given.changed);
 				// A newer copy's track caches it: continue from there. On switch-back to the same
@@ -3106,7 +3116,8 @@ class Recover implements GroupRecover {
 				this.#release();
 				this.#copy = copy;
 				this.#generation = generation;
-				this.#fetched = fetched;
+				this.#judged = fetched || this.#excusing;
+				this.#excusing = false;
 			},
 			discard: () => group.close(),
 		};

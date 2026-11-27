@@ -322,6 +322,9 @@ interface FetchTarget {
 	// How its stream failed without a code, as Firefox reports a reset that lost one: the drop the
 	// publisher names the group in says why, which a reader needs to ask again after TOO_FAR_BEHIND.
 	lost?: Error;
+	// Why the publisher dropped the group, once it said: a stream for it arriving later is one whose
+	// reset may never land, as Chromium loses one, so it is not taken.
+	dropped?: Error;
 }
 
 // A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
@@ -2280,9 +2283,9 @@ export class Subscriber {
 							hasSkip(this.version) && resp.drop.error === StreamCode.Skip
 								? new NotFound(`group ${key}`)
 								: resp.drop.cause(this.version);
-						// The publisher gave up a group whose stream it opened: the stream ends
-						// with this reason, even where the browser lost its reset. One received
-						// whole stays whole.
+						// The publisher gave up the group: a stream it opened ends with this reason,
+						// even where the browser lost its reset. One received whole stays whole.
+						target.dropped ??= refused;
 						if (target.taken) target.producer.abort(refused);
 					}
 				} else if ("end" in resp) {
@@ -3576,7 +3579,7 @@ export class Subscriber {
 
 		if (entry.fillGroup) {
 			const target = entry.fillGroup;
-			if (group.key !== target.producer.start || target.taken) {
+			if (group.key !== target.producer.start || target.taken || target.dropped) {
 				stream.stop(StreamCode.Cancel);
 				return;
 			}

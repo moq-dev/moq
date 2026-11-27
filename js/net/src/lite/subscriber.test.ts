@@ -1763,8 +1763,8 @@ test("a reset without its code ends the group", async () => {
 // Lite-07: a fetch's Group Stream reset to make room competes for the same cap, and a reader asks
 // again only once it knows why. When Firefox drops the reset's code, the drop the publisher names
 // the group in says it, before or after the reset lands; when Chromium loses the reset itself, the
-// drop ends the stream.
-test.each(["before", "after", "without"] as const)(
+// drop ends the stream, even one whose header the drop overtook.
+test.each(["before", "after", "without", "overtaking"] as const)(
 	"a fetch whose reset lost its code ends with the reason its drop names (drop %s the reset)",
 	async (order) => {
 		const version = Version.DRAFT_07;
@@ -1778,13 +1778,23 @@ test.each(["before", "after", "without"] as const)(
 			await request.reading;
 			await respond(request, version, [{ start: answer(version, 0n) }]);
 
+			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.TooFarBehind }) };
+			if (order === "overtaking") {
+				await respond(request, version, [drop]);
+				await drainReactions();
+				const late = handStream(version);
+				late.write(await liteFrame(300, new Uint8Array([1])));
+				await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), late.reader);
+				request.inbound.close();
+				await expect(fetch).rejects.toMatchObject({ code: StreamCode.TooFarBehind });
+				return;
+			}
 			const stream = handStream(version);
 			stream.write(await liteFrame(300, new Uint8Array([1])));
 			const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), stream.reader);
 			const group = await fetch;
 			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
-			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.TooFarBehind }) };
 			if (order !== "after") await respond(request, version, [drop]);
 			if (order !== "without") stream.error(new TypeError("Error in input stream"));
 			if (order !== "without") await running;
