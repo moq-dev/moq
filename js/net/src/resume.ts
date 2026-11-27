@@ -1126,7 +1126,7 @@ class Reader implements ResumeSource {
 		if (this.#closed || this.#ended || !newest || resumed === undefined) return;
 		const end = min(passed, resumed);
 		// An ordered reader never goes back, nor does any reader past its budget.
-		if (this.#delivered.covers(start, end)) return;
+		if (this.#delivered.owesNone(start, end)) return;
 		// What a backfill of this route already failed to get, it would fail to get again.
 		const refused = this.#refused;
 		if (refused?.generation === newest.generation && refused.start <= start && end <= refused.end) return;
@@ -1202,7 +1202,7 @@ class Reader implements ResumeSource {
 			if (resumed === undefined) return;
 			let start: bigint | undefined;
 			for (const time of raisedAt.values()) {
-				if (!delivered.covers(time, resumed)) start = start === undefined ? time : min(start, time);
+				if (!delivered.owesNone(time, resumed)) start = start === undefined ? time : min(start, time);
 			}
 			if (start !== undefined) this.#backfill(start, resumed, true);
 			return;
@@ -1218,7 +1218,7 @@ class Reader implements ResumeSource {
 		const placed: (Resolved | undefined)[] = [];
 		const ranges = this.#ranges();
 		for (const [key, time] of raisedAt) {
-			if (resumed !== undefined && !delivered.covers(time, resumed)) {
+			if (resumed !== undefined && !delivered.owesNone(time, resumed)) {
 				owed.push(time);
 				continue;
 			}
