@@ -98,14 +98,12 @@ What the model asks of that code, each found by TLC as a broken rule without it:
 
 ### SubscribeDedup.tla
 
-Sync commit: `2d4bc83cbf59a16ec4b1b064444c83d625667d42`. Run `git log 2d4bc83cbf.. -- rs/moq-net/src/model/track/demand rs/moq-net/src/model/track/demand.rs rs/moq-net/src/lite/subscribe.rs rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/lite/subscriber/fills.rs rs/moq-net/src/model/subscription.rs rs/moq-net/src/model/subscription/window.rs rs/moq-net/src/model/group.rs` to see what changed since.
-
-The model states the per-group scheduling and the fold the code is moving to. At the sync commit the publisher serves a whole subscription at `Policy::of` (the highest priority of its ranges, Descending if any range there asks for it), and `Ranges::fold` folds every range into `Range::ALL` once one is held; both break `FoldRule` and `EffectivePolicy` until per-range scheduling lands, as the per-range policy quest plans.
+Sync commit: `f7a41c3ea52fa6b12c6bf698142f428c24ea673b`. Run `git log f7a41c3ea5.. -- rs/moq-net/src/model/track/demand rs/moq-net/src/model/track/demand.rs rs/moq-net/src/lite/subscribe.rs rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/lite/subscriber/fills.rs rs/moq-net/src/model/subscription.rs rs/moq-net/src/model/subscription/window.rs rs/moq-net/src/model/group.rs` to see what changed since.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/track/demand/ranges.rs` `Ranges::union`, `Ranges::fold`; `rs/moq-net/src/model/track/demand.rs` `Subscriptions::combined` | `Folds`, `Fold`, `Update`, `FoldRule` |
-| `rs/moq-net/src/lite/subscribe.rs` `Policy::of` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
+| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `rank_at`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `TrackRun::serve`, `TrackRun::mark_served` | `Send`, `told` |
 | `rs/moq-net/src/model/subscription/window.rs` `Budget::at`; `rs/moq-net/src/model/track.rs` `GroupExpiry::is_expired`; `rs/moq-net/src/model/group.rs` `Consumer::expired_under`; `rs/moq-net/src/lite/publisher.rs` `GroupServe::settle_failed` | `Wanting`, `Widest`, `PubJudged`, `Judge` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::hole`, `TrackRun::give_way`, `TrackRun::shed`; `rs/moq-net/src/model/subscription.rs` `Subscription::narrowest`; `rs/moq-net/src/lite/subscribe.rs` `SubscribeDrop::given_up`, `SubscribeDrop::stale` | `GiveUp`, `Narrowest`, `PubUnjudged`, `verdict` |
@@ -120,7 +118,7 @@ What the model asks of that code, each found by TLC as a broken rule without it:
 - A reader wider than a stale record gets the group on a request of the relay's own (`Recovery`, `QuietIsSettled`).
 - A group's priority comes only from the ranges that have not expired it (`EffectivePolicy`): otherwise a group a high-priority live join expired still goes at the live priority while only a low-priority history range wants it.
 - A group is OLD only once every covering range expired it (`JudgedWidest`).
-- A range folds into one covering it only at a priority and order that decide every group it wants as it would (`FoldRule`); folding regardless, as into `Range::ALL` today, breaks it.
+- A range folds into one covering it only at a priority and order that decide every group it wants as it would (`FoldRule`); folding every range into a held `Range::ALL` regardless breaks it.
 
 ## Not covered
 
