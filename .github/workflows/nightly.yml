@@ -305,6 +305,8 @@ jobs:
     permissions:
       contents: write
       actions: write
+      id-token: write
+      attestations: write
 
   release-moq-cli:
     name: moq-cli
@@ -312,6 +314,8 @@ jobs:
     permissions:
       contents: write
       actions: write
+      id-token: write
+      attestations: write
 
   release-moq-gst:
     name: moq-gst
