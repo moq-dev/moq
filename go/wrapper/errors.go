@@ -79,7 +79,7 @@ var (
 	ErrUnsupportedConfig = ffi.ErrMoqErrorUnsupportedConfig
 	// ErrAlreadyCommitted is returned when a track already reading one way (arrival order, start order, or a typed reader) is asked to read another; subscribe again for a second cursor.
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
-	// ErrInvalidIdentity is returned when an identity is empty.
+	// ErrInvalidIdentity is returned when an identity is empty or longer than 256 UTF-8 bytes.
 	ErrInvalidIdentity = ffi.ErrMoqErrorInvalidIdentity
 	// ErrInvalidPattern is returned when a path pattern is empty, has a doubled slash, or uses a reserved segment form.
 	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern

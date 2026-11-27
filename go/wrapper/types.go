@@ -174,7 +174,7 @@ func UnlimitedCongestionControl() *CongestionControl {
 	return ffi.MoqCongestionControlUnlimited()
 }
 
-// ParseIdentity names an identity with text, failing with ErrInvalidIdentity when it is empty.
+// ParseIdentity names an identity with text, failing with ErrInvalidIdentity when it is empty or longer than 256 UTF-8 bytes.
 func ParseIdentity(text string) (*Identity, error) {
 	return ffi.MoqIdentityParse(text)
 }

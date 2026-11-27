@@ -47,23 +47,21 @@ impl Server {
 		match &route.resource {
 			Resource::Master => master(self, broadcast, query).await,
 			Resource::Manifest => manifest(self, broadcast, query).await,
-			Resource::Media {
-				identity,
-				kind,
-				rendition,
-			} => media(self, At::new(route, identity, *kind, rendition), query).await,
+			Resource::Media { token, kind, rendition } => {
+				media(self, At::new(route, token, *kind, rendition), query).await
+			}
 			Resource::Init {
-				identity,
+				token,
 				kind,
 				rendition,
 				hash,
-			} => init(self, At::new(route, identity, *kind, rendition), hash).await,
+			} => init(self, At::new(route, token, *kind, rendition), hash).await,
 			Resource::Segment {
-				identity,
+				token,
 				kind,
 				rendition,
 				segment: id,
-			} => segment(self, At::new(route, identity, *kind, rendition), id).await,
+			} => segment(self, At::new(route, token, *kind, rendition), id).await,
 		}
 	}
 }

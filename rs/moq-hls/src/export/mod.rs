@@ -110,10 +110,11 @@ impl Default for Config {
 	}
 }
 
-/// The URL token naming `identity` in an `@{token}` path segment: a hash of whether a session
+/// The token naming `identity` in an `@{token}` URL or key segment: a hash of whether a session
 /// minted it together with its text, so a minted identity never shares URLs with a named one of
 /// the same text, and an identity up to 256 bytes, such as a public key, keeps URLs short.
-pub(crate) fn token(identity: &moq_net::Identity) -> Arc<str> {
+/// `moq export archive` keys recordings by it too, so a recording's key matches its HLS URLs.
+pub fn token(identity: &moq_net::Identity) -> Arc<str> {
 	let mut hash = rind::digest::Context::new(&rind::digest::SHA256);
 	hash.update(&[u8::from(identity.is_minted())]);
 	hash.update(identity.as_str().as_bytes());

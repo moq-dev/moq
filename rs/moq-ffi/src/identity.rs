@@ -22,7 +22,7 @@ impl std::fmt::Display for MoqIdentity {
 
 #[uniffi::export]
 impl MoqIdentity {
-	/// A named identity with `text`, refusing an empty one.
+	/// A named identity with `text`, refusing an empty one or one longer than 256 UTF-8 bytes.
 	#[uniffi::constructor]
 	pub fn parse(text: String) -> Result<Arc<Self>, MoqError> {
 		Ok(Arc::new(Self(text.try_into()?)))

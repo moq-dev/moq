@@ -126,7 +126,7 @@ async fn an_include_does_not_hide_the_parents_first_variants() {
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
 	let at = crate::export::Include {
 		id: "rung/a".into(),
-		identity: child_url.to_string(),
+		token: child_url.to_string(),
 	};
 	assert!(
 		broadcaster
@@ -337,7 +337,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
 	let at = crate::export::Include {
 		id: "rung/a".into(),
-		identity: child_url.to_string(),
+		token: child_url.to_string(),
 	};
 	let rendition = broadcaster
 		.include(&at, crate::export::Kind::Video, "same")
@@ -391,7 +391,7 @@ async fn an_include_answers_the_master_when_no_own_rendition_is_listable() {
 	let broadcaster = server.broadcaster("room/live").await.unwrap();
 	let at = crate::export::Include {
 		id: "rung/a".into(),
-		identity: child_url.to_string(),
+		token: child_url.to_string(),
 	};
 	assert!(
 		broadcaster

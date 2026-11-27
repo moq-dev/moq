@@ -341,7 +341,7 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// An identity was empty.
+	/// An identity was empty or longer than 256 UTF-8 bytes.
 	#[error("{reason}")]
 	InvalidIdentity {
 		/// A diagnostic message describing the failure.

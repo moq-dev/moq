@@ -8,8 +8,8 @@
 //! the way positional numbering would.
 //!
 //! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`), under the publisher identity
-//! it lists (`@<identity>/<kind>/<rendition>/...`). The identity and rendition name are
-//! each percent-encoded as one path segment, using the HLS master's set, and the finished URL
+//! it lists, by its token (`@<token>/<kind>/<rendition>/...`). The rendition name is
+//! percent-encoded as one path segment, using the HLS master's set, and the finished URL
 //! is then XML-escaped, so a name containing `/` still resolves under the broadcast. The
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
 //! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
@@ -559,12 +559,12 @@ mod tests {
 			assert_eq!(route.broadcast, "live");
 			match route.resource {
 				Resource::Init {
-					identity: actual,
+					token: actual,
 					rendition,
 					..
 				}
 				| Resource::Segment {
-					identity: actual,
+					token: actual,
 					rendition,
 					..
 				} => {

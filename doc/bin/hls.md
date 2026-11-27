@@ -83,7 +83,7 @@ recording needs moq-lite 07 on every network hop for track discovery; see
 
 ```bash
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<identity>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<token>
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --hls-listen '[::]:8089'
 ```
 

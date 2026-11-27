@@ -220,7 +220,7 @@ impl Producer {
 				Current::Pending => return Poll::Pending,
 				Current::Failed(err) => return Poll::Ready(Err(err.clone())),
 				Current::Offline => return Poll::Ready(Ok(None)),
-				Current::Online(identity) if *identity.id != *at.identity => return Poll::Ready(Ok(None)),
+				Current::Online(identity) if *identity.id != *at.token => return Poll::Ready(Ok(None)),
 				Current::Online(identity) => identity,
 			};
 			Poll::Ready(Ok(ready!(identity.renditions.poll_get(waiter, kind, name))))
@@ -353,7 +353,7 @@ mod tests {
 		include.sync(&source, &catalog);
 		let at = super::super::Include {
 			id: "child".into(),
-			identity: super::super::token(&child_id).to_string(),
+			token: super::super::token(&child_id).to_string(),
 		};
 		let mut lookup = Box::pin(include.rendition(&at, Kind::Video, "v"));
 		// The catalog has been read, but the driver has not yet polled its follow task.

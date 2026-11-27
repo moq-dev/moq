@@ -32,7 +32,7 @@ pub struct Include {
 	/// The include ID in the parent catalog, percent-decoded.
 	pub id: String,
 	/// The include's identity token, percent-decoded and without its `@`.
-	pub identity: String,
+	pub token: String,
 }
 
 /// A resource under a broadcast.
@@ -47,7 +47,7 @@ pub enum Resource {
 	#[non_exhaustive]
 	Media {
 		/// The publisher identity's URL token, percent-decoded and without its `@`.
-		identity: String,
+		token: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -58,7 +58,7 @@ pub enum Resource {
 	#[non_exhaustive]
 	Init {
 		/// The publisher identity's URL token, percent-decoded and without its `@`.
-		identity: String,
+		token: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -71,7 +71,7 @@ pub enum Resource {
 	#[non_exhaustive]
 	Segment {
 		/// The publisher identity's URL token, percent-decoded and without its `@`.
-		identity: String,
+		token: String,
 		/// The rendition's kind.
 		kind: Kind,
 		/// The rendition's name, percent-decoded.
@@ -118,15 +118,15 @@ impl Route {
 			match &parts[..end] {
 				[.., parent, directory, id, kind, _, child]
 					if directory == "include"
-						&& identity_id(parent).is_some()
+						&& parse_token(parent).is_some()
 						&& Kind::parse(kind).is_some()
-						&& identity_id(child).is_some() =>
+						&& parse_token(child).is_some() =>
 				{
 					// Every slot has the include shape; otherwise the ordinary arms below
 					// parse the untouched parts as a longer broadcast path.
 					let include = Include {
 						id: id.clone(),
-						identity: identity_id(child)?,
+						token: parse_token(child)?,
 					};
 					parts.remove(end - 1);
 					parts.drain(end - 5..end - 3);
@@ -144,7 +144,7 @@ impl Route {
 			[broadcast @ .., identity, kind, rendition, file] if file == "media.m3u8" => (
 				broadcast,
 				Resource::Media {
-					identity: identity_id(identity)?,
+					token: parse_token(identity)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 				},
@@ -152,7 +152,7 @@ impl Route {
 			[broadcast @ .., identity, kind, rendition, file] if init_hash(file).is_some() => (
 				broadcast,
 				Resource::Init {
-					identity: identity_id(identity)?,
+					token: parse_token(identity)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 					hash: init_hash(file)?.to_string(),
@@ -161,7 +161,7 @@ impl Route {
 			[broadcast @ .., identity, kind, rendition, directory, file] if directory == "seg" => (
 				broadcast,
 				Resource::Segment {
-					identity: identity_id(identity)?,
+					token: parse_token(identity)?,
 					kind: Kind::parse(kind)?,
 					rendition: rendition.clone(),
 					segment: segments::Id::parse(file.strip_suffix(".m4s")?)?,
@@ -183,9 +183,9 @@ impl Route {
 }
 
 /// The identity token an `@{token}` path segment names.
-fn identity_id(part: &str) -> Option<String> {
+fn parse_token(part: &str) -> Option<String> {
 	part.strip_prefix('@')
-		.filter(|identity| !identity.is_empty())
+		.filter(|token| !token.is_empty())
 		.map(str::to_string)
 }
 
@@ -209,7 +209,7 @@ mod tests {
 				broadcast: "project/live".to_string(),
 				include: None,
 				resource: Resource::Media {
-					identity: "run".to_string(),
+					token: "run".to_string(),
 					kind: Kind::Video,
 					rendition: "cam#1/main?alt".to_string(),
 				},
@@ -250,7 +250,7 @@ mod tests {
 	fn parses_all_resource_routes() {
 		let resource = |path| Route::parse(path).map(|route| route.resource);
 		let segment = |generation: Option<&str>, at| Resource::Segment {
-			identity: "run".to_string(),
+			token: "run".to_string(),
 			kind: Kind::Video,
 			rendition: "main".to_string(),
 			segment: Id {
@@ -264,7 +264,7 @@ mod tests {
 		assert_eq!(
 			resource("/project/live/@run/audio/main/init.0123abcd.mp4"),
 			Some(Resource::Init {
-				identity: "run".to_string(),
+				token: "run".to_string(),
 				kind: Kind::Audio,
 				rendition: "main".to_string(),
 				hash: "0123abcd".to_string(),
@@ -340,16 +340,14 @@ mod tests {
 				route.include,
 				Some(Include {
 					id: "a/b".into(),
-					identity: "child".into()
+					token: "child".into()
 				})
 			);
-			let identity = match route.resource {
-				Resource::Media { identity, .. }
-				| Resource::Init { identity, .. }
-				| Resource::Segment { identity, .. } => identity,
+			let token = match route.resource {
+				Resource::Media { token, .. } | Resource::Init { token, .. } | Resource::Segment { token, .. } => token,
 				_ => panic!("wrong resource"),
 			};
-			assert_eq!(identity, "parent");
+			assert_eq!(token, "parent");
 		}
 		let own = Route::parse("/room/@parent/include/id/@child/video/main/media.m3u8").unwrap();
 		assert_eq!(own.broadcast, "room/@parent/include/id");
@@ -361,12 +359,8 @@ mod tests {
 		assert_eq!(own.broadcast, "room/@parent/include/id/video");
 		assert!(own.include.is_none());
 		match own.resource {
-			Resource::Media {
-				identity,
-				kind,
-				rendition,
-			} => {
-				assert_eq!(identity, "run");
+			Resource::Media { token, kind, rendition } => {
+				assert_eq!(token, "run");
 				assert_eq!(kind, Kind::Audio);
 				assert_eq!(rendition, "seg");
 			}

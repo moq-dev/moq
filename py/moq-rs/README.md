@@ -282,7 +282,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
 - **`TrackInfo`**. Publisher track properties: priority, cache window, refresh, and timescale.
 - **`TrackRefresh`**. When a subscriber asks the publisher for a new group: a join past `ratio`, waiting out `interval`. `TrackDemand.refresh()` waits for the request.
-- **`Identity`**. Names one continuous stream at a path. `Identity.parse(text)` names one (an empty `text` raises `Error.InvalidIdentity`); `.text()` and `str()` give its text, and `.is_minted()` tells whether a session minted it for a route whose wire (moq-lite 06 or older, or moq-transport) carries none. Identities compare and hash by text and that flag, so pass back an announced identity as is, not `Identity.parse` of its text, to pin its stream.
+- **`Identity`**. Names one continuous stream at a path. `Identity.parse(text)` names one (an empty `text`, or one longer than 256 UTF-8 bytes, raises `Error.InvalidIdentity`); `.text()` and `str()` give its text, and `.is_minted()` tells whether a session minted it for a route whose wire (moq-lite 06 or older, or moq-transport) carries none. Identities compare and hash by text and that flag, so pass back an announced identity as is, not `Identity.parse` of its text, to pin its stream.
 - **`media.Dimensions`**. `.width: int`, `.height: int`.
 - **`media.Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 

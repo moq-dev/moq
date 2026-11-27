@@ -4,8 +4,8 @@
 //! recorder writing `<name>/media.m3u8`, say) reuses the grouping and attribute
 //! rules. [`Broadcaster::master_playlist`](super::Broadcaster::master_playlist)
 //! renders the live layout, relative to `/<broadcast>/master.m3u8`: each rendition under the
-//! publisher identity it lists (`@<identity>/<kind>/<rendition>/media.m3u8`), with the identity
-//! and rendition name each percent-encoded as one segment.
+//! publisher identity it lists, by its token (`@<token>/<kind>/<rendition>/media.m3u8`), with the
+//! rendition name percent-encoded as one segment.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -342,7 +342,7 @@ mod tests {
 					broadcast: "live".into(),
 					include: None,
 					resource: Resource::Media {
-						identity: identity.into(),
+						token: identity.into(),
 						kind: Kind::Video,
 						rendition: "hd".into(),
 					},

@@ -21,7 +21,7 @@ const GRACE: Duration = Duration::from_secs(30);
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
-	/// Each broadcast records under `<broadcast>/@<identity>` beneath it.
+	/// Each broadcast records under `<broadcast>/@<token>` beneath it, `<token>` hashing its identity.
 	pub store: Url,
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
@@ -38,7 +38,7 @@ pub struct ExportArgs {
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
-	/// One recorded broadcast: the `<broadcast>/@<identity>` key prefix `export archive` wrote.
+	/// One recorded broadcast: the `<broadcast>/@<token>` key prefix `export archive` wrote.
 	pub store: Url,
 
 	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
@@ -50,7 +50,7 @@ pub struct ImportArgs {
 type Identity = (moq_net::Path, moq_net::Identity);
 
 /// Record every broadcast announced at or under `prefix` into `args.store`, each stream under
-/// `<path>/@<identity>`, until the announcements end.
+/// `<path>/@<token>`, until the announcements end.
 ///
 /// A broadcast that fails to record, or whose path cannot be followed, is logged and dropped:
 /// every other broadcast keeps recording, whatever one publisher does. Only the origin
@@ -263,7 +263,7 @@ async fn record(
 		let Some(_claim) = claims.claim(path, &broadcast) else {
 			return Ok(());
 		};
-		tracing::info!(%path, key = %store.prefix(), "recording broadcast");
+		tracing::info!(%path, identity = %identity.1, key = %store.prefix(), "recording broadcast");
 		moq_archive::Producer::new(store, broadcast, config)
 			.run()
 			.await
@@ -273,7 +273,10 @@ async fn record(
 	(identity, result)
 }
 
-/// The key prefix one stream records under: its path's segments, then `@<identity>`.
+/// The key prefix one stream records under: its path's segments, then `@<token>`, the
+/// [`token`](moq_hls::export::token) its HLS URLs carry. Hashing the identity with its minted flag
+/// keys a minted identity apart from a named one of the same text, and keeps the segment short
+/// for an identity of up to 256 bytes, which percent-encoded could pass a filesystem's name limit.
 ///
 /// Each key segment is a path segment's content, percent-encoded, so one holding a `/` stays
 /// one segment. A path segment's key never starts with `@`, since a leading one is
@@ -289,8 +292,9 @@ fn key(root: &Path, (path, identity): &Identity) -> anyhow::Result<Path> {
 			None => key.join(part),
 		};
 	}
-	// Percent-encoded like any segment, so an identity holding a delimiter stays one segment.
-	Ok(key.join(PathPart::from(format!("@{identity}").as_str())))
+	Ok(key.join(PathPart::from(
+		format!("@{}", moq_hls::export::token(identity)).as_str(),
+	)))
 }
 
 /// Republish the recording at `args.store` as the broadcast `name`, announced under `identity`.
@@ -408,7 +412,7 @@ mod tests {
 	}
 
 	/// `export archive` records each broadcast announced under its prefix into its own
-	/// `<path>/@<identity>`, and leaves out what is announced elsewhere.
+	/// `<path>/@<token>`, and leaves out what is announced elsewhere.
 	#[tokio::test(start_paused = true)]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
 		let dir = tempfile::tempdir().unwrap();
@@ -448,8 +452,8 @@ mod tests {
 			broadcast.broadcast().close();
 		}
 		let complete = [
-			format!("live/a/@{}/.end", identities[0]),
-			format!("live/b/@{}/.end", identities[1]),
+			format!("live/a/@{}/.end", moq_hls::export::token(&identities[0])),
+			format!("live/b/@{}/.end", moq_hls::export::token(&identities[1])),
 		];
 		kio::clock::timeout(Duration::from_secs(10), async {
 			while !complete.iter().all(|end| dir.path().join(end).exists()) {
@@ -462,6 +466,7 @@ mod tests {
 
 		let files = files(dir.path());
 		for (path, identity) in [("live/a", &identities[0]), ("live/b", &identities[1])] {
+			let identity = moq_hls::export::token(identity);
 			for file in [".end", "video/.info", "video/end"] {
 				assert!(files.contains(&format!("{path}/@{identity}/{file}")), "{files:?}");
 			}
@@ -529,7 +534,9 @@ mod tests {
 
 		// `live/a` already holds a recording whose track has another timescale.
 		let bad = publish(&origin, "live/a", Timescale::MILLI);
-		let stored = dir.path().join(format!("live/a/@{}/video", bad.0.identity()));
+		let stored = dir
+			.path()
+			.join(format!("live/a/@{}/video", moq_hls::export::token(&bad.0.identity())));
 		std::fs::create_dir_all(&stored).unwrap();
 		std::fs::write(
 			stored.join(".info"),
@@ -537,7 +544,7 @@ mod tests {
 		)
 		.unwrap();
 		let good = publish(&origin, "live/b", Timescale::MILLI);
-		let good_end = format!("live/b/@{}/.end", good.0.identity());
+		let good_end = format!("live/b/@{}/.end", moq_hls::export::token(&good.0.identity()));
 
 		finish(good).await;
 		complete(dir.path(), good_end).await;
@@ -545,7 +552,7 @@ mod tests {
 
 		// A broadcast announced after the failure records too.
 		let later = publish(&origin, "live/c", Timescale::MILLI);
-		let later_end = format!("live/c/@{}/.end", later.0.identity());
+		let later_end = format!("live/c/@{}/.end", moq_hls::export::token(&later.0.identity()));
 		finish(later).await;
 		complete(dir.path(), later_end).await;
 		assert!(!recording.is_finished());
@@ -575,7 +582,7 @@ mod tests {
 		request.reject(moq_net::Error::NotFound);
 
 		let good = publish(&origin, "live/b", Timescale::MILLI);
-		let good_end = format!("live/b/@{}/.end", good.0.identity());
+		let good_end = format!("live/b/@{}/.end", moq_hls::export::token(&good.0.identity()));
 		finish(good).await;
 		complete(dir.path(), good_end).await;
 		assert!(!recording.is_finished(), "a refused path ended the export");
@@ -607,7 +614,7 @@ mod tests {
 		assert!(!recording.is_finished(), "a dropped publisher ended the export");
 
 		let good = publish(&origin, "live/b", Timescale::MILLI);
-		let good_end = format!("live/b/@{}/.end", good.0.identity());
+		let good_end = format!("live/b/@{}/.end", moq_hls::export::token(&good.0.identity()));
 		finish(good).await;
 		complete(dir.path(), good_end).await;
 		assert!(!recording.is_finished());
@@ -709,25 +716,23 @@ mod tests {
 		assert!(claims.0.lock().unwrap().is_empty());
 	}
 
-	/// A stream records under its identity, which stays one key segment even when it holds a
-	/// delimiter.
+	/// A stream records under its identity's token: one short hex segment whatever the identity
+	/// holds, even 256 bytes that percent-encoded would pass a filesystem's name limit.
 	#[test]
 	fn an_identity_keys_one_segment() {
 		let identity = moq_net::Identity::random();
 		let pinned = (moq_net::Path::from_static("live/a"), identity.clone());
 		assert_eq!(
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
-			format!("rec/live/a/@{identity}")
+			format!("rec/live/a/@{}", moq_hls::export::token(&identity))
 		);
-		for identity in ["a/b?%23#", "音声\"\n&", "~0123"] {
+		for identity in ["a/b?%23#", "音声\"\n&", "~0123", &"é".repeat(128)] {
 			let pinned = (moq_net::Path::from_static("live/a"), identity.parse().unwrap());
 			let key = key(&Path::from("rec"), &pinned).unwrap();
 			assert_eq!(key.parts().count(), 4);
 			let part = key.parts().next_back().unwrap();
-			let decoded = percent_encoding::percent_decode_str(part.as_ref().strip_prefix('@').unwrap())
-				.decode_utf8()
-				.unwrap();
-			assert_eq!(decoded, identity);
+			assert_eq!(part.as_ref(), format!("@{}", moq_hls::export::token(&pinned.1)));
+			assert_eq!(part.as_ref().len(), 17);
 
 			// The store key is itself URL-encoded when naming the recording to import.
 			for base in ["file:///", "s3://bucket/", "gs://bucket/", "az://container/"] {
@@ -749,21 +754,25 @@ mod tests {
 		let identity = moq_net::Identity::random();
 		let pinned = (moq_net::Path::from_static(r"live/a\/b\\c"), identity.clone());
 		let key = key(&Path::from("rec"), &pinned).unwrap();
-		assert_eq!(key.as_ref(), format!("rec/live/a%2Fb%5Cc/@{identity}"));
+		assert_eq!(
+			key.as_ref(),
+			format!("rec/live/a%2Fb%5Cc/@{}", moq_hls::export::token(&identity))
+		);
 		assert_eq!(key.parts().count(), 4);
 	}
 
-	/// A path segment's key never starts with `@`, so a path that spells out another identity's
+	/// A path segment's key never starts with `@`, so a path that spells out another stream's
 	/// key prefix records beside it, never inside it.
 	#[test]
 	fn keys_are_prefix_free() {
 		let identity = moq_net::Identity::random();
+		let token = moq_hls::export::token(&identity);
 		let victim = key(
 			&Path::from("rec"),
 			&(moq_net::Path::from_static("live/a"), identity.clone()),
 		)
 		.unwrap();
-		let hostile = format!("live/a/@{identity}");
+		let hostile = format!("live/a/@{token}");
 		let nested = key(
 			&Path::from("rec"),
 			&(moq_net::Path::new(&hostile).unwrap(), moq_net::Identity::random()),
@@ -771,14 +780,14 @@ mod tests {
 		.unwrap();
 		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
 		assert!(
-			nested.as_ref().starts_with(&format!("rec/live/a/%40{identity}/@")),
+			nested.as_ref().starts_with(&format!("rec/live/a/%40{token}/@")),
 			"{nested}"
 		);
 
 		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
 		let literal = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new(&format!("live/a/%40{identity}")).unwrap(), identity),
+			&(moq_net::Path::new(&format!("live/a/%40{token}")).unwrap(), identity),
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");

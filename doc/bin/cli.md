@@ -369,12 +369,14 @@ for how, and for storage and serving limits.
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<identity>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<token>
 ```
 
 `export archive` records every broadcast announced at or under `--broadcast`
 with [moq-archive](https://docs.rs/moq-archive), each stream under
-`<broadcast>/@<identity>` in the store, until the connection ends. Like
+`<broadcast>/@<token>` in the store, until the connection ends. The `<token>` is the
+same 16-hex-digit hash of the stream's identity that its [HLS](/bin/hls) URLs carry, and the
+export logs it beside the identity as each recording starts. Like
 `announced`, it leaves out a broadcast whose name starts with `.` unless
 `--broadcast` names it. A broadcast path segment that starts with `@` is
 stored as `%40`, so no recording lands inside another. Every track is stored as its own objects, cut about every 2 s
@@ -387,7 +389,7 @@ dropped, and every other keeps recording; only the origin failing ends the expor
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes one recorded broadcast, the `<broadcast>/@<identity>`
+`import archive` republishes one recorded broadcast, the `<broadcast>/@<token>`
 prefix `export archive` wrote, as an ordinary broadcast under a new identity: every
 track, the catalog included, with its original groups, frames, timescale, and
 priority. Each track is live from its newest stored group and serves older
@@ -397,9 +399,9 @@ reachable. A recording still being made is followed, checked every `--refresh`
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
 
-Identities are percent-encoded as one key segment. When passing a stored key in an
-import URL, URL-encode its literal `%` characters too: identity `a/b` records under
-`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
+Broadcast path segments are percent-encoded as one key segment each. When passing a stored
+key in an import URL, URL-encode its literal `%` characters too: broadcast `a\/b` records
+under `a%2Fb/@<token>`, which the import URL names as `s3://recordings/a%252Fb/@<token>`.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the

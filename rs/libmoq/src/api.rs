@@ -2843,7 +2843,7 @@ fn lookup_identity(identity: u32) -> Result<Option<moq_net::Identity>, Error> {
 	Ok(Some(State::lock().origin.identity(identity)?.clone()))
 }
 
-/// Parse a named identity from `text`, refusing an empty one.
+/// Parse a named identity from `text`, refusing an empty one or one longer than 256 UTF-8 bytes.
 ///
 /// Only a session mints an identity, for a route whose wire (moq-lite 06 or older, or
 /// moq-transport) carries none, so text always names one: pass the handle a route or an
@@ -2859,7 +2859,7 @@ pub unsafe extern "C" fn moq_identity_parse(text: *const c_char, text_len: usize
 	ffi::enter(move || {
 		let identity = unsafe { ffi::parse_str(text, text_len)? }
 			.parse()
-			.map_err(|_| Error::InvalidConfig("an identity is never empty".into()))?;
+			.map_err(|err: moq_net::InvalidIdentity| Error::InvalidConfig(err.to_string()))?;
 		State::lock().origin.identity_insert(identity)
 	})
 }
