@@ -4059,6 +4059,8 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
+		// A late group below what the fill floor passed may reach later than the groups it was judged by.
+		if (this.#passed && key < this.#passed.key) this.#passed = undefined;
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -4869,16 +4871,18 @@ export class Subscriber {
 	// it handed out above a gap once media time puts that group past the widest budget, which puts
 	// every key below past it too (see #staleByMedia). That floor holds below a cached group no range
 	// covers, and an arrival read never raises its key cursor, so without this its fill verdicts since
-	// the join pile up and are judged again on every change. A scale-less track has no media time, so
-	// its floor stays. Only a widening lowers it, found by bisecting what it passed.
+	// the join pile up and are judged again on every change. A scale-less track has no media time, and
+	// an unchecked one's timestamps may rewind, so their floor stays. What it passed is only proven
+	// under the budget and the groups it judged by, so a widening, or a group handed out below it (see
+	// #handOut), walks it again from the hand-out floor.
 	#pastBudget(drift: Drift): bigint {
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		if (this.#state.info.peek()?.unchecked === true) return floor;
 		const widest = drift.budget.widest();
 		const judge = { ...drift, budget: Budget.uniform(widest) };
 		const stale = (key: bigint) => this.#staleByMedia(key, judge);
-		if (!this.#passed) this.#passed = { widest, key: floor };
+		if (!this.#passed || widest > this.#passed.widest) this.#passed = { widest, key: floor };
 		const passed = this.#passed;
-		if (widest > passed.widest) passed.key = this.#delivered.lastAboveGap(floor, passed.key, stale) ?? floor;
 		passed.widest = widest;
 		for (
 			let next = this.#delivered.nextAboveGap(max(passed.key, floor));

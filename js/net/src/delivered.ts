@@ -108,21 +108,6 @@ export class Delivered {
 		return this.#runs[this.#below(key) + 1]?.[0];
 	}
 
-	/**
-	 * The highest key handed out above a gap in `(from, to]` that `holds` is true for, given that it
-	 * is true for every such key below one it is true for.
-	 */
-	lastAboveGap(from: bigint, to: bigint, holds: (key: bigint) => boolean): bigint | undefined {
-		let lo = this.#below(from) + 1;
-		let hi = this.#below(to) + 1;
-		while (lo < hi) {
-			const mid = (lo + hi) >>> 1;
-			if (holds(this.#runs[mid][0])) lo = mid + 1;
-			else hi = mid;
-		}
-		return lo > this.#below(from) + 1 ? this.#runs[lo - 1][0] : undefined;
-	}
-
 	/** One past the last key of the run holding `key`, if it was handed out. */
 	runEnd(key: bigint): bigint | undefined {
 		const index = this.#below(key);
