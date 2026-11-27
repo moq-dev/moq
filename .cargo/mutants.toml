@@ -44,10 +44,6 @@ exclude_re = [
     # resume.rs: the sweep of handed-out groups only bounds memory, since
     # `let_go` drops dead entries itself before anything reads `out`.
     'replace (== with !=|> with >=) in Reader::hand_out$',
-    # Polling a covered copy hands out nothing, so polling it anyway only costs work. An
-    # expired copy's groups are past the reader's own budget too: the copy expires a budget
-    # after the newer group that makes them stale, and `let_go` arms the same timer.
-    ':\d+:13: replace \|\| with && in Reader::poll_first$',
     # A run starting at the window's end or the resume point clips to an empty range, which
     # has no gaps.
     'replace < with <= in Reader::(exhausted|lacking)$',

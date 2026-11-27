@@ -12363,6 +12363,40 @@ mod test {
 		assert!(matches!(res, Poll::Ready(Err(Error::NotFound))), "{res:?}");
 	}
 
+	/// A replaced copy refusing to place a time start leaves the read to the serving copy
+	/// instead of failing it.
+	#[test]
+	fn a_replaced_copys_refusal_leaves_the_read_to_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		write(&a, 0);
+		write(&a, 2);
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [2, 0]);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		sub.update(from_times(&[0, 1])).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.refuse_time(1, Error::NotFound);
+		let res = sub
+			.poll_recv_group(&kio::Waiter::noop())
+			.map(|res| res.map(|group| group.map(|group| group.start)));
+		assert!(res.is_pending(), "{res:?}");
+		b.time_starts([(1, Some(1))]);
+		write(&b, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+	}
+
 	/// A failed copy's late group waits for the window to place while a range still waits on
 	/// the copy continuing the track, though a range already placed holds the group.
 	#[test]
@@ -15550,6 +15584,33 @@ mod test {
 			sub.update(Subscription::default().with_max(ms(2000))).unwrap();
 			assert_eq!(drain(&mut sub, false), [2, 1], "routed {routed}");
 		}
+	}
+
+	/// A replaced copy a full budget past the newer group that superseded it hands out none of
+	/// its late groups, though they are fresh by their own successors there.
+	#[kio::test]
+	async fn an_expired_copys_late_groups_stay_unread() {
+		let ms = Duration::from_millis;
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, ms(1000));
+		write(&a, 0);
+		write(&a, 5);
+		// Held, so the replaced copy stays subscribed once it expires.
+		let _held = recv(&mut sub);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(ms(1500)).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending());
+		for key in [4, 2, 1] {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 	}
 
 	/// A backfill of the serving route goes once it delivered what it was asked for, when the
