@@ -597,7 +597,7 @@ async def test_publish_track_info_and_subscription():
     info = moq.TrackInfo(priority=5, max_age=timedelta(seconds=2))
     track = broadcast.publish_track("status", info)
 
-    consumer = track.consume(moq.Subscription(priority=3))
+    consumer = track.consume(moq.Subscription(ranges=[moq.Range(priority=3)]))
     track.write_frame(b"ready", moq.Timestamp.unscaled(0))
 
     frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
@@ -1331,8 +1331,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     consumer = track.consume(
         moq.Subscription(
             delay=moq.Delay(max=timedelta(seconds=10)),
-            ranges=[moq.Range(start=moq.Timestamp.unscaled(0))],
-            order=moq.Order.ASCENDING,
+            ranges=[moq.Range(start=moq.Timestamp.unscaled(0), order=moq.Order.ASCENDING)],
         )
     )
     starts = []
@@ -1357,8 +1356,7 @@ async def test_range_time_starts_at_the_group_containing_it():
     consumer = track.consume(
         moq.Subscription(
             delay=moq.Delay(max=timedelta(seconds=10)),
-            ranges=[moq.Range(start=start)],
-            order=moq.Order.ASCENDING,
+            ranges=[moq.Range(start=start, order=moq.Order.ASCENDING)],
         )
     )
     group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
@@ -1377,7 +1375,7 @@ async def test_delay_min_places_a_range_with_no_start():
 
     async def first(min: timedelta | None) -> int:
         consumer = track.consume(
-            moq.Subscription(delay=moq.Delay(min=min, max=None), ranges=[moq.Range()], order=moq.Order.ASCENDING)
+            moq.Subscription(delay=moq.Delay(min=min, max=None), ranges=[moq.Range(order=moq.Order.ASCENDING)])
         )
         group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
         assert group is not None

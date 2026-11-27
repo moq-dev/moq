@@ -111,18 +111,15 @@ func delayFromFFI(d ffi.MoqDelay) Delay {
 	return out
 }
 
-// Subscription holds subscriber-side delivery preferences: priority, the Delay (where a range
-// with no start begins and how late a non-latest group may fall before it is skipped), the
-// ranges of the track to deliver (nil for one Range with no start, while an empty non-nil
-// slice asks for nothing), and the order the publisher sends pending groups in (nil for
-// newest first).
+// Subscription holds subscriber-side delivery preferences: the Delay (where a range with no
+// start begins and how late a non-latest group may fall before it is skipped) and the ranges
+// of the track to deliver, each with its own priority and order (nil for one Range with no
+// start at priority 0, newest first, while an empty non-nil slice asks for nothing).
 //
 // The zero Subscription is moq-net's defaults, the same as DefaultSubscription.
 type Subscription struct {
-	Priority int8
-	Delay    Delay
-	Ranges   []Range
-	Order    *Order
+	Delay  Delay
+	Ranges []Range
 }
 
 // DefaultSubscription returns moq-net's defaults, whose zero Delay (no Min, a zero Max) starts
@@ -133,7 +130,7 @@ func DefaultSubscription() Subscription {
 	if d.Ranges != nil {
 		ranges = *d.Ranges
 	}
-	return Subscription{Priority: d.Priority, Delay: delayFromFFI(d.Delay), Ranges: ranges, Order: d.Order}
+	return Subscription{Delay: delayFromFFI(d.Delay), Ranges: ranges}
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
@@ -143,10 +140,8 @@ func (s Subscription) ffi() (ffi.MoqSubscription, error) {
 	}
 	delay, err := s.Delay.ffi()
 	return ffi.MoqSubscription{
-		Priority: s.Priority,
-		Delay:    delay,
-		Ranges:   ranges,
-		Order:    s.Order,
+		Delay:  delay,
+		Ranges: ranges,
 	}, err
 }
 

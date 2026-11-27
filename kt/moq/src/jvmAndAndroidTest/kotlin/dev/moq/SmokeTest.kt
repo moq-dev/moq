@@ -376,8 +376,7 @@ class SmokeTest {
                                 min = java.time.Duration.ZERO,
                                 max = java.time.Duration.ofSeconds(10),
                             ),
-                        ranges = listOf(Range(start = Timestamp.unscaled(0uL))),
-                        order = Order.ASCENDING,
+                        ranges = listOf(Range(start = Timestamp.unscaled(0uL), order = Order.ASCENDING)),
                     )
                 )
             val starts = List(3) { checkNotNull(consumer.recvGroup()).start() }
