@@ -2631,7 +2631,8 @@ impl TrackState {
 		if let Some(cap) = cap
 			&& cap <= next_key
 		{
-			if closed || self.final_key().is_some() && !self.awaits_answer(window) {
+			// No answer can place a group under a cap the read already passed.
+			if closed || self.final_key().is_some() {
 				return Poll::Ready(end());
 			}
 			return Poll::Pending;
@@ -4412,7 +4413,8 @@ impl TrackState {
 	/// (declared via [`Producer::finish_at`] ahead of the live edge) stays incomplete
 	/// until the remaining groups are produced, the last producer drops without them, or,
 	/// on a received copy, the grace for them passes. Drives the end-of-stream signal from
-	/// the read methods (`recv_group` / `next_group` / `read_frame` return `None`).
+	/// the read methods (`recv_group` / `next_group` / `read_frame` return `None`), except
+	/// that a read still waiting on a live join's answer waits on (see [`Self::awaits_answer`]).
 	///
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
@@ -12206,7 +12208,8 @@ impl Cursor {
 			// The walk read the track apart from the sync above: the copy's session, on another
 			// thread, may have answered a live join and then ended the track between the two, and
 			// the window as synced holds none of that join's groups. The poll runs again against
-			// the window as it is now.
+			// the window as it is now. A wait judged through it syncs again in the walk itself
+			// (`watch_time`), once it has parked where the answer's wake reaches it.
 			if matches!(res, Poll::Ready(Ok(None))) && self.sync() {
 				continue;
 			}
@@ -26927,6 +26930,45 @@ mod test {
 			ordered.poll_next_item(waiter).is_pending()
 		});
 		assert_eq!(items(&mut ordered), ["group 10", "group 11", "group 12"]);
+	}
+
+	/// A lite-07 copy whose end is declared and whose tail still owes group 10, so a read parks
+	/// rather than ends, has its live join answered between a woken read syncing its window
+	/// and walking the track. That answer's wake came before the read parked, so the walk syncs
+	/// again once parked and takes it in the same poll, rather than wait on a later write.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_read_takes_a_join_answered_mid_read_while_its_tail_is_owed() {
+		let lag = Some(Duration::from_secs(1));
+		let join = Subscription::default().with_ranges([Range::from(Start::Live { min: lag, max: None })]);
+		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(30)));
+		producer.received();
+		producer.anchored();
+		producer.proven();
+		producer.answers_joins();
+		producer.request_start(None).unwrap();
+		let mut reader = producer.subscribe(join);
+		for key in 11..13 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(Timestamp::unscaled(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		producer.finish_at(Position::group(13)).unwrap();
+		let (woken, waiter) = Flag::waiter();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		// A skip below the groups wakes the read, which then races the answer.
+		producer.skip_groups(0..10);
+		assert!(woken.take(), "the skip wakes the read");
+		let mut session = producer.clone();
+		set_after_sync(move || {
+			session.answer_join(lag, None, Some(10), Duration::MAX);
+			session.start_resolved(10).unwrap();
+		});
+		let read = reader.poll_recv_group(&kio::Waiter::noop());
+		assert!(
+			matches!(&read, Poll::Ready(Ok(Some(group))) if group.start == 12),
+			"the answer places the join in the same poll"
+		);
 	}
 
 	/// A lite-07 copy holding a whole burst for a live join still waiting on its upstream,

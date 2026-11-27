@@ -3304,6 +3304,9 @@ export class Producer {
 				return runGaps(given, gap.start, gap.end).length > 0;
 			});
 		const from = min(floor, final);
+		// Where the feed starts is still unknown, so every gap below the end is owed, whatever the
+		// ranges ask. Mirrors the Rust `TrackState::tail_deadline`.
+		if (this.#feedStart() === "pending" && this.#wire.served?.requested === undefined) return missing(0n, final);
 		// On a proven copy (lite-07) with active demand ranges, only gaps inside the asked ranges
 		// are owed by the wire: a gap between two disjoint ranges is never named on the wire.
 		const requested = this.#proven ? this.#requested.peek() : undefined;
@@ -7163,7 +7166,7 @@ export class Subscriber {
 		if (
 			!this.#parked(groups) &&
 			!this.#starting(groups, start) &&
-			(this.#complete() || (end !== undefined && start >= finalKey(end)))
+			(this.#complete() || (end !== undefined && start >= finalKey(end) && !this.#awaitsAnswer()))
 		) {
 			return this.#done();
 		}
