@@ -56,6 +56,7 @@ impl FillAsk {
 		groups.iter().map(|groups| lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+			..lite::Range::OPEN
 		})
 	}
 
@@ -728,6 +729,7 @@ impl Recovery {
 		let ranges = vec![lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
+			..lite::Range::OPEN
 		}];
 		Self::open(serve, serving, groups, subscription, ranges, !one_start)
 	}
@@ -745,6 +747,7 @@ impl Recovery {
 		let ranges = vec![lite::Range {
 			start: Some(lite::Anchor::Time(time)),
 			end: Some(lite::Anchor::Time(time)),
+			..lite::Range::OPEN
 		}];
 		Self::open(serve, serving, groups, subscription, ranges, true)
 	}
@@ -1115,6 +1118,7 @@ fn cap(groups: &Range<u64>, active: &mut SubStream) -> Result<(), Error> {
 	let range = lite::Range {
 		start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 		end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+		..lite::Range::OPEN
 	};
 	let (edit, _) = active.live.edit_keyed(&[((), range)], |_| ())?;
 	super::buffer_update(active, edit)

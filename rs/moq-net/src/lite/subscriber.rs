@@ -3685,6 +3685,7 @@ mod tests {
 				max: Some(Duration::ZERO),
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		for added in [lite::Range::span(Some(20), 0, None, None), latest] {
 			active.live = lite::LiveRanges::new(Version::Lite07, &[first, added]);
@@ -3717,14 +3718,17 @@ mod tests {
 				lite::Range {
 					start: Some(lite::Anchor::Time(10)),
 					end: Some(lite::Anchor::Time(20)),
+					..lite::Range::OPEN
 				},
 				lite::Range {
 					start: Some(lite::Anchor::Time(30)),
 					end: Some(lite::Anchor::Time(24)),
+					..lite::Range::OPEN
 				},
 				lite::Range {
 					start: Some(lite::Anchor::Time(66)),
 					end: None,
+					..lite::Range::OPEN
 				},
 			],
 		);
@@ -3777,6 +3781,7 @@ mod tests {
 			&[lite::Range {
 				start: Some(lite::Anchor::Time(40)),
 				end: None,
+				..lite::Range::OPEN
 			}],
 		);
 		active.starts = [(0, None)].into();
@@ -3831,6 +3836,7 @@ mod tests {
 						max,
 					}),
 					end: None,
+					..lite::Range::OPEN
 				}],
 			);
 			active.starts = [(0, Some(20))].into();
@@ -4495,7 +4501,15 @@ mod tests {
 		assert_eq!(probes, [], "the kept demand range answers the join");
 
 		// Hidden by an oldest range, it is retired, so the join is asked by a probe.
-		let (probes, _) = join_probes(Some(&sub), &[join], &[lite::Range { start: None, end: None }]);
+		let (probes, _) = join_probes(
+			Some(&sub),
+			&[join],
+			&[lite::Range {
+				start: None,
+				end: None,
+				..lite::Range::OPEN
+			}],
+		);
 		assert_eq!(probes, [probe], "the retired demand range answers nothing");
 	}
 
@@ -4564,7 +4578,7 @@ mod tests {
 		assert_eq!(add, [join_probe(&wide)], "and asked afresh");
 		assert_eq!(
 			retune,
-			[(0, Some(Duration::from_millis(300)))],
+			[(0, lite::Retune::max(Some(Duration::from_millis(300))))],
 			"the demand range is retuned"
 		);
 	}
@@ -4774,6 +4788,7 @@ mod tests {
 		let groups = |range: std::ops::Range<u64>| lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(range.start))),
 			end: Some(lite::Anchor::Absolute(Position::group(range.end))),
+			..lite::Range::OPEN
 		};
 		let demand = groups(4..8);
 		let mut sub = SubStream {
@@ -4884,6 +4899,7 @@ mod tests {
 				max: None,
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		let (edit, changed) = sub.edit(&[first, back], (0, 0), &Default::default()).unwrap();
 		assert!(changed);
@@ -6442,6 +6458,7 @@ mod tests {
 		let bounded = |start, end| lite::Range {
 			start: Some(lite::Anchor::Time(start)),
 			end: Some(lite::Anchor::Time(end)),
+			..lite::Range::OPEN
 		};
 		let Sub::Active(active) = &mut serving.sub else {
 			unreachable!("the helper opens a subscription");
@@ -7073,6 +7090,7 @@ mod tests {
 					max: Some(Duration::from_secs(5)),
 				}),
 				end: None,
+				..lite::Range::OPEN
 			};
 			let ranges = active.live.edit(&[wider]).unwrap();
 			buffer_update(active, ranges).unwrap();
@@ -7111,6 +7129,7 @@ mod tests {
 				max: Some(budget),
 			}),
 			end: Some(lite::Anchor::Time(3)),
+			..lite::Range::OPEN
 		};
 		let Sub::Active(active) = &mut serving.sub else {
 			unreachable!("an active subscription");
@@ -7142,7 +7161,11 @@ mod tests {
 	#[test]
 	fn the_cap_is_where_the_last_range_ends() {
 		let version = Version::Lite07;
-		let ending = |end: Option<lite::Anchor>| lite::Range { start: None, end };
+		let ending = |end: Option<lite::Anchor>| lite::Range {
+			start: None,
+			end,
+			..lite::Range::OPEN
+		};
 		let cap = |ranges: &[lite::Range]| cap_of(&lite::LiveRanges::new(version, ranges));
 		let position = |group: u64, frame: u64| lite::Anchor::Absolute(crate::track::Position::new(group, frame));
 		assert_eq!(cap(&[ending(Some(lite::Anchor::Time(3)))]), Some(4));
@@ -9991,6 +10014,7 @@ mod tests {
 			Some(vec![lite::Range {
 				start: time(5),
 				end: time(5),
+				..lite::Range::OPEN
 			}])
 		);
 		// Pre-lite-07 carries absolute group bounds.
@@ -9999,6 +10023,7 @@ mod tests {
 			Some(vec![lite::Range {
 				start: group(5),
 				end: group(6),
+				..lite::Range::OPEN
 			}])
 		);
 		assert_eq!(wire_ranges(&Subscription::default().with_end(0), true), None);
@@ -10013,6 +10038,7 @@ mod tests {
 			Some(vec![lite::Range {
 				start: time(5),
 				end: time(9),
+				..lite::Range::OPEN
 			}])
 		);
 		assert_eq!(
@@ -10020,6 +10046,7 @@ mod tests {
 			Some(vec![lite::Range {
 				start: group(5),
 				end: group(10),
+				..lite::Range::OPEN
 			}])
 		);
 		// An end before its start asks for nothing.
@@ -10040,6 +10067,7 @@ mod tests {
 					max: Some(Duration::ZERO)
 				}),
 				end: None,
+				..lite::Range::OPEN
 			}])
 		);
 	}
@@ -10065,6 +10093,7 @@ mod tests {
 				max,
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		let live = lite::Range {
 			start: Some(lite::Anchor::Live {
@@ -10072,6 +10101,7 @@ mod tests {
 				max,
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		assert_eq!(wire_ranges(&placed, true), Some(vec![live, joined(0)]));
 		placed.resume = Some(Position::new(5, 2));
@@ -10087,6 +10117,7 @@ mod tests {
 			Some(vec![lite::Range {
 				start: Some(lite::Anchor::Absolute(Position::new(5, 2))),
 				end: None,
+				..lite::Range::OPEN
 			}])
 		);
 	}
@@ -12117,9 +12148,22 @@ fn wire_ranges(subscription: &Subscription, ranged: bool) -> Option<Vec<lite::Ra
 			_ if ranged => (time < u64::MAX).then_some(lite::Anchor::Time(time)),
 			_ => Some(lite::Anchor::Absolute(Position::group(time.checked_add(1)?))),
 		});
-		ranges.push(lite::Range { start, end });
+		ranges.push(lite::Range {
+			start,
+			end,
+			..lite::Range::OPEN
+		});
 	}
 	(!ranges.is_empty()).then_some(ranges)
+}
+
+/// `ranges` at `subscription`'s priority and order, which lite-07 carries on each range.
+fn with_policy(ranges: Vec<lite::Range>, subscription: &Subscription) -> Vec<lite::Range> {
+	let policy = lite::Policy {
+		priority: subscription.priority,
+		order: subscription.order,
+	};
+	ranges.into_iter().map(|range| range.with_policy(policy)).collect()
 }
 
 /// `subscription` narrowed to the one span a wire without ranges carries, which the
@@ -12690,6 +12734,7 @@ fn join_probe(join: &track::JoinAsk) -> lite::Range {
 			max: join.max(),
 		}),
 		end: join.end.map(lite::Anchor::Time),
+		..lite::Range::OPEN
 	}
 }
 
@@ -12750,6 +12795,7 @@ fn probe(time: u64) -> lite::Range {
 	lite::Range {
 		start: Some(lite::Anchor::Time(time)),
 		end: Some(lite::Anchor::Time(time)),
+		..lite::Range::OPEN
 	}
 }
 
@@ -13223,16 +13269,17 @@ impl TrackServe {
 		// parameters. The demand alone sets the floor.
 		let request = match request {
 			Some((demand, demand_ranges, probes, reasked, max_age)) => {
+				let subscription = fills.merge(demand.clone());
 				let mut ranges = demand_ranges.clone();
 				ranges.extend(probes.iter().copied());
 				ranges.extend(FillAsk::wire(&groups));
 				Some(Wire {
-					subscription: fills.merge(demand.clone()),
+					ranges: with_policy(ranges, &subscription),
+					subscription,
 					demand: Some(demand),
 					demand_ranges,
 					probes: probes.len(),
 					reasked,
-					ranges,
 					max_age,
 				})
 			}
@@ -13243,7 +13290,7 @@ impl TrackServe {
 				demand_ranges: Vec::new(),
 				probes: 0,
 				reasked: Default::default(),
-				ranges: FillAsk::wire(&groups).collect(),
+				ranges: with_policy(FillAsk::wire(&groups).collect(), &fills.subscription()),
 				max_age: fills.subscription().max_age(),
 			}),
 		};
@@ -13426,7 +13473,7 @@ impl TrackServe {
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
 		}
-		let ranges = wire_ranges(&subscription, ranged)?;
+		let ranges = with_policy(wire_ranges(&subscription, ranged)?, &subscription);
 		Some(Request {
 			subscription,
 			ranges,
@@ -16819,6 +16866,7 @@ impl kio::Task for SubFillRun {
 								frame: frame_start,
 							})),
 							end: Some(lite::Anchor::Absolute(end_pos)),
+							..lite::Range::OPEN
 						}],
 						order: crate::track::Order::Ascending,
 					};

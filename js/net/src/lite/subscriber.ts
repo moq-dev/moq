@@ -107,6 +107,7 @@ import {
 	inclusiveGroupEnd,
 	LiveRanges,
 	type RangeKind,
+	type Retune,
 	requestedRange,
 	Subscribe,
 	type SubscribeStart,
@@ -115,6 +116,7 @@ import {
 	toWireRanges,
 	type WireAnchor,
 	type WireRange,
+	withPolicy,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { decodeTracksEventMaybe, Tracks as TracksMessage } from "./tracks.ts";
@@ -1713,7 +1715,7 @@ export class Subscriber {
 	// `msg` asking for `ranges` on a wire that carries them, each live join `placed` at a group by
 	// index as a Joined start there.
 	#withRanges(msg: Subscribe, ranges: readonly track.Range[], placed?: ReadonlyMap<number, bigint>): Subscribe {
-		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, placed);
+		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, placed).map((range) => withPolicy(range, msg));
 		return msg;
 	}
 
@@ -1722,7 +1724,9 @@ export class Subscriber {
 	async #fitted(msg: Subscribe): Promise<Subscribe> {
 		if (!msg.ranges || !hasRanges(this.version)) return msg;
 		const fields = await this.#subscribeFields(msg, msg);
-		msg.ranges = [...Fit.fit(msg.ranges, [], [], Fit.budget(fields, 0n, msg.ranges.length)).ranges];
+		const fitted = Fit.fit(msg.ranges, [], [], Fit.budget(fields, 0n, msg.ranges.length)).ranges;
+		// Each range at the subscription's priority and order.
+		msg.ranges = fitted.map((range) => withPolicy(range, msg));
 		return msg;
 	}
 
@@ -2075,10 +2079,13 @@ export class Subscriber {
 			);
 
 			const ranges: WireRange[] = [
-				{
-					start: { absolute: key, frame: 0 },
-					end: { absolute: key + 1n, frame: 0 },
-				},
+				withPolicy(
+					{
+						start: { absolute: key, frame: 0 },
+						end: { absolute: key + 1n, frame: 0 },
+					},
+					{ priority, order: "ascending" },
+				),
 			];
 			const msg = new Subscribe({
 				id,
@@ -2522,10 +2529,13 @@ export class Subscriber {
 		// rather than time-containment ranges.
 		if (hasRanges(this.version)) {
 			msg.ranges = [
-				{
-					start: { absolute: groups.start, frame: 0 },
-					end: { absolute: groups.end, frame: 0 },
-				},
+				withPolicy(
+					{
+						start: { absolute: groups.start, frame: 0 },
+						end: { absolute: groups.end, frame: 0 },
+					},
+					msg,
+				),
 			];
 		}
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
@@ -3270,7 +3280,7 @@ export class Subscriber {
 
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
-			let edit: { remove: bigint[]; add: WireRange[]; retune: [bigint, number | null][] } | undefined;
+			let edit: { remove: bigint[]; add: WireRange[]; retune: [bigint, Retune][] } | undefined;
 			if (hasRanges(this.version)) {
 				// The demand's ranges and the fills' groups, widened together until they fit. The fills
 				// keep their exact ask, so what they ask next is compared with that, not the wire.
@@ -3312,8 +3322,10 @@ export class Subscriber {
 					const max = (live ?? joined)?.max ?? null;
 					entry.joinBudgets.set(id, Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max)));
 				}
+				// Every range at the subscription's priority and order.
+				const policy = { priority, order: current.order };
 				const edited = entry.live.edit(
-					[...fitted.ranges, ...probed, ...fillRanges],
+					[...fitted.ranges, ...probed, ...fillRanges].map((range) => withPolicy(range, policy)),
 					{ probes: probed.length, fills: fillRanges.length, kindOf },
 					renew,
 				);

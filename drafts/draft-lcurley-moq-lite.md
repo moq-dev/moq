@@ -765,13 +765,16 @@ How these streams get transmitted over the network is very important, and yet ha
 ## Prioritization
 The Publisher and Subscriber both exchange a `Priority` value, which determines which Track should be transmitted next.
 The subscriber's `Group Order` determines which Group within the Track is transmitted next.
+The subscriber sets both on each Range (see [SUBSCRIBE](#subscribe)), so one subscription can ask for its live edge urgently and its history in the background.
+A Group goes out at the highest `Subscriber Priority` among the live Ranges covering it, in that Range's `Group Order`, descending if several Ranges at that priority disagree.
+A Group a high-priority Range covers is never held back behind one only a lower-priority Range covers.
 
 A publisher SHOULD attempt to transmit streams based on these rules.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
 A [datagram](#datagrams) is ranked by its Datagrams Stream's priority like a Group Stream, the newest first among them.
 
 ### Priority
-The `Subscriber Priority` is scoped to the connection and MAY change over the life of the subscription via SUBSCRIBE_UPDATE.
+The `Subscriber Priority` is scoped to the connection and MAY change over the life of each Range via a SUBSCRIBE_UPDATE retune.
 The `Publisher Priority` is fixed for the lifetime of the Track (see [TRACK_INFO](#track-info)) and SHOULD be used only to resolve conflicts or ties.
 Both are a byte where higher is more urgent, and 128 is the midpoint an endpoint SHOULD use for a priority it was never given.
 
@@ -791,7 +794,7 @@ ali/video + bob/video: subscriber_priority=1 publisher_priority=1
 ```
 
 Because publisher priority cannot change, dynamic adaptation is the subscriber's job.
-If the subscriber detects that Bob is actively speaking, it raises the subscriber priority of Bob's tracks via SUBSCRIBE_UPDATE:
+If the subscriber detects that Bob is actively speaking, it raises the subscriber priority of Bob's tracks by retuning their Ranges via SUBSCRIBE_UPDATE:
 ```text
 bob/audio: subscriber_priority=4 publisher_priority=2
 bob/video: subscriber_priority=3 publisher_priority=1
@@ -802,7 +805,7 @@ ali/video: subscriber_priority=1 publisher_priority=1
 The subscriber priority takes precedence, so the subscriber can likewise full-screen Ali's window by raising the subscriber priority of Ali's tracks above Bob's.
 
 ### Group Order
-Within a subscription, a publisher SHOULD transmit pending Groups in the subscriber's `Group Order`: newest first when descending (the default), oldest first when ascending.
+Among the pending Groups at one priority, a publisher SHOULD transmit them in the `Group Order` of the Ranges covering them: newest first when descending (the default), oldest first when ascending.
 Descending sheds the backlog rather than the live edge under congestion, which is what a Group boundary exists to make possible; ascending drains a backlog in start order, for catch-up.
 
 `Group Order` only orders transmission; it never decides whether a Group is delivered, which is [Expiration](#expiration)'s job.
@@ -1474,13 +1477,13 @@ SUBSCRIBE Message {
   Minted (8)
   Node (..)
   Track Name (s)
-  Subscriber Priority (8)
-  Group Order (8)
   Range Count (i)
   Range (..) ...
 }
 
 Range {
+  Subscriber Priority (8)
+  Group Order (8)
   Start (Anchor)
   End (Anchor)
 }
@@ -1502,25 +1505,25 @@ A Subscribe ID MUST NOT be reused within the same session, even if the prior sub
 **Instance**, **Minted**, and **Node**:
 As in [TRACK](#track).
 
-**Subscriber Priority**:
-The priority of the subscription within the session, represented as a u8 with 128 as the midpoint.
-The publisher SHOULD transmit *higher* values first during congestion.
-See the [Prioritization](#prioritization) section for more information.
-
-**Group Order**:
-Which pending Group the publisher SHOULD transmit first: descending (0x0), newest first, or ascending (0x1), oldest first.
-Any other value is a PROTOCOL_VIOLATION.
-See the [Group Order](#group-order) section for more information.
-
 **Range Count**:
 The number of Ranges that follow.
 A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing has no use.
 
 **Range**:
-A span of the Track to deliver, from its `Start` up to its `End`.
-The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_DROP for every Group it will not deliver.
+A span of the Track to deliver, from its `Start` up to its `End`, at its own priority and order.
+The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, at the priority and order the Ranges covering it ask (see [Prioritization](#prioritization)), and accounts with SUBSCRIBE_DROP for every Group it will not deliver.
 Each Range implicitly takes the next Range ID on the stream, starting at 0, which a [SUBSCRIBE_UPDATE](#subscribe-update) uses to retire it.
 A relay asking for the union of several subscriptions' Ranges, whose exact union does not fit one SUBSCRIBE, SHOULD ask for fewer Ranges covering it, joining the Ranges separated by the narrowest gaps, rather than refuse a subscription: each reader still reads only its own Ranges from the relay's copy.
+
+**Subscriber Priority**:
+The priority of the Range's Groups within the session, represented as a u8 with 128 as the midpoint.
+The publisher SHOULD transmit *higher* values first during congestion.
+See the [Prioritization](#prioritization) section for more information.
+
+**Group Order**:
+Which of the Range's pending Groups the publisher SHOULD transmit first: descending (0x0), newest first, or ascending (0x1), oldest first.
+Any other value is a PROTOCOL_VIOLATION.
+See the [Group Order](#group-order) section for more information.
 
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
@@ -1571,7 +1574,7 @@ If the Group itself finishes at or before `Frame`, the Group Stream ends with [G
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
 Every field but the Ranges restates the subscription, and the latest one applies.
-The Ranges are an edit, growing or shrinking the subscription: the update retires the live Ranges it names by Range ID, changes the `Max Age` of the live joins it retunes, then adds its own Ranges, each taking the next Range ID.
+The Ranges are an edit, growing or shrinking the subscription: the update retires the live Ranges it names by Range ID, changes the priority and order of the live Ranges it retunes and the `Max Age` of the live joins among them, then adds its own Ranges, each taking the next Range ID.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered or dropped on this subscription.
 No update reopens a Group the subscription already delivered or named in a SUBSCRIBE_DROP, whatever its Error Code, even one an update makes no longer stale.
@@ -1580,8 +1583,6 @@ A SUBSCRIBE_UPDATE never resets the subscription, since a reset would race Group
 ~~~
 SUBSCRIBE_UPDATE Message {
   Message Length (i)
-  Subscriber Priority (8)
-  Group Order (8)
   Remove Count (i)
   Range ID (i) ...
   Range Count (i)
@@ -1593,6 +1594,8 @@ SUBSCRIBE_UPDATE Message {
 
 Retune {
   Range ID (i)
+  Subscriber Priority (8)
+  Group Order (8)
   Max Age (i)
 }
 ~~~
@@ -1609,10 +1612,10 @@ The live Ranges after the edit MUST NOT be empty, and MUST fit in one SUBSCRIBE:
 A publisher closes the session with a PROTOCOL_VIOLATION otherwise.
 
 **Retune Count** and **Retune**:
-The live joins whose `Max Age` changes, each a Range ID and its new `Max Age`, encoded as in a Live Anchor.
-A retuned Range keeps where it started and is not resolved again: only which of its Groups are stale changes, from then on.
+The live Ranges whose priority, order, or `Max Age` changes, each a Range ID, its new `Subscriber Priority` and `Group Order`, and, for a live join, its new `Max Age`, encoded as in a Live Anchor.
+A retuned Range keeps where it started and is not resolved again: only how its Groups are scheduled and which of them are stale change, from then on.
 A wider `Max Age` reopens no Group already named in a SUBSCRIBE_DROP.
-A Range ID that is not live after the removals, names a Range whose `Start` is neither Live nor Joined, or appears twice in the list is a PROTOCOL_VIOLATION.
+A Range ID that is not live after the removals, or appears twice in the list, is a PROTOCOL_VIOLATION, and so is a non-zero `Max Age` for a Range whose `Start` is neither Live nor Joined.
 
 **Wanted Start**:
 The group start the subscriber's readers want, plus one; `0` means none.
@@ -2269,10 +2272,10 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 ### Subscriptions {#changelog-07-subscribe}
 
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none or a time naming the Group containing it, and both ends include the Group they name. There is no Anchor counting Groups back from the latest: a live join is a Range whose `Start` is a Live Anchor (see below). A start may also be a Position, a Group's start and a frame within it, so a subscription resumes a Group partway through.
-- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
+- Moved `Subscriber Priority` from SUBSCRIBE and SUBSCRIBE_UPDATE onto each Range, beside a new `Group Order`: descending (0x0, the previous fixed order) or ascending (0x1). A Group goes out at the highest priority among the live Ranges covering it, in that Range's order.
 - Removed `Subscriber Max Age` from SUBSCRIBE and SUBSCRIBE_UPDATE. Only a Group reached through a live join expires for staleness, under that join's own `Max Age`, measured from the live edge; a Group several joins cover takes the largest, and one any other Range covers has no subscriber limit. A Group being sent when an update stops covering it takes the largest limit any Range asks. A Range whose `Start` is None, a Time, or a Position asks for history: every Group it covers is delivered, bounded only by `Publisher Max Age`.
 - Added a Live Anchor (0x3), a `Start` only, carrying a `Min Age`, the subscriber's target latency, in milliseconds plus one with zero meaning no lag limit: the Range joins at the Group containing the live edge minus it. It also carries a `Max Age`, milliseconds plus one with zero meaning no limit, past which the Groups it reaches are stale; the join never starts at a Group it expired. Each Range joins on its own, so one subscription can join at several lags. A relay places the join only at the Range Start its upstream answered a Range of its own with, the same `Min Age` and `End`, under a `Max Age` at least as large, answered after the subscriber's Range was added, and otherwise adds such a Range and waits for its answer. A `Start` of None is the oldest Group the publisher holds.
-- Added a retune list to SUBSCRIBE_UPDATE, after the Ranges to add: Range IDs of live joins, each with a new `Max Age`, changed in place without resolving the Range again.
+- Added a retune list to SUBSCRIBE_UPDATE, after the Ranges to add: Range IDs of live Ranges, each with a new `Subscriber Priority`, `Group Order`, and, for a live join, `Max Age`, changed in place without resolving the Range again.
 - Added a Joined Anchor (0x4), a `Start` only: a live join already placed, carrying a Group's start, a frame within it (`0` for the whole Group), and the join's `Max Age`, so a subscriber resuming a live join on a new subscription keeps its `Max Age` without being placed at the live edge again.
 - A relay places a Time `Start` only where it can show its origin would, and otherwise adds a Range from that time to its own subscription and waits for its answer.
 - Removed the Fetch Stream (0x3) and FETCH message; single-group and frame-slice reads use bounded SUBSCRIBE ranges with `Position (0x2)` Anchors. `Position (0x2)` allows `Frame == 0`, matches only the exact Group starting at `Timestamp` (never falling back to an earlier Group whose span contains `Timestamp`), and is exclusive as an `End` (so `[Position(G, 0), Position(G + 1, 0))` selects whole Group `G` and `[Position(G, f1), Position(G, f2))` selects frames `[f1, f2)`). Reaching a `Position` End closes the Group Stream cleanly with FIN (without `GROUP_END`) instead of parking it open. A publisher holding only part of a Group a subscription covers drops it.

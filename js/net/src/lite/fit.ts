@@ -18,10 +18,10 @@ import { rangeSize, varintSize, type WireRange } from "./subscribe.ts";
 export const UPDATE_FIELDS = 9 * 9 + 1;
 
 /**
- * The most one range takes besides its Range ID: each end's type, then at most three varints of
- * nine bytes for a start and two for an end.
+ * The most one range takes besides its Range ID: its priority and order, each end's type, then at
+ * most three varints of nine bytes for a start and two for an end.
  */
-const RANGE_FIELDS = 2 + 5 * 9;
+const RANGE_FIELDS = 2 + 2 + 5 * 9;
 
 /** What lite-07 ranges may take on the wire. */
 export interface Budget {

@@ -1731,6 +1731,13 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 	fn resolve(mut self, live: &mut lite::LiveRanges) -> Result<LiveUpdate, DecodeError> {
 		let edit = std::mem::replace(&mut self.ranges, lite::RangeEdit::Replace(Vec::new()));
 		let ranges = live.apply(edit)?;
+		// Lite-07 carries a priority and order per range, which this serves the subscription at
+		// as a whole.
+		if live.reports_starts() {
+			let policy = lite::Policy::of(live.iter().map(|(_, range)| range));
+			self.priority = policy.priority;
+			self.order = policy.order;
+		}
 		Ok(self.with_ranges(ranges))
 	}
 
@@ -7393,6 +7400,7 @@ impl CoverageBench {
 			.map(|range| lite::Range {
 				start: group(range.start),
 				end: group(range.end),
+				..lite::Range::OPEN
 			})
 			.collect();
 		let bounds = Bounds::new(&wire, None);
@@ -7551,7 +7559,11 @@ impl UpdateBench {
 	/// set stays under 8K ranges, small enough that 8K of them fit one SUBSCRIBE.
 	fn range(id: u64) -> lite::Range {
 		let time = Some(lite::Anchor::Time(2 * id % (1 << 14)));
-		lite::Range { start: time, end: time }
+		lite::Range {
+			start: time,
+			end: time,
+			..lite::Range::OPEN
+		}
 	}
 
 	/// Retire the `edited` oldest ranges and add as many new ones, then serve until parked.
@@ -8286,7 +8298,16 @@ mod serve_group_test {
 	#[test]
 	fn bounds_convert_to_whole_groups() {
 		let group = |group, frame| Some(lite::Anchor::Absolute(track::Position { group, frame }));
-		let bounds = |start, end| Bounds::new(&[lite::Range { start, end }], None);
+		let bounds = |start, end| {
+			Bounds::new(
+				&[lite::Range {
+					start,
+					end,
+					..lite::Range::OPEN
+				}],
+				None,
+			)
+		};
 
 		let whole = bounds(None, group(6, 0));
 		assert_eq!(whole.groups().end(), Some(6));
@@ -8321,6 +8342,7 @@ mod serve_group_test {
 		let time = [lite::Range {
 			start: Some(lite::Anchor::Time(1_000)),
 			end: None,
+			..lite::Range::OPEN
 		}];
 		assert_eq!(
 			Bounds::new(&time, None).ranges[0].start,
@@ -8341,6 +8363,7 @@ mod serve_group_test {
 						max,
 					}),
 					end: None,
+					..lite::Range::OPEN
 				}],
 				None,
 			)
@@ -8369,6 +8392,7 @@ mod serve_group_test {
 		let start = [lite::Range {
 			start: Some(lite::Anchor::Absolute(track::Position { group: 5, frame: 0 })),
 			end: None,
+			..lite::Range::OPEN
 		}];
 		let legacy = Bounds::new(&start, Some(crate::track::Start::Oldest));
 		assert_eq!(legacy.ranges[0].start, crate::track::Start::Time(5));
@@ -8397,6 +8421,7 @@ mod serve_group_test {
 			&[lite::Range {
 				start: Some(lite::Anchor::Absolute(at)),
 				end: None,
+				..lite::Range::OPEN
 			}],
 			Some(crate::track::Start::within(max)),
 		);
@@ -8404,6 +8429,7 @@ mod serve_group_test {
 			&[lite::Range {
 				start: Some(lite::Anchor::Joined { at, max: Some(max) }),
 				end: None,
+				..lite::Range::OPEN
 			}],
 			None,
 		);
@@ -8420,6 +8446,7 @@ mod serve_group_test {
 			&[lite::Range {
 				start: group(5, 2),
 				end: group(5, 4),
+				..lite::Range::OPEN
 			}],
 			None,
 		);
@@ -8472,10 +8499,12 @@ mod serve_group_test {
 				lite::Range {
 					start: at(7, 4),
 					end: time(8),
+					..lite::Range::OPEN
 				},
 				lite::Range {
 					start: at(9, 2),
 					end: None,
+					..lite::Range::OPEN
 				},
 			],
 			None,
@@ -8490,8 +8519,13 @@ mod serve_group_test {
 				lite::Range {
 					start: at(7, 4),
 					end: time(6),
+					..lite::Range::OPEN
 				},
-				lite::Range { start: None, end: None },
+				lite::Range {
+					start: None,
+					end: None,
+					..lite::Range::OPEN
+				},
 			],
 			None,
 		);
@@ -8502,10 +8536,12 @@ mod serve_group_test {
 				lite::Range {
 					start: at(7, 4),
 					end: None,
+					..lite::Range::OPEN
 				},
 				lite::Range {
 					start: at(9, 2),
 					end: None,
+					..lite::Range::OPEN
 				},
 			],
 			None,
@@ -9596,6 +9632,7 @@ mod serve_group_test {
 			lite::Range {
 				start: Some(lite::Anchor::Time(0)),
 				end: None,
+				..lite::Range::OPEN
 			}
 		} else {
 			lite::Range::span(Some(0), 0, None, None)
@@ -10082,6 +10119,7 @@ mod serve_group_test {
 				max: None,
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
 		// Before any SUBSCRIBE_START, another update leaves the join live.
@@ -10140,6 +10178,7 @@ mod serve_group_test {
 				max: Some(Duration::from_millis(1500)),
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10181,6 +10220,7 @@ mod serve_group_test {
 				max: None,
 			}),
 			end: None,
+			..lite::Range::OPEN
 		};
 		let join = |update: LiveUpdate| update;
 		let live = [(0, first)];
@@ -10242,6 +10282,7 @@ mod serve_group_test {
 		let time = lite::Range {
 			start: Some(lite::Anchor::Time(4500)),
 			end: None,
+			..lite::Range::OPEN
 		};
 		run.update(lite07_add(&run, &[(0, served)], 1, &[time]));
 		let live = [(0, served), (1, time)];
@@ -10283,6 +10324,7 @@ mod serve_group_test {
 		let later = lite::Range {
 			start: Some(lite::Anchor::Time(7000)),
 			end: Some(lite::Anchor::Time(100_000)),
+			..lite::Range::OPEN
 		};
 		run.update(lite07_add(&run, &[], 1, &[later]));
 		let waiter = kio::Waiter::noop();
@@ -10331,6 +10373,7 @@ mod serve_group_test {
 		let time = lite::Range {
 			start: Some(lite::Anchor::Time(time)),
 			end: None,
+			..lite::Range::OPEN
 		};
 		run.update(lite07_add(&run, &[(0, served)], 1, &[time]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10392,6 +10435,7 @@ mod serve_group_test {
 		let time = lite::Range {
 			start: Some(lite::Anchor::Time(4500)),
 			end: None,
+			..lite::Range::OPEN
 		};
 		run.update(lite07_add(&run, &[], 1, &[time]));
 		assert_eq!(run.track.resolved_range(1).map(|r| r.start), Some(4000));
@@ -10751,6 +10795,7 @@ mod serve_group_test {
 			&[lite::Range {
 				start: Some(lite::Anchor::Time(3000)),
 				end: Some(lite::Anchor::Time(4000)),
+				..lite::Range::OPEN
 			}],
 		);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -10760,10 +10805,12 @@ mod serve_group_test {
 			lite::Range {
 				start: Some(lite::Anchor::Time(1000)),
 				end: Some(lite::Anchor::Time(2000)),
+				..lite::Range::OPEN
 			},
 			lite::Range {
 				start: Some(lite::Anchor::Time(5000)),
 				end: Some(lite::Anchor::Time(6000)),
+				..lite::Range::OPEN
 			},
 		];
 		run.update(lite07_add(&run, &[], 1, &added));
@@ -11851,6 +11898,7 @@ mod serve_group_test {
 				&[lite::Range {
 					start: Some(start),
 					end: None,
+					..lite::Range::OPEN
 				}],
 				None,
 			);
@@ -12060,6 +12108,7 @@ mod serve_group_test {
 		let at = |frame: Option<u64>| lite::Range {
 			start: Some(lite::Anchor::Time(0)),
 			end: frame.map(|frame| lite::Anchor::Absolute(track::Position::new(0, frame))),
+			..lite::Range::OPEN
 		};
 		// The group stream's bytes, whether it FINed, and whether it was reset.
 		let stream = |log: &Log| {
@@ -12155,6 +12204,7 @@ mod serve_group_test {
 		ranges.push(lite::Range {
 			start: Some(lite::Anchor::Time(1)),
 			end: None,
+			..lite::Range::OPEN
 		});
 		let bounds = Bounds::new(&ranges, None);
 		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
@@ -12181,6 +12231,7 @@ mod serve_group_test {
 		let at = |frame: Option<u64>| lite::Range {
 			start: Some(lite::Anchor::Time(0)),
 			end: frame.map(|frame| lite::Anchor::Absolute(track::Position::new(0, frame))),
+			..lite::Range::OPEN
 		};
 		let track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -12263,6 +12314,7 @@ mod serve_group_test {
 		let exact = lite::Range {
 			start: Some(lite::Anchor::Absolute(track::Position::new(0, 0))),
 			end: Some(lite::Anchor::Absolute(track::Position::new(0, 2))),
+			..lite::Range::OPEN
 		};
 		let bounds = Bounds::new(&[exact], None);
 		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
@@ -12284,6 +12336,7 @@ mod serve_group_test {
 		let partial = lite::Range {
 			start: Some(lite::Anchor::Absolute(track::Position::new(0, 0))),
 			end: Some(lite::Anchor::Absolute(track::Position::new(0, 1))),
+			..lite::Range::OPEN
 		};
 		let bounds = Bounds::new(&[partial], None);
 		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
@@ -12583,6 +12636,7 @@ mod serve_group_test {
 				&[lite::Range {
 					start: Some(lite::Anchor::Time(first)),
 					end: None,
+					..lite::Range::OPEN
 				}],
 				None,
 			);
@@ -12596,6 +12650,7 @@ mod serve_group_test {
 					ranges: vec![lite::Range {
 						start: Some(lite::Anchor::Time(10)),
 						end: None,
+						..lite::Range::OPEN
 					}],
 				});
 			}
@@ -14671,7 +14726,10 @@ mod tests {
 			priority: 1,
 			max_delay: Some(Duration::ZERO),
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
-			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
+			ranges: vec![lite::Range::span(Some(1), 0, None, None).with_policy(lite::Policy {
+				priority: 1,
+				order: crate::track::Order::Descending,
+			})],
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -14688,7 +14746,7 @@ mod tests {
 		let mut serve = RequestServe::<SubscribeServe>::new(publisher.shared.clone(), stream);
 		assert!(!drive(&mut serve).await);
 
-		// The ranges stay as the SUBSCRIBE asked, so each update edits none of them.
+		// The ranges stay where the SUBSCRIBE placed them, so each update only retunes its one.
 		let update = |wanted_group, priority| lite::SubscribeUpdate {
 			wanted_group,
 			order: crate::track::Order::Descending,
@@ -14697,7 +14755,16 @@ mod tests {
 			ranges: lite::RangeEdit::Edit {
 				remove: Vec::new(),
 				add: Vec::new(),
-				retune: Vec::new(),
+				retune: vec![(
+					0,
+					lite::Retune {
+						policy: lite::Policy {
+							priority,
+							order: crate::track::Order::Descending,
+						},
+						max: None,
+					},
+				)],
 			},
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
@@ -14762,6 +14829,27 @@ mod tests {
 				add: Vec::new(),
 				retune: Vec::new(),
 			},
+		}
+	}
+
+	/// An update that gives the running subscription's one range `priority`.
+	fn retuned(priority: i8) -> lite::SubscribeUpdate {
+		lite::SubscribeUpdate {
+			ranges: lite::RangeEdit::Edit {
+				remove: Vec::new(),
+				add: Vec::new(),
+				retune: vec![(
+					0,
+					lite::Retune {
+						policy: lite::Policy {
+							priority,
+							order: crate::track::Order::Descending,
+						},
+						max: None,
+					},
+				)],
+			},
+			..running_update()
 		}
 	}
 
@@ -14946,11 +15034,7 @@ mod tests {
 		let priority = |i: usize| if i == UPDATES - 1 { i8::MAX } else { (i % 100) as i8 + 1 };
 		let mut bytes = Vec::new();
 		for i in 0..UPDATES {
-			let update = lite::SubscribeUpdate {
-				priority: priority(i),
-				..running_update()
-			};
-			update
+			retuned(priority(i))
 				.encode(
 					&mut crate::coding::Encoder::new(&mut bytes, Version::Lite07.into()),
 					Version::Lite07,
@@ -15002,11 +15086,7 @@ mod tests {
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		assert_eq!(wakes.0.load(Ordering::Relaxed), 0, "a repeated update woke the groups");
 
-		let update = lite::SubscribeUpdate {
-			priority: 1,
-			..running_update()
-		};
-		session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		session.push(&retuned(1).encode_bytes(Version::Lite07).unwrap());
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		assert_eq!(
 			wakes.0.load(Ordering::Relaxed),
@@ -15684,7 +15764,10 @@ mod tests {
 			track: track.into(),
 			priority,
 			max_delay: Some(Duration::ZERO),
-			ranges: vec![lite::Range::span(None, 0, None, None)],
+			ranges: vec![lite::Range::span(None, 0, None, None).with_policy(lite::Policy {
+				priority,
+				order: crate::track::Order::Descending,
+			})],
 		};
 		let mut script = Vec::new();
 		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)

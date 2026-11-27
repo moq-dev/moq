@@ -22,9 +22,9 @@ use crate::{
 /// varints of at most nine bytes, and the priority byte.
 const UPDATE_FIELDS: usize = 9 * 9 + 1;
 
-/// The most one range takes besides its Range ID: each end's type, then at most three varints
-/// of nine bytes for a start and two for an end.
-const RANGE_FIELDS: usize = 2 + 5 * 9;
+/// The most one range takes besides its Range ID: its priority and order, each end's type,
+/// then at most three varints of nine bytes for a start and two for an end.
+const RANGE_FIELDS: usize = 2 + 2 + 5 * 9;
 
 /// What ranges may take on the wire.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +89,7 @@ fn span(start: Position, end: Option<Position>) -> Range {
 	Range {
 		start: Some(Anchor::Absolute(start)),
 		end: end.map(Anchor::Absolute),
+		..Range::OPEN
 	}
 }
 
@@ -97,6 +98,7 @@ fn make_span(start: Position, end: Option<Position>, time: bool) -> Range {
 		true => Range {
 			start: Some(Anchor::Time(start.group)),
 			end: end.map(|end| Anchor::Time(end.group)),
+			..Range::OPEN
 		},
 		false => span(start, end),
 	}
@@ -415,10 +417,12 @@ mod tests {
 				0 => Range {
 					start: Some(Anchor::Time(rng.random_range(0..20))),
 					end: end.map(Anchor::Absolute),
+					..Range::OPEN
 				},
 				1 => Range {
 					start: None,
 					end: end.map(Anchor::Absolute),
+					..Range::OPEN
 				},
 				_ => span(Position::group(start), end),
 			});
@@ -536,6 +540,7 @@ mod tests {
 			.map(|back| Range {
 				start: Some(Anchor::Time(1_000 - back)),
 				end: Some(Anchor::Absolute(Position::group(1_000 + back))),
+				..Range::OPEN
 			})
 			.collect();
 		let (ranges, _) = fit(times.clone(), &RangeSet::new(), &RangeSet::new(), budget(100)).unwrap();
@@ -544,6 +549,7 @@ mod tests {
 			[Range {
 				start: Some(Anchor::Time(801)),
 				end: Some(Anchor::Absolute(Position::group(1_199))),
+				..Range::OPEN
 			}]
 		);
 		assert!(matches!(

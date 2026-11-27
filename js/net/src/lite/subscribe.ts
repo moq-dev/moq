@@ -164,10 +164,63 @@ export interface WireLive {
 	max: number | null;
 }
 
-/** A lite-07 range as the wire carries it; see {@link WireAnchor}. */
+/**
+ * A lite-07 range as the wire carries it; see {@link WireAnchor}. Its `priority` and `order` say
+ * how urgently and in what order its groups go out, absent for 0 and descending.
+ */
 export interface WireRange {
 	start?: WireAnchor;
 	end?: WireAnchor;
+	priority?: number;
+	order?: Order;
+}
+
+/** A lite-07 range's priority and group order. Mirrors the Rust `lite::Policy`. */
+export interface Policy {
+	priority: number;
+	order: Order;
+}
+
+/** The policy `range` carries. */
+function policyOf(range: WireRange): Policy {
+	return { priority: range.priority ?? 0, order: range.order ?? "descending" };
+}
+
+/** `range` under `policy`, which it omits where it is the default. */
+export function withPolicy(range: WireRange, policy: Partial<Policy>): WireRange {
+	const { priority: _, order: __, ...rest } = range;
+	const out: WireRange = rest;
+	if (policy.priority) out.priority = policy.priority;
+	if (policy.order === "ascending") out.order = "ascending";
+	return out;
+}
+
+/**
+ * What a subscription of `ranges` asks as a whole, for a wire or a sender without a policy per
+ * range: the highest priority, newest first if any range at that priority is. Mirrors the Rust
+ * `Policy::of`.
+ */
+export function subscriptionPolicy(ranges: readonly WireRange[]): Policy {
+	let top: Policy | undefined;
+	for (const range of ranges) {
+		const policy = policyOf(range);
+		if (
+			top === undefined ||
+			policy.priority > top.priority ||
+			(policy.priority === top.priority && policy.order === "descending")
+		)
+			top = policy;
+	}
+	return top ?? { priority: 0, order: "descending" };
+}
+
+/**
+ * A lite-07 SUBSCRIBE_UPDATE's change to a live range in place, which keeps where it started: its
+ * new policy, and a live join's new `max` in milliseconds, `null` for no limit and for any other
+ * range. Mirrors the Rust `lite::Retune`.
+ */
+export interface Retune extends Policy {
+	max: number | null;
 }
 
 /**
@@ -224,8 +277,9 @@ function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...b
 	return [0];
 }
 
-/** Encode one lite-07 range, its start then its end; see {@link wireAnchor}. */
+/** Encode one lite-07 range: its policy, then its start, then its end; see {@link wireAnchor}. */
 async function encodeRange(w: Writer, range: WireRange) {
+	await encodePolicy(w, policyOf(range));
 	for (const [anchor, end] of [
 		[range.start, false],
 		[range.end, true],
@@ -241,7 +295,13 @@ async function encodeRange(w: Writer, range: WireRange) {
  * and the frame bounds; lite-07 carries a list of ranges, which is `ranges` when given and
  * otherwise this span as its only one.
  */
-async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: readonly WireRange[]) {
+async function encodeSpan(
+	w: Writer,
+	version: Version,
+	span: Span,
+	ranges?: readonly WireRange[],
+	policy?: Partial<Policy>,
+) {
 	if (ranges !== undefined && hasRanges(version)) {
 		if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 		await w.u53(ranges.length);
@@ -266,7 +326,7 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 			? { absolute: span.startGroup, frame: span.startFrame }
 			: { time: span.startGroup };
 	if (span.endGroup !== undefined) range.end = { time: span.endGroup };
-	await encodeRange(w, range);
+	await encodeRange(w, withPolicy(range, policy ?? {}));
 }
 
 /**
@@ -390,14 +450,28 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 	}
 }
 
-/** Decode one lite-07 range: its start, then its end. */
+/** Decode one lite-07 range: its policy, then its start, then its end. */
 async function decodeRange(r: Reader): Promise<WireRange> {
+	const policy = await decodePolicy(r);
 	const start = await decodeAnchor(r, false);
 	const end = await decodeAnchor(r, true);
 	const range: WireRange = {};
 	if (start) range.start = start;
 	if (end) range.end = end;
-	return range;
+	return withPolicy(range, policy);
+}
+
+/** Encode a lite-07 range's or retune's `Priority` then `Group Order`. */
+async function encodePolicy(w: Writer, policy: Policy) {
+	await w.u8(toWire(policy.priority));
+	await encodeOrder(w, Version.DRAFT_07, policy.order);
+}
+
+/** Decode the inverse of {@link encodePolicy}. */
+async function decodePolicy(r: Reader): Promise<Policy> {
+	const priority = fromWire(await r.u8());
+	const order = await decodeOrder(r, Version.DRAFT_07);
+	return { priority, order };
 }
 
 /** Decode a lite-07 `Range Count` and its ranges, which may be none. */
@@ -606,11 +680,18 @@ export function rangeSize(range: WireRange): number {
 		const [kind, ...values] = wireAnchor(anchor, end);
 		return values.reduce((total, value) => total + size(value), size(kind));
 	};
-	return anchor(range.start, false) + anchor(range.end, true);
+	// Its priority and order, a byte each.
+	return 2 + anchor(range.start, false) + anchor(range.end, true);
 }
 
-/** A range's anchors as a key, so equal ranges compare equal. */
+/** A range's anchors and policy as a key, so equal ranges compare equal. */
 function rangeKey(range: WireRange): string {
+	const { priority, order } = policyOf(range);
+	return `${anchorsKey(range)}@${priority}${order[0]}`;
+}
+
+/** A range's anchors alone as a key. */
+function anchorsKey(range: WireRange): string {
 	const anchor = (anchor: WireAnchor | undefined) => {
 		if (anchor?.absolute !== undefined) return `a${anchor.absolute}.${anchor.frame ?? 0}`;
 		if (anchor?.time !== undefined) return `t${anchor.time}`;
@@ -729,19 +810,21 @@ export class LiveRanges {
 		}
 		// Retuned before the adds, so a retune names a range live before this edit.
 		const retuned: [bigint, WireRange][] = [];
-		for (const [id, max] of update.retune ?? []) {
-			// Each live join once: one retuned twice in an edit says nothing a single one doesn't.
+		for (const [id, retune] of update.retune ?? []) {
+			// Each range once: one retuned twice in an edit says nothing a single one doesn't.
 			if (retuned.some(([tuned]) => tuned === id)) throw new ProtocolViolation(`range id retuned twice: ${id}`);
 			const range = this.#live.get(id);
-			const live = range?.start?.live;
-			const joined = range?.start?.joined;
-			if (range === undefined || (live === undefined && joined === undefined))
+			if (range === undefined) throw new ProtocolViolation(`no live range to retune: ${id}`);
+			const live = range.start?.live;
+			const joined = range.start?.joined;
+			// Only a live join has a max age to change.
+			if (live === undefined && joined === undefined && retune.max !== null)
 				throw new ProtocolViolation(`no live join to retune: ${id}`);
 			// One already placed stays where it was placed.
-			const tuned: WireRange = {
-				...range,
-				start: joined ? { joined: { ...joined, max } } : { live: { min: live ? live.min : 0, max } },
-			};
+			let tuned: WireRange = range;
+			if (joined) tuned = { ...range, start: { joined: { ...joined, max: retune.max } } };
+			else if (live) tuned = { ...range, start: { live: { min: live.min, max: retune.max } } };
+			tuned = withPolicy(tuned, retune);
 			this.#replace(id, tuned);
 			retuned.push([id, tuned]);
 		}
@@ -770,8 +853,9 @@ export class LiveRanges {
 	 * demand range does still takes a range of its own, so each Range ID stays one kind's.
 	 * `fillIds` and `probeIds` are the Range IDs the added ones of each took. The live ranges in
 	 * `renew` are retired and added again even when wanted, so the publisher resolves them afresh.
-	 * A live join wanted again under another max alone, as the same kind, is retuned in place,
-	 * keeping its Range ID and so where it was placed. Mirrors the Rust `SubStream::edit`.
+	 * A range wanted again under another policy, or a live join under another max, as the same
+	 * kind, is retuned in place, keeping its Range ID and so where it was placed. Mirrors the Rust
+	 * `SubStream::edit`.
 	 */
 	edit(
 		ranges: readonly WireRange[],
@@ -780,7 +864,7 @@ export class LiveRanges {
 	): {
 		remove: bigint[];
 		add: WireRange[];
-		retune: [bigint, number | null][];
+		retune: [bigint, Retune][];
 		fillIds: bigint[];
 		probeIds: bigint[];
 	} {
@@ -831,24 +915,26 @@ export class LiveRanges {
 			wanted.set(k, count - 1);
 			adding.push([range, kind]);
 		});
-		// A live join wanted again under another max alone, its placement kept: one being renewed
-		// is placed afresh.
+		// A range wanted again under another policy, or a live join under another max, its placement
+		// kept: one being renewed is placed afresh.
 		const retuned: [bigint, WireRange][] = [];
 		const kept = remove.filter((id) => {
 			const start = this.#live.get(id)?.start;
 			const live = start?.live;
 			const joined = start?.joined;
-			if ((live === undefined && joined === undefined) || renew.has(id)) return true;
-			const end = rangeKey({ end: this.#live.get(id)?.end });
-			// The same join: one live by its lag, one placed by where it was placed.
+			if (renew.has(id)) return true;
+			const end = anchorsKey({ end: this.#live.get(id)?.end });
+			// The same start: a join live by its lag, one placed by where it was placed, any other as is.
 			const same = (wanted: WireAnchor | undefined) =>
 				live !== undefined
 					? wanted?.live?.min === live.min
-					: wanted?.joined !== undefined &&
-						wanted.joined.absolute === joined?.absolute &&
-						wanted.joined.frame === joined.frame;
+					: joined !== undefined
+						? wanted?.joined !== undefined &&
+							wanted.joined.absolute === joined.absolute &&
+							wanted.joined.frame === joined.frame
+						: anchorsKey({ start: wanted }) === anchorsKey({ start });
 			const index = adding.findIndex(
-				([range, kind]) => kind === kindOf(id) && same(range.start) && rangeKey({ end: range.end }) === end,
+				([range, kind]) => kind === kindOf(id) && same(range.start) && anchorsKey({ end: range.end }) === end,
 			);
 			if (index < 0) return true;
 			retuned.push([id, adding[index][0]]);
@@ -873,9 +959,9 @@ export class LiveRanges {
 		for (const id of kept) this.#remove(id);
 		for (const [id, range] of retuned) this.#replace(id, range);
 		this.#add(add);
-		const retune = retuned.map(([id, range]): [bigint, number | null] => [
+		const retune = retuned.map(([id, range]): [bigint, Retune] => [
 			id,
-			range.start?.live?.max ?? range.start?.joined?.max ?? null,
+			{ ...policyOf(range), max: range.start?.live?.max ?? range.start?.joined?.max ?? null },
 		]);
 		return { remove: kept, add, retune, fillIds, probeIds };
 	}
@@ -980,10 +1066,10 @@ export class SubscribeUpdate {
 	/** Lite-07: the Range IDs of the live ranges to retire before adding {@link ranges}. */
 	remove?: bigint[];
 	/**
-	 * Lite-07: each live join to give a new max in milliseconds (`null` for no limit) in place,
-	 * keeping where it was placed, by Range ID.
+	 * Lite-07: each live range to give a new policy, and a live join a new max, in place, keeping
+	 * where it was placed, by Range ID.
 	 */
-	retune?: [bigint, number | null][];
+	retune?: [bigint, Retune][];
 
 	constructor(props: {
 		priority: number;
@@ -996,7 +1082,7 @@ export class SubscribeUpdate {
 		endFrame?: number;
 		ranges?: WireRange[];
 		remove?: bigint[];
-		retune?: [bigint, number | null][];
+		retune?: [bigint, Retune][];
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
 			throw new RangeError("wanted group must be non-negative");
@@ -1020,8 +1106,11 @@ export class SubscribeUpdate {
 				await w.u8(toWire(this.priority));
 				break;
 			default:
-				await w.u8(toWire(this.priority));
-				await encodeOrder(w, version, this.order);
+				// Lite-07 carries a priority and order per range instead.
+				if (!hasRanges(version)) {
+					await w.u8(toWire(this.priority));
+					await encodeOrder(w, version, this.order);
+				}
 				await encodeMaxDelay(w, version, this.maxDelay);
 				if (hasRanges(version)) {
 					// An edit of the live ranges, which may add none: `ranges`, or else the span as
@@ -1032,16 +1121,17 @@ export class SubscribeUpdate {
 					await w.u53(remove.length);
 					for (const id of remove) await w.u62(id);
 					if (this.ranges === undefined) {
-						await encodeSpan(w, version, this);
+						await encodeSpan(w, version, this, undefined, this);
 					} else {
 						await w.u53(this.ranges.length);
 						for (const range of this.ranges) await encodeRange(w, range);
 					}
 					const retune = this.retune ?? [];
 					await w.u53(retune.length);
-					for (const [id, max] of retune) {
+					for (const [id, tuned] of retune) {
 						await w.u62(id);
-						await Duration.encodeOptional(w, max ?? undefined);
+						await encodePolicy(w, tuned);
+						await Duration.encodeOptional(w, tuned.max ?? undefined);
 					}
 				} else {
 					await encodeSpan(w, version, this, this.ranges);
@@ -1057,18 +1147,23 @@ export class SubscribeUpdate {
 			case Version.DRAFT_02:
 				return new SubscribeUpdate({ priority: fromWire(await r.u8()), maxDelay: null });
 			default: {
-				const priority = fromWire(await r.u8());
-				const order = await decodeOrder(r, version);
+				// Lite-07 carries a priority and order per range, which the publisher reads off the live
+				// ranges once it applies the edit.
+				const priority = hasRanges(version) ? 0 : fromWire(await r.u8());
+				const order = hasRanges(version) ? "descending" : await decodeOrder(r, version);
 				const maxDelay = await decodeMaxDelay(r, version);
-				let span: Span & { ranges?: WireRange[]; remove?: bigint[]; retune?: [bigint, number | null][] };
+				let span: Span & { ranges?: WireRange[]; remove?: bigint[]; retune?: [bigint, Retune][] };
 				if (hasRanges(version)) {
 					// Not preallocated, like the ranges: each id costs a byte of the bounded message.
 					const remove: bigint[] = [];
 					for (let count = await r.u53(); count > 0; count--) remove.push(await r.u62());
 					const ranges = await decodeRanges(r);
-					const retune: [bigint, number | null][] = [];
-					for (let count = await r.u53(); count > 0; count--)
-						retune.push([await r.u62(), (await Duration.decodeOptional(r)) ?? null]);
+					const retune: [bigint, Retune][] = [];
+					for (let count = await r.u53(); count > 0; count--) {
+						const id = await r.u62();
+						const policy = await decodePolicy(r);
+						retune.push([id, { ...policy, max: (await Duration.decodeOptional(r)) ?? null }]);
+					}
 					span = { startFrame: 0, remove, ranges, retune };
 				} else {
 					span = await decodeSpan(r, version);
@@ -1176,16 +1271,20 @@ export class Subscribe {
 		await encodePin(w, version, this.instance);
 		await encodeNode(w, version);
 		await w.string(this.track);
-		await w.u8(toWire(this.priority));
 
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
+				await w.u8(toWire(this.priority));
 				break;
 			default:
-				await encodeOrder(w, version, this.order);
+				// Lite-07 carries a priority and order per range instead.
+				if (!hasRanges(version)) {
+					await w.u8(toWire(this.priority));
+					await encodeOrder(w, version, this.order);
+				}
 				await encodeMaxDelay(w, version, this.maxDelay);
-				await encodeSpan(w, version, this, this.ranges);
+				await encodeSpan(w, version, this, this.ranges, this);
 				break;
 		}
 	}
@@ -1196,16 +1295,22 @@ export class Subscribe {
 		const instance = await decodePin(r, version);
 		await decodeNode(r, version);
 		const track = await r.string();
-		const priority = fromWire(await r.u8());
 
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				return new Subscribe({ id, broadcast, track, priority, maxDelay: null });
+				return new Subscribe({ id, broadcast, track, priority: fromWire(await r.u8()), maxDelay: null });
 			default: {
-				const order = await decodeOrder(r, version);
+				let priority = 0;
+				let order: Order = "descending";
+				if (!hasRanges(version)) {
+					priority = fromWire(await r.u8());
+					order = await decodeOrder(r, version);
+				}
 				const maxDelay = await decodeMaxDelay(r, version);
 				const span = await decodeSpan(r, version);
+				// Each range carries its own priority and order, which the subscription runs at as a whole.
+				if (span.ranges) ({ priority, order } = subscriptionPolicy(span.ranges));
 				return new Subscribe({
 					id,
 					broadcast,

@@ -84,6 +84,7 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 	spanBetween,
+	subscriptionPolicy,
 	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
@@ -557,6 +558,9 @@ class SubscriptionControls {
 				}
 				// Each lite-07 update edits the live ranges, which only the stream's history names.
 				const edit = live.apply(update);
+				// Lite-07 carries a priority and order per range, which this serves the subscription at
+				// as a whole.
+				if (hasRanges(version)) Object.assign(update, subscriptionPolicy(live.ranges()));
 				apply(update, edit);
 				// The latest one replaces any the loop has yet to take, its edit folded in.
 				const pending = this.#update ?? {

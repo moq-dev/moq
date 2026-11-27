@@ -2730,12 +2730,32 @@ impl TrackState {
 		if self.anchors != Anchors::Wire {
 			return;
 		}
+		// One poll per group, at the largest of its times: a group that places that one places
+		// every smaller one, and one that doesn't wakes the waiter on its next change. Polling
+		// each time would spin on a group already past many of them.
+		let mut run: Option<(u64, u64)> = None;
 		for time in times {
-			if let Some((_, slot)) = self.lookup.range(..=time).next_back() {
-				for copy in slot.copies() {
-					let _ = copy.poll_past(waiter, time);
+			let Some((&key, _)) = self.lookup.range(..=time).next_back() else {
+				continue;
+			};
+			match &mut run {
+				Some((held, largest)) if *held == key => *largest = time.max(*largest),
+				_ => {
+					if let Some((held, largest)) = run.replace((key, time)) {
+						self.watch_place(held, largest, waiter);
+					}
 				}
 			}
+		}
+		if let Some((held, largest)) = run {
+			self.watch_place(held, largest, waiter);
+		}
+	}
+
+	/// Wake `waiter` once each copy of the group held at `key` places `time`.
+	fn watch_place(&self, key: u64, time: u64, waiter: &kio::Waiter) {
+		for copy in self.lookup[&key].copies() {
+			let _ = copy.poll_past(waiter, time);
 		}
 	}
 

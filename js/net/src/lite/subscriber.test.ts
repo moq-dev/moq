@@ -1561,7 +1561,9 @@ test.each(
 		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
 		track.update(withMax({ priority: 4, delay: { max: Duration.millis(10_000) } }));
 		const update = await SubscribeUpdate.decode(subscribe, version);
-		expect([update.priority, update.maxDelay]).toEqual([4, maxAge]);
+		// Lite-07 retunes each range to the new priority.
+		const priority = version === Version.DRAFT_07 ? update.retune?.[0]?.[1].priority : update.priority;
+		expect([priority, update.maxDelay]).toEqual([4, maxAge]);
 		track.close();
 		if (version === Version.DRAFT_07) await request.aborted;
 		else expect(await subscribe.done()).toBe(true);
