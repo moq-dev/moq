@@ -18,7 +18,3 @@ Work items (report before/after `js/qmux/bench/` numbers):
 4. **Drop redundant native `WebSocketStream` receive `TransformStream`**: Remove the `event.readable.pipeThrough(new TransformStream(...))` wrapper in `web-socket-stream.ts:365-371` by using an internal transport type for `Session` (keeping exported `WebSocketStreamLike` / `WebSocketStreamOpenEvent` types unchanged) and relying on the `ArrayBuffer` normalization already performed in `js/qmux/src/session.ts` (noted in `audit-perf.md:113`).
 
 Public API: none. Wire: none (multi-frame records are standard `qmux-01/02`).
-
-## Required
-
-- [Fix Rust and JS QMux correctness bugs and port web-transport fixes](/quest/m1/qmux-correctness-fixes.md) - lands the JS wire and state-machine fixes before optimizing the hot path
