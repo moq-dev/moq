@@ -8692,6 +8692,50 @@ mod test {
 		}
 	}
 
+	/// A reader that read a copy's groups around a skip that copy's publisher declared is told
+	/// of that skip after the front switched routes, as a reader of the copy alone is: a relay
+	/// serving it otherwise names those starts NOT_FOUND once the track ends.
+	#[test]
+	fn a_skip_on_a_replaced_copy_reaches_its_reader() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(Subscription::default().with_max(None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&a, 0);
+		a.skip_groups(1..3);
+		write(&a, 3);
+		let mut b = received_copy();
+		b.anchored();
+		write(&b, 3);
+		b.skip_groups(4..6);
+		write(&b, 6);
+		routes.serve(b.consume());
+		b.finish_at(Position::group(7)).unwrap();
+		let mut groups = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&kio::Waiter::noop()) {
+			groups.push(group.start);
+		}
+		assert_eq!(groups, [6, 3, 0]);
+		let mut skips = Vec::new();
+		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+			assert!(matches!(hole, track::Hole::Skip), "{run:?} {hole:?}");
+			skips.push(run);
+		}
+		skips.sort_by_key(|run| run.start);
+		assert_eq!(
+			skips,
+			[1..3, 4..6],
+			"the replaced copy's skip of 1 and 2 reaches the reader"
+		);
+	}
+
 	/// A front's held group with no end of its own is bounded by the next key its copies hold,
 	/// so a time start past that key holds back none of the groups another range covers.
 	/// Mirrors the plain `a_held_groups_successor_rules_out_a_time_start_past_it`.
