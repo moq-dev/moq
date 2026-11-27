@@ -5937,6 +5937,11 @@ struct TrackRun {
 	// SUBSCRIBE_START has gone out yet, as a range following an edge this hop does not know
 	// yet leaves it. A subscriber reads none before the subscription's first START.
 	withheld: Option<RangeMap<u64, Hole>>,
+	// The final runs given up below where delivery starts that its wire was never told of,
+	// though the record holds them told so no later scan gives them up again, one by one. Named
+	// once owed: those reaching up to a group served below the start, and those a lowered start
+	// reaches (see [`Self::lower_start`]).
+	unsent: RangeMap<u64, Hole>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
 	bounded: bool,
@@ -6102,6 +6107,7 @@ impl TrackRun {
 			end_sent: false,
 			held_end: None,
 			withheld: None,
+			unsent: RangeMap::new(),
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -6221,13 +6227,11 @@ impl TrackRun {
 		let range = (self.floor, self.cap);
 		if let Some(start) = floor {
 			self.floor = start;
-			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
-			if let Start::Resolved(resolved) = &mut self.start {
-				// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
-				// A raised one sends no early drop: the subscriber already stops owing below its
-				// floor, and a later update may lower it again to reopen those groups.
-				*resolved = (*resolved).min(start);
-			}
+			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it. A lowered
+			// floor owes the groups it newly asks for, so the end sweep covers them. A raised one
+			// sends no early drop: the subscriber already stops owing below its floor, and a
+			// later update may lower it again to reopen those groups.
+			self.lower_start(start);
 		}
 		self.cap = end.map_or(Bound::Unbounded, Bound::Excluded);
 		// Moving the cursor wakes its readers, so an update that keeps the range moves nothing.
@@ -6505,10 +6509,7 @@ impl TrackRun {
 			reported = true;
 		}
 		self.unstarted = waiting;
-		self.start = Start::Resolved(lowest);
-		if lowest < from {
-			self.track.rescan_drops();
-		}
+		self.lower_start(lowest);
 		Ok(reported)
 	}
 
@@ -6527,6 +6528,28 @@ impl TrackRun {
 			false => lite::Applied::Replace(added),
 		};
 		self.update(update.with_ranges(ranges));
+	}
+
+	/// Move where delivery starts down to `start`, owing the subscriber what was given up from
+	/// there: the runs [`Self::unsent`] holds there are forgotten, so the next drop scan, which
+	/// this asks for, gives them up again.
+	fn lower_start(&mut self, start: u64) {
+		let Start::Resolved(resolved) = &mut self.start else {
+			return;
+		};
+		if start >= *resolved {
+			return;
+		}
+		let lowered = start..*resolved;
+		*resolved = start;
+		let owed: Vec<_> = (self.unsent.overlapping(&lowered))
+			.map(|(run, _)| run.start.max(lowered.start)..run.end.min(lowered.end))
+			.collect();
+		for run in owed {
+			self.track.untell(run);
+		}
+		self.unsent.remove(lowered);
+		self.track.rescan_drops();
 	}
 
 	/// Apply [`Self::floor`] and [`Self::cap`] to the read cursor.
@@ -6730,6 +6753,10 @@ impl TrackRun {
 							debug_assert!(first.is_none(), "a held group is resolved before the next");
 							*first = Some(group);
 						}
+						&mut Start::Resolved(start) if key < start => {
+							self.serve(group);
+							self.name_reaching(key, writer)?;
+						}
 						_ => self.serve(group),
 					}
 				}
@@ -6848,6 +6875,17 @@ impl TrackRun {
 		};
 		match &mut self.start {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
+			// A stale run below the start goes unnamed, as at the start (see [`Self::resolve`]).
+			&mut Start::Resolved(start) if range.start < start && hole.stale_budget().is_some() => {
+				let owed = self.owed(start);
+				for below in owed.gaps(&range) {
+					self.track.record_mut().untell(below);
+				}
+				for part in owed.overlapping(&range) {
+					let part = part.start.max(range.start)..part.end.min(range.end);
+					self.forward_range(part, &hole, writer)?;
+				}
+			}
 			_ => {
 				self.forward_range(range, &hole, writer)?;
 			}
@@ -7219,10 +7257,13 @@ impl TrackRun {
 		// above it is named as it would have been after the start. Below it, nothing is owed. The
 		// final runs reaching up to it unbroken are named all the same, so a reader filling below
 		// the start (a relay whose reader reaches lower) learns nothing there exists. The rest,
-		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
+		// past a stale run, a group still held, or a key nothing gave up, go unnamed: naming them
 		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
-		// one per group. An update that asks below the start names them then, and a wider budget
-		// may still serve a stale one.
+		// one per group. A stale one is forgotten by this subscription's record alone, so a wider
+		// budget may still serve it: a front's copies keep it, or each would give it up again on
+		// every scan an update widening the budget asks for, one poll at a time ahead of every
+		// group. A final one stays told for the same reason; an update that asks below the start
+		// names it then.
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
 			if range.start >= reach {
@@ -7233,25 +7274,13 @@ impl TrackRun {
 			}
 			reach = range.start;
 		}
-		// On lite-07, a subscription can also name disjoint history ranges below `reach` whose
-		// groups were already given up before the first group resolved: forward their drops too
-		// so the subscriber settles those ranges with the same verdict as a direct reader.
-		let mut send = rangemap::RangeSet::new();
-		send.insert(reach..u64::MAX);
-		if self.ctx.version.has_ranges() {
-			for range in self.requested.ranges.values() {
-				let track::Start::Time(from) = range.start else {
-					continue;
-				};
-				let to = range.end.map_or(u64::MAX, |end| end.saturating_add(1));
-				if from < to {
-					send.insert(from..to);
-				}
-			}
-		}
+		let send = self.owed(reach);
 		for (range, hole) in skipped.iter() {
 			for below in send.gaps(range) {
-				self.track.untell(below);
+				match hole.stale_budget() {
+					Some(_) => self.track.record_mut().untell(below),
+					None => self.unsent.insert(below, hole.clone()),
+				}
 			}
 			for part in send.overlapping(range) {
 				let part = part.start.max(range.start)..part.end.min(range.end);
@@ -7261,6 +7290,45 @@ impl TrackRun {
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
 			writer.buffer(&lite::SubscribeResponse::End(end))?;
+		}
+		Ok(())
+	}
+
+	/// The keys named once given up: those from `from` on, and on lite-07 those in a disjoint
+	/// history range below it, so the subscriber settles that range with the same verdict as a
+	/// direct reader.
+	fn owed(&self, from: u64) -> rangemap::RangeSet<u64> {
+		let mut owed = rangemap::RangeSet::new();
+		owed.insert(from..u64::MAX);
+		if self.ctx.version.has_ranges() {
+			for range in self.requested.ranges.values() {
+				let track::Start::Time(from) = range.start else {
+					continue;
+				};
+				let to = range.end.map_or(u64::MAX, |end| end.saturating_add(1));
+				if from < to {
+					owed.insert(from..to);
+				}
+			}
+		}
+		owed
+	}
+
+	/// Name the final runs below where delivery starts that reach up to `key` unbroken, now
+	/// that a group was served there, as [`Self::resolve`] names those reaching up to the start.
+	fn name_reaching(
+		&mut self,
+		key: u64,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+	) -> Result<(), Error> {
+		let mut reach = key;
+		while let Some(below) = reach.checked_sub(1)
+			&& let Some((run, hole)) = self.unsent.get_key_value(&below)
+		{
+			let (run, hole) = (run.start..reach, hole.clone());
+			self.unsent.remove(run.clone());
+			reach = run.start;
+			self.forward_range(run, &hole, writer)?;
 		}
 		Ok(())
 	}
@@ -12050,8 +12118,9 @@ mod serve_group_test {
 	/// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per
 	/// group, names only the gaps from the group below its start up, and an update keeping its
 	/// start names none of the rest: they lie past a group its budget skipped, which the
-	/// subscriber is not owed. One lowering its start asks for them, so they are named then, on a
-	/// relay's front too, whose copies reported them once already.
+	/// subscriber is not owed. Nor does one widening the budget, whose fresh scan would otherwise
+	/// give each up again ahead of any group. One lowering its start asks for them, so they are
+	/// named then, on a relay's front too, whose copies reported them once already.
 	#[kio::test]
 	async fn a_join_names_no_gap_past_a_skipped_group() {
 		for (version, routed) in [Version::Lite05, Version::Lite06]
@@ -12099,15 +12168,15 @@ mod serve_group_test {
 				"{version:?} routed {routed}: start {start}"
 			);
 
-			let update = |start| lite::SubscribeUpdate {
+			let update = |start, max| lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 1,
-				max_delay: Some(Duration::from_millis(100)),
+				max_delay: Some(Duration::from_millis(max)),
 				ranges: vec![lite::Range::span(start, 0, None, None)],
 			};
 			let named = drops(&mut writer, &log, version).await.len();
-			run.replace(update(None));
+			run.replace(update(None, 100));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let after = drops(&mut writer, &log, version).await;
 			assert_eq!(
@@ -12116,11 +12185,33 @@ mod serve_group_test {
 				"{version:?} routed {routed}: an update keeping the start"
 			);
 
+			// One widening the budget serves the groups it newly covers below the start, and names
+			// only the gaps reaching up to them. A front's copies give up none of the rest again,
+			// each of which would take a step ahead of those groups.
+			run.replace(update(None, 200));
+			let mut steps = 0;
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {
+				steps += 1;
+			}
+			let mut widened: Vec<_> = drops(&mut writer, &log, version).await.split_off(named);
+			widened.sort();
+			let served = match version {
+				// Lite-05 serves none below the start.
+				Version::Lite05 => start,
+				_ => start - 100,
+			};
+			let reaching: Vec<_> = (served..start).step_by(20).map(|key| (key - 19, key - 1)).collect();
+			assert_eq!(widened, reaching, "{version:?} routed {routed}: a widened budget");
+			if routed {
+				assert_eq!(steps, reaching.len(), "{version:?}: a step per group served");
+			}
+			let named = named + widened.len();
+
 			// One lowering the start asks for those keys, so each gap there is named then.
-			run.replace(update(Some(1)));
+			run.replace(update(Some(1), 200));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let lowered: Vec<_> = drops(&mut writer, &log, version).await.split_off(named);
-			for key in (0..start - 20).step_by(20) {
+			for key in (0..served - 20).step_by(20) {
 				assert!(
 					lowered.contains(&(key + 1, key + 19)),
 					"{version:?} routed {routed}: gap {key} after a lowered start"

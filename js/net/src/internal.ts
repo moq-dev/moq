@@ -1312,7 +1312,11 @@ export const hooks: {
 	refused: (subscriber: Subscriber) => Error | undefined;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
-	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
+	/**
+	 * Forget what a subscriber reported of `[start, end)`, which its wire was never told, and what
+	 * each of its route copies did, so ranges that later ask for it report it again. Mirrors the Rust
+	 * `track::Subscriber::untell`.
+	 */
 	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the

@@ -3586,7 +3586,10 @@ export interface WireRecord {
 	untold(start: bigint, end: bigint): Run[];
 	/** Record that the wire was told `report` of `[start, end)`. */
 	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
-	/** Forget what was recorded of `[start, end)` without going out on the wire. */
+	/**
+	 * Forget what was recorded of `[start, end)` without going out on the wire, keeping what a
+	 * front's copies reported; `hooks.untell` forgets theirs too. Mirrors the Rust `Record::untell`.
+	 */
 	untell(start: bigint, end: bigint): void;
 }
 
@@ -4291,11 +4294,8 @@ export class Subscriber {
 			tell: (start, end, report) => {
 				if (start < end) reported.set(start, end, { ...report, start, end });
 			},
-			// A front's copies forget it too, so ranges that later ask for it report it again.
 			untell: (start, end) => {
-				if (start >= end) return;
-				reported.set(start, end);
-				this.#resume?.untell(start, end);
+				if (start < end) reported.set(start, end);
 			},
 		};
 	}

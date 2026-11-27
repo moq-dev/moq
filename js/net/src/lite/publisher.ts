@@ -1961,8 +1961,24 @@ export class Publisher {
 		// replaces the runs it covers, as a skip may go out over a drop, so they stay sorted and
 		// disjoint. Mirrors the Rust `Start::Unresolved::skipped`.
 		let skipped = new Runs<DropRun>(sameHole);
+		// The final runs given up below where delivery starts that the wire was never told of, though
+		// the record holds them told so no later scan gives them up again, one by one. Named once owed:
+		// those reaching up to a group served below the start, and those a lowered start reaches.
+		// Mirrors the Rust `TrackRun::unsent`.
+		const unsent = new Runs<DropRun>(sameHole);
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startKey: bigint | undefined;
+		// Move where delivery starts down to `start`, owing the subscriber what was given up from
+		// there: the runs `unsent` holds there are forgotten, so the reader gives them up again.
+		// Mirrors the Rust `TrackRun::lower_start`.
+		const lowerStart = (start: bigint) => {
+			if (startKey === undefined || start >= startKey) return;
+			// A front's copies forget them too, so they give them up again.
+			for (const run of record ? unsent.overlapping(start, startKey) : [])
+				hooks.untell(track, max(run.start, start), min(run.end, startKey));
+			unsent.set(start, startKey);
+			startKey = start;
+		};
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
@@ -2041,7 +2057,7 @@ export class Publisher {
 					budget !== undefined ? hooks.joinStart(track, range.start, budget) : max(range.start, from);
 				unstarted.delete(id);
 				const at = range.end === undefined || range.end > start ? start : undefined;
-				if (at !== undefined) startKey = min(startKey, at);
+				if (at !== undefined) lowerStart(at);
 				if (!(await sendStart(new SubscribeStart({ id, start: at, largest })))) return false;
 			}
 			// A range an update added before this start is answered with it, before the drops held
@@ -2111,7 +2127,7 @@ export class Publisher {
 						start = max(range.start, source === "pending" ? from : (source ?? from));
 					} else start = max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
-					else startKey = min(startKey, start);
+					else lowerStart(start);
 				}
 				unstarted.delete(id);
 				if (!(await sendStart(new SubscribeStart({ id, start, largest })))) return false;
@@ -2181,6 +2197,24 @@ export class Publisher {
 				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
+		};
+
+		// The keys named once given up: those from `from` on, and on lite-07 those in a disjoint history
+		// range below it, so the subscriber settles that range with the same verdict as a direct
+		// reader. Mirrors the Rust `TrackRun::owed`.
+		const owed = (from: bigint): Run[] => {
+			const runs: Run[] = [];
+			const maxEnd = 1n << 64n;
+			insertRun(runs, from, maxEnd);
+			if (hasRanges(this.version)) {
+				for (const askedRange of requested.values()) {
+					const model = requestedRange(askedRange);
+					if (typeof model.start !== "bigint") continue;
+					const to = model.end !== undefined ? model.end + 1n : maxEnd;
+					if (model.start < to) insertRun(runs, model.start, to);
+				}
+			}
+			return runs;
 		};
 
 		// Forward a verdict the reader reached on `[start, end)`, which its record already took in, so
@@ -2292,10 +2326,12 @@ export class Publisher {
 					// Nothing below the start is owed. The final runs reaching up to it unbroken are named all
 					// the same, so a reader filling below the start (a relay whose reader reaches lower) learns
 					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
-					// gave up, stay untold: naming them would send every gap in the track's history, as a
-					// lite-06 track keyed by timestamp holds one per group. An update that asks below the start
-					// names them then, and a wider budget may still serve a stale one. Mirrors the Rust
-					// `TrackRun::resolve`.
+					// gave up, go unnamed: naming them would send every gap in the track's history, as a lite-06
+					// track keyed by timestamp holds one per group. A stale one is forgotten by this
+					// subscription's record alone, so a wider budget may still serve it: a front's copies keep
+					// it, or each would give it up again on every scan an update widening the budget asks for,
+					// ahead of every group. A final one stays told for the same reason; an update that asks
+					// below the start names it then. Mirrors the Rust `TrackRun::resolve`.
 					let reach = startKey;
 					for (let i = skipped.size - 1; i >= 0; i--) {
 						const range = skipped.all[i];
@@ -2303,22 +2339,12 @@ export class Publisher {
 						if (range.end < reach || range.stale !== undefined) break;
 						reach = range.start;
 					}
-					// On lite-07, a subscription can also name disjoint history ranges below `reach` whose
-					// groups were already given up before the first group resolved: forward their drops too.
-					const send: Run[] = [];
-					const maxEnd = 1n << 64n;
-					insertRun(send, reach, maxEnd);
-					if (hasRanges(this.version)) {
-						for (const askedRange of requested.values()) {
-							const model = requestedRange(askedRange);
-							if (typeof model.start !== "bigint") continue;
-							const to = model.end !== undefined ? model.end + 1n : maxEnd;
-							if (model.start < to) insertRun(send, model.start, to);
-						}
-					}
+					const send = owed(reach);
 					for (const range of skipped.all) {
-						for (const below of runGaps(send, range.start, range.end))
-							record?.untell(below.start, below.end);
+						for (const below of runGaps(send, range.start, range.end)) {
+							if (range.stale !== undefined) record?.untell(below.start, below.end);
+							else unsent.set(below.start, below.end, range);
+						}
 						for (const part of send) {
 							const from = max(part.start, range.start);
 							const to = min(part.end, range.end);
@@ -2412,8 +2438,13 @@ export class Publisher {
 								// A lowered floor owes the groups it newly asks for, so the end sweep
 								// covers them. A raised one sends no early drop: the subscriber already
 								// stops owing below its floor, and a later update may lower it again to
-								// ask for the groups the wire was told nothing of.
-								if (startKey !== undefined) startKey = min(startKey, start);
+								// ask for the groups the wire was told nothing of. A lite-06 update naming
+								// no start asks for nothing below it unless it drops a floor, as in Rust.
+								const lowers =
+									hasRanges(this.version) ||
+									update.startGroup !== undefined ||
+									(requested !== undefined && (!resolvesStart(this.version) || requested > 0n));
+								if (lowers) lowerStart(start);
 							}
 							bounds.startGroup = update.startGroup;
 							bounds.startFrame = update.startFrame;
@@ -2453,7 +2484,18 @@ export class Publisher {
 						throw recv.error;
 					case "drop":
 						if (!startSent) skipped.set(recv.start, recv.end, recv);
-						else if (!(await forward(recv.start, recv.end, recv))) return false;
+						else if (startKey !== undefined && recv.start < startKey && recv.stale !== undefined) {
+							// A stale run below the start goes unnamed, as at the start, so a wider budget may
+							// still serve it: one widening the budget gives each up again otherwise.
+							const send = owed(startKey);
+							for (const below of runGaps(send, recv.start, recv.end))
+								record?.untell(below.start, below.end);
+							for (const part of send) {
+								const from = max(part.start, recv.start);
+								const to = min(part.end, recv.end);
+								if (from < to && !(await forward(from, to, recv))) return false;
+							}
+						} else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
 						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
@@ -2643,6 +2685,17 @@ export class Publisher {
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
 				streaming.add(group.start);
+				// A wider budget served it below the start: name the final runs reaching up to it
+				// unbroken, as the start names those reaching up to it. Mirrors the Rust
+				// `TrackRun::name_reaching`.
+				if (startKey !== undefined && group.start < startKey) {
+					let reach = group.start;
+					for (let run = unsent.at(reach - 1n); run && run.end === reach; run = unsent.at(reach - 1n)) {
+						unsent.set(run.start, run.end);
+						reach = run.start;
+						if (!(await forward(run.start, run.end, run))) return false;
+					}
+				}
 
 				const options: RunGroup = {
 					sub,
