@@ -59,10 +59,16 @@ impl Version {
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
-	/// This is the common feature boundary for TRACK_INFO, FETCH streams,
+	/// This is the common feature boundary for TRACK_INFO,
 	/// SUBSCRIBE_START/END, and per-frame timestamp prefixes.
 	pub(crate) fn has_track_stream(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
+	}
+
+	/// Whether the session supports the FETCH control stream (0x3). Present in lite-05 and
+	/// lite-06 only; lite-07 removes FETCH in favor of bounded SUBSCRIBE ranges.
+	pub(crate) fn has_fetch(self) -> bool {
+		matches!(self, Self::Lite05 | Self::Lite06)
 	}
 
 	/// Whether the PROBE message carries the RTT field. Added in lite-04; lite-03

@@ -265,12 +265,15 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 		{ start: { joined: { absolute: 9n, frame: 0, max: 4 } } },
 	]);
 	await expect(update([1, 0, 4, 9, 0, 0])).rejects.toThrow(ProtocolViolation);
-	// Any other type is a violation, and so is a Position at frame 0, as a start or an end.
-	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 1, 0, 2, 7, 0])).rejects.toThrow(ProtocolViolation);
+	// Position at frame 0 is valid as both start and end (exact group match / exclusive group end).
+	expect((await update([1, 2, 0, 0, 0])).ranges).toEqual([{ start: { absolute: 0n, frame: 0 } }]);
+	expect((await update([1, 1, 0, 2, 7, 0])).ranges).toEqual([
+		{ start: { time: 0n }, end: { absolute: 7n, frame: 0 } },
+	]);
 	expect((await update([1, 1, 0, 2, 7, 4])).ranges).toEqual([
 		{ start: { time: 0n }, end: { absolute: 7n, frame: 4 } },
 	]);
+	// Any other type is a violation.
 	await expect(update([1, 5, 0, 0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 0, 5, 0])).rejects.toThrow(ProtocolViolation);
 });
@@ -440,7 +443,7 @@ test("a lite-07 range may end partway through a group, stopping it there", async
 	expect(positionFrames([empty, { start: { absolute: 9n, frame: 3 } }])).toEqual(new Map([[9n, 3]]));
 });
 
-test("lite-07 sends an absolute anchor as a time, an end as the time before it", async () => {
+test("lite-07 sends an absolute anchor as a Position at frame 0", async () => {
 	const update = new SubscribeUpdate({
 		priority: 0,
 		ranges: [{ start: { absolute: 7n }, end: { absolute: 10n } }],
@@ -449,11 +452,20 @@ test("lite-07 sends an absolute anchor as a time, an end as the time before it",
 		new Reader(undefined, await encodeMessage(Version.DRAFT_07, update), Version.DRAFT_07),
 		Version.DRAFT_07,
 	);
-	expect(got.ranges).toEqual([{ start: { time: 7n }, end: { time: 9n } }]);
-	// Nothing comes before group 0, so an end there can't go out.
-	await expect(
-		encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 0n } }] })),
-	).rejects.toThrow("empty subscription range cannot be encoded");
+	expect(got.ranges).toEqual([{ start: { absolute: 7n, frame: 0 }, end: { absolute: 10n, frame: 0 } }]);
+	// Position(0, 0) as an exclusive end encodes without underflow.
+	const zero = await SubscribeUpdate.decode(
+		new Reader(
+			undefined,
+			await encodeMessage(
+				Version.DRAFT_07,
+				new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 0n } }] }),
+			),
+			Version.DRAFT_07,
+		),
+		Version.DRAFT_07,
+	);
+	expect(zero.ranges).toEqual([{ end: { absolute: 0n, frame: 0 } }]);
 });
 
 test("lite-07 carries every range, times and no start included, and older wires the span alone", async () => {

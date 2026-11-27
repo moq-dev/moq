@@ -77,6 +77,8 @@ export interface OriginProducer {
 	blind(slot: RequestSlot): boolean;
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined;
 	routes(path: Path.Valid): boolean;
+	/** The rank of the link a session given this handle lands its routes through. */
+	readonly priority: number;
 }
 
 /** The protocol-facing operations behind an origin route or claim. */

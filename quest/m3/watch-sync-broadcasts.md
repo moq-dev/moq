@@ -87,5 +87,4 @@ Public API: additive in `@moq/watch` (`Player`'s `sync` option,
 
 ## Related
 
-- [Ingest clock](/quest/m2/ingest-clock.md) - gives RTSP and WebRTC ingests a correct `sync.clock`, which the reporter's cameras need
 - [Data tracks in sync](/quest/m5/watch-data-sync.md) - also registers new kinds of track with `Sync`

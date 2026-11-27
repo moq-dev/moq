@@ -437,7 +437,7 @@ impl Publish {
 			// `mpegts` section names.
 			let config = config.with_catalog(hang::Catalog::<ts::Ext>::default());
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-			let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.timebase().reserve())?;
+			let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.reserve())?;
 			if let Some(pid) = pcr_pid {
 				passthrough = passthrough.with_pcr_pid(pid);
 			}
@@ -460,16 +460,14 @@ impl Publish {
 				}
 			}
 			PublishFormat::Fmp4 { cmaf } => {
-				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } | PublishFormat::TsPassthrough { .. } => unreachable!("handled above"),
 			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
 			// so it takes no era.
 			PublishFormat::Flv => {
-				let timebase = catalog.timebase();
-				let flv = flv::Import::new(broadcast.clone(), timebase.reserve());
+				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
 				PublishDecoder::Flv(Box::new(flv))
 			}
 		};

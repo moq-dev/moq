@@ -90,6 +90,8 @@ pub struct MockConnectOptions {
 	pub server_extensions: Extensions,
 	/// The price the client puts on the link, when not the default.
 	pub cost: Option<u64>,
+	/// The price the server puts on the link, when not the default.
+	pub server_cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
 	/// Whether both transports have a sender that probes up to a target.
@@ -126,6 +128,7 @@ impl MockConnectOptions {
 			client_extensions: Default::default(),
 			server_extensions: Default::default(),
 			cost: None,
+			server_cost: None,
 			stats: MockStats::default(),
 			probe: false,
 			server_stats: Default::default(),
@@ -228,6 +231,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 	if let Some(implementation) = opts.server_implementation {
 		server = server.with_implementation(implementation);
+	}
+	if let Some(cost) = opts.server_cost {
+		server = server.with_cost(cost);
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver

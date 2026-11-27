@@ -5,6 +5,7 @@ import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
 import type { Viewers } from "../bandwidth.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
+import type { Cost } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
@@ -15,7 +16,7 @@ import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { checkCost, DEFAULT_TIMEOUT, exchangeSetup, handsOff, type Link, link } from "./handshake.ts";
 import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
@@ -270,6 +271,16 @@ export interface ConnectProps {
 	consume?: OriginProducer;
 
 	/**
+	 * Price this link, in the units the rest of the mesh uses (moq-lite-06+, and moq-transport
+	 * via the MoQ Cluster extension). Added to the route cost of every announcement the peer
+	 * sends, and declared in SETUP so the peer adds it to every announcement we send. Wins over a
+	 * price the peer declares; an unpriced link costs 1, which routes by hop count. Zero is
+	 * refused on moq-lite-07. Rank the link with {@link OriginProducer.withPriority} on
+	 * {@link ConnectProps.consume}.
+	 */
+	cost?: Cost;
+
+	/**
 	 * Credentials to present, kept apart from the URL.
 	 *
 	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
@@ -343,7 +354,7 @@ type SessionProps = {
 	implementation: string;
 	/** The PROBE target to send a peer that advertised `Increase`. */
 	probeTarget?: Getter<number>;
-};
+} & Link;
 
 /**
  * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
@@ -390,6 +401,7 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	signal.throwIfAborted();
 	// Fail before dialing; the session checks again when it attaches.
 	if (props.auth) vacant(props.auth);
+	checkCost(props.cost);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 
 	// Resolves on abort or timeout so every in-flight transport tears itself down.
@@ -504,6 +516,7 @@ async function connectInner(
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,
+		...link(props),
 	});
 
 	if (props.transport) {

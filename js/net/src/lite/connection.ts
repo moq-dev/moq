@@ -8,7 +8,7 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, peerEnded, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop } from "../hop.ts";
+import { type Cost, type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -37,6 +37,7 @@ import {
 	hasAuth,
 	hasDatagrams,
 	hasDatagramTracks,
+	hasFetch,
 	hasGoaway,
 	hasProbeRtt,
 	hasRoutes,
@@ -77,6 +78,10 @@ export interface ConnectionProps {
 	implementation?: string;
 	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
 	probeTarget?: Getter<number>;
+	/** This link's price, declared in our SETUP and winning over the peer's (lite-06+). */
+	cost?: Cost;
+	/** This link's rank, which every route the peer sends carries at most. Defaults to 0. */
+	priority?: number;
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
@@ -148,6 +153,8 @@ export class Connection implements Session {
 	#implementation: string;
 	// See {@link ConnectionProps.probeTarget}.
 	#probeTarget?: Getter<number>;
+	// See {@link ConnectionProps.cost}.
+	#cost?: Cost;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
@@ -175,7 +182,12 @@ export class Connection implements Session {
 		token,
 		implementation = IMPLEMENTATION,
 		probeTarget,
+		cost,
+		priority = 0,
 	}: ConnectionProps) {
+		// A free link would leave a route as cheap as the one it came from, so lite-07 refuses one.
+		if (cost === 0n && hasRoutes(version)) throw new RangeError("a moq-lite-07 link cannot cost 0");
+		this.#cost = cost;
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
 		this.#token = client && hasAuth(version) ? token : undefined;
@@ -255,6 +267,7 @@ export class Connection implements Session {
 			this.#auth.scope,
 			undefined,
 			this.#auth,
+			{ cost, priority },
 		);
 		this.#client = client;
 		this.#implementation = implementation;
@@ -439,6 +452,7 @@ export class Connection implements Session {
 			const probe = await probeLevel(this.#quic, this.#version);
 			await new Setup({
 				probe,
+				cost: this.#cost,
 				hop: this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
@@ -458,6 +472,7 @@ export class Connection implements Session {
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
+					stream.reader.stop(err);
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream would leave it free to repeat malformed input.
 					const violation = closeViolation(this.#quic, err);
@@ -497,7 +512,7 @@ export class Connection implements Session {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
-			if (!hasTrackStream(this.#version)) throw new Error("FETCH is not supported on this version");
+			if (!hasFetch(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);
