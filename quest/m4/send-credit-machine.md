@@ -26,8 +26,10 @@ verification tooling nobody waits on.
 - ✅ The checker comes from kio's `model` feature, a dev-dependency
   ([kixel-ai/kio `quest/m2/model-check.md`](https://github.com/kixel-ai/kio/blob/main/quest/m2/model-check.md);
   rejected: a copy in moq-net, which every later consumer would copy again).
-  Bumping moq's kio dependency to a release or revision with it is part of
-  this quest.
+  Bumping moq's kio dependency to a crates.io release with it is part of
+  this quest: after the release cut, moq depends on kio from crates.io
+  ([kio crates.io](/quest/m0/kio-crates-io.md)), and a git pin would block
+  publishing.
 
 Guidance from kio#26's report:
 
@@ -42,11 +44,11 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- kixel-ai/kio: the `model` feature lands on kio's `main` (`quest/m2/model-check.md`, which starts once this quest exists). Check: kio's `Cargo.toml` has a `model` feature.
+- kixel-ai/kio: a crates.io release of kio has the `model` feature, once `quest/m2/model-check.md` (which starts once this quest exists) lands on kio's `main` and release-plz publishes it. Check: `curl -sA kio-check https://crates.io/api/v1/crates/kio | jq '.versions[0].features | has("model")'` prints `true`.
 
 ## Required
 
-- [kio main](/quest/m0/kio-main.md) - moq runs on kio's `main`, so this quest's bump only moves past the `model` feature
+- [kio crates.io](/quest/m0/kio-crates-io.md) - moq depends on a crates.io kio release, so this quest's bump only moves to one with the `model` feature
 
 ## Related
 
