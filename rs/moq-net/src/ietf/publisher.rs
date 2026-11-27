@@ -8807,7 +8807,7 @@ mod group_priority_test {
 		})
 	}
 
-	/// The model's `Subscription::priority` is higher-first ("higher values preempt
+	/// The model's `Range::priority` is higher-first ("higher values preempt
 	/// lower ones"), matching the transport trait's send order, so the higher-priority
 	/// subscription's group stream must get the higher send order. An inversion here
 	/// would transmit the LOWEST-priority track first under contention.
