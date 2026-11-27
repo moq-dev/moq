@@ -220,9 +220,11 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 
 	let mut skips = Skips::default();
 	// A skip recording wakes this read, so one landing while the source pauses is named then.
+	// Asked after the read registers, so a skip recorded just before that is seen here instead.
 	while let Some(mut group) = kio::wait(|waiter| {
+		let read = subscriber.poll_recv_group(waiter);
 		skips.recheck(&subscriber, sender);
-		subscriber.poll_recv_group(waiter)
+		read
 	})
 	.await?
 	{
