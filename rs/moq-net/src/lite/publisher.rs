@@ -7227,7 +7227,12 @@ impl TrackRun {
 		// budget reaches past that bound: a relay reading from the oldest group would otherwise wait
 		// on it forever. Earlier drafts name a drop with no range, which a capped read could still
 		// serve, so they stop there.
-		let bound = self.ctx.version.has_ranges().then(|| self.track.max_age_bound()).flatten();
+		let bound = self
+			.ctx
+			.version
+			.has_ranges()
+			.then(|| self.track.max_age_bound())
+			.flatten();
 		let final_stale = |budget: Duration| bound.is_some_and(|bound| budget >= bound);
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
