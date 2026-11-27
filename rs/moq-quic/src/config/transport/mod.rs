@@ -12,6 +12,7 @@ use crate::{
 
 pub mod ack_frequency;
 pub mod datagram;
+pub mod fec;
 pub mod mtu;
 pub mod qlog;
 
@@ -158,6 +159,10 @@ pub struct Config {
 	/// a peer that asks.
 	pub receive_timestamps: Option<NonZeroU32>,
 
+	/// Experimental forward error correction, or `None` (the default) to neither send repair
+	/// packets nor offer to rebuild lost packets from the peer's
+	pub fec: Option<fec::Config>,
+
 	/// How to construct each connection's congestion controller, BBRv3 by default
 	pub congestion: Arc<dyn congestion::Factory + Send + Sync>,
 
@@ -296,6 +301,7 @@ impl Default for Config {
 			mtu: Some(mtu::Config::default()),
 			ack_frequency: None,
 			receive_timestamps: None,
+			fec: None,
 
 			congestion: Arc::new(congestion::bbr3::Config::default()),
 
@@ -333,6 +339,7 @@ impl fmt::Debug for Config {
 			mtu,
 			ack_frequency,
 			receive_timestamps,
+			fec,
 			congestion: _,
 			datagram,
 			crypto_buffer_size,
@@ -359,6 +366,7 @@ impl fmt::Debug for Config {
 			.field("mtu", mtu)
 			.field("ack_frequency", ack_frequency)
 			.field("receive_timestamps", receive_timestamps)
+			.field("fec", fec)
 			// congestion not debug
 			.field("datagram", datagram)
 			.field("crypto_buffer_size", crypto_buffer_size)

@@ -53,6 +53,7 @@ mod cid_state;
 use cid_state::CidState;
 
 mod datagrams;
+mod fec;
 use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
@@ -282,6 +283,12 @@ pub struct Connection {
 	arrival: Option<Instant>,
 	/// Resends in-flight data to probe for bandwidth while `app_limited`
 	bandwidth_probe: BandwidthProbe,
+	/// Builds repair packets, once the peer offers to rebuild lost packets from them
+	fec_encoder: Option<fec::Encoder>,
+	/// Rebuilds lost packets from the peer's repair packets, if this endpoint offered to
+	fec_decoder: Option<fec::Decoder>,
+	/// Packets rebuilt while handling the last one received, whose frames are still to process
+	fec_rebuilt: Vec<(u64, Bytes)>,
 	/// Holds sending to a cap below whatever the congestion controller allows
 	send_rate: Option<rate::Bucket>,
 	/// Since when the congestion controller has held back data ready to send, and how
@@ -410,6 +417,13 @@ impl Connection {
 			receive_timestamps: None,
 			arrival: None,
 			bandwidth_probe: BandwidthProbe::new(&config, now),
+			fec_encoder: None,
+			fec_decoder: config
+				.fec
+				.as_ref()
+				.filter(|fec| fec.window > 0)
+				.map(|fec| fec::Decoder::new(fec.window)),
+			fec_rebuilt: Vec::new(),
 			receiving_ecn: false,
 
 			streams: StreamsState::new(
@@ -649,6 +663,16 @@ impl Connection {
 		// A write that blocked on the peer's credit, or the congestion controller, woke this call:
 		// date its wait from here.
 		self.observe_waits(now);
+		// Repairs follow a burst: a block closes once nothing is left to send, and its repairs go
+		// out only then, so they never take a packet that stream data could have had
+		let quiet = !self.streams.can_send_frames(usize::MAX);
+		let space = usize::from(self.path.current_mtu()).saturating_sub(self.predict_1rtt_overhead(None));
+		if let Some(encoder) = &mut self.fec_encoder {
+			if quiet {
+				encoder.close();
+			}
+			encoder.fit(space + fec::RESERVE);
+		}
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
 			true => max_datagrams,
@@ -3612,7 +3636,44 @@ impl Connection {
 		number: u64,
 		packet: Packet,
 	) -> Result<(), TransportError> {
-		let payload = packet.payload.freeze();
+		let short = packet.header.is_short();
+		self.process_frames(now, remote, number, packet.payload.freeze(), short, false)?;
+		// A REPAIR frame may have rebuilt packets that never arrived. Their frames are processed
+		// as if they had, except that nothing acknowledges them: the sender still counts each as
+		// lost, as its congestion controller must (RFC 9265 §6.3), and retransmits what it
+		// carried.
+		while let Some((number, frames)) = self.fec_rebuilt.pop() {
+			// One that arrived after all, or was rebuilt before, is not processed twice. Marking
+			// it received drops the original, should it still arrive, as a duplicate.
+			if self.spaces[SpaceId::Data].dedup.insert(number) {
+				continue;
+			}
+			trace!(number, len = frames.len(), "rebuilt packet");
+			self.stats.path.rebuilt_packets += 1;
+			self.process_frames(now, remote, number, frames, true, true)?;
+		}
+		Ok(())
+	}
+
+	/// Processes the frames of 1-RTT packet `number`, received from `remote` or `rebuilt` from
+	/// repairs
+	///
+	/// A rebuilt packet's ACK and path validation frames are skipped: its ACK delay and the
+	/// address it would have come from are unknown, and later packets carry both again.
+	fn process_frames(
+		&mut self,
+		now: Instant,
+		remote: SocketAddr,
+		number: u64,
+		payload: Bytes,
+		short: bool,
+		rebuilt: bool,
+	) -> Result<(), TransportError> {
+		// Where the frames end and trailing padding begins
+		let (mut offset, mut frames_end) = (0, 0);
+		// Whether the packet carries a REPAIR frame, which no repair covers in turn
+		let mut repairs = false;
+		let held = self.fec_decoder.as_ref().map(|_| payload.clone());
 		// Earned before anything this packet carries is charged against the cap, and granted now:
 		// the refill retires the credit deadline, so a later timeout would not grant it.
 		if self.streams.grant_receive_rate(now) {
@@ -3625,10 +3686,19 @@ impl Connection {
 		let mut frames = frame::Iter::new(payload)?;
 		while let Some((result, frame_size)) = frames.next_with_size() {
 			let frame = result?;
+			offset += frame_size;
 			let span = match frame {
 				Frame::Padding => continue,
 				_ => Some(trace_span!("frame", ty = %frame.ty())),
 			};
+			frames_end = offset;
+			if rebuilt
+				&& matches!(
+					frame,
+					Frame::Ack(_) | Frame::PathChallenge(_) | Frame::PathResponse(_) | Frame::Repair(_)
+				) {
+				continue;
+			}
 
 			self.stats.frame_rx.record(&frame);
 			// Crypto, Stream and Datagram frames are special cased in order no pollute
@@ -3668,12 +3738,23 @@ impl Connection {
 				}
 				Frame::Ack(ack) => {
 					// Only 1-RTT packets carry receive timestamps, and only to a peer that asked
-					if ack.timestamps.is_some()
-						&& (!packet.header.is_short() || self.config.receive_timestamps.is_none())
-					{
+					if ack.timestamps.is_some() && (!short || self.config.receive_timestamps.is_none()) {
 						return Err(TransportError::PROTOCOL_VIOLATION("unexpected receive timestamps"));
 					}
 					self.on_ack_received(now, SpaceId::Data, ack)?;
+				}
+				Frame::Repair(repair) => {
+					let Some(decoder) = &mut self.fec_decoder else {
+						return Err(TransportError::PROTOCOL_VIOLATION("unexpected REPAIR"));
+					};
+					// A repair follows the packets it covers, so it cannot name one sent after
+					// it. Rebuilding one far ahead would also mark every packet before it as
+					// seen, and drop them as duplicates when they arrive.
+					if repair.sources.last().is_none_or(|&last| last >= number) {
+						return Err(TransportError::PROTOCOL_VIOLATION("REPAIR covers a later packet"));
+					}
+					repairs = true;
+					self.fec_rebuilt.extend(decoder.repair(repair)?);
 				}
 				Frame::Padding | Frame::Ping => {}
 				Frame::Close(reason) => {
@@ -3913,10 +3994,19 @@ impl Connection {
 			}
 		}
 
+		// Any packet a repair might cover is held to rebuild the others with
+		if ack_eliciting
+			&& !repairs
+			&& let (Some(decoder), Some(held)) = (&mut self.fec_decoder, held)
+		{
+			decoder.hold(number, held.slice(..frames_end));
+		}
+
 		let space = &mut self.spaces[SpaceId::Data];
-		if space
-			.pending_acks
-			.packet_received(now, number, ack_eliciting, &space.dedup)
+		if !rebuilt
+			&& space
+				.pending_acks
+				.packet_received(now, number, ack_eliciting, &space.dedup)
 		{
 			self.timers
 				.set(Timer::MaxAckDelay, now.saturating_add(self.ack_frequency.max_ack_delay));
@@ -3936,7 +4026,11 @@ impl Connection {
 			self.state = State::Draining { send_close: true };
 		}
 
-		if remote != self.path.remote && !is_probing_packet && number == self.spaces[SpaceId::Data].rx_packet {
+		if !rebuilt
+			&& remote != self.path.remote
+			&& !is_probing_packet
+			&& number == self.spaces[SpaceId::Data].rx_packet
+		{
 			let ConnectionSide::Server { server_config } = &self.side else {
 				panic!("packets from unknown remote should be dropped by clients");
 			};
@@ -4171,6 +4265,26 @@ impl Connection {
 				.congestion
 				.on_ack_frequency_update(config.ack_eliciting_threshold.into_inner(), max_ack_delay);
 			self.stats.frame_tx.ack_frequency += 1;
+		}
+
+		// REPAIR, which fills its packet, so it goes ahead of the ACK and everything after it.
+		// Every other packet leaves the room its own repair will need.
+		let mut max_size = max_size;
+		if space_id == SpaceId::Data
+			&& let Some(encoder) = &mut self.fec_encoder
+		{
+			let room = max_size.saturating_sub(buf.len());
+			let quiet = !self.streams.can_send_frames(usize::MAX);
+			if ack_eliciting && quiet && encoder.next().is_some_and(|frame| frame.len() <= room) {
+				let frame = encoder.pop().unwrap();
+				trace!(len = frame.len(), "REPAIR");
+				buf.extend_from_slice(&frame);
+				sent.non_retransmits = true;
+				sent.fec_repair = true;
+				self.stats.frame_tx.repair += 1;
+			} else {
+				max_size = max_size.saturating_sub(fec::RESERVE).max(buf.len());
+			}
 		}
 
 		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
@@ -4510,6 +4624,13 @@ impl Connection {
 				params.receive_timestamps_exponent.0,
 			)
 		});
+		self.fec_encoder = self
+			.config
+			.fec
+			.as_ref()
+			.and_then(|fec| fec.send.as_ref())
+			.filter(|_| params.fec_window.0 > 0)
+			.map(|send| fec::Encoder::new(send, params.fec_window.0));
 		self.peer_params = params;
 		let mtu = self.path.mtud.current_mtu();
 		self.path.mtud.on_peer_max_udp_payload_size_received(
@@ -4773,6 +4894,7 @@ impl Connection {
 	/// See also `self.space(SpaceId::Data).can_send()`
 	fn can_send_1rtt(&self, max_size: usize) -> bool {
 		self.streams.can_send_frames(max_size)
+			|| self.repair_ready(max_size).is_some()
 			|| self.streams.owes_streams_blocked()
 			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
 			|| self
@@ -4780,6 +4902,14 @@ impl Connection {
 				.as_ref()
 				.is_some_and(|(_, prev)| prev.challenge.is_some_and(|challenge| challenge.pending))
 			|| !self.path_responses.is_empty()
+	}
+
+	/// The next REPAIR frame, if a packet with `max_size` bytes for frames can carry it now:
+	/// only once no stream data waits to be sent
+	fn repair_ready(&self, max_size: usize) -> Option<&Bytes> {
+		let frame = self.fec_encoder.as_ref()?.next()?;
+		// `max_size` leaves out the room a packet reserves for the frame
+		(frame.len() <= max_size + fec::RESERVE && !self.streams.can_send_frames(usize::MAX)).then_some(frame)
 	}
 
 	/// Update counters to account for a packet becoming acknowledged, lost, or abandoned
@@ -4838,8 +4968,12 @@ impl Connection {
 			None => 4,
 		};
 
+		// A packet a repair may cover leaves room for the REPAIR frame's own fields, so that its
+		// symbol, as long as the packet's frames, fits a packet of the same size
+		let reserve = if self.fec_encoder.is_some() { fec::RESERVE } else { 0 };
+
 		// 1 byte for flags
-		1 + self.rem_cids.active().len() + pn_len + self.tag_len_1rtt()
+		1 + self.rem_cids.active().len() + pn_len + self.tag_len_1rtt() + reserve
 	}
 
 	fn tag_len_1rtt(&self) -> usize {
@@ -5232,6 +5366,8 @@ struct SentFrames {
 	path_challenge: bool,
 	/// Whether the packet goes to an address off the path, unmarked for ECN
 	off_path: bool,
+	/// Whether the packet carries a REPAIR frame, which no repair covers in turn
+	fec_repair: bool,
 }
 
 impl SentFrames {

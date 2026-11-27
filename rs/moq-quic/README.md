@@ -123,9 +123,82 @@ Changes on top of the upstream commit, besides the renames:
 - **Exact anti-amplification limit**: an unvalidated path never sends past three times what it received (RFC 9000 section 8.1). quinn lets a whole path-MTU datagram through while any budget is left, the workaround for [quinn#1082](https://github.com/quinn-rs/quinn/issues/1082), which overshoots by up to a datagram; here no datagram outgrows the budget left, so a path MTU past the whole budget still sends smaller ones instead of stalling. An Initial that must be padded to 1200 bytes waits when the budget cannot carry it, and a PATH\_CHALLENGE or PATH\_RESPONSE datagram is padded only as far as the budget allows, as section 8.2.1 permits; when that leaves a challenge short of 1200 bytes, its PATH\_RESPONSE validates the address and a fresh challenge then confirms the path carries 1200 bytes, as the same section requires. A 1-RTT packet needs less room than `MIN_PACKET_SPACE` (`MIN_SHORT_PACKET_SPACE`), so a small budget still carries a close or a challenge. Not offered upstream yet.
 - **ACK-only packets stay ACK-only**: a packet planned with nothing ack-eliciting skips the congestion window, so `populate_packet` writes nothing after its ACK. quinn adds an unvalidated path's repeated PATH\_CHALLENGE and a pending STREAMS\_BLOCKED to such a packet, which then counts in flight past the window (RFC 9002 section 7). A pending STREAMS\_BLOCKED now counts as something to send, and an open past the limit queues it once per limit instead of on every refusal. Not offered upstream yet.
 - **Congestion waits** (`PathStats::cwnd_blocked`, `PathStats::pacing_blocked`): the time data ready to send waited on a full congestion window, or on the pacer, accrued whenever the connection is driven and ended once the window has room or the pacer's deadline passes, whether or not a transmit follows, so a sender can tell a congestion-limited path from an idle one. A held bandwidth probe resends data already in flight, so it is not one. Not offered upstream: quinn reports no such time.
+- **Forward error correction** (`transport::Config::fec`, experimental, `experiment/quic-fec` branch only): repair packets a receiver rebuilds lost packets from, described under [Forward error correction](#forward-error-correction-experimental). `sim::Link::fades` adds fades to the simulated path.
 - **Inherited bug fixes** from the [moq-dev/moq#9707](https://github.com/moq-dev/moq/pull/9707) audit, not yet offered upstream: `Assembler` compaction drops bytes already read and `truncate` lowers its end; `CONNECTION_CLOSE` reasons truncate by the header's exact width and never underflow a small budget; a long header's length or token length past `usize` fails decode on 32-bit targets instead of wrapping; `BloomTokenLog` computes its k number for each half-sized filter and starts a fresh period at the triggering token's issue, so a valid token issued just before it is not refused; an expiring CID batch waits for the peer to retire the previous Retire Prior To instead of being dropped; and a peer's stream past the last announced `MAX_STREAMS` is a `STREAM_LIMIT_ERROR` even after the local limit rose.
 
 Recheck the BBR3 changes when porting quinn#2481 updates, or if it merges, and the BBR3 reference heads above at each sync.
+
+### Forward error correction (experimental)
+
+An experiment on the `experiment/quic-fec` branch, not meant for `main` as it stands. `transport::Config::fec`, off by default, lets a sender follow each burst of stream data with repair packets, from which the receiver rebuilds lost packets without waiting for their retransmission. It asks whether live video can stay on streams over a lossy radio link, where senders move to datagrams today to get FEC and then rebuild ordering, retransmission, and flow control themselves. The wire format is private to this branch and will change.
+
+It starts from [draft-zheng-quic-fec-extension-04](https://www.ietf.org/archive/id/draft-zheng-quic-fec-extension-04.html), an individual draft that specifies frames but no code, no congestion rule, and no bound a receiver sets, and departs from it as listed below.
+
+**Negotiation.** The transport parameter `fec_window` (`0x2bfec0`, an integer) is the most packets one REPAIR frame may cover for the endpoint to rebuild from it. Absent or zero, the endpoint refuses REPAIR, and receiving one is a `PROTOCOL_VIOLATION`. Each direction stands alone: an endpoint sends repairs only to a peer with a window, and only if its own `fec::Config::send` is set.
+
+**Symbols.** A covered packet is a 1-RTT packet that carries STREAM frames and is neither a bandwidth probe nor a repair. Its symbol is its payload, the frames without trailing PADDING, behind a two-byte length and zero-padded to the longest symbol of its block. The length and the padding are never sent: they exist only in what a repair is computed over, as in RFC 8681 section 3.2, so that rebuilding a packet also rebuilds where its frames end. While a connection sends repairs, every 1-RTT packet leaves 50 bytes unused (`fec::RESERVE`), so that a symbol as long as the packet's frames fits a REPAIR frame in a packet of the same size.
+
+**REPAIR frame**, one symbol per frame, naming the packets its block covers by packet number:
+
+```
+REPAIR Frame {
+  Type (i) = 0x2bfec6,
+  Code (i),                 0 XOR, 1 Reed-Solomon
+  Repair Index (i),         which of the block's repairs this is
+  First Packet Number (i),  the lowest packet number covered
+  Range Count (i),          ranges after the first
+  First Range (i),          packets in the first range, less one
+  Range (..) ...,           { Gap (i): numbers skipped less one, Length (i): packets less one }
+  Symbol Length (i),
+  Symbol (..),
+}
+```
+
+A frame covers at most 128 packets, in ascending ranges, all sent before the packet that carries it. Covering more than the receiver's window, or a later packet, is a `PROTOCOL_VIOLATION`.
+
+**Codes.** XOR: one repair, the XOR of the block's symbols, rebuilds one packet. Reed-Solomon: repair `j` is the sum over the block's sources `i` of `symbol_i / ((255 - j) XOR i)` in GF(2^8) over `x^8 + x^4 + x^3 + x^2 + 1`, a Cauchy matrix, so any `n` repairs rebuild any `n` packets. Source positions and repair indexes together stay below 255.
+
+**Sender.** A block closes when it holds `Send::block` packets, when its packet numbers span the peer's window, or when no stream data is left to send, which for live video is the end of a frame. Its repairs, `Send::overhead` per hundred packets and at least one, go out only while no stream data waits, as ordinary ack-eliciting packets inside the congestion window and the pacer. A lost repair is not resent.
+
+**Receiver.** It holds the frames of the last `2 * fec_window` ack-eliciting packets. Once a block's repairs are at least as many as the packets it lacks, it rebuilds them and processes their frames as if they had arrived, except ACK, PATH_CHALLENGE, and PATH_RESPONSE, whose delay and path are unknown. A rebuilt packet is marked received, so its original is dropped as a duplicate should it still arrive, and is never acknowledged: the sender declares it lost, its congestion controller hears the loss ([RFC 9265](https://www.rfc-editor.org/rfc/rfc9265.html) section 6.3: "a recovered packet must be considered as a lost packet"), and it retransmits the data, which the receiver drops as duplicate. A symbol that does not decode to a valid packet closes the connection.
+
+**Departures from the draft**, each for a reason:
+
+- No SRC_SYMBOL_ID frame in covered packets, and no flow, block, or symbol IDs: a repair names packets by the packet numbers QUIC already gives them. The draft's own Repair ACK reports packet numbers, yet nothing in it ties a rebuilt symbol to one.
+- A symbol carries its length. The draft pads symbols to equal length without one, so a rebuilt STREAM frame without a Length field would run into the padding.
+- The receiver sets the bound (`fec_window`). The draft's `fec_max_symbol_num` is the sender's block size and bounds nothing a receiver holds.
+- Repairs wait for the stream data to run out, and stay inside congestion control. The draft has no normative rule; RFC 9265 section 4 does.
+- A rebuilt packet is never acknowledged, and nothing yet tells the sender to skip its retransmission. The draft's optional Repair ACK would, and is the next step.
+- A block ends with the burst. The draft's fixed blocks leave a burst's tail uncovered until later data fills the block.
+- The codes are specified. The draft registers IDs for Reed-Solomon, XOR, and a packet mask without defining any.
+- Private codepoints, since the frames are not the draft's.
+
+**Measured** on the simulator (`just rs quic-fec`): 4 Mbit/s of video at 30 frames a second, a stream per 60 frames, for 300 seconds on one seed. A frame is late when it is read more than a frame interval after the path's one-way delay. "No controller" has no pacing either, so every frame leaves at once.
+
+| Round trip | Path | Controller | No repairs | XOR, block of 8 | Reed-Solomon 20% | Reed-Solomon 30% |
+|---|---|---|---|---|---|---|
+| 20 ms | 2% scattered | none | 3.19% | 0.06% | 0.00% | 0.00% |
+| 60 ms | 1% scattered | none | 14.5% | 0.58% | 0.00% | 0.00% |
+| 60 ms | 2% scattered | none | 26.9% | 2.36% | 0.01% | 0.00% |
+| 60 ms | 5% scattered | none | 56.8% | 13.2% | 1.23% | 0.09% |
+| 150 ms | 2% scattered | none | 64.4% | 6.97% | 0.00% | 0.00% |
+| 60 ms | 2% scattered | GCC | 33.9% | 2.08% | 0.02% | 0.02% |
+| 150 ms | 2% scattered | GCC | 64.8% | 8.30% | 1.19% | 1.08% |
+| 60 ms | 2% in 2 ms fades | GCC | 10.3% | 11.0% | 5.92% | 4.80% |
+| 60 ms | 2% in 8 ms fades | GCC | 5.28% | 6.66% | 6.11% | 4.81% |
+| 60 ms | 1.2% in 16 ms fades of 60% | GCC | 3.87% | 3.24% | 3.42% | 3.22% |
+| 60 ms | 2% scattered | BBR3 | 26.6% | 2.10% | 35.0% | 0.02% |
+| 150 ms | 2% scattered | BBR3 | 73.2% | 73.2% | 78.4% | 87.9% |
+
+What it shows:
+
+- Against scattered loss, repairs remove nearly every late frame, more so the longer the round trip. Reed-Solomon at "20%" costs 26% more bytes on the wire: three repairs for a frame of thirteen packets, and the reserved room.
+- Against fades, repairs sent right behind their frame do little, because the fade takes them too. Without pacing they do nothing at all. This limits FEC over datagrams equally.
+- BBR3 reads loss as congestion. From 2% scattered loss at a 60 ms round trip it holds the video back for seconds with repairs or without, and near that edge the repairs' own load can tip it over. A lossy radio link needs a controller that does not, such as the delay-based GCC, and the repairs must still not hide the loss from it.
+
+[`fec-model`](fec-model/README.md) is a model of the same video in Python that shares no code with this crate. Its frames late without repairs agree with the simulator's within about two points (28.8% against 26.9% at 60 ms and 2%; 64.8% against 64.4% at 150 ms), and it compares repair timings this prototype does not have.
+
+**Not done.** A packet that arrives after it was rebuilt is dropped unacknowledged, so reordering costs a spurious loss. The receiver holds slices of its receive buffers, and the sender copies every covered packet. Coverage is the whole connection, with no per-stream choice and a fixed overhead. The fuzz targets and the random-workload simulation do not run with repairs on. Nothing compares it with datagrams carrying the same repairs, and nothing has run over a real link.
 
 ### ACK frequency
 

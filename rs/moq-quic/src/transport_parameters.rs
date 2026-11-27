@@ -69,6 +69,10 @@ macro_rules! apply_params {
 			/// Exponent used to decode the timestamp deltas in ACK_RECEIVE_TIMESTAMPS frames the
 			/// peer sends, with zero meaning microseconds
 			receive_timestamps_exponent(ReceiveTimestampsExponent) = 0,
+
+			/// Experimental: the most packets one REPAIR frame may cover for the endpoint to
+			/// rebuild lost packets from it, with zero refusing the frame entirely
+			fec_window(FecWindow) = 0,
 		}
 	};
 }
@@ -188,6 +192,7 @@ impl TransportParameters {
 			min_ack_delay: Some(VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap()),
 			reset_stream_at: config.reset_stream_at,
 			max_receive_timestamps_per_ack: config.receive_timestamps.map_or(VarInt(0), |max| max.get().into()),
+			fec_window: config.fec.as_ref().map_or(VarInt(0), |fec| fec.window.into()),
 			grease_transport_parameter: Some(ReservedTransportParameter::random(rng)),
 			write_order: Some({
 				let mut order = std::array::from_fn(|i| i as u8);
@@ -659,11 +664,14 @@ pub(crate) enum TransportParameterId {
 	// https://www.ietf.org/archive/id/draft-ietf-quic-receive-ts-03.html#section-6
 	MaxReceiveTimestampsPerAck = 0x4AC07,
 	ReceiveTimestampsExponent = 0x4AC26,
+
+	// Experimental and private to this implementation: forward error correction
+	FecWindow = 0x2BFEC0,
 }
 
 impl TransportParameterId {
 	/// Array with all supported transport parameter IDs
-	const SUPPORTED: [Self; 24] = [
+	const SUPPORTED: [Self; 25] = [
 		Self::MaxIdleTimeout,
 		Self::MaxUdpPayloadSize,
 		Self::InitialMaxData,
@@ -688,6 +696,7 @@ impl TransportParameterId {
 		Self::ResetStreamAt,
 		Self::MaxReceiveTimestampsPerAck,
 		Self::ReceiveTimestampsExponent,
+		Self::FecWindow,
 	];
 }
 
@@ -726,6 +735,7 @@ impl TryFrom<u64> for TransportParameterId {
 			id if Self::ResetStreamAt == id => Self::ResetStreamAt,
 			id if Self::MaxReceiveTimestampsPerAck == id => Self::MaxReceiveTimestampsPerAck,
 			id if Self::ReceiveTimestampsExponent == id => Self::ReceiveTimestampsExponent,
+			id if Self::FecWindow == id => Self::FecWindow,
 			_ => return Err(()),
 		};
 		Ok(param)

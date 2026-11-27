@@ -134,6 +134,8 @@ frame_types! {
 	// https://www.ietf.org/archive/id/draft-ietf-quic-receive-ts-03.html#section-4
 	ACK_RECEIVE_TIMESTAMPS = 0x03178307,
 	ACK_RECEIVE_TIMESTAMPS_ECN = 0x03178308,
+	// Experimental and private to this implementation: forward error correction
+	REPAIR = 0x2bfec6,
 	// DATAGRAM
 }
 
@@ -165,6 +167,7 @@ pub(crate) enum Frame {
 	AckFrequency(AckFrequency),
 	ImmediateAck,
 	HandshakeDone,
+	Repair(Repair),
 }
 
 impl Frame {
@@ -211,6 +214,7 @@ impl Frame {
 			AckFrequency(_) => FrameType::ACK_FREQUENCY,
 			ImmediateAck => FrameType::IMMEDIATE_ACK,
 			HandshakeDone => FrameType::HANDSHAKE_DONE,
+			Repair(_) => FrameType::REPAIR,
 		}
 	}
 
@@ -679,6 +683,61 @@ impl NewToken {
 	}
 }
 
+/// Experimental: a repair symbol, and the packets whose payloads it was computed over
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Repair {
+	/// How the symbol was computed, as [`crate::connection::fec`] numbers its codes
+	pub(crate) code: u64,
+	/// Which of the block's repair symbols this is
+	pub(crate) index: u8,
+	/// The packet numbers the block covers, ascending
+	pub(crate) sources: Vec<u64>,
+	pub(crate) symbol: Bytes,
+}
+
+impl Repair {
+	/// The most packets one frame covers
+	pub(crate) const MAX_SOURCES: usize = 128;
+	/// The most ranges of consecutive packet numbers a sender describes its sources by
+	pub(crate) const MAX_RANGES: usize = 8;
+	/// The most bytes of the frame besides its symbol, when its packet numbers fall in
+	/// [`Self::MAX_RANGES`] ranges with gaps below 2^14: the type, code, and index, the first
+	/// packet number, the range count and first range, each further range, and the symbol's
+	/// length
+	pub(crate) const SIZE_BOUND: usize = 4 + 1 + 2 + 8 + 1 + 2 + (Self::MAX_RANGES - 1) * 4 + 2;
+
+	pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
+		out.write(FrameType::REPAIR);
+		out.write_var(self.code);
+		out.write_var(self.index.into());
+		let ranges = self.ranges();
+		out.write_var(ranges[0].0);
+		out.write_var(ranges.len() as u64 - 1);
+		let mut end = ranges[0].0;
+		for (i, &(first, last)) in ranges.iter().enumerate() {
+			if i > 0 {
+				out.write_var(first - end - 2);
+			}
+			out.write_var(last - first);
+			end = last;
+		}
+		out.write_var(self.symbol.len() as u64);
+		out.put_slice(&self.symbol);
+	}
+
+	/// The sources as inclusive ranges of consecutive packet numbers
+	pub(crate) fn ranges(&self) -> Vec<(u64, u64)> {
+		let mut ranges: Vec<(u64, u64)> = Vec::new();
+		for &pn in &self.sources {
+			match ranges.last_mut() {
+				Some((_, last)) if *last + 1 == pn => *last = pn,
+				_ => ranges.push((pn, pn)),
+			}
+		}
+		ranges
+	}
+}
+
 pub(crate) struct Iter {
 	bytes: Bytes,
 	last_ty: Option<FrameType>,
@@ -861,6 +920,36 @@ impl Iter {
 				reordering_threshold: self.bytes.get()?,
 			}),
 			FrameType::IMMEDIATE_ACK => Frame::ImmediateAck,
+			FrameType::REPAIR => {
+				let code = self.bytes.get_var()?;
+				let index = u8::try_from(self.bytes.get_var()?).map_err(|_| IterErr::Malformed)?;
+				let mut next = self.bytes.get_var()?;
+				let ranges = self.bytes.get_var()?;
+				let mut sources = Vec::new();
+				// Every range adds a source and the frame holds at most `MAX_SOURCES`, which
+				// bounds the loop whatever count the peer claims
+				for range in 0..=ranges {
+					if range > 0 {
+						let gap = self.bytes.get_var()?;
+						next = next.checked_add(gap + 1).ok_or(IterErr::Malformed)?;
+					}
+					let more = self.bytes.get_var()?;
+					if more >= (Repair::MAX_SOURCES - sources.len()) as u64 {
+						return Err(IterErr::Malformed);
+					}
+					let last = next.checked_add(more).filter(|&last| last < VarInt::MAX.0);
+					let last = last.ok_or(IterErr::Malformed)?;
+					sources.extend(next..=last);
+					next = last + 1;
+				}
+				let symbol = self.take_len()?;
+				Frame::Repair(Repair {
+					code,
+					index,
+					sources,
+					symbol,
+				})
+			}
 			_ => {
 				if let Some(s) = ty.stream() {
 					Frame::Stream(Stream {

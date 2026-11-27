@@ -186,6 +186,17 @@ impl PacketBuilder {
 		let ack_eliciting = self.ack_eliciting;
 		let exact_number = self.exact_number;
 		let space_id = self.space;
+		// A packet with stream data is one a repair covers: its frames as they stand, before
+		// any padding. Resent probe data and other repairs are not.
+		if space_id == SpaceId::Data
+			&& let Some(encoder) = &mut conn.fec_encoder
+			&& sent
+				.as_ref()
+				.is_some_and(|sent| !sent.stream_frames.is_empty() && !sent.bandwidth_probe && !sent.fec_repair)
+		{
+			let frames = self.partial_encode.start + self.partial_encode.header_len;
+			encoder.source(exact_number, &buffer[frames..]);
+		}
 		let (size, padded) = self.finish(conn, now, buffer);
 		let Some(sent) = sent else {
 			return;

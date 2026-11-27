@@ -99,6 +99,18 @@ impl Bottleneck {
 	}
 }
 
+/// Spells in which a link loses most of what crosses it, as a radio's fades do, where
+/// [`Link::loss`] drops each datagram alone
+#[derive(Debug, Clone, Copy)]
+pub struct Fades {
+	/// How long the link stays clear between fades, on average
+	pub clear: Duration,
+	/// How long a fade lasts, on average
+	pub fade: Duration,
+	/// The probability a datagram sent during a fade is lost
+	pub loss: f64,
+}
+
 /// One direction of the path: an optional bottleneck, then seeded loss, duplication, jitter,
 /// and reordering
 #[derive(Debug, Clone, Default)]
@@ -107,6 +119,8 @@ pub struct Link {
 	pub bottleneck: Option<Bottleneck>,
 	/// The probability a datagram leaving the bottleneck is lost
 	pub loss: f64,
+	/// Fades, each losing a run of the datagrams that leave the bottleneck during it
+	pub fades: Option<Fades>,
 	/// The probability a datagram arrives twice
 	pub duplicate: f64,
 	/// Extra delay drawn uniformly up to this for each arrival, keeping arrivals in order
@@ -123,6 +137,9 @@ pub struct Link {
 	last_arrival: Option<Instant>,
 	/// When the first grant interval began
 	grant_epoch: Option<Instant>,
+	/// Whether the link is in a fade, and when that next changes
+	fading: bool,
+	fade_change: Option<Instant>,
 }
 
 impl Link {
@@ -144,6 +161,25 @@ impl Link {
 		};
 		if rng.random_bool(self.loss) {
 			return (marked, Vec::new());
+		}
+		if let Some(fades) = self.fades {
+			// Spells of exponentially distributed length, drawn as time passes them
+			let mut spell = |fading: bool| {
+				let mean = if fading { fades.fade } else { fades.clear };
+				mean.mul_f64(-(1.0 - rng.random::<f64>()).ln())
+			};
+			let mut change = match self.fade_change {
+				Some(change) => change,
+				None => sent.saturating_add(spell(false)),
+			};
+			while sent >= change {
+				self.fading = !self.fading;
+				change = change.saturating_add(spell(self.fading));
+			}
+			self.fade_change = Some(change);
+			if self.fading && rng.random_bool(fades.loss) {
+				return (marked, Vec::new());
+			}
 		}
 
 		let copies = 1 + rng.random_bool(self.duplicate) as usize;

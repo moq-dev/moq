@@ -40,6 +40,7 @@ use util::*;
 
 mod acked;
 mod characterize;
+mod fec;
 mod keep_alive;
 mod probe;
 mod quiesce;

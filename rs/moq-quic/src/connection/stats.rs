@@ -51,6 +51,7 @@ pub struct FrameStats {
 	pub path_challenge: u64,
 	pub path_response: u64,
 	pub ping: u64,
+	pub repair: u64,
 	pub reset_stream: u64,
 	pub retire_connection_id: u64,
 	pub stream_data_blocked: u64,
@@ -98,6 +99,7 @@ impl FrameStats {
 			Frame::AckFrequency(_) => self.ack_frequency += 1,
 			Frame::ImmediateAck => self.immediate_ack += 1,
 			Frame::HandshakeDone => self.handshake_done = self.handshake_done.saturating_add(1),
+			Frame::Repair(_) => self.repair += 1,
 		}
 	}
 }
@@ -122,6 +124,7 @@ impl std::fmt::Debug for FrameStats {
 			.field("PATH_CHALLENGE", &self.path_challenge)
 			.field("PATH_RESPONSE", &self.path_response)
 			.field("PING", &self.ping)
+			.field("REPAIR", &self.repair)
 			.field("RESET_STREAM", &self.reset_stream)
 			.field("RETIRE_CONNECTION_ID", &self.retire_connection_id)
 			.field("STREAM_DATA_BLOCKED", &self.stream_data_blocked)
@@ -168,6 +171,8 @@ pub struct PathStats {
 	pub sent_bandwidth_probes: u64,
 	/// The bytes of those packets, which carry no new data
 	pub sent_bandwidth_probe_bytes: u64,
+	/// Experimental: packets that never arrived and were rebuilt from the peer's repair packets
+	pub rebuilt_packets: u64,
 	/// The number of times a black hole was detected in the path
 	pub black_holes_detected: u64,
 	/// Time data ready to send waited on a full congestion window
