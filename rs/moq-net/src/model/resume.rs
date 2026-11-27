@@ -7880,6 +7880,69 @@ mod test {
 		assert_eq!(dropped(&mut sub), []);
 	}
 
+	/// A front's delivery starts at a group it holds below the first one out when any copy can
+	/// serve it from its head: a newer route's copy that joined partway into the group never
+	/// hides the whole one an older copy holds.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fronts_delivery_starts_at_a_group_any_copy_serves_whole() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let newest_first = Subscription::default()
+			.with_ranges([track::Range::ALL])
+			.with_order(track::Order::Descending);
+		let mut sub = logical.consume().subscribe(newest_first).now_or_never().unwrap().unwrap();
+		let mut open = a.create_group(group::Info { start: 3 }).unwrap();
+		open.write_frame(ts(3), b"x".as_ref()).unwrap();
+		// Capped below group 3, so the polls that let each copy answer hand nothing out.
+		sub.set_range(..3);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		open.write_frame(ts(4), b"y".as_ref()).unwrap();
+		open.finish().unwrap();
+		let mut rest = b.create_group(group::Info { start: 3 }).unwrap();
+		rest.start_at(1).unwrap();
+		rest.write_frame(ts(4), b"y".as_ref()).unwrap();
+		rest.finish().unwrap();
+		write(&b, 5);
+		sub.set_range(..);
+		assert_eq!(recv(&mut sub).start, 5);
+		let start = sub.delivery_start(track::Opening {
+			first: 5,
+			source: None,
+			given_up: &rangemap::RangeMap::new(),
+			serves: &|group| group.fetches_from(0),
+		});
+		assert_eq!(start, 3);
+	}
+
+	/// A run reported and then taken back as never told goes out again once delivery widens
+	/// below it, on a front through the copy that gave it up: nothing new landed, so only a
+	/// rescan finds it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_untold_run_is_reported_again_after_a_rescan() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(if routed { &logical } else { &a }, HOUR);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, false), [0]);
+			a.drop_groups(2..4, StreamError::NotFound);
+			assert_eq!(dropped(&mut sub), [(2..4, StreamError::NotFound)], "routed={routed}");
+			sub.untell(2..4);
+			assert_eq!(dropped(&mut sub), [], "routed={routed}: nothing changed");
+			sub.rescan_drops();
+			assert_eq!(dropped(&mut sub), [(2..4, StreamError::NotFound)], "routed={routed}");
+		}
+	}
+
 	/// A run the serving copy's own cursor wrote off as stale is its verdict, not a received one
 	/// a new upstream subscription supersedes: it is still reported after the copy lets go of a
 	/// stale run its upstream judged.
@@ -8651,6 +8714,61 @@ mod test {
 		ordered.update(both).unwrap();
 		// Time 5 lies in group 4 or later, never in group 2.
 		assert_eq!(read(&mut ordered, usize::MAX), ["group 4"]);
+	}
+
+	/// A front's held group with no end of its own is bounded by the next key its copies hold,
+	/// not that group's first timestamp: a time start between the two may still place at the
+	/// held group. Mirrors the plain `a_held_groups_successor_bounds_it_by_key`.
+	#[test]
+	fn a_fronts_held_groups_successor_bounds_it_by_key() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let mut ordered = logical
+			.consume()
+			.subscribe(Subscription::default().with_max(None))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let read = |ordered: &mut track::Ordered, most: usize| -> Vec<String> {
+			let mut items = Vec::new();
+			while items.len() < most
+				&& let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop())
+			{
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, .. } => format!("gap {range:?}"),
+				});
+			}
+			items
+		};
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		write(&a, 2);
+		let mut ten = a.create_group(group::Info { start: 10 }).unwrap();
+		ten.write_frame(ts(4), b"x".as_ref()).unwrap();
+		ten.finish().unwrap();
+		// Group 2 is held behind the gap.
+		assert_eq!(read(&mut ordered, 2), ["group 0", "gap 1..2"]);
+		let both = Subscription::default()
+			.with_ranges([5, 10].map(|time| crate::track::Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}))
+			.with_max(None);
+		ordered.update(both).unwrap();
+		a.time_starts([(10, Some(10))]);
+		// Time 10 places at group 10, but group 2 goes first if time 5 lies in it.
+		assert_eq!(
+			read(&mut ordered, usize::MAX),
+			Vec::<String>::new(),
+			"time 5 may lie in group 2"
+		);
+		a.time_starts([(5, Some(2))]);
+		assert_eq!(read(&mut ordered, usize::MAX), ["group 2"]);
 	}
 
 	/// A front's ordered read holding a group runs its cursor and meets the serving copy's fatal
