@@ -6,6 +6,13 @@
  */
 
 import { max, min } from "./util/key.ts";
+import type { Run } from "./window.ts";
+
+/** The groups a reader's ranges hold, as a fold judges a gap by. */
+export interface Judged {
+	/** The runs the placed ranges name from `from` up to the exclusive `end`, lowest first. */
+	placed(from: bigint, end: bigint): Run[];
+}
 
 /**
  * The group keys a reader handed out, as runs of consecutive keys.
@@ -17,6 +24,10 @@ import { max, min } from "./util/key.ts";
 export class Delivered {
 	// First and last key of each run, inclusive, sorted and never adjacent to each other.
 	#runs: [bigint, bigint][] = [];
+	// The keys a fold counted as handed out that no range held then, so no budget judged them: a
+	// range added later owes each it holds (see {@link reopen}). Always within `#runs`. Mirrors the
+	// Rust `Delivered::unjudged`.
+	#unjudged: Delivered | undefined;
 
 	// The index of the run containing or preceding `key`, or -1 when none starts at or below it.
 	#below(key: bigint): number {
@@ -53,6 +64,7 @@ export class Delivered {
 	/** Record every key in `[start, end)` as handed out. */
 	addRun(start: bigint, end: bigint): void {
 		if (start >= end) return;
+		this.#unjudged?.remove(start, end);
 		// The runs it overlaps or touches, `first` through `last`, merge into one.
 		let first = this.#below(start - 1n);
 		if (first < 0 || this.#runs[first][1] < start - 1n) first++;
@@ -63,6 +75,21 @@ export class Delivered {
 		}
 		const merged: [bigint, bigint] = [min(start, this.#runs[first][0]), max(end - 1n, this.#runs[last][1])];
 		this.#runs.splice(first, last - first + 1, merged);
+	}
+
+	/** Forget that any key in `[start, end)` was handed out, splitting the runs it cuts. */
+	remove(start: bigint, end: bigint): void {
+		if (start >= end) return;
+		this.#unjudged?.remove(start, end);
+		// The runs reaching into it, `first` through `last`, keep only what lies outside it.
+		let first = this.#below(start);
+		if (first < 0 || this.#runs[first][1] < start) first++;
+		const last = this.#below(end - 1n);
+		if (last < first) return;
+		const kept: [bigint, bigint][] = [];
+		if (this.#runs[first][0] < start) kept.push([this.#runs[first][0], start - 1n]);
+		if (this.#runs[last][1] >= end) kept.push([end, this.#runs[last][1]]);
+		this.#runs.splice(first, last - first + 1, ...kept);
 	}
 
 	/** A record of what either this or `other` handed out. */
@@ -82,6 +109,37 @@ export class Delivered {
 			next = max(next, last + 1n);
 		}
 		if (next < end) yield { start: next, end };
+	}
+
+	/**
+	 * Count every key below `floor` as handed out, as a fold past the reader's budget does: each gap
+	 * it closes that `judged` doesn't hold, or every one while the ranges are still being placed, a
+	 * range added later that holds it owes again. Mirrors the Rust `Delivered::fold_below`.
+	 */
+	foldBelow(floor: bigint, judged: Judged | undefined): void {
+		for (const gap of [...this.gaps(this.runEnd(0n) ?? 0n, floor)]) {
+			let from = gap.start;
+			for (const held of judged?.placed(gap.start, gap.end) ?? []) {
+				if (held.start > from) this.#unjudge(from, held.start);
+				from = max(from, held.end);
+			}
+			if (from < gap.end) this.#unjudge(from, gap.end);
+		}
+		this.forgetBelow(floor);
+	}
+
+	// Remember `[start, end)` as folded unjudged.
+	#unjudge(start: bigint, end: bigint): void {
+		this.#unjudged ??= new Delivered();
+		this.#unjudged.addRun(start, end);
+	}
+
+	/** Take back each key a fold counted as handed out unjudged that `judged` now holds, so it is owed again. */
+	reopen(judged: Judged): void {
+		const unjudged = this.#unjudged;
+		if (!unjudged) return;
+		const held = unjudged.#runs.flatMap(([first, last]) => judged.placed(first, last + 1n));
+		for (const run of held) this.remove(run.start, run.end);
 	}
 
 	/** Count every key below `floor` as handed out. */
@@ -109,8 +167,8 @@ export class Delivered {
 		return index >= 0 && key <= this.#runs[index][1] ? this.#runs[index][1] + 1n : undefined;
 	}
 
-	/** How many runs it holds: one per gap, plus the floor. */
+	/** How many runs it holds: one per gap, plus the floor, plus one per run folded unjudged. */
 	get runs(): number {
-		return this.#runs.length;
+		return this.#runs.length + (this.#unjudged?.runs ?? 0);
 	}
 }

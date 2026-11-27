@@ -1309,6 +1309,43 @@ test("a late group on a drained serving copy is read", async () => {
 	}
 });
 
+// A range added behind a resumed reader caught up at the live edge hands out the older group its
+// route delivers after the update, though the reader's budget folded that gap before any range held
+// it. Mirrors the Rust `a_range_added_behind_a_caught_up_resumed_read_hands_out_what_arrives_later`.
+test("a range added behind a caught-up resumed read hands out what arrives later", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	hooks.receiveTrack(ta.producer);
+	front.serve(handle);
+	const sub = front.consumer.track("seq").subscribe(joining(Duration.ZERO));
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(5n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([5n]);
+		ta.write(6n);
+		ta.write(7n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([7n]);
+		sub.update({ ranges: [...(joining(Duration.ZERO).ranges ?? []), { start: 3n, end: 3n }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		ta.write(3n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([3n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
 test("a late group on a drained serving copy is peeked as the take hands it out", async () => {
 	const clock = new Manual();
 	const installed = install(clock);

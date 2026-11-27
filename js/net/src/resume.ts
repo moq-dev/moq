@@ -58,6 +58,7 @@ import {
 	type Dispositions,
 	type DropRun,
 	type Expiry,
+	type FoldTerms,
 	finalKey,
 	type GroupRecover,
 	type Held,
@@ -1421,6 +1422,7 @@ class Reader implements ResumeSource {
 		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
 		this.#reopen();
+		this.#reopenFolded(delivered);
 		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -1564,6 +1566,7 @@ class Reader implements ResumeSource {
 		if (!serving) return false;
 		// The reader's own window, as its copies placed it: the subscriber's leaves its anchors to them.
 		const window = this.#window();
+		if (!window.pending) delivered.reopen(window);
 		const end = window.end();
 		if (end === undefined || window.pending) return false;
 		const gaps = window.runs(window.floor() ?? 0n, end).flatMap((run) => [...delivered.gaps(run.start, run.end)]);
@@ -2235,7 +2238,21 @@ class Reader implements ResumeSource {
 	}
 
 	forgetPastBudget(delivered: Delivered): void {
-		this.forgetPast(delivered, this.#readerBudget());
+		this.forgetPast(delivered, { budget: this.#readerBudget(), ranges: this.#placed() });
+	}
+
+	// The reader's window once nothing waits on a copy to place a live join.
+	#placed(): Window | undefined {
+		const window = this.#window();
+		return window.pending ? undefined : window;
+	}
+
+	// Take back what a fold counted as handed out in `delivered` before any range held it, which the
+	// reader's ranges, as its copies placed them, now owe. Each read does so before it judges what
+	// the copies hold, since the copies place a range only once a group arrives for it.
+	#reopenFolded(delivered: Delivered): void {
+		const placed = this.#placed();
+		if (placed) delivered.reopen(placed);
 	}
 
 	untell(start: bigint, end: bigint): void {
@@ -2245,7 +2262,7 @@ class Reader implements ResumeSource {
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
 	// holds unread: as one cursor keeps what it owes, since a late group there may be fresh by its
 	// own successor on that copy. Nor past `keep`, an outer reader's own such group.
-	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void {
+	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
 		let kept = keep;
@@ -2254,7 +2271,7 @@ class Reader implements ResumeSource {
 			const key = hooks.lowestBuffered(copy.sub, delivered);
 			if (key !== undefined) kept = min(kept ?? key, key);
 		}
-		hooks.forgetPastBudget(newest.sub, delivered, budget, kept);
+		hooks.forgetPastBudget(newest.sub, delivered, terms, kept);
 	}
 
 	// The same key is the same group on every copy, so it bounds group `key` whichever copy holds it.
@@ -2553,6 +2570,7 @@ class Reader implements ResumeSource {
 		// As the take does, so a late group on a copy that ran out is offered here too. A serving
 		// copy it reopens owes a backfill, which the next take asks.
 		this.#reopen();
+		this.#reopenFolded(delivered);
 		const { next } = this.#first(ordered, delivered);
 		if (!next) return undefined;
 		return hooks.peekGroup(next.sub, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);

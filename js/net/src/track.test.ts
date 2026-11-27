@@ -7220,6 +7220,36 @@ test("a join added behind a caught-up read hands out what it reaches", () => {
 	}
 });
 
+// A range added behind a reader caught up at the live edge of a relay's copy holding only its
+// newest groups hands out the older group its upstream sends after the update, though the reader's
+// own budget folded that gap before any range held it. Mirrors the Rust
+// `a_range_added_behind_a_caught_up_relay_read_hands_out_what_arrives_later`.
+test("a range added behind a caught-up relay read hands out what arrives later", () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	try {
+		const read = (subscriber: ReturnType<typeof producer.subscribe>) => {
+			const got: bigint[] = [];
+			for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) got.push(group.start);
+			return got;
+		};
+		putGroup(producer, 5n);
+		const subscriber = producer.subscribe(latest(Duration.ZERO));
+		expect(read(subscriber)).toEqual([5n]);
+		putGroup(producer, 6n);
+		putGroup(producer, 7n);
+		expect(read(subscriber)).toEqual([7n]);
+		subscriber.update({ ranges: [...(latest(Duration.ZERO).ranges ?? []), { start: 3n, end: 3n }] });
+		expect(read(subscriber)).toEqual([]);
+		putGroup(producer, 3n);
+		expect(read(subscriber)).toEqual([3n]);
+		subscriber.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 // Where a publisher's delivery starts, over random held groups (whole or headless) and runs given
 // up: from the lower of the source's start and the lowest held group it serves, the first group
 // neither given up nor held unservable, and never past the first group out. Mirrors the Rust

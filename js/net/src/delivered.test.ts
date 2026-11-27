@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Delivered } from "./delivered.ts";
+import { Delivered, type Judged } from "./delivered.ts";
+import { max, min } from "./util/key.ts";
 
 test("add joins neighbouring runs", () => {
 	const delivered = new Delivered();
@@ -75,4 +76,57 @@ test("a run joins every run it touches, leaving the gaps around it", () => {
 	delivered.addRun(0n, 20n);
 	expect(delivered.runs).toBe(1);
 	expect([...delivered.gaps(0n, 20n)]).toEqual([]);
+});
+
+// The judged groups as a window places them, from `[start, end)` runs.
+function judged(...runs: [bigint, bigint][]): Judged {
+	return {
+		placed: (from, end) =>
+			runs
+				.filter(([start, stop]) => start < end && stop > from)
+				.map(([start, stop]) => ({ start: max(start, from), end: min(stop, end) })),
+	};
+}
+
+test("a fold reopens only the gaps no range judged", () => {
+	const delivered = new Delivered();
+	for (const key of [4n, 9n]) delivered.add(key);
+	// Ranges hold 2..4 and 6..8 as the fold closes every gap below 9.
+	delivered.foldBelow(9n, judged([2n, 4n], [6n, 8n]));
+	expect([...delivered.gaps(0n, 10n)]).toEqual([]);
+	expect(delivered.runs).toBe(4);
+	// A range added over 0..9 owes the gaps folded unjudged, never a hand-out nor what the budget judged.
+	delivered.reopen(judged([0n, 9n]));
+	expect([...delivered.gaps(0n, 10n)]).toEqual([
+		{ start: 0n, end: 2n },
+		{ start: 5n, end: 6n },
+		{ start: 8n, end: 9n },
+	]);
+	expect(delivered.runs).toBe(3);
+	// Folded while the ranges are still being placed, every gap is unjudged; one settled since is not reopened.
+	delivered.foldBelow(10n, undefined);
+	delivered.addRun(0n, 1n);
+	delivered.reopen(judged([0n, 10n]));
+	expect([...delivered.gaps(0n, 10n)]).toEqual([
+		{ start: 1n, end: 2n },
+		{ start: 5n, end: 6n },
+		{ start: 8n, end: 9n },
+	]);
+});
+
+test("remove splits the runs it cuts", () => {
+	const delivered = new Delivered();
+	delivered.addRun(2n, 7n);
+	for (const key of [9n, 12n]) delivered.add(key);
+	delivered.remove(4n, 10n);
+	expect([...delivered.gaps(0n, 13n)]).toEqual([
+		{ start: 0n, end: 2n },
+		{ start: 4n, end: 12n },
+	]);
+	delivered.addRun(2n, 12n);
+	delivered.remove(5n, 6n);
+	expect(delivered.has(4n) && !delivered.has(5n) && delivered.has(6n)).toBe(true);
+	delivered.remove(13n, 20n);
+	delivered.remove(8n, 8n);
+	expect(delivered.runs).toBe(2);
 });

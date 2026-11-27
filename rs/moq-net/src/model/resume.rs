@@ -1389,16 +1389,23 @@ impl Subscriber {
 	/// Forget the gaps in `delivered` below each group past the reader's budget, as
 	/// [`Self::forget_past`] does; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
-		let budget = self.reader().budget();
-		self.forget_past(delivered, budget, None);
+		let terms = {
+			let mut reader = self.reader();
+			let budget = reader.budget();
+			track::FoldTerms {
+				budget,
+				ranges: reader.window().groups().cloned(),
+			}
+		};
+		self.forget_past(delivered, terms, None);
 	}
 
-	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	/// `delivered` this is, judged on the newest copy that answered, but never past a group a
-	/// replaced copy the reader still reads holds unread: as one cursor keeps what it owes,
-	/// since a late group there may be fresh by its own successor on that copy. Nor past `keep`,
-	/// an outer reader's own such group.
-	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
+	/// Forget the gaps in `delivered` below each group past the budget of `terms`, an outer
+	/// reader's whose `delivered` this is, judged on the newest copy that answered, but never
+	/// past a group a replaced copy the reader still reads holds unread: as one cursor keeps what
+	/// it owes, since a late group there may be fresh by its own successor on that copy. Nor past
+	/// `keep`, an outer reader's own such group.
+	pub(super) fn forget_past(&self, delivered: &mut Delivered, terms: track::FoldTerms, keep: Option<u64>) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
 			Sub::Ready(sub) => Some((copy, sub)),
@@ -1425,7 +1432,7 @@ impl Subscriber {
 			.filter_map(|(_, sub)| unread(sub))
 			.chain(keep)
 			.min();
-		newest.forget_past_budget(delivered, budget, kept);
+		newest.forget_past_budget(delivered, terms, kept);
 	}
 
 	/// Poll for the track's declared exclusive end.
@@ -11219,6 +11226,35 @@ mod test {
 		write(&b, 4);
 		assert_eq!(drain(&mut sub, false), [4]);
 		assert_eq!(sub.delivered_runs(), 1);
+	}
+
+	/// A range added behind a resumed reader caught up at the live edge hands out the older
+	/// group its route delivers after the update, though the reader's budget folded that gap
+	/// before any range held it.
+	#[test]
+	fn a_range_added_behind_a_caught_up_resumed_read_hands_out_what_arrives_later() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let latest = Subscription::default().with_ranges([track::Range::from(crate::track::Start::LATEST)]);
+		let mut sub = logical.consume().subscribe(latest).now_or_never().unwrap().unwrap();
+		write(&a, 5);
+		assert_eq!(drain(&mut sub, false), [5]);
+		write(&a, 6);
+		write(&a, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(1, track::Range::groups(3..=3))],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing held there yet");
+		write(&a, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
 	}
 
 	/// Across route changes, an endless track with groups missing remembers only the gaps

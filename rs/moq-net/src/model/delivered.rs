@@ -2,6 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use rangemap::RangeSet;
+
+use super::subscription::{Cover, minus};
+
 /// The group keys a reader handed out, as runs of consecutive keys.
 ///
 /// A reader stops expecting a group once it is past its budget, and counts everything
@@ -12,6 +16,9 @@ use std::collections::BTreeMap;
 pub(super) struct Delivered {
 	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
+	/// The keys a fold counted as handed out that no range held then, so no budget judged
+	/// them: a range added later owes each it holds (see [`Self::reopen`]). Always within `runs`.
+	unjudged: RangeSet<u64>,
 }
 
 impl Delivered {
@@ -58,6 +65,7 @@ impl Delivered {
 		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
+		self.unjudged.remove(groups.clone());
 		let mut first = groups.start;
 		// A run ending at or just below the first key joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
@@ -81,6 +89,7 @@ impl Delivered {
 		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
+		self.unjudged.remove(groups.clone());
 		// Runs are disjoint and sorted, so the ones reaching into `groups` are the last few
 		// starting at or below its last key.
 		let cut: Vec<(u64, u64)> = (self.runs.range(..=last).rev())
@@ -133,6 +142,43 @@ impl Delivered {
 		gaps
 	}
 
+	/// Count every key below `floor` as handed out, as a fold past the reader's budget does:
+	/// each gap it closes that `judged` doesn't hold, or every one while the ranges are still
+	/// being placed, a range added later that holds it owes again.
+	pub fn fold_below(&mut self, floor: u64, judged: Option<&Cover>) {
+		let gaps: Vec<std::ops::Range<u64>> = self.gaps(self.floor()..floor).collect();
+		for gap in gaps {
+			match judged {
+				Some(judged) => {
+					for run in minus(gap.start..=gap.end - 1, judged) {
+						self.unjudged.insert(*run.start()..*run.end() + 1);
+					}
+				}
+				None => self.unjudged.insert(gap),
+			}
+		}
+		self.forget_below(floor);
+	}
+
+	/// Take back each key a fold counted as handed out unjudged that `judged` now holds, so it
+	/// is owed again.
+	pub fn reopen(&mut self, judged: &Cover) {
+		let held: Vec<std::ops::Range<u64>> = (self.unjudged.iter())
+			.flat_map(|run| judged.within(run.start, run.end - 1))
+			.map(|run| *run.start()..*run.end() + 1)
+			.collect();
+		for run in held {
+			self.remove(run);
+		}
+	}
+
+	/// Count every key below `floor` as handed out for good: none is owed again, whatever
+	/// range is added later.
+	pub fn settle_below(&mut self, floor: u64) {
+		self.forget_below(floor);
+		self.unjudged.remove(0..floor);
+	}
+
 	/// Count every key below `floor` as handed out.
 	pub fn forget_below(&mut self, floor: u64) {
 		let Some(below) = floor.checked_sub(1) else {
@@ -183,9 +229,9 @@ impl Delivered {
 		self.runs.last_key_value().map(|(_, last)| last + 1)
 	}
 
-	/// How many runs it holds: one per gap, plus the floor.
+	/// How many runs it holds: one per gap, plus the floor, plus one per run folded unjudged.
 	pub fn runs(&self) -> usize {
-		self.runs.len()
+		self.runs.len() + self.unjudged.len()
 	}
 }
 
@@ -312,5 +358,37 @@ mod test {
 		delivered.forget_below(13);
 		assert_eq!(runs(&delivered), [(0, 12)]);
 		assert_eq!(delivered.above_gap(), None);
+	}
+
+	#[test]
+	fn a_fold_reopens_only_the_gaps_no_range_judged() {
+		let mut delivered = Delivered::default();
+		for key in [4, 9] {
+			delivered.insert(key);
+		}
+		// Ranges hold 2..=3 and 6..=7 as the fold closes every gap below 9.
+		delivered.fold_below(9, Some(&Cover::new([2..=3, 6..=7])));
+		assert_eq!(runs(&delivered), [(0, 9)]);
+		assert_eq!(delivered.runs(), 4, "the floor plus three gaps no range held");
+
+		// A range added over 0..=8 owes the gaps folded unjudged, never a hand-out nor what the
+		// budget judged.
+		delivered.reopen(&Cover::new(std::iter::once(0..=8)));
+		assert_eq!(runs(&delivered), [(2, 4), (6, 7), (9, 9)]);
+		assert_eq!(delivered.runs(), 3, "nothing left to reopen");
+
+		// Folded while the ranges are still being placed, every gap is unjudged; one handed out or
+		// settled since is not reopened.
+		delivered.fold_below(10, None);
+		delivered.insert_run(0..1);
+		delivered.reopen(&Cover::new(std::iter::once(0..=9)));
+		assert_eq!(runs(&delivered), [(0, 0), (2, 4), (6, 7), (9, 9)]);
+
+		// Settled for good, nothing below is owed again.
+		delivered.fold_below(10, None);
+		delivered.settle_below(10);
+		delivered.reopen(&Cover::new(std::iter::once(0..=9)));
+		assert_eq!(runs(&delivered), [(0, 9)]);
+		assert_eq!(delivered.runs(), 1);
 	}
 }
