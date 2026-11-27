@@ -249,3 +249,23 @@ failures (re-check if one repeats): `benchmark_receive_windows`' `group timed ou
 non-skipped cell, the Firefox player's `after resume` tone at 65/75 samples, Interop's
 Chromium `volume 0.25` at 27/31 samples, Interop's `finish go -> *` gst reader on 11-25, and
 the supplemental benchmarks' 55-minute step timeout on 11-25 (28 minutes compiling).
+
+Bisected 2026-11-27 (maintainer away; agent recommendation, for review), the paired
+regressions Nightly [45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463)
+confirmed, still on `main` at `83e10f008a`. Counted in user instructions per iteration on one
+pinned core, since wall time on the shared host varied by up to 30% between runs:
+
+- `moq-audio/capture` `capture_fanout/*`: from
+  [moq-dev/moq#9675](https://github.com/moq-dev/moq/pull/9675). Once kio left the workspace,
+  `cargo hakari` unified its test-only `sim` and `manual` features into the workspace-hack,
+  so every bench and test build compiled kio's per-poll accounting: 13 more instructions per
+  read, +3.9% to +9.7% per cell. Release builds never carried it. [moq-dev/moq#9747](https://github.com/moq-dev/moq/pull/9747) excludes kio from the
+  workspace-hack (`.config/hakari.toml`), which restores every cell's count to the base's.
+- `moq-net/session` `session_delivery_group_cost_cpu/moq-lite-07-wip/.../publishers=16/.../viewers=1`:
+  from [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529), not #9686 (about 1,000
+  instructions). It cost every version 6 allocations and about 11,000 instructions (+2.3%)
+  per viewer-group: 487,300 at the base, 500,200 on `main`. [moq-dev/moq#9747](https://github.com/moq-dev/moq/pull/9747) removes the
+  allocations (a `Vec` per arrival walk, and a group consumed only to judge it stale),
+  leaving 498,500. Accepted: the remaining 2.3% pays for serving held groups in Group
+  Order, where a newest-first read judges the oldest group it holds before handing out a
+  newer one. Fastest-of-six cycles agree: +2.4% on `main`, +1.4% with #9747, not +11%.

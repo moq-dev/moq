@@ -10642,7 +10642,6 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.2",
  "itertools 0.13.0",
- "kio",
  "libc",
  "linux-raw-sys 0.12.1",
  "log",
