@@ -4,7 +4,7 @@
 
 Rust and JS subscribe to a track's group and frame progress without its
 payload, as a subscription of its own beside payload subscriptions, on the
-lite-07 wire [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md)
+lite-07 wire [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)
 defines and every lite-07 publisher and relay of ours already serves. A reader
 that wants the payload opens a payload subscription from its first missing
 frame, and nothing changes mode in place.
@@ -12,7 +12,7 @@ frame, and nothing changes mode in place.
 ## Plan
 
 Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
-✅ move both [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md) and
+✅ move both the metadata wire quest and
 this subscriber quest into `m2` for `moq-lite-07` (rejected: moving only the
 wire into `m2` and keeping this quest in `m3`; leaving both in `m3` on
 lite-08-wip). This reverses the 2026-11-25 deferral to `m3`: `moq-hls` live
@@ -58,8 +58,12 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   relay holds one, and otherwise travels upstream as a metadata subscription.
   When the last payload reader leaves and metadata demand remains, the relay
   opens the metadata subscription and closes the payload one.
+  - Pending maintainer decision on [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758): it built metadata demand that
+    always travels upstream as its own metadata subscription over lite-07,
+    even while the relay holds a payload copy, so the two modes never splice
+    (recommended: costs only duplicate header bytes under mixed demand).
 - Superseded 2026-11-25 (maintainer, `/quest-run`, on
-  [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md)): ✅ nothing
+  the metadata wire quest, [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)): ✅ nothing
   refuses the mode. A relay whose upstream is lite-06 or earlier subscribes
   for payload and drops it for its metadata readers, and moq-transport gets an
   [extension](/quest/m3/route-health/ietf.md) for the mode (rejected: this
@@ -74,7 +78,7 @@ What the parked PR learned, on branch `quest/m3/route-health/meta` at
   waiting for or inflating a compressed frame (`read_info`, `readInfo`); the
   bindings' header read; and the interop lane's subscriber half. The codecs,
   the relay's per-mode upstream, and the TLA+ check live in
-  [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md), and its refusal
+  [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758), and its refusal
   on older versions and moq-transport is dropped.
 - Recommended, to confirm when this starts: an endpoint whose own session is
   an older version asks for metadata the way a relay does over one, with a
@@ -97,8 +101,4 @@ for bytes, wakes, and memory. Add the subscriber to
 `just test interop --all`.
 
 Public API: a metadata subscription in Rust, JS, and the bindings. Wire: none
-beyond [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md).
-
-## Required
-
-- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - the header-only copy a subscriber reads into, and relays forwarding metadata upstream
+beyond [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758).
