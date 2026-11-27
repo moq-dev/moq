@@ -218,12 +218,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		})]);
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
-	// One past the newest group read, and where the next pause may start: that group's End once
-	// it ended whole, since no group starts inside a whole group's span.
-	let mut after: Option<(u64, u64)> = None;
-	// The last run below a group not known skipped when it arrived, as `(from, pause, group)`: a
-	// skip travels apart from the group above it, so it may land after that group.
-	let mut unproven: Option<(u64, u64, u64)> = None;
+	let mut skips = Skips::default();
 	while let Some(mut group) = subscriber.recv_group().await? {
 		let sink = match &mut decoder {
 			Some(sink) => sink,
@@ -232,26 +227,12 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
-		//
-		// A skip still in flight reads as unknown, so a run is asked again at the next group and
-		// then left to a fill, which never declares a group that exists.
-		if let Some((from, pause, start)) = unproven.take()
-			&& subscriber.is_skipped(pause..start)
-		{
-			let _ = sender.send(Item::Skip(from..start));
-		}
-		let (from, pause) = after.unwrap_or((0, 0));
-		if pause < group.start {
-			match subscriber.is_skipped(pause..group.start) {
-				true => drop(sender.send(Item::Skip(from..group.start))),
-				false => unproven = Some((from, pause, group.start)),
-			}
-		}
+		skips.arrived(group.start, &subscriber, sender);
 		let _ = sender.send(Item::Group(group.start));
 
 		// A lost group is never finished short, and every rung hears of it now
 		// rather than at a next group that may never come.
-		let item = match decode_group(&container, sink, &mut group, sender).await {
+		let item = match decode_group(&container, sink, &mut group, &mut skips, &subscriber, sender).await {
 			Ok(true) => Item::End(group.end()),
 			Ok(false) => Item::Lost,
 			// A corrupt packet costs its own group, not every rung's track: each group decodes
@@ -263,18 +244,62 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				Item::Lost
 			}
 		};
+		skips.ended(group.start, &item);
+		let _ = sender.send(item);
+	}
+	skips.recheck(&subscriber, sender);
+	Ok(())
+}
+
+/// The runs between source groups the feed has named skipped, or has yet to.
+#[derive(Default)]
+struct Skips {
+	/// One past the newest group read, and where the next pause may start: that group's End
+	/// once it ended whole, since no group starts inside a whole group's span.
+	after: Option<(u64, u64)>,
+	/// The last run below a group not known skipped when that group arrived, as
+	/// `(from, pause, group)`. A skip travels apart from the group above it, so it may land
+	/// later: asked again as each frame arrives, and then left to a fill, which never declares
+	/// a group that exists.
+	unproven: Option<(u64, u64, u64)>,
+}
+
+impl Skips {
+	/// Name the run below group `start` if the source declared it skipped, or keep it to ask
+	/// again.
+	fn arrived(&mut self, start: u64, subscriber: &moq_net::track::Subscriber, sender: &broadcast::Sender<Item>) {
+		self.recheck(subscriber, sender);
+		let (from, pause) = self.after.unwrap_or((0, 0));
+		if pause < start {
+			match subscriber.is_skipped(pause..start) {
+				true => drop(sender.send(Item::Skip(from..start))),
+				false => self.unproven = Some((from, pause, start)),
+			}
+		}
+	}
+
+	/// Name the run kept from an earlier group once the source declared it skipped.
+	fn recheck(&mut self, subscriber: &moq_net::track::Subscriber, sender: &broadcast::Sender<Item>) {
+		if let Some((from, pause, start)) = self.unproven
+			&& subscriber.is_skipped(pause..start)
+		{
+			self.unproven = None;
+			let _ = sender.send(Item::Skip(from..start));
+		}
+	}
+
+	/// Group `start` ended as `item` says.
+	fn ended(&mut self, start: u64, item: &Item) {
 		// A group arriving late below a newer one moves nothing back.
-		let next = group.start.saturating_add(1);
-		let pause = match &item {
+		let next = start.saturating_add(1);
+		let pause = match item {
 			Item::End(Some(end)) => (*end).max(next),
 			_ => next,
 		};
-		if after.is_none_or(|(from, _)| next > from) {
-			after = Some((next, pause));
+		if self.after.is_none_or(|(from, _)| next > from) {
+			self.after = Some((next, pause));
 		}
-		let _ = sender.send(item);
 	}
-	Ok(())
 }
 
 /// Decode one source group into the channel, draining the decoder at its end. Returns whether
@@ -285,11 +310,15 @@ async fn decode_group(
 	container: &moq_mux::catalog::hang::Container,
 	decoder: &mut moq_video::decode::Sink,
 	group: &mut moq_net::group::Consumer,
+	skips: &mut Skips,
+	subscriber: &moq_net::track::Subscriber,
 	sender: &broadcast::Sender<Item>,
 ) -> Result<bool, Error> {
 	let mut first = true;
 	let complete = loop {
-		let wire = match group.read_frame().await {
+		let read = group.read_frame().await;
+		skips.recheck(subscriber, sender);
+		let wire = match read {
 			Ok(Some(wire)) => wire,
 			Ok(None) => break true,
 			// A failed group read loses that group alone, such as one its
@@ -499,6 +528,18 @@ mod tests {
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(150 * FRAME + 1..200 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(200 * FRAME + 1..250 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(250 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+
+		// One landing while the group above it is still arriving is named with its next frame,
+		// not held until a group that may never come.
+		let mut open = track.create_group((300 * FRAME).into()).unwrap();
+		write(&mut open, 300, 2);
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(300 * FRAME));
+		track.skip_groups(250 * FRAME + 1..300 * FRAME);
+		write(&mut open, 302, 2);
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(250 * FRAME + 1..300 * FRAME));
+		open.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
 	}
 
 	/// A source packet that fails to decode costs its own group: every listener hears it lost,

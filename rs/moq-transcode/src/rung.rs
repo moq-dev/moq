@@ -857,14 +857,47 @@ async fn locate(
 			Err(err) => Err(err),
 		};
 	}
-	Ok(match containing(track, sequence, fill.priority()).await? {
-		Some((group, placing)) if (fill.floor()..=sequence).contains(&group.start) => {
-			Some((group.start, group, Some(placing)))
+	// The newest group from the floor answers the time even when it ended whole before it: the
+	// reader then starts at its End. Only none there says nothing starts from the floor through it.
+	let found = newest(track, fill.floor(), sequence, fill.priority()).await?;
+	Ok(found.map(|(group, placing)| (group.start, group, Some(placing))))
+}
+
+/// The newest source group starting from `from` through `time`, with the read holding it: the
+/// group containing `time` when one does, and otherwise, as when that group ended whole before
+/// `time`, found by reading the source up from `from`.
+async fn newest(
+	track: &moq_net::track::Consumer,
+	from: u64,
+	time: u64,
+	priority: i8,
+) -> moq_net::Result<Option<(moq_net::group::Consumer, moq_net::track::Ordered)>> {
+	use moq_net::track::{Order, Range, Start, Subscription};
+
+	if let Some((group, read)) = containing(track, time, priority).await?
+		&& group.start <= time
+	{
+		return Ok((group.start >= from).then_some((group, read)));
+	}
+	let subscription = Subscription::default()
+		.with_ranges([Range {
+			start: Start::Time(from),
+			end: Some(time),
+		}])
+		.with_order(Order::Ascending)
+		.with_priority(priority);
+	let mut read = track.subscribe(subscription).await?.ordered();
+	let mut newest = None;
+	// A group given up on is no source group.
+	while let Some(group) = read.next_group().await? {
+		if group.start > time {
+			break;
 		}
-		// One below the floor is older than the group the reader's cache holds there, which then
-		// contains the time.
-		_ => None,
-	})
+		if group.start >= from {
+			newest = Some(group);
+		}
+	}
+	Ok(newest.map(|group| (group, read)))
 }
 
 /// The source group containing `time`, placed as any reader of the source places it: the newest
@@ -894,10 +927,10 @@ async fn containing(
 /// Keys are media times, so most of them name no group between two of the source's. Fetching
 /// each would cost one request per tick of the gap; one bounded read of the source, in key order,
 /// finds the groups around the miss instead, and the span between them is dropped at once.
-/// The read starts at the group containing the miss. Ascending, that group was already answered
-/// and the read goes on to the next one. Descending, it is the newest source group below the
-/// miss, so the read reaches no further back; only when no group contains the miss, as when the
-/// newest one below ended whole before it, is the span below read from the fill's first group.
+/// Ascending, the read starts at the group containing the miss, already answered, and goes on to
+/// the next one. Descending, it looks up only the newest source group below the miss, which
+/// reads up from the fill's first group only when no group contains the key below the miss, as
+/// when that group ended whole before it.
 ///
 /// The miss itself is dropped first. A source holding no group at all resolves no time until it
 /// holds one, as it would for any reader of it, so the lookup for the rest then waits for the
@@ -928,14 +961,19 @@ async fn drop_gap(
 	let Some(next) = next else {
 		return Ok(());
 	};
-	// The source groups next to the miss, read in key order from the group containing `from`
-	// through the one containing `last`: the newest starting below the miss, and the first at or
-	// past it.
-	let read = |from: u64, last: u64| async move {
+	// The source groups next to the miss: the newest starting below it, and the first at or past it.
+	let around = async {
+		if below {
+			// The fill holds a key below the miss, so there is one to look up through.
+			let before = newest(track, first, sequence - 1, fill.priority()).await?;
+			return Ok::<_, moq_net::Error>((before.map(|(group, _)| group.start), None));
+		}
+		// Read in key order from the group containing the miss through the fill's last key, which
+		// it has since it holds the miss.
 		let subscription = Subscription::default()
 			.with_ranges([Range {
-				start: Start::Time(from),
-				end: Some(last),
+				start: Start::Time(sequence),
+				end: Some(end - 1),
 			}])
 			.with_order(Order::Ascending)
 			.with_priority(fill.priority());
@@ -944,23 +982,11 @@ async fn drop_gap(
 		// A group given up on is no source group.
 		while let Some(group) = groups.next_group().await? {
 			if group.start >= sequence {
-				return Ok::<_, moq_net::Error>((before, Some(group.start)));
+				return Ok((before, Some(group.start)));
 			}
 			before = Some(group.start);
 		}
 		Ok((before, None))
-	};
-	let around = async {
-		if !below {
-			// The fill holds the miss, so it has a last key.
-			return read(sequence, end - 1).await;
-		}
-		let held = containing(track, sequence, fill.priority()).await?;
-		match held.map(|(group, _)| group.start).filter(|start| *start < sequence) {
-			Some(before) => Ok((Some(before), None)),
-			// The fill holds a key below the miss, so there is one to read through.
-			None => read(first, sequence - 1).await,
-		}
 	};
 	let mut retire = rung.retire.clone();
 	let (before, after) = tokio::select! {
@@ -1556,6 +1582,66 @@ mod tests {
 		drop(video);
 	}
 
+	/// A reader's time start in a pause after a whole source group is answered with that group,
+	/// so the reader starts at its End, rather than with a drop, which would start it at the
+	/// older group its cache holds below the floor and replay it.
+	#[tokio::test]
+	async fn a_time_start_in_a_pause_starts_at_the_end_of_the_group_before_it() {
+		use moq_net::track::{Order, Range, Start, Subscription};
+		let (rung, source, _retire) = idle_rung();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+		let video = source.create_track("video", info.clone()).unwrap();
+		// A group a second in, ending whole two frames later, then the live group at two seconds.
+		let mut paused = video.create_group(moq_net::group::Info { start: 30 * FRAME }).unwrap();
+		write_frames(&mut paused, 30, 2);
+		paused.finish_at(32 * FRAME).unwrap();
+		let mut live = video.create_group(moq_net::group::Info { start: 60 * FRAME }).unwrap();
+		write_frames(&mut live, 60, 1);
+		live.finish().unwrap();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let track = output.create_track("video/120p", info).unwrap();
+		let fills = track.requests();
+		// The reader's cache already holds an older group at 0.
+		track
+			.create_group(moq_net::group::Info { start: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let time = 40 * FRAME;
+		track
+			.create_group(moq_net::group::Info { start: 60 * FRAME })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let mut reader = track
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Start::Time(time),
+						end: None,
+					}])
+					.with_order(Order::Ascending),
+			)
+			.ordered();
+		let waiter = kio::Waiter::noop();
+		let _ = reader.poll_next_group(&waiter);
+		let fill = fills.requested_fill().await.unwrap();
+		assert!(fill.is_time_start());
+		assert_eq!((fill.start().group, fill.floor()), (time, 1));
+
+		let mut tasks = tokio::task::JoinSet::new();
+		let (_drainer, draining) = Retire::channel();
+		spawn_fill(&mut tasks, rung.clone(), fill, Arc::new(Semaphore::new(1)), draining);
+		// The fills that follow, as the pause past the group's End.
+		let (_finished, mut finishing) = tokio::sync::watch::channel(false);
+		let serving = tokio::spawn(async move { fetches(&rung, fills, &mut finishing).await });
+		let first = reader.next_group().await.unwrap().expect("a group past the time");
+		assert_eq!(first.start, 60 * FRAME, "starts past the paused group, never back at 0");
+		serving.abort();
+		drop(video);
+	}
+
 	/// Filling newest first, the gap below a miss is placed from the source group containing the
 	/// miss, rather than by reading the fill's history up from its first group: the source's
 	/// handler is never asked for what lies below that group before the fill reaches it.
@@ -1619,8 +1705,8 @@ mod tests {
 		// its handler answers with nothing there.
 		let place = source_fills.requested_fill().await.unwrap();
 		assert!(place.is_time_start());
-		assert_eq!((place.start().group, place.floor()), (HOUR - 1, 60 * FRAME + 1));
-		place.drop_groups(HOUR - 1..HOUR);
+		assert_eq!((place.start().group, place.floor()), (HOUR - 2, 60 * FRAME + 1));
+		place.drop_groups(HOUR - 2..HOUR - 1);
 		let next = reader
 			.recv_group()
 			.await
