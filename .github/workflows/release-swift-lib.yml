@@ -102,7 +102,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       ffi_version: ${{ steps.version.outputs.ffi_version }}
       ffi_unreleased: ${{ steps.ffi-diff.outputs.unreleased }}
-      # Release PRs and nightly only build. On `release` we publish when the
+      # Nightly and other dry-runs only build. On `release` we publish when the
       # version is not already tagged on the mirror.
       publish: ${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists == 'true' && steps.gate.outputs.exists == 'false' }}
 

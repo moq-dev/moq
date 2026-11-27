@@ -236,9 +236,8 @@ Passthrough carries damaged packets as they came.
 
 ## Evidence
 
-Every claim above has an automated test. **PR** runs in the Rust gate that
-every pull request passes before it merges (`just rs test -p moq-mux`, on a
-paused clock). **Nightly** runs in the
+Every claim above has an automated test. **PR** runs in the merge queue's Rust
+gate (`just rs test -p moq-mux`, on a paused clock). **Nightly** runs in the
 [TS workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/ts.yml)
 every night: a relay round trip through the CLI, graded by TSDuck, FFmpeg, and
 the harness's own models. **Nightly only** marks that workflow's long,

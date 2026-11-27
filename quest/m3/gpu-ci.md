@@ -45,9 +45,9 @@ skipping inside the Nix shell.
   `vulkan_cuda_auto_external_encode` must pass its per-plane pixel checks
   against the CPU reference for both renditions, RGBA and BGRA, through
   NVENC and CUDA external-image import (the verification #4975 deferred here).
-- Merge queue: a `merge_group` job in `.github/workflows/queue-build.yml` runs `nix develop --command just rs nvidia`, a recipe and not
-  a script path, like every other workflow step, on a self-hosted runner
-  labeled for the NVIDIA host. Scope it like the other queue jobs: run when
+- Merge queue: the queue runs `nix develop --command just rs nvidia`, a recipe
+  and not a script path, like every other workflow step, where the Waiting
+  decision below places it. Scope it like the other queue jobs: run when
   the queue's diff touches moq-video, moq-nvenc, or what they depend on.
   Read-only `permissions`, never `pull_request`.
 - Decided 2026-10-20 (maintainer): GPU tests gate in the merge queue on the

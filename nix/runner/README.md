@@ -100,8 +100,8 @@ reads its caches from disk.
 The guest has no swap, so earlyoom kills the largest process once available memory
 drops below 10%, rather than letting a job that fills memory thrash the disk.
 MoQ's main pull requests land through GitHub's merge queue, whose `merge_group`
-builds run on the host's `moq-queue` runner; release pull requests use hosted
-runners.
+builds run on the host's `moq-queue` runner; no CI runs on pull requests, and
+Nightly runs on hosted runners.
 
 The hosted workflow uses `just gh runner-vm-ci` to load a temporary AppArmor
 profile for the exact pinned `unshare` while building the image. The recipe
