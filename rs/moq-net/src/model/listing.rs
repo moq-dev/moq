@@ -83,8 +83,9 @@ pub enum TracksEvent {
 		/// The track's kind and properties.
 		info: Listed,
 	},
-	/// Every track this hop listed when the listing began, and still lists, has been
-	/// reported. Sent once; later events are live.
+	/// Every track this hop listed once its listing was complete, and still lists, has been
+	/// reported: at once without a [`Lister`], else once it [`synced`](Lister::synced), as a
+	/// relay's copy does on its upstream's SYNCED. Sent once; later events are live.
 	Synced,
 	/// A track is no longer listed, unfinished: its producer dropped or aborted before
 	/// declaring its end, or the route or handler that listed it withdrew. A handler may still
@@ -573,7 +574,7 @@ fn removal((kind, name): Key, finished: bool) -> TracksEvent {
 
 /// The tracks a broadcast lists, from [`Consumer::tracks`].
 ///
-/// Reports every track listed when it was created, then [`TracksEvent::Synced`], then
+/// Reports every track listed once the listing is complete, then [`TracksEvent::Synced`], then
 /// each change as it happens, until the broadcast ends: a clean end comes after each
 /// track that left before it, and a track still listed then ends unfinished. Listing a broadcast never
 /// requests a track: subscribe to each listed one through [`Consumer::track`].

@@ -710,6 +710,8 @@ export function decodeRecord(buffer: Uint8Array): Any[] {
 		const [frame, remaining] = result;
 		if (frame !== null) {
 			frames.push(frame);
+			// The peer closed: whatever follows, malformed or not, must not hide why.
+			if (frame.type === "application_close" || frame.type === "connection_close") break;
 		}
 		buffer = remaining;
 	}

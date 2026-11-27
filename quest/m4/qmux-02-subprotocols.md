@@ -42,10 +42,6 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
 Public API: none expected. Wire: newer qmux preferred where both sides
 support it.
 
-## Required
-
-- [Fix Rust and JS QMux correctness bugs and port web-transport fixes](/quest/m1/qmux-correctness-fixes.md) - fixes Rust-to-JS `qmux-02` `RESET_STREAM_AT` interop before advertising `qmux-02` first
-
 ## Related
 
 - [Retire the web-transport JS qmux](/quest/m3/release/qmux-js-retire.md) - the old JS qmux publisher

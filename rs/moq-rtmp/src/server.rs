@@ -2308,6 +2308,7 @@ mod tests {
 	/// muxed AVC sequence header and keyframe back.
 	#[tokio::test]
 	async fn play_streams_broadcast_to_client() {
+		kio::clock::host_time(); // real TCP sockets
 		// An AVC sequence-header tag body: keyframe + AVC CodecID, AVCPacketType 0,
 		// composition time 0, then a minimal avcC (one SPS, one PPS).
 		let avcc = {
@@ -2407,6 +2408,7 @@ mod tests {
 	/// once its identity's route dies.
 	#[tokio::test]
 	async fn a_play_stays_on_its_identity_until_the_route_dies() {
+		kio::clock::host_time(); // real TCP sockets
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
@@ -2464,6 +2466,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn play_enhanced_codec_rejects_legacy_client() {
+		kio::clock::host_time(); // real TCP sockets
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 		let origin = moq_tokio::origin::spawn();
@@ -2732,6 +2735,7 @@ mod tests {
 	/// negotiation reaches the FLV muxer.
 	#[tokio::test]
 	async fn play_multitrack_to_capable_client() {
+		kio::clock::host_time(); // real TCP sockets
 		// Enhanced-RTMP multitrack framing constants, matching moq-mux's FLV muxer.
 		const EX: u8 = 0x80;
 		const MULTITRACK: u8 = 5;

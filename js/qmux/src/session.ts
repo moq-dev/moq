@@ -1,14 +1,4 @@
-import {
-	Duration,
-	Elapsed,
-	Instant,
-	type Interval,
-	interval,
-	MissedTickBehavior,
-	now,
-	sleepUntil,
-	timeout,
-} from "@moq/clock";
+import { Duration, Elapsed, Instant, now, sleepUntil, timeout } from "@moq/clock";
 import { Credit, StreamLimit, Window } from "./credit.ts";
 import {
 	resetCode,
@@ -776,17 +766,19 @@ export class Session implements WebTransport {
 
 	// QMux01 idle-timeout tracking (engaged once we've received the peer's params).
 	#lastRecvAt = now();
-	#lastSendAt = now();
-	// Deadline bookkeeping for #idleActivityAt: the newest receive observed, the
-	// send last allowed to restart the deadline, and whether a send may restart it.
-	#recvSeen = Instant.ZERO;
+	// The send that last restarted the idle deadline, and whether the next send may, which
+	// each receive allows once; see #idleActivityAt.
 	#sendResetAt = Instant.ZERO;
 	#sendCredit = true;
 	#nextPingSeq = 0;
+	// When the idle keep-alive last sent a QX_PING.
+	#lastPingAt = Instant.ZERO;
 	// Highest sequence seen in a received QX_PING request (draft-02 requires them
-	// to strictly increase). Undefined until the first request arrives.
+	// to strictly increase), which the response always answers. Undefined until the
+	// first request arrives.
 	#lastPingRecv?: bigint;
-	#idleTimer?: Interval;
+	// Stops the idle loop, which a restart or the session's end replaces.
+	#idleStop?: AbortController;
 	#liveness?: Liveness;
 	// Settles on the next change to `stale`, or the session's end; see {@link staleChanged}.
 	#staleChanged = Promise.withResolvers<void>();
@@ -1010,7 +1002,10 @@ export class Session implements WebTransport {
 		this.#scheduler = new SendScheduler(sink, {
 			first: params,
 			onActivity: () => {
-				this.#lastSendAt = now();
+				if (this.#sendCredit) {
+					this.#sendResetAt = now();
+					this.#sendCredit = false;
+				}
 			},
 			// A failed write leaves the session unable to send anything, even if the
 			// socket hasn't reported closing yet.
@@ -1028,7 +1023,9 @@ export class Session implements WebTransport {
 		this.#connCredit = new Credit(0n);
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
-		// Our own idle deadline applies until the peer's parameters arrive.
+		// Our own idle deadline applies until the peer's parameters arrive, counted from the
+		// open rather than construction, so a slow WebSocket open doesn't eat the window.
+		this.#lastRecvAt = now();
 		this.#startIdleTimerIfEnabled();
 		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
 		// a peer that never sends its parameters can't hold `ready` forever.
@@ -1043,6 +1040,7 @@ export class Session implements WebTransport {
 
 	#onData(data: Uint8Array) {
 		this.#lastRecvAt = now();
+		this.#sendCredit = true;
 		if (this.#liveness?.stale) {
 			this.#liveness.stale = false;
 			this.#notifyStale();
@@ -1101,6 +1099,10 @@ export class Session implements WebTransport {
 				throw new Error("QX_TRANSPORT_PARAMETERS must be the first frame");
 			}
 		}
+		// Draft-00 has no QX_PING.
+		if (!usesRecords(this.#version) && (frame.type === "ping_request" || frame.type === "ping_response")) {
+			throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "QX_PING on qmux-00");
+		}
 
 		if (frame.type === "stream") {
 			this.#handleStreamFrame(frame);
@@ -1152,15 +1154,17 @@ export class Session implements WebTransport {
 			}
 			pushDatagram(this.#datagrams, frame.data);
 		} else if (frame.type === "ping_request") {
-			// Draft-02: request sequence numbers must strictly increase.
-			if (this.#version === "qmux-02") {
-				if (this.#lastPingRecv !== undefined && frame.sequence <= this.#lastPingRecv) {
-					throw new Error("QX_PING request sequence must strictly increase");
-				}
-				this.#lastPingRecv = frame.sequence;
+			// One response answers every request up to its sequence, so an older request
+			// never replaces the answer to a newer one still queued.
+			let answer = frame.sequence;
+			const last = this.#lastPingRecv;
+			if (last !== undefined && answer <= last) {
+				// Draft-02: request sequence numbers must strictly increase.
+				if (this.#version === "qmux-02") throw new Error("QX_PING request sequence must strictly increase");
+				answer = last;
 			}
-			// Respond to ping requests
-			this.#sendPriorityFrame({ type: "ping_response", sequence: frame.sequence });
+			this.#lastPingRecv = answer;
+			this.#sendPriorityFrame({ type: "ping_response", sequence: answer });
 		} else if (frame.type === "ping_response") {
 			// Draft-02: a response must echo a sequence we actually sent (0..nextPingSeq).
 			if (this.#version === "qmux-02" && frame.sequence >= BigInt(this.#nextPingSeq)) {
@@ -1179,7 +1183,7 @@ export class Session implements WebTransport {
 	}
 
 	#handleTransportParameters(params: TransportParams) {
-		if (this.#paramsReceived) return;
+		if (this.#paramsReceived) throw new Error("duplicate QX_TRANSPORT_PARAMETERS");
 		// Record-framed drafts: an advertised max_record_size MUST NOT go below the
 		// default minimum. Omitted values decode to the default, so only an explicit
 		// smaller value trips this (TRANSPORT_PARAMETER_ERROR).
@@ -1348,34 +1352,48 @@ export class Session implements WebTransport {
 	}
 
 	#startIdleTimerIfEnabled() {
-		this.#idleTimer?.close();
-		this.#idleTimer = undefined;
+		this.#idleStop?.abort();
+		this.#idleStop = undefined;
 		const timeoutMs = this.#effectiveIdleTimeoutMs();
 		if (timeoutMs === 0n) return;
-		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
-		// but not so frequent it burns CPU on otherwise-quiet sessions.
-		const timeout = Duration.millis(Number(timeoutMs));
-		const timer = interval(Duration.millis(Math.max(50, Number(timeoutMs) / 6)));
-		timer.setMissedTickBehavior(MissedTickBehavior.Delay);
-		this.#idleTimer = timer;
-		void this.#idleLoop(timer, timeout);
+		const stop = new AbortController();
+		this.#idleStop = stop;
+		void this.#idleLoop(Duration.millis(Number(timeoutMs)), stop.signal);
 	}
 
-	async #idleLoop(timer: Interval, timeout: Duration) {
-		// The first tick is immediate; the first check belongs one period in.
-		let first = true;
+	// Sleeps until the idle deadline or the next keep-alive probe, whichever is first, reading
+	// the activity on each wake: it only moves both later, so a sleep never needs cutting short.
+	async #idleLoop(timeout: Duration, stop: AbortSignal) {
+		const third = timeout.div(3);
 		for (;;) {
-			try {
-				await timer.tick();
-			} catch {
-				return; // #end closed the timer.
-			}
-			if (this.#closed) {
-				timer.close();
+			if (this.#closed || stop.aborted) return;
+			const at = now();
+			const expiry = this.#idleActivityAt().saturatingAdd(timeout);
+			if (at.ge(expiry)) {
+				// No frames have been sent or received within the negotiated limit. Abnormal:
+				// without a rejection this is indistinguishable from a graceful close(), which
+				// also settles with closeCode 0.
+				this.#end({ clean: false, cause: new Error("idle timeout") });
 				return;
 			}
-			if (!first) this.#idleTick(timeout);
-			first = false;
+			let next = expiry;
+			// Keep-alive: probe the peer once it has been unheard for a third of the timeout,
+			// whatever we sent meanwhile, so even a one-way sender draws an answer before the
+			// deadline. Nothing to keep alive before the peer has spoken at all.
+			if (this.#paramsReceived) {
+				let probe = this.#lastRecvAt.max(this.#lastPingAt).saturatingAdd(third);
+				if (at.ge(probe)) {
+					this.#ping();
+					this.#lastPingAt = at;
+					probe = at.saturatingAdd(third);
+				}
+				next = next.min(probe);
+			}
+			try {
+				await sleepUntil(next, { signal: stop });
+			} catch {
+				return; // Restarted, or the session ended.
+			}
 		}
 	}
 
@@ -1385,39 +1403,16 @@ export class Session implements WebTransport {
 	 * A received frame always restarts the timer: it is the only direct proof the
 	 * peer is still there. A send restarts it too, but at most once per receive
 	 * (RFC 9000 §10.1). That proviso is what keeps the deadline reachable: our own
-	 * keep-alive pings advance `#lastSendAt`, so counting every send would let them
-	 * restart the very deadline they exist to test, and a peer that goes silent
-	 * while its socket still accepts our writes would never be reclaimed.
+	 * keep-alive pings are sends, so counting every send would let them restart the
+	 * very deadline they exist to test, and a peer that goes silent while its socket
+	 * still accepts our writes would never be reclaimed.
 	 *
 	 * Crediting the first send after each receive is what still lets a mostly
 	 * one-way sender stay open - its peer answers the keep-alive, and each answer
 	 * re-arms the credit.
 	 */
 	#idleActivityAt(): Instant {
-		if (this.#lastRecvAt.gt(this.#recvSeen)) {
-			this.#recvSeen = this.#lastRecvAt;
-			this.#sendCredit = true;
-		}
-		if (this.#sendCredit && this.#lastSendAt.gt(this.#sendResetAt)) {
-			this.#sendResetAt = this.#lastSendAt;
-			this.#sendCredit = false;
-		}
-		return this.#recvSeen.max(this.#sendResetAt);
-	}
-
-	#idleTick(timeout: Duration) {
-		const at = now();
-		if (at.since(this.#idleActivityAt()).gt(timeout)) {
-			// No frames have been sent or received within the negotiated limit. Abnormal:
-			// without a rejection this is indistinguishable from a graceful close(), which
-			// also settles with closeCode 0.
-			this.#end({ clean: false, cause: new Error("idle timeout") });
-			return;
-		}
-		// Keep-alive: nudge the peer when our outbound side has been silent for a third
-		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
-		// Nothing to keep alive before the peer has spoken at all.
-		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) this.#ping();
+		return this.#lastRecvAt.max(this.#sendResetAt);
 	}
 
 	/** Encode the next window update owed to the peer, or undefined once none is.
@@ -1980,8 +1975,8 @@ export class Session implements WebTransport {
 		if (end.clean) this.#closedResolve({ closeCode: end.code, reason: end.reason });
 		else this.#closedReject(new SessionError(error.message, { cause: error }));
 
-		this.#idleTimer?.close();
-		this.#idleTimer = undefined;
+		this.#idleStop?.abort();
+		this.#idleStop = undefined;
 		this.#liveness?.stop.abort();
 		this.#notifyStale();
 

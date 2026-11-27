@@ -148,6 +148,9 @@ pub(crate) struct StreamsState {
 	initial_max_stream_data_bidi_remote: VarInt,
 	/// Whether the peer accepts RESET_STREAM_AT
 	pub(super) peer_reset_stream_at: bool,
+	/// Whether frames reach the peer in the order they were written (QMux), which forbids a
+	/// RESET_STREAM_AT ahead of the data below its Reliable Size
+	ordered: bool,
 
 	/// The shrink to be applied to local_max_data when receive_window is shrunk
 	receive_window_shrink_debt: u64,
@@ -268,6 +271,7 @@ impl StreamsState {
 			initial_max_stream_data_bidi_local: 0u32.into(),
 			initial_max_stream_data_bidi_remote: 0u32.into(),
 			peer_reset_stream_at: false,
+			ordered: false,
 			receive_window_shrink_debt: 0,
 			streams_blocked: [false, false],
 			open_refused: [false, false],
@@ -275,6 +279,18 @@ impl StreamsState {
 			send_stalls: SendStalls::default(),
 			holds: Holds::default(),
 		}
+	}
+
+	/// Frames reach the peer in the order they are written, as on QMux's byte stream
+	pub(crate) fn set_ordered(&mut self) {
+		self.ordered = true;
+	}
+
+	/// Whether a reset may go out before the data below its Reliable Size: only to a peer that
+	/// accepts RESET_STREAM_AT, over a transport that reassembles, since an ordered one would
+	/// deliver the Reliable Size ahead of the bytes it promises
+	pub(super) fn reset_ahead(&self) -> bool {
+		self.peer_reset_stream_at && !self.ordered
 	}
 
 	pub(crate) fn set_params(&mut self, params: &TransportParameters) {
@@ -600,7 +616,7 @@ impl StreamsState {
 		let stopped = stream.try_stop(error_code);
 		let buffered = stream.pending.buffered();
 		let reset = match quiesced {
-			Some(code) => stream.reset(code, 0, self.peer_reset_stream_at),
+			Some(code) => stream.reset(code, 0, self.peer_reset_stream_at && !self.ordered),
 			None => stream.abandon_reliable(),
 		};
 		self.buffered_data -= buffered - stream.pending.buffered();
