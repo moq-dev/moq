@@ -8021,7 +8021,8 @@ async fn export_fixture(data: &[u8], mux_rate: Option<u64>) -> BytesMut {
 }
 
 /// `bbb_cbr.ts` is a 400 kb/s multiplex carrying 167 kb/s of media, which import
-/// records as such, so export pads the media back to the recorded rate.
+/// records as such, so export pads the media back to the recorded rate, and a packet a slot
+/// more for its own clock and framing.
 #[tokio::test(start_paused = true)]
 async fn export_pads_to_the_recorded_mux_rate() {
 	let ts = export_fixture(include_bytes!("test_data/bbb_cbr.ts"), None).await;
@@ -8029,8 +8030,8 @@ async fn export_pads_to_the_recorded_mux_rate() {
 	assert!(clocked.nulls > 0, "no null stuffing was emitted");
 	let rate = clocked.rate();
 	assert!(
-		rate.abs_diff(400_000) * 100 <= 400_000,
-		"output runs at {rate} b/s, not the recorded 400 kb/s"
+		rate.abs_diff(460_160) * 100 <= 460_160,
+		"output runs at {rate} b/s, not the recorded 400 kb/s and 60,160 b/s"
 	);
 	assert!(
 		clocked.max_gap <= 40 * 27_000,
@@ -10618,28 +10619,40 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	assert_eq!(start.elapsed(), follow);
 }
 
-/// Each track subscription joins live the whole delay back and states it as its max, so a relay
-/// holds a group as long as the export could still play it.
+/// Each track subscription states the whole delay as its max, so a relay holds a group as long as
+/// the export could still play it. A live export joins at the edge, where it starts reading, so no
+/// backlog it would skip crowds out the newest group; a replay reaches back the whole delay.
 #[tokio::test(start_paused = true)]
 async fn a_subscription_states_the_whole_delay() {
-	let origin = crate::source::produce_origin();
-	let (live, mut catalog) = publish_bare(&origin, None);
-	let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
-	write_aac(&mut audio, 0);
-	let delay = Duration::from_secs(2);
-	let mut export = open_export(crate::source::resolved(&origin, "live").await, delay)
-		.await
-		.unwrap();
-	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
-	let subscription = audio.track().subscription().unwrap();
-	assert_eq!(
-		subscription.ranges,
-		[moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: Some(delay),
-			max: Some(delay),
-		})]
-	);
-	drop((live, catalog));
+	for replay in [false, true] {
+		let origin = crate::source::produce_origin();
+		let (live, mut catalog) = publish_bare(&origin, None);
+		let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
+		write_aac(&mut audio, 0);
+		let delay = Duration::from_secs(2);
+		let export = open_export(crate::source::resolved(&origin, "live").await, delay)
+			.await
+			.unwrap();
+		let mut export = match replay {
+			true => export.with_replay(),
+			false => export,
+		};
+		let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
+		let subscription = audio.track().subscription().unwrap();
+		let min = match replay {
+			true => delay,
+			false => Duration::ZERO,
+		};
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(min),
+				max: Some(delay),
+			})],
+			"replay: {replay}"
+		);
+		drop((live, catalog));
+	}
 }
 
 /// A program that ends while stitching, then returns after the unresolved replacement goes,
@@ -10978,6 +10991,74 @@ async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 		pmts(&frames).iter().all(|(version, _)| *version == 0),
 		"the PMT keeps its version"
 	);
+}
+
+/// The same instance leaving partway into a group and returning while what the export buffered
+/// still waits out the delay, republishing that group from its start as a publisher's cache
+/// serves it again: the follower carries on into the return before the buffer runs dry, and the
+/// track reads on right after the last frame it took. The output matches an export the route
+/// never left: every frame once, in order, none late, and no break in the timeline.
+#[tokio::test(start_paused = true)]
+async fn a_follower_carries_on_into_a_return_while_it_plays_out() {
+	/// Twenty AAC frames 20 ms apart in groups of ten, through a 500 ms delay, the route going
+	/// after the first `leave` and the same instance serving again 100 ms later, from the start of
+	/// the group it went in.
+	async fn export(leave: Option<u64>) -> (Vec<u64>, u64, u64) {
+		let origin = crate::source::produce_origin();
+		let route = moq_net::origin::RouteOptions::default().with_instance(moq_net::Instance::random(), 0);
+		let write = |track: &mut Producer<HangContainer>, frame: u64| {
+			track
+				.write(Frame {
+					timestamp: Timestamp::from_millis(60_000 + frame * 20).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+					keyframe: frame.is_multiple_of(10),
+				})
+				.unwrap();
+		};
+		let (mut route_held, mut catalog) = publish_live::<()>(&origin, route.clone());
+		let mut track = aac_rendition(&mut route_held.broadcast().clone(), &mut catalog, "a.aac");
+		let source = crate::source::resolved(&origin, "live").await;
+		let export = open_export(source, Duration::from_millis(500)).await.unwrap();
+		let mut follower = super::Follower::new(export)
+			.unwrap()
+			.with_follow(Duration::from_secs(10));
+		let drain = tokio::spawn(async move {
+			let (frames, end) = drain_follower(&mut follower).await;
+			assert!(matches!(end, Some(Ok(()))), "the return's finish ends it: {end:?}");
+			(
+				audio_pts(&frames),
+				follower.export().dropped(),
+				follower.export().discontinuity(),
+			)
+		});
+		for frame in 0..20 {
+			if Some(frame) == leave {
+				track.abort(moq_net::Error::Unroutable);
+				catalog.abort(moq_net::Error::Unroutable);
+				drop(route_held);
+				kio::clock::sleep(Duration::from_millis(100)).await;
+				(route_held, catalog) = publish_live::<()>(&origin, route.clone());
+				track = aac_rendition(&mut route_held.broadcast().clone(), &mut catalog, "a.aac");
+				for again in frame / 10 * 10..frame {
+					write(&mut track, again);
+				}
+			}
+			write(&mut track, frame);
+			kio::clock::sleep(Duration::from_millis(20)).await;
+		}
+		let _finished = track.finish().unwrap();
+		catalog.finish().unwrap();
+		let out = drain.await.unwrap();
+		drop(route_held);
+		out
+	}
+
+	let (pts, dropped, discontinuity) = export(Some(14)).await;
+	let (expected, ..) = export(None).await;
+	assert_eq!(expected.len(), 20, "every frame goes out once: {expected:?}");
+	assert_eq!(pts, expected, "the return carries on exactly where the route went");
+	assert_eq!((dropped, discontinuity), (0, 0), "none late, no break");
 }
 
 /// A broader prefix starting, restarting, and ending while the exact route still serves the
@@ -13075,4 +13156,122 @@ async fn a_joiner_counts_only_the_payload_it_is_sent() {
 		"{billed} bytes billed for {pictures} pictures"
 	);
 	assert!(billed <= sent as u64, "{billed} bytes billed, {sent} sent");
+}
+
+/// The packets of `data` up to and including each PCR on `pid`, with the PCR in 27 MHz ticks.
+fn pcr_chunks(data: &[u8], pid: u16) -> Vec<(usize, u64)> {
+	data.chunks(188)
+		.enumerate()
+		.filter(|(_, packet)| (u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == pid)
+		.filter(|(_, packet)| packet[3] & 0x20 != 0 && packet[4] >= 7 && packet[5] & 0x10 != 0)
+		.map(|(index, packet)| {
+			let base = packet[6..10].iter().fold(0, |base, &byte| base << 8 | u64::from(byte)) << 1
+				| u64::from(packet[10] >> 7);
+			(
+				index + 1,
+				base * 300 + (u64::from(packet[10] & 1) << 8 | u64::from(packet[11])),
+			)
+		})
+		.collect()
+}
+
+/// An FFmpeg TS of audio alone, packed as it does by default, exports with the CLI's 1 s delay and
+/// the rate the source recorded, whatever the codec and however its frames peak: the rate it pads to
+/// carries what the audio sends, its tables and its clock, though the source recorded one with no
+/// room beyond its own packing. So it does whether the export waits for the rate, takes it up once
+/// it is measured, or is given it.
+#[tokio::test(start_paused = true)]
+async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
+	for (name, data) in [
+		("aac", &include_bytes!("test_data/ffmpeg_aac.ts")[..]),
+		("aac_pulse", include_bytes!("test_data/ffmpeg_aac_pulse.ts")),
+		("ac3", include_bytes!("test_data/ffmpeg_ac3.ts")),
+		("eac3", include_bytes!("test_data/ffmpeg_eac3.ts")),
+		("mp2", include_bytes!("test_data/ffmpeg_mp2.ts")),
+		("opus", include_bytes!("test_data/ffmpeg_opus.ts")),
+	] {
+		let recorded = Clocked::of(data).rate();
+		let padded = recorded + crate::container::ts::schedule::PACKET;
+		for rate in [Rate::Wait, Rate::Measured, Rate::Given(padded)] {
+			let (ts, dropped) = paced_export(data, rate, Duration::from_secs(1)).await;
+			assert_packet_aligned(&ts);
+			assert_eq!(dropped, 0, "{name}, {rate:?}: every frame made its deadline");
+			let out = Clocked::of(&ts).rate();
+			match rate {
+				Rate::Given(_) => assert!(out.abs_diff(padded) <= 1, "{name}: padded to {out} b/s, not {padded}"),
+				_ => assert!(
+					out > recorded,
+					"{name}, {rate:?}: padded to {out} b/s, no more than the recorded {recorded}"
+				),
+			}
+		}
+	}
+	// With no delay to send it ahead, AAC still finds room in each slot it decodes in. Frames
+	// that arrive after their decode time drop, but none misses a deadline once scheduled.
+	let data = include_bytes!("test_data/ffmpeg_aac.ts");
+	let (ts, _dropped) = paced_export(data, Rate::Wait, Duration::ZERO).await;
+	assert!(Clocked::of(&ts).rate() > Clocked::of(data).rate() + crate::container::ts::schedule::PACKET);
+}
+
+/// Where [`paced_export`] takes its multiplex rate from.
+#[derive(Clone, Copy, Debug)]
+enum Rate {
+	/// The catalog, waiting for the import to measure it.
+	Wait,
+	/// The catalog, starting unpadded and taking it up once measured.
+	Measured,
+	/// The builder, from the start.
+	Given(u64),
+}
+
+/// Import `data` live, each stretch to a PCR on PID 0x100 arriving when its clock says, and export
+/// it at `rate` and `delay` from the first stretch on until 4 s of media. Returns the output and the frames it
+/// dropped.
+async fn paced_export(data: &[u8], rate: Rate, delay: Duration) -> (BytesMut, u64) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+
+	let chunks = pcr_chunks(data, 0x100);
+	assert!(chunks.len() > 10, "{} PCRs", chunks.len());
+	let (mut at, mut clock) = (0, chunks[0].1);
+	let mut export = None;
+	for (end, pcr) in chunks {
+		kio::clock::sleep(Duration::from_nanos(pcr.saturating_sub(clock) * 1000 / 27)).await;
+		clock = pcr;
+		import.decode(&data[at * 188..end * 188]).unwrap();
+		at = end;
+		if export.is_none() {
+			let source = crate::source::announced(&consumer).await;
+			let catalog = source
+				.catalog::<tscat::Ext>(crate::catalog::CatalogFormat::Hang)
+				.await
+				.unwrap();
+			export = Some(tokio::spawn(async move {
+				let export = Export::new(source, catalog, delay);
+				let mut export = match rate {
+					Rate::Wait => export,
+					Rate::Measured => export.without_rate_wait(),
+					Rate::Given(rate) => export.with_mux_rate(rate),
+				};
+				let mut ts = BytesMut::new();
+				// The catalog stays open, so the export pads on: stop with the media.
+				while let Some(frame) = export.next().await.expect("exporter error") {
+					ts.extend_from_slice(&frame.payload);
+					if frame.timestamp >= Timestamp::from_secs(4).unwrap() {
+						break;
+					}
+				}
+				(ts, export.dropped())
+			}));
+		}
+	}
+	import.decode(&data[at * 188..]).unwrap();
+	let _finished = import.finish().unwrap();
+	export.unwrap().await.unwrap()
 }

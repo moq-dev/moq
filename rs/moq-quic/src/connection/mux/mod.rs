@@ -309,8 +309,9 @@ impl Connection {
 
 	/// Close the connection with an APPLICATION_CLOSE, unless it already ended
 	///
-	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
-	/// the transport.
+	/// The frame comes from [`Self::poll_transmit`], in a record of its own if the transport
+	/// parameters still go first; keep transmitting until [`Self::is_drained`], then flush
+	/// before shutting down the transport.
 	pub fn close(&mut self, error_code: VarInt, reason: String) {
 		if self.is_closed() {
 			return;
@@ -465,6 +466,14 @@ impl Connection {
 		self.streams.peak_stream_receive_window()
 	}
 
+	/// Whether [`send::Stream::reset_at`] still delivers its prefix to the peer's reader: the peer
+	/// accepts RESET_STREAM_AT, which only qmux-02 negotiates. Otherwise it sends a RESET_STREAM
+	/// behind the prefix, which lets the peer discard any of it not yet read. False until the
+	/// peer's parameters arrive.
+	pub fn reset_stream_at(&self) -> bool {
+		self.streams.peer_reset_stream_at()
+	}
+
 	/// Receive flow control as the receiver sees it, evictions included
 	pub fn credit_stats(&self) -> super::CreditStats {
 		self.streams.credit_stats()
@@ -581,9 +590,14 @@ impl Connection {
 		}
 
 		if let End::Closing { error, frame } = &mut self.end {
+			let room = budget.saturating_sub(buf.len());
+			if frame.is_some() && !buf.is_empty() && room < Close::SIZE_BOUND {
+				// The transport parameters left no room, so the close goes in the next record
+				self.timer.on_send(now);
+				return Some(Default::default());
+			}
 			// Write the close frame, if any, and go quiet
 			if let Some(close) = frame.take() {
-				let room = budget - buf.len();
 				close.encode(buf, room);
 			}
 			self.end = End::Closed(error.clone());

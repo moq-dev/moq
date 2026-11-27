@@ -297,7 +297,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			catalog: reserved.producer(),
-			timebase: reserved.timebase(),
+			timebase: reserved.producer().timebase(),
 			initial_reservation: Some(reserved),
 			select: None,
 			cmaf: false,
@@ -339,6 +339,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.input.check()?;
 		self.pending_cut = true;
 		Ok(())
+	}
+
+	/// Shift this input's timestamps through `timebase`, a timestamp base of the catalog `reserved`
+	/// belongs to, instead of a fresh one: importers of one source share its offset.
+	///
+	/// Set it before the first [`decode`](Self::decode), which may anchor the timebase.
+	pub fn with_timebase(mut self, timebase: crate::catalog::Timebase<E>) -> Self {
+		self.timebase = timebase;
+		self
 	}
 
 	/// Restrict which track roles are published.
@@ -2582,12 +2591,12 @@ mod tests {
 	}
 
 	fn replay(output: &Output<()>) -> moq_net::track::Subscriber {
-		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-			moq_net::track::Start::Live {
+		let replay = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 				min: Some(std::time::Duration::from_secs(30)),
 				max: Some(std::time::Duration::from_secs(30)),
-			},
-		)]);
+			})])
+			.with_order(moq_net::track::Order::Ascending);
 		match output {
 			Output::Audio(output) => output.subscribe(replay),
 			Output::Passthrough(output) => output.track.subscribe(replay),

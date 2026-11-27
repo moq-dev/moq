@@ -308,11 +308,18 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		"{version}: the FETCH read the wrong group"
 	);
 	let counted = relay.fetches().await?;
-	anyhow::ensure!(
-		counted == forwarded + 1,
-		"{version}: the relay counted {counted} forwarded FETCHes, not {}",
-		forwarded + 1
-	);
+	if version.alpn() == "moq-lite-07-wip" {
+		anyhow::ensure!(
+			counted == 0,
+			"{version}: lite-07 must serve fetch via bounded SUBSCRIBE, not {counted} legacy FETCHes"
+		);
+	} else {
+		anyhow::ensure!(
+			counted == forwarded + 1,
+			"{version}: the relay counted {counted} forwarded FETCHes, not {}",
+			forwarded + 1
+		);
+	}
 
 	drop((first, below, inside));
 	running.stop().await.with_context(|| version.to_string())?;

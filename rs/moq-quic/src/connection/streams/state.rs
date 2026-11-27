@@ -23,6 +23,7 @@ use crate::{
 	connection::stats::{CreditStats, FrameStats, HeldStats, SendCreditStats},
 	connection::waits::{Wait, Waits},
 	frame::{self, FrameStruct, StreamMetaVec},
+	range_set::RangeSet,
 	transport_parameters::TransportParameters,
 };
 
@@ -60,6 +61,13 @@ pub(crate) struct StreamsState {
 	max_concurrent_remote_count: [u64; 2],
 	/// Lowest remotely-initiated stream index that haven't actually been opened by the peer
 	pub(super) next_remote: [u64; 2],
+	/// Remotely-initiated stream indices below `next_remote` that a later index opened and no frame
+	/// or accept has touched, so they hold no slot yet
+	///
+	/// A single frame may skip any number of indices up to the limit we granted, and a slot each
+	/// would let one packet allocate that whole window. These are open, not closed: a slot is
+	/// made on their first frame, or when the application accepts them.
+	pub(super) skipped: [RangeSet; 2],
 	// Next to report to the application, once opened
 	pub(super) next_reported_remote: [u64; 2],
 	/// Number of outbound streams
@@ -227,6 +235,7 @@ impl StreamsState {
 			allocated_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			max_concurrent_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			next_remote: [0, 0],
+			skipped: Default::default(),
 			next_reported_remote: [0, 0],
 			send_streams: 0,
 			pending: Schedule::new(),
@@ -332,7 +341,7 @@ impl StreamsState {
 		if fin {
 			self.waits.wake_ended();
 		}
-		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 
@@ -428,7 +437,7 @@ impl StreamsState {
 			return Ok(false);
 		};
 		self.waits.wake_ended();
-		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 		let credit = if stopped {
@@ -530,10 +539,17 @@ impl StreamsState {
 	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual. A stream
 	/// waiting to be accepted counts as open, since only the application can tell whether to keep it.
 	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &FxHashSet<StreamId>) -> bool {
-		let mut open = false;
 		let mut asked = false;
+		// A stream opened implicitly and never touched is open, and unaccepted.
+		let mut open = self.skipped.iter().any(|skipped| !skipped.is_empty());
 		for (&id, slot) in &mut self.recv {
 			if keep.contains(&id) {
+				continue;
+			}
+			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
+			// Only the application can tell whether to keep it, so an untouched one gets no state.
+			if unaccepted && slot.is_none() {
+				open = true;
 				continue;
 			}
 			let rs = get_or_insert_recv(slot, self.initial_stream_receive_window);
@@ -541,7 +557,6 @@ impl StreamsState {
 				continue;
 			}
 			open = true;
-			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
 			if unaccepted || rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
 				continue;
 			}
@@ -646,8 +661,11 @@ impl StreamsState {
 	/// unidirectional one. On an ordered transport, data at any other offset is a protocol
 	/// violation.
 	pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
-		// A peer stream not opened yet starts at offset 0 too
-		if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {
+		// A peer stream not opened yet, or opened implicitly and untouched, starts at offset 0 too
+		if id.initiator() != self.side
+			&& (id.index() >= self.next_remote[id.dir() as usize]
+				|| self.skipped[id.dir() as usize].contains(id.index()))
+		{
 			return Some(0);
 		}
 		let recv = self.recv.get(&id)?;
@@ -726,6 +744,17 @@ impl StreamsState {
 		stream
 			.data_blocked_limit
 			.filter(|&limit| stream.is_writable() && !stream.peer_stopped() && limit == stream.max_data)
+	}
+
+	/// Whether a queued RESET_STREAM for stream `id` would still be written
+	///
+	/// `false` once the stream is freed, such as when a lost reset is requeued after its
+	/// replacement was acknowledged.
+	pub(crate) fn can_send_reset(&self, id: StreamId) -> bool {
+		self.send
+			.get(&id)
+			.and_then(|s| s.as_ref())
+			.is_some_and(|s| s.reliable_size().is_some())
 	}
 
 	pub(in crate::connection) fn write_control_frames(
@@ -1226,7 +1255,8 @@ impl StreamsState {
 				Dir::Bi => {}
 			};
 		} else {
-			let limit = self.max_remote[id.dir() as usize];
+			// A raised `max_remote` may not be in a `MAX_STREAMS` frame yet
+			let limit = self.sent_max_remote[id.dir() as usize];
 			if id.index() >= limit {
 				return Err(TransportError::STREAM_LIMIT_ERROR(""));
 			}
@@ -1320,28 +1350,43 @@ impl StreamsState {
 		}
 	}
 
-	/// Allocate state for remotely-initiated streams up to and including `id`
+	/// Open remotely-initiated streams up to and including `id`, and make `id` a slot
 	///
-	/// A frame for index N implicitly opens `0..N`, so the skipped indices need slots too.
+	/// A frame for index N implicitly opens `0..N`, which stay slotless until [`Self::materialize`].
 	fn insert_remote(&mut self, id: StreamId) {
 		let dir_idx = id.dir() as usize;
+		let index = id.index();
 
-		if id.initiator() == self.side
-			|| id.index() >= self.max_remote[dir_idx]
-			|| id.index() < self.next_remote[dir_idx]
-		{
+		if id.initiator() == self.side || index >= self.max_remote[dir_idx] {
 			return;
 		}
 
-		for i in self.next_remote[dir_idx]..=id.index() {
-			let tid = StreamId::new(!self.side, id.dir(), i);
-			assert!(self.recv.insert(tid, None).is_none());
-			if id.dir() == Dir::Bi {
-				assert!(self.send.insert(tid, None).is_none());
-			}
+		let next = self.next_remote[dir_idx];
+		if index < next {
+			self.materialize(id);
+			return;
 		}
-		self.next_remote[dir_idx] = id.index() + 1;
+
+		if index > next {
+			self.skipped[dir_idx].insert(next..index);
+		}
+		self.insert_slots(id);
+		self.next_remote[dir_idx] = index + 1;
 		self.waits.wake_accept(id.dir());
+	}
+
+	/// Give a stream the peer opened implicitly its slots, if it has none yet
+	pub(super) fn materialize(&mut self, id: StreamId) {
+		if self.skipped[id.dir() as usize].remove(id.index()..id.index() + 1) {
+			self.insert_slots(id);
+		}
+	}
+
+	fn insert_slots(&mut self, id: StreamId) {
+		assert!(self.recv.insert(id, None).is_none());
+		if id.dir() == Dir::Bi {
+			assert!(self.send.insert(id, None).is_none());
+		}
 	}
 
 	/// Adds credits to the connection flow control window
@@ -1473,6 +1518,11 @@ impl StreamsState {
 		diff > 0 && (diff >= threshold || sent.saturating_sub(self.data_recvd) < threshold)
 	}
 
+	/// Whether the peer accepts RESET_STREAM_AT, so a reset still delivers its reliable prefix
+	pub(crate) fn peer_reset_stream_at(&self) -> bool {
+		self.peer_reset_stream_at
+	}
+
 	pub(crate) fn credit_stats(&self) -> CreditStats {
 		CreditStats {
 			leased: self.held,
@@ -1556,7 +1606,7 @@ impl StreamsState {
 	///
 	/// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
 	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: Box<Recv>) -> bool {
-		let evicted = recv.reader == Reader::Evicted;
+		let evicted = recv.reader.is_evicted();
 		let transmit = self.discard_lease(id, &mut recv.lease, evicted);
 		self.unlooked.remove(&id);
 		self.stream_freed(id, StreamHalf::Recv);
@@ -1670,6 +1720,7 @@ mod tests {
 					let mut server = make(Side::Server);
 					let mut pending = Retransmits::default();
 					for round in 0..3 {
+						announce_max_streams(&mut server);
 						let readers: Vec<_> = (0..streams).map(|_| Counter::new()).collect();
 						let ids: Vec<_> = (0..streams)
 							.map(|i| StreamId::new(Side::Client, dir, round * streams + i))
@@ -3182,6 +3233,7 @@ mod tests {
 			pending: &mut pending,
 		};
 		stream.stop(0u32.into()).unwrap();
+		announce_max_streams(&mut client);
 
 		// Open stream 128
 		assert_eq!(
@@ -3233,6 +3285,7 @@ mod tests {
 
 		// Relax limit by one
 		client.set_max_concurrent(Dir::Uni, 129u32.into());
+		announce_max_streams(&mut client);
 
 		// Open stream 128
 		assert_eq!(
@@ -3312,6 +3365,7 @@ mod tests {
 			pending: &mut pending,
 		};
 		stream.stop(0u32.into()).unwrap();
+		announce_max_streams(&mut client);
 
 		// Open stream 128
 		assert_eq!(
@@ -3401,6 +3455,59 @@ mod tests {
 		chunks.finalize();
 	}
 
+	/// One frame at the far end of a huge grant allocates one slot, not the whole window, and the
+	/// streams it skipped stay open: each works on its first frame or when the application accepts it.
+	#[test]
+	fn sparse_stream_id_allocates_one_slot() {
+		for dir in Dir::iter() {
+			let cap = VarInt::from_u64(MAX_STREAM_COUNT).unwrap();
+			let mut server = StreamsState::new(Side::Server, cap, cap, 1024 * 1024, VarInt::MAX, VarInt::MAX);
+			let far = StreamId::new(Side::Client, dir, MAX_STREAM_COUNT - 1);
+			data(&mut server, far, 0, 1, true);
+			assert_eq!(server.recv.len(), 1);
+			assert_eq!(server.send.len(), (dir == Dir::Bi) as usize);
+
+			let early = StreamId::new(Side::Client, dir, 7);
+			assert_eq!(server.rx_offset(early), Some(0));
+			data(&mut server, early, 0, 3, false);
+			assert_eq!(server.recv.len(), 2);
+			assert_eq!(server.rx_offset(early), Some(3));
+
+			// The application meets the skipped streams in order, each getting its slot as it does.
+			for index in 0..3 {
+				let id = StreamId::new(Side::Client, dir, index);
+				assert_eq!(Streams::new(&mut server, false).accept(dir), Some(id));
+				assert!(server.recv.contains_key(&id));
+				assert_eq!(server.send.contains_key(&id), dir == Dir::Bi);
+			}
+			assert_eq!(server.recv.len(), 5);
+		}
+	}
+
+	/// A quiesce counts an unaccepted stream the peer only touched by `STOP_SENDING` as open without
+	/// allocating its receive state, and so a stream it skipped.
+	#[test]
+	fn quiesce_leaves_untouched_streams_slotless() {
+		let mut server = make(Side::Server);
+		let mut pending = Retransmits::default();
+		let keep = FxHashSet::default();
+		assert!(!server.quiesce(&mut pending, 0u32.into(), &keep));
+
+		let stopped = StreamId::new(Side::Client, Dir::Bi, 0);
+		server.received_stop_sending(stopped, 0u32.into()).unwrap();
+		assert_eq!(server.recv.len(), 1);
+		assert!(server.quiesce(&mut pending, 0u32.into(), &keep));
+		assert!(
+			server.recv.values().all(Option::is_none),
+			"a quiesce allocated receive state"
+		);
+		assert!(pending.stop_sending.is_empty());
+
+		let mut server = make(Side::Server);
+		data(&mut server, StreamId::new(Side::Client, Dir::Uni, 1), 0, 1, true);
+		assert!(server.quiesce(&mut pending, 0u32.into(), &keep));
+	}
+
 	#[test]
 	fn frame_for_closed_stream_is_dropped() {
 		// Below the frontier, absence from the map means closed
@@ -3455,6 +3562,7 @@ mod tests {
 		for i in 0..N {
 			// Give ourselves room as we churn through ids
 			client.set_max_concurrent(Dir::Uni, (i + 200).try_into().unwrap());
+			announce_max_streams(&mut client);
 			let id = StreamId::new(Side::Server, Dir::Uni, i);
 			assert_eq!(
 				client.received(
@@ -3981,6 +4089,10 @@ mod tests {
 		assert_eq!(server.send_streams, 1);
 		server.reset_acked(id, 0);
 		assert_eq!(server.send_streams, 0);
+
+		// The shrunk RESET_STREAM_AT is declared lost after its replacement freed the stream
+		pending.reset_stream = vec![(id, 4)];
+		assert!(pending.is_empty(&server), "a stale reset must not demand a packet");
 	}
 
 	/// A RESET_STREAM_AT acknowledged before STOP_SENDING shrinks it no longer counts, so a late
@@ -4103,6 +4215,71 @@ mod tests {
 		assert_eq!(open.wakes(), 0);
 	}
 
+	/// Data acknowledged before a reset truncated it stays acknowledged while the reset lingers
+	#[test]
+	fn acked_survives_reset_at_truncation() {
+		let mut server = reset_at_server();
+		let mut pending = Retransmits::default();
+		let id = Streams {
+			state: &mut server,
+			closed: false,
+		}
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+		let mut stream = send::Stream {
+			id,
+			state: &mut server,
+			pending: &mut pending,
+			closed: false,
+		};
+		stream.write(&mut &b"hello world"[..]).unwrap();
+		let end = stream.offset();
+		let mut buf = Vec::new();
+		let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
+		stream.state.received_ack_of(sent[0].clone());
+		assert_eq!(stream.acked(end), Ok(true));
+
+		stream.reset_at(end.rewind(4), 7u32.into()).unwrap();
+		assert_eq!(stream.state.send_streams, 1, "the reset is not acknowledged yet");
+		assert_eq!(stream.acked(end), Ok(true));
+	}
+
+	/// An empty write queues no STREAM frame and never blocks on flow control
+	#[test]
+	fn empty_write_queues_nothing() {
+		let mut server = make(Side::Server);
+		server.set_params(&TransportParameters {
+			initial_max_streams_uni: 2u32.into(),
+			initial_max_data: 4u32.into(),
+			initial_max_stream_data_uni: 42u32.into(),
+			..TransportParameters::default()
+		});
+		let mut pending = Retransmits::default();
+		let mut open = || {
+			Streams {
+				state: &mut server,
+				closed: false,
+			}
+			.open(Dir::Uni, Default::default())
+			.unwrap()
+		};
+		let (first, second) = (open(), open());
+
+		let mut stream = send::Stream::new(first, &mut server, &mut pending, false);
+		assert_eq!(stream.write(&mut &b""[..]), Ok(0));
+		assert!(!server.can_send_stream_data());
+		let mut buf = Vec::new();
+		assert!(server.write_frames(&mut buf, 0..100, true).streams.is_empty());
+
+		// Spend the connection credit, then write nothing on another stream
+		let mut stream = send::Stream::new(first, &mut server, &mut pending, false);
+		assert_eq!(stream.write(&mut &b"full"[..]), Ok(4));
+		let mut stream = send::Stream::new(second, &mut server, &mut pending, false);
+		assert_eq!(stream.write(&mut &b""[..]), Ok(0));
+		assert!(!pending.data_blocked);
+		assert!(server.connection_blocked.is_empty());
+	}
+
 	#[test]
 	fn reset_at_after_stop_sending_drops_prefix() {
 		let mut server = reset_at_server();
@@ -4129,6 +4306,11 @@ mod tests {
 		assert_eq!(frame.final_offset, VarInt(11));
 		assert!(send.pending.is_fully_acked());
 		assert_eq!(server.buffered_data, 0);
+	}
+
+	/// Count every raised stream limit as announced in a `MAX_STREAMS` frame
+	fn announce_max_streams(state: &mut StreamsState) {
+		state.sent_max_remote = state.max_remote;
 	}
 
 	fn data(client: &mut StreamsState, id: StreamId, offset: u64, len: usize, fin: bool) {
@@ -5292,6 +5474,34 @@ mod tests {
 		}
 	}
 
+	/// Evicting a stream whose FIN arrived out of order with a missing gap before FIN still
+	/// emits STOP_SENDING when stopped, because the sender has not finished transmitting.
+	#[test]
+	fn evicted_stop_with_reordered_fin_gap_still_sends_stop_sending() {
+		const WINDOW: u64 = 1000;
+		let (mut client, [low, high]) = stuck(WINDOW);
+		// Low receives 0..900 and a reordered FIN at 950..1000, leaving gap 900..950 before FIN.
+		data(&mut client, low, 0, 900, false);
+		data(&mut client, low, 950, 50, true);
+		// High fills the rest of the 2*WINDOW receive window.
+		data(&mut client, high, 0, WINDOW as usize, false);
+		let mut pending = Retransmits::default();
+		recv(&mut client, &mut pending, low).set_priority(-1);
+		recv(&mut client, &mut pending, high).set_priority(1);
+		assert_eq!(lease(&mut client, low), 900);
+		assert_eq!(lease(&mut client, high), WINDOW as usize);
+		assert!(matches!(wait(&mut client, high, 2000), Poll::Pending));
+		assert_eq!(wait(&mut client, low, 1), Poll::Ready(Err(recv::Error::Evicted)));
+
+		let mut frames = Retransmits::default();
+		frames |= stop(&mut client, low, 7);
+		assert_eq!(
+			frames.stop_sending.len(),
+			1,
+			"reordered FIN with an unreceived gap must still send STOP_SENDING"
+		);
+	}
+
 	/// A group token indexes its own connection's schedule, so another connection refuses it
 	/// rather than reach whichever of its own groups shares the index.
 	#[test]
@@ -5420,6 +5630,16 @@ mod tests {
 		let id = StreamId::new(Side::Server, Dir::Bi, 200);
 
 		// Raised locally, but no MAX_STREAMS has told the peer yet
+		let frame = || frame::Stream {
+			id,
+			offset: 0,
+			fin: false,
+			data: Bytes::from_static(b"x"),
+		};
+		assert_eq!(
+			client.received(frame(), 1).map_err(|e| e.code),
+			Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+		);
 		assert_eq!(
 			client.received_stop_sending(id, 0u32.into()).map_err(|e| e.code),
 			Err(TransportErrorCode::STREAM_LIMIT_ERROR),
@@ -5443,6 +5663,7 @@ mod tests {
 
 		assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
 		assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
+		assert!(client.received(frame(), 1).is_ok());
 	}
 
 	/// A stream window as large as a varint, added to what the reader took, still encodes.

@@ -99,6 +99,40 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
 }
 
+/// The multiplex a source that recorded `rate` is padded to: a packet a slot more, for the
+/// export's own framing. Every slot carries a clock, and a PES holds no more than the decoder
+/// buffer, where a source may clock only each PES and pack more: FFmpeg's default audio has no
+/// nulls and a clock only every 186 ms, so its recorded rate has no room for either.
+fn padded(rate: u64) -> u64 {
+	rate.saturating_add(schedule::PACKET)
+}
+
+/// The rate a multiplex needs when its delay is too short to send audio a slot ahead: each slot
+/// then carries the AAC its own decode times hold, as much as two frames, beside a clock and
+/// tables. Sent further ahead, the audio spreads over slots and needs no floor.
+fn audio_floor(catalog: &Catalog<impl catalog::Catalog>) -> u64 {
+	let packets: u64 = catalog
+		.audio
+		.renditions
+		.iter()
+		.filter(|(_, config)| matches!(config.codec, AudioCodec::AAC(_)))
+		.filter_map(|(name, config)| {
+			// The catalog is untrusted: no frame outgrows the decoder buffer that holds it.
+			let size = audio_buffer(config, &audio_kind(config, name).ok()?).size?;
+			let frame = (config.bitrate? / 8 * 1024 / u64::from(config.sample_rate.max(1))).min(size as u64);
+			let pes = 2 * frame + (adts::MIN_HEADER_LEN + PES_PREFIX_LEN + PES_OPTIONAL_LEN) as u64;
+			Some(pes.div_ceil(schedule::PAYLOAD as u64))
+		})
+		.fold(0, u64::saturating_add);
+	match packets {
+		0 => 0,
+		packets => packets
+			.saturating_add(3)
+			.saturating_mul(schedule::PACKET)
+			.min(MAX_MUX_RATE),
+	}
+}
+
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
 /// Use [`poll_next`](Self::poll_next) to pull one [`Frame`] per PCR grid slot: its `payload`
@@ -211,6 +245,12 @@ where
 	/// none and the output is unpadded ([`Schedule`]).
 	mux_rate: Option<u64>,
 	mux_rate_override: Option<u64>,
+	/// The rate the last program tables carried to the schedule, which pads to it from there.
+	led_rate: Option<u64>,
+	/// The decode time, in nanoseconds, from which the tables carry [`Self::mux_rate`] rather
+	/// than [`Self::led_rate`]: a rate that sends audio further ahead waits for the frames keyed
+	/// for it.
+	rate_from: Option<u128>,
 	/// The newest catalog snapshot while the export waits for the rate a TS import has yet to
 	/// measure: the tracks are subscribed once it ends, so the export joins the media as it is
 	/// then, not on frames that went stale during the wait.
@@ -363,6 +403,8 @@ struct Track {
 	/// The current group's clock, when its rendition declared `reorder` at the group's start.
 	/// A trimmed leading picture holds its slot as `None`.
 	declared: Option<DeclaredClock<Option<Held>>>,
+	/// The source group that clock runs for.
+	declared_group: Option<u64>,
 	/// Loss counter at the last read, excluding declared ends.
 	recovery_gap: Option<u64>,
 	/// Leading pictures below the recovery keyframe have unavailable references, and whether
@@ -434,6 +476,7 @@ impl Track {
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
 			declared: None,
+			declared_group: None,
 			recovery_gap: None,
 			leading_floor: None,
 			held: None,
@@ -502,6 +545,8 @@ impl Track {
 				self.release(name, jitter, true)?;
 			}
 			self.declared = depth.map(DeclaredClock::new);
+			// The frame was just read, or is the first, held while the source read no further.
+			self.declared_group = self.source.group();
 		}
 		let source = pending.frame.timestamp;
 		let pts = to_ticks(source);
@@ -1619,6 +1664,8 @@ where
 			trimmed: 0,
 			mux_rate: None,
 			mux_rate_override: None,
+			led_rate: None,
+			rate_from: None,
 			held_catalog: None,
 			rate_until: None,
 			rate_wait: super::mux_rate::WAIT,
@@ -1658,8 +1705,8 @@ where
 	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
 	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
 	/// the delay, where a brief network stall only drops what it made late. Every track is
-	/// subscribed with the whole delay as its min and max, so a relay resets a group only once it
-	/// is that old. The export skips a stalled group once it falls the whole delay behind the
+	/// subscribed with the whole delay as its max, so a relay resets a group only once it is that
+	/// old; a live export joins at the edge, and a replay reaches back the whole delay. The export skips a stalled group once it falls the whole delay behind the
 	/// newest content (see [`Consumer`](crate::container::Consumer)), so a stall shorter than the
 	/// delay loses nothing, while a group whose tail never arrives makes the start of the next one
 	/// late.
@@ -1684,8 +1731,9 @@ where
 	}
 
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
-	/// catalog records. Without this the catalog's `mpegts.muxRate` decides, and a
-	/// catalog without one leaves the output unpadded.
+	/// catalog records, which is used as given. Without this the catalog's `mpegts.muxRate`
+	/// decides, a packet a slot faster for the export's own clock and framing, and a catalog
+	/// without one leaves the output unpadded.
 	///
 	/// Zero and absurd rates are refused with a warning, leaving the output
 	/// unpadded rather than allocating unbounded nulls.
@@ -1695,6 +1743,7 @@ where
 		}
 		self.program.mux_rate_override = Some(mux_rate);
 		self.program.mux_rate = sanitize_mux_rate(mux_rate);
+		self.program.led_rate = self.program.mux_rate;
 		self.program.schedule.set_rate(self.program.mux_rate);
 		self
 	}
@@ -2271,9 +2320,10 @@ where
 
 	/// The program playing failed with `err`. Only a publisher that left is survivable: its
 	/// input stops at once, as a follow that runs out stops it, but what it already buffered
-	/// goes out on schedule. Without a replacement, the export then reports `err`, so a
-	/// [`Follower`](super::Follower) waits for a return only after the old output has ended,
-	/// rather than leaving it buffered to go out late, behind the gap, once something returns.
+	/// goes out on schedule. Without a replacement, the export then reports `err`. A
+	/// [`Follower`](super::Follower) carries on into the same instance returning meanwhile
+	/// ([`Self::departed`]), whose tracks read on from where they stopped while that output
+	/// plays out, and otherwise waits for a return only after the old output has ended.
 	///
 	/// The program keeps its catalog, whose format the follower subscribes a return with.
 	fn leave(&mut self, err: crate::Error) -> crate::Result<()> {
@@ -2418,19 +2468,30 @@ where
 		// unpadded), so a bad flag cannot silently fall back to the catalog rate.
 		let mux_rate = match self.program.mux_rate_override {
 			Some(override_rate) => sanitize_mux_rate(override_rate),
-			None => mpegts.mux_rate.and_then(|rate| {
-				sanitize_mux_rate(rate).or_else(|| {
-					tracing::warn!(mux_rate = rate, "ignoring invalid MPEG-TS multiplex rate in catalog");
-					None
+			None => mpegts
+				.mux_rate
+				.and_then(|rate| {
+					sanitize_mux_rate(rate).or_else(|| {
+						tracing::warn!(mux_rate = rate, "ignoring invalid MPEG-TS multiplex rate in catalog");
+						None
+					})
 				})
-			}),
+				.map(padded)
+				// Audio goes out at most half the delay ahead (`audio_reach`).
+				.map(|rate| match self.program.delay < 2 * PCR_INTERVAL {
+					true => rate.max(audio_floor(&catalog)),
+					false => rate,
+				})
+				.and_then(sanitize_mux_rate),
 		};
 		// A revision is one boundary: the rate rides the next tables out.
-		if mux_rate != self.program.mux_rate {
+		let previous = self.program.mux_rate;
+		if mux_rate != previous {
 			self.program.mux_rate = mux_rate;
 			self.program.revised = true;
 		}
 		if self.program.psi.is_none() {
+			self.program.led_rate = self.program.mux_rate;
 			self.program.schedule.set_rate(self.program.mux_rate);
 		}
 
@@ -2691,6 +2752,58 @@ where
 			track.kind = kind;
 			self.refresh(name, track, pid, entry.descriptors.clone());
 		}
+		// Every audio track follows the rate, a listed one too. Once the clock runs, a frame keyed
+		// further ahead has that much less of the delay to arrive in, so the send-ahead grows by
+		// no more than the frames have had to spare over the last second, less a slot.
+		//
+		// Frames already keyed for less send-ahead would reach the new rate with too little of
+		// it, so a rate that sends audio further ahead waits twice that send-ahead past the
+		// newest frame keyed: the frames keyed after it catch up to the new send-ahead within it
+		// ([`Track::release_key`]), and the frames keyed before it are due by the time the first
+		// of those goes out.
+		let window = schedule::slot(self.program.delay.as_nanos());
+		let spare = match self.program.psi {
+			None => self.program.delay,
+			Some(_) => self
+				.jitter
+				.margin()
+				.and_then(|margin| Duration::try_from_secs_f64(margin).ok())
+				.map_or(Duration::ZERO, |margin| margin.saturating_sub(PCR_INTERVAL)),
+		};
+		let mut grown = Duration::ZERO;
+		for track in self.program.tracks.values_mut() {
+			if let Some(buffer) = track
+				.buffer
+				.as_mut()
+				.filter(|_| track.kind.class() == super::stats::Class::Audio)
+			{
+				// Only a new rate or a new track moves it, so the margin is spent once.
+				let fresh = buffer.reach == audio_reach(buffer, None, self.program.delay);
+				if self.program.mux_rate == previous && !fresh {
+					continue;
+				}
+				let before = audio_reach(buffer, previous, self.program.delay).min(buffer.reach);
+				let reach = audio_reach(buffer, self.program.mux_rate, self.program.delay);
+				buffer.reach = reach.min(before + spare);
+				let before = Buffer {
+					reach: before,
+					..*buffer
+				};
+				if schedule::ahead(Some(buffer), window) > schedule::ahead(Some(&before), window) {
+					grown = grown.max(buffer.reach);
+				}
+			}
+		}
+		if !grown.is_zero() && self.program.psi.is_some() {
+			let newest = self
+				.program
+				.tracks
+				.values()
+				.filter_map(|track| track.released)
+				.map(|(decode, ..)| nanos(decode))
+				.max();
+			self.program.rate_from = newest.map(|decode| decode + 2 * grown.as_nanos() + PCR_INTERVAL.as_nanos());
+		}
 		// The clock anchors on whichever track a source sends latest against its decode time
 		// (audio just in time while video runs most of a second ahead), so it waits to hear
 		// from each continuous one: audio, video, and the passthrough streams the schedule
@@ -2718,38 +2831,57 @@ where
 	/// Point each stale track this snapshot lists at the returned broadcast.
 	///
 	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
-	/// stale, silent on its PID. The new subscription's playhead jumped from wherever the
-	/// old one stopped, so its first frame counts as a skip: late frames drop, and a leap
-	/// ahead opens a new generation.
+	/// stale, silent on its PID. The same instance carries the same content, so each track reads
+	/// on right after the last frame it read ([`ExportSource::resuming`]): nothing is replayed,
+	/// and a frame that comes too late drops as any other does. A track that read nothing starts
+	/// at the live edge instead, its playhead jumping from wherever the old subscription stopped,
+	/// so its first frame counts as a skip: late frames drop, and a leap ahead opens a new
+	/// generation.
 	fn resubscribe(&mut self, catalog: &Catalog<S::Ext>, mpegts: &catalog::Mpegts) -> Result<()> {
 		let delay = self.program.delay;
+		let replay = self.program.replay;
 		for (name, track) in self.program.tracks.iter_mut() {
 			if track.read != Read::Stale {
 				continue;
 			}
+			let mut resume = track.source.resume();
+			// A flush settled the group's decode clock before its reordering was known, so the
+			// rest of the group may not fit it: read on from the next group instead.
+			let cut = track.declared.as_ref().is_some_and(DeclaredClock::forced)
+				&& track.declared_group.is_some_and(|group| resume.past_group(group));
+			let resumed = |source: ExportSource| match resume.read() {
+				true => source.resuming(&resume),
+				false => at_edge(source, replay),
+			};
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
 				ExportSource::for_video(&self.program.source, name, config, subscribed(delay))?
-					.map(|s| at_edge(skipping(s, delay), self.program.replay))
+					.map(|s| resumed(skipping(s, delay)))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				ExportSource::for_audio(&self.program.source, name, config, subscribed(delay))?
-					.map(|s| at_edge(skipping(s, delay), self.program.replay))
+					.map(|s| resumed(skipping(s, delay)))
 			} else if mpegts
 				.tracks
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
 				let source = ExportSource::for_stream(&self.program.source, name, subscribed(delay))?;
-				Some(stream_edge(skipping(source, delay), &track.kind, self.program.replay))
+				let kind = track.kind.clone();
+				Some(match resume.read() {
+					true => skipping(source, delay).resuming(&resume),
+					false => stream_edge(skipping(source, delay), &kind, replay),
+				})
 			} else {
 				None
 			};
 			let Some(source) = source else {
 				continue;
 			};
-			// The new subscription counts as cutting whatever group the old one was reading.
+			// A new subscription at the edge counts as cutting whatever group the old one was
+			// reading, as does reading on past the rest of it; one that reads on counts its own.
+			let jumped = u64::from(!resume.read() || cut);
 			track.base.0 += track.source.markers();
-			track.base.1 += track.source.skips() + 1;
-			track.base.2 += track.source.cuts() + 1;
+			track.base.1 += track.source.skips() + jumped;
+			track.base.2 += track.source.cuts() + jumped;
 			track.source = source;
 			track.subscribed = kio::clock::now();
 			track.read = Read::Live;
@@ -2951,6 +3083,21 @@ where
 	pub fn follow(mut self, broadcast: moq_net::broadcast::Consumer, catalog: S) -> Result<Self, crate::Error> {
 		self.followed(&broadcast, catalog, Duration::ZERO)?;
 		Ok(self)
+	}
+
+	/// Why the publisher of the program playing left, while what it buffered still goes out
+	/// before the export reports it ([`Self::leave`]).
+	pub(super) fn departed(&self) -> Option<&crate::Error> {
+		match &self.program.feed {
+			Feed::Retired(left) if self.pending.is_none() => left.as_ref(),
+			Feed::Live | Feed::Ended | Feed::Retired(_) => None,
+		}
+	}
+
+	/// Leave the instance carried on into while what it buffered went out, which went before
+	/// serving its catalog: as if its publisher left with `err` ([`Self::leave`]).
+	pub(super) fn depart(&mut self, err: crate::Error) -> crate::Result<()> {
+		self.leave(err)
 	}
 
 	/// Whether the catalog this export last subscribed has delivered a snapshot.
@@ -3550,10 +3697,42 @@ where
 		Ok(())
 	}
 
-	/// Hand the program tables to the schedule ahead of the next unit, if they are due.
-	fn lead_tables(&mut self) -> Result<()> {
+	/// The buffers the schedule holds `track`'s PID to: audio reaches as far ahead as the rate the
+	/// tables last carried lets it, which is what the schedule pads to, while the frames are keyed
+	/// for a rate still waiting on them ([`Program::rate_from`]).
+	fn scheduled(&self, track: &Track) -> Option<Buffer> {
+		let mut buffer = track.buffer()?;
+		if track.kind.class() == super::stats::Class::Audio {
+			buffer.reach = audio_reach(&buffer, self.program.led_rate, self.program.delay).min(buffer.reach);
+		}
+		Some(buffer)
+	}
+
+	/// Hand the program tables to the schedule ahead of the next unit, decoding at `decode`, if
+	/// they are due.
+	fn lead_tables(&mut self, decode: Timestamp) -> Result<()> {
 		if !std::mem::take(&mut self.program.psi_due) {
 			return Ok(());
+		}
+		let rate = match self.program.rate_from {
+			Some(from) if nanos(decode) < from => self.program.led_rate,
+			_ => {
+				self.program.rate_from = None;
+				self.program.mux_rate
+			}
+		};
+		if std::mem::replace(&mut self.program.led_rate, rate) != rate {
+			let buffers: Vec<_> = self
+				.program
+				.tracks
+				.values()
+				// A track waiting for its PID takes its buffer there when it lists ([`Self::push_unit`]).
+				.filter(|track| track.listed && track.kind.class() == super::stats::Class::Audio)
+				.filter_map(|track| Some((track.pid, self.scheduled(track)?)))
+				.collect();
+			for (pid, buffer) in buffers {
+				self.program.schedule.set_buffer(pid, buffer);
+			}
 		}
 		// A rewind may have dropped the copy a move waited for.
 		self.follow_pmt()?;
@@ -3567,10 +3746,7 @@ where
 			.map(|es| es.pid.as_u16())
 			.collect();
 		psi.led = Some(psi.pmt.clone());
-		self.program.schedule.lead(super::schedule::Tables {
-			rate: self.program.mux_rate,
-			added,
-		});
+		self.program.schedule.lead(super::schedule::Tables { rate, added });
 		Ok(())
 	}
 
@@ -3769,7 +3945,7 @@ where
 		if let Some(buffer) = buffer {
 			self.program.schedule.set_buffer(pid, buffer);
 		}
-		self.lead_tables()?;
+		self.lead_tables(frame.timestamp)?;
 		self.program.schedule.push_placed(
 			pid,
 			(place, decode.unwrap_or(place)),
@@ -3905,9 +4081,6 @@ where
 			}
 		};
 		let track = self.program.tracks.get(name).context("missing track")?;
-		if let Some(buffer) = track.buffer() {
-			self.program.schedule.set_buffer(pid, buffer);
-		}
 		// A padded output cannot burst a picture late, so a CPB that the source may fill to
 		// its declared buffer delay needs that much send-ahead, all of it out of the delay.
 		if self.program.mux_rate.is_some()
@@ -3922,7 +4095,11 @@ where
 			);
 		}
 		let by = nanos(decode).saturating_sub(track.drain().as_nanos());
-		self.lead_tables()?;
+		self.lead_tables(decode)?;
+		let track = self.program.tracks.get(name).context("missing track")?;
+		if let Some(buffer) = self.scheduled(track) {
+			self.program.schedule.set_buffer(pid, buffer);
+		}
 		self.program.schedule.push_frames(
 			pid,
 			super::schedule::Timing {
@@ -4595,7 +4772,8 @@ fn video_kind(config: &VideoConfig, name: &str) -> Result<Kind> {
 }
 
 /// The delay a track subscription states for an export running `delay` behind: all of it, as both
-/// bounds, so a relay resets a group only once it is that old.
+/// bounds, so a relay resets a group only once it is that old and a replay reaches back that far.
+/// A live start joins at the edge whatever the min ([`ExportSource::live`]).
 pub(super) fn subscribed(delay: Duration) -> crate::container::Delay {
 	crate::container::Delay::default().with_min(delay).with_max(delay)
 }
@@ -4730,7 +4908,7 @@ fn fill(bits: u64, rate: u64) -> Duration {
 
 /// An audio stream's buffers in a receiver (H.222.0 2.4.2.3): by channel count for ADTS
 /// AAC (and Opus, which borrows them), 2 Mb/s and the codec's main buffer for the rest. B
-/// reaches as far ahead as it takes to fill at Rx.
+/// reaches as far ahead as it takes to fill at Rx ([`audio_reach`]).
 fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 	let by_channels = || match config.channel_count {
 		0..=2 => (2_000_000, 3_584),
@@ -4752,6 +4930,26 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 		size: Some(size),
 		transport: 512,
 		reach: fill(size as u64 * 8, rate),
+	}
+}
+
+/// How far ahead of its decode time audio B holds a unit in a multiplex padded to `mux_rate`: as
+/// long as B takes to fill at Rx, or at the multiplex rate when that is slower, since nothing
+/// reaches B faster than the multiplex carries it, within half of `delay` so a frame keeps the
+/// rest to arrive in, as a packed PES does.
+///
+/// A slow multiplex so spreads its audio over the slots before it decodes and carries it near its
+/// own rate. Sent only in the slot it decodes in, every slot would need room for the most audio
+/// any one decodes, beside the tables and the clock: about 400 kb/s for 96 kb/s of FFmpeg's AC-3.
+fn audio_reach(buffer: &Buffer, mux_rate: Option<u64>, delay: Duration) -> Duration {
+	let Some(size) = buffer.size else {
+		return buffer.reach;
+	};
+	let bits = size as u64 * 8;
+	let at_rx = fill(bits, buffer.rate);
+	match mux_rate {
+		Some(mux_rate) if mux_rate < buffer.rate => fill(bits, mux_rate).min(delay / 2).max(at_rx),
+		_ => at_rx,
 	}
 }
 

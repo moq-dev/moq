@@ -202,6 +202,12 @@ pub enum StreamError {
 	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
+	/// The publisher declared that no group will ever exist at these starts.
+	///
+	/// Sent in `SUBSCRIBE_DROP` on lite-07: final, cacheable emptiness that ends no reader.
+	#[error("skipped")]
+	Skip,
+
 	/// The grant does not cover this subscription, fetch, or announcement, or no longer
 	/// does. Unlike [`SessionError::Unauthorized`], the session stays up.
 	#[error("unauthorized")]
@@ -238,6 +244,7 @@ impl StreamError {
 			Self::WrongSize => 0x37,
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
+			Self::Skip => 0x3a,
 			Self::Unauthorized => 0x3b,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
@@ -270,6 +277,7 @@ impl StreamError {
 			0x37 => Self::WrongSize,
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
+			0x3a => Self::Skip,
 			0x3b => Self::Unauthorized,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -858,6 +866,7 @@ mod tests {
 			(StreamError::WrongSize, 0x37),
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
+			(StreamError::Skip, 0x3a),
 			(StreamError::Unauthorized, 0x3b),
 			(StreamError::App(7), 0x40 + 7),
 		] {

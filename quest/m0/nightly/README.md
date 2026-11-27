@@ -218,10 +218,34 @@ Triaged 2026-11-25 (pre-0.22 recurring audits), from run
 `Tests (test resume-model)` at seed `1465722607` was fixed by
 [moq-dev/moq#9509](https://github.com/moq-dev/moq/pull/9509); `Nightly (JS coverage)`'s
 `widened_max_age.test.ts` failure is
-[widened-bounded-reader-js](/quest/m0/test-flakes-4/widened-bounded-reader-js.md); and
+[moq-dev/moq#9607](https://github.com/moq-dev/moq/pull/9607); and
 `Shipping sizes`' +10% `moq_ffi.dll.lib` is the Windows import library growing with the
 exports [moq-dev/moq#9359](https://github.com/moq-dev/moq/pull/9359) added, while every
 shipped library stayed under the 5% bound. Already owned: `Tests (rs quic-sim)`'s
 `many_groups_carry_bulk_transfers_losslessly` by
 [moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439), and the paired benchmark
 regressions by [perf-recheck](/quest/m3/release/perf-recheck.md).
+
+Triaged 2026-11-26 (maintainer, /quest-plan), from Nightly runs
+[45667362304](https://github.com/moq-dev/moq/actions/runs/45667362304) (`420b8dcb0d`) and
+[45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463) (`4fba5df73f`),
+scheduled Interop [45873739689](https://github.com/moq-dev/moq/actions/runs/45873739689), and
+TS [45872586504](https://github.com/moq-dev/moq/actions/runs/45872586504). New children: the
+JS resume model's failed final group, the route sweep's job split, the bursty audio rows, and
+the 11-26 paired regressions; two Interop children went to
+[interop green](/quest/m0/interop-green/README.md), and the Pages deploy to
+[CI](/quest/m0/ci/README.md). The macOS moq-cli tarball's crc-fast link failure is fixed by
+[moq-dev/moq#9728](https://github.com/moq-dev/moq/pull/9728). Fixed on `main` since: the track
+bench ([moq-dev/moq#9635](https://github.com/moq-dev/moq/pull/9635); 11-26 failed only on its
+base), `widened_max_age` ([moq-dev/moq#9607](https://github.com/moq-dev/moq/pull/9607)),
+cli-export ([moq-dev/moq#9662](https://github.com/moq-dev/moq/pull/9662)), and the TS
+congested path ([moq-dev/moq#9621](https://github.com/moq-dev/moq/pull/9621)). Owned by open
+PRs: Windows' CRLF crate names ([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545))
+and quic-interop's lossy handshakes ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
+[moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
+[moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)); the 11-26 mutants went to
+[resume and route mutants](/quest/m0/nightly/resume-route-mutants.md). Dropped as one-night
+failures (re-check if one repeats): `benchmark_receive_windows`' `group timed out` on a
+non-skipped cell, the Firefox player's `after resume` tone at 65/75 samples, Interop's
+Chromium `volume 0.25` at 27/31 samples, Interop's `finish go -> *` gst reader on 11-25, and
+the supplemental benchmarks' 55-minute step timeout on 11-25 (28 minutes compiling).

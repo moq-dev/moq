@@ -596,7 +596,9 @@ mod tests {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut groups = track.subscribe(None);
+		// Oldest first, as published.
+		let mut groups =
+			track.subscribe(moq_net::track::Subscription::default().with_order(moq_net::track::Order::Ascending));
 		let mut producer = Producer::<Value>::new(track, Config::default().with_deltas(true));
 		producer
 			.update(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))

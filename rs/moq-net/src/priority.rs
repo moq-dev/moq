@@ -526,6 +526,10 @@ pub const RECV_CONTROL: i64 = i64::MAX;
 /// The receive priority of a stream not yet identified, the transport's default, kept until
 /// a group stream's header is read: above every group stream, since it holds at most a
 /// header's bytes, and stopping it before then hides which group it carried.
+#[allow(
+	dead_code,
+	reason = "transport default receive priority documented alongside RECV_CONTROL and RECV_PARKED"
+)]
 pub const RECV_UNIDENTIFIED: i64 = 0;
 
 /// The receive priority of a group stream held unread until a control message says how to

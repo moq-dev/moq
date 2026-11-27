@@ -1467,13 +1467,14 @@ mod tests {
 	/// These tests write every group up front and only then read, which the default
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
+	/// Oldest first, as they are read back.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-			moq_net::track::Start::Live {
+		moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 				min: Some(RECORDING_MAX_DELAY),
 				max: Some(RECORDING_MAX_DELAY),
-			},
-		)])
+			})])
+			.with_order(moq_net::track::Order::Ascending)
 	}
 
 	/// The media track's full max age, so readers started after publishing
@@ -1850,9 +1851,11 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their frame counts.
-	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+	async fn collect_groups(consumer: moq_net::track::Subscriber) -> Vec<usize> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut count = 0;
 			while group.next_frame().await.unwrap().is_some() {
 				count += 1;
@@ -1992,9 +1995,11 @@ mod tests {
 	}
 
 	/// Drain all groups, returning each group's (timestamp_micros, payload_len) pairs.
-	async fn collect_payloads(mut consumer: moq_net::track::Subscriber) -> Vec<Vec<(u128, usize)>> {
+	async fn collect_payloads(consumer: moq_net::track::Subscriber) -> Vec<Vec<(u128, usize)>> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				let decoded = hang::container::Frame::decode(frame.payload).unwrap();
@@ -2041,9 +2046,11 @@ mod tests {
 	}
 
 	/// Drain all LOC groups, returning each group's (timestamp_micros, payload_len) pairs.
-	async fn collect_loc_payloads(mut consumer: moq_net::track::Subscriber) -> Vec<Vec<(u64, usize)>> {
+	async fn collect_loc_payloads(consumer: moq_net::track::Subscriber) -> Vec<Vec<(u64, usize)>> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				let decoded = moq_loc::decode(frame.payload).unwrap();
@@ -2145,9 +2152,11 @@ mod tests {
 	}
 
 	/// Drain all groups from a finished track, returning their starts.
-	async fn collect_starts(mut consumer: moq_net::track::Subscriber) -> Vec<u64> {
+	async fn collect_starts(consumer: moq_net::track::Subscriber) -> Vec<u64> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut starts = Vec::new();
-		while let Some(group) = consumer.recv_group().await.unwrap() {
+		while let Some(group) = consumer.next_group().await.unwrap() {
 			starts.push(group.start);
 		}
 		starts
@@ -2748,9 +2757,11 @@ mod tests {
 	type Published = (u64, Vec<moq_net::frame::Frame>, Option<u64>);
 
 	/// Every group `consumer` reads, with its frames and End.
-	async fn collect_published(mut consumer: moq_net::track::Subscriber) -> Vec<Published> {
+	async fn collect_published(consumer: moq_net::track::Subscriber) -> Vec<Published> {
+		// Key order, oldest first, whatever the subscription's Group Order.
+		let mut consumer = consumer.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+		while let Some(mut group) = consumer.next_group().await.unwrap() {
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(frame);

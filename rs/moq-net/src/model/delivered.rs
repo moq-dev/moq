@@ -76,28 +76,52 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
-	/// The parts of `groups` not handed out, in order.
-	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
-		let mut gaps = Vec::new();
+	/// Forget that any key in `groups` was handed out, splitting the runs it cuts.
+	pub fn remove(&mut self, groups: std::ops::Range<u64>) {
+		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
+			return;
+		};
+		// Runs are disjoint and sorted, so the ones reaching into `groups` are the last few
+		// starting at or below its last key.
+		let cut: Vec<(u64, u64)> = (self.runs.range(..=last).rev())
+			.take_while(|(_, end)| **end >= groups.start)
+			.map(|(start, end)| (*start, *end))
+			.collect();
+		for (start, end) in cut {
+			self.runs.remove(&start);
+			if start < groups.start {
+				self.runs.insert(start, groups.start - 1);
+			}
+			if end > last {
+				self.runs.insert(last + 1, end);
+			}
+		}
+	}
+
+	/// The parts of `groups` not handed out, in order, found as they are read.
+	pub fn gaps(&self, groups: std::ops::Range<u64>) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
 		let mut next = groups.start;
 		let from = self
 			.runs
 			.range(..=groups.start)
 			.next_back()
 			.map_or(next, |(start, _)| *start);
-		for (first, last) in self.runs.range(from..) {
-			if next >= groups.end {
-				return gaps;
+		let mut runs = self.runs.range(from..);
+		std::iter::from_fn(move || {
+			while next < groups.end {
+				let Some((first, last)) = runs.next() else {
+					let gap = next..groups.end;
+					next = groups.end;
+					return Some(gap);
+				};
+				let gap = next..(*first).min(groups.end);
+				next = next.max(last + 1);
+				if !gap.is_empty() {
+					return Some(gap);
+				}
 			}
-			if *first > next {
-				gaps.push(next..(*first).min(groups.end));
-			}
-			next = next.max(last + 1);
-		}
-		if next < groups.end {
-			gaps.push(next..groups.end);
-		}
-		gaps
+			None
+		})
 	}
 
 	/// The parts of `groups` none of `taken` handed out, in order.
@@ -179,11 +203,11 @@ mod test {
 		for key in [2, 4, 5, 9] {
 			delivered.insert(key);
 		}
-		assert_eq!(delivered.gaps(0..12), [0..2, 3..4, 6..9, 10..12]);
-		assert_eq!(delivered.gaps(4..6), []);
-		assert_eq!(delivered.gaps(5..11), [6..9, 10..11]);
+		assert_eq!(delivered.gaps(0..12).collect::<Vec<_>>(), [0..2, 3..4, 6..9, 10..12]);
+		assert_eq!(delivered.gaps(4..6).next(), None);
+		assert_eq!(delivered.gaps(5..11).collect::<Vec<_>>(), [6..9, 10..11]);
 		delivered.insert(u64::MAX - 1);
-		let gaps = delivered.gaps(u64::MAX - 2..u64::MAX);
+		let gaps: Vec<_> = delivered.gaps(u64::MAX - 2..u64::MAX).collect();
 		assert_eq!((gaps.len(), gaps.first()), (1, Some(&(u64::MAX - 2..u64::MAX - 1))));
 	}
 
@@ -222,6 +246,30 @@ mod test {
 		assert_eq!(runs(&delivered), [(2, 14)], "an empty run");
 		delivered.insert_run(u64::MAX - 1..u64::MAX);
 		assert!(delivered.contains(u64::MAX - 1) && !delivered.contains(u64::MAX));
+	}
+
+	#[test]
+	fn remove_splits_the_runs_it_cuts() {
+		let mut delivered = Delivered::default();
+		delivered.insert_run(2..7);
+		for key in [9, 12] {
+			delivered.insert(key);
+		}
+		delivered.remove(4..10);
+		assert_eq!(runs(&delivered), [(2, 3), (12, 12)], "the tail of one, all of another");
+		delivered.insert_run(2..12);
+		delivered.remove(5..6);
+		assert_eq!(runs(&delivered), [(2, 4), (6, 12)], "the middle of one");
+		delivered.remove(13..20);
+		delivered.remove(8..8);
+		assert_eq!(
+			runs(&delivered),
+			[(2, 4), (6, 12)],
+			"nothing handed out, or nothing at all"
+		);
+		delivered.insert(u64::MAX - 1);
+		delivered.remove(0..u64::MAX);
+		assert_eq!(runs(&delivered), []);
 	}
 
 	#[test]

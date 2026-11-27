@@ -27,6 +27,10 @@ pub(crate) fn grace(max_delay: Duration) -> Duration {
 	}
 }
 
+/// Maximum number of disjoint runs retained in a single [`Ledger`], bounding memory even when
+/// no grace expires gaps (such as a lite-07 proven tail moving across many disjoint ranges).
+pub(crate) const MAX_RUNS: usize = 4096;
+
 /// Heap a ledger keeps per run: the run, its age entry, and its two entries in [`Changes`].
 /// Doubled for half-full `BTreeMap` nodes, as the cache's own overheads are. A track bills
 /// its arrivals at this per run, so a peer fragmenting them costs what the cache would hold.
@@ -160,6 +164,7 @@ impl Ledger {
 			}
 		}
 		self.changes.insert(first..end);
+		while self.runs.len() > MAX_RUNS && self.fold_oldest().is_some() {}
 	}
 
 	/// Account a live arrival, refreshing a cached incarnation even if its key was
@@ -571,5 +576,21 @@ mod tests {
 				assert_eq!(runs[0], 0..arrival.saturating_sub(retained) * 2 + 1);
 			}
 		}
+	}
+
+	#[test]
+	fn ledger_caps_run_count_at_max_runs_even_with_unbounded_grace() {
+		let start = Instant::now();
+		let mut ledger = Ledger::new(Duration::MAX);
+		let total = (MAX_RUNS + 128) as u64;
+		for i in 0..total {
+			ledger.account(i * 2..i * 2 + 1, start.saturating_add(Duration::from_millis(i)));
+			assert!(ledger.len() <= MAX_RUNS, "ledger grew past MAX_RUNS at i={i}");
+		}
+		assert_eq!(ledger.len(), MAX_RUNS);
+		// The newest gaps remain tracked individually while the oldest folded.
+		let newest = (total - 1) * 2;
+		assert!(ledger.covers(newest..newest + 1));
+		assert!(!ledger.covers(newest - 1..newest));
 	}
 }

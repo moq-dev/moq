@@ -224,6 +224,10 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			audioContext: el.audio.out.context.peek()?.state,
 			audioTimestamp: el.audio.out.timestamp.peek()?.asMillis(),
 			audioStalled: el.audio.out.stalled.peek(),
+			audioBuffered: el.audio.out.buffered
+				.peek()
+				.map(({ start, end }) => [Math.round(start.asMillis()), Math.round(end.asMillis())]),
+			audioError: el.audio.out.error.peek()?.message,
 			delay: el.sync.out.delay.peek().asMillis(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
 			audioCodec: audioRendition?.codec,
@@ -231,6 +235,8 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			audioSampleRate: audioRendition?.sampleRate,
 			audioRendition: audioName,
 			audioTrack: audioRendition?.track ?? audioName,
+			audioCatalogDelay: audioRendition?.delay,
+			audioCatalogJitter: audioRendition?.jitter,
 			speakerRms: speakerRms(el.audio.out.context.peek(), wave),
 			tones: toneCheck?.read(),
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,

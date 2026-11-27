@@ -17,7 +17,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Per-range priority, order, and judged OLD drops on lite-07](/quest/m2/lite07-subscribe/per-range-policy.md) - judged Max Age on SUBSCRIBE_DROP(OLD) replaces stale_budget so front re-judging needs no copy-wide untelling layer
-
-## Related
-
-- [A JS front's ordered read returns a gap held across a switch](/quest/m1/front-switch-held-gap-js.md) - standalone JS front switch held-gap bug preserved from #9437

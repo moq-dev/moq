@@ -6,8 +6,9 @@
 //! before it covers too, so spans merge as they do over starts. A treap keeps each
 //! subtree's sum and lowest running sum, so a change touches two boundaries and asks one
 //! range-minimum question, whatever else the audience holds. Ranges with no time start can't
-//! be placed on that line and are counted by value instead, live joins by lag and end under
-//! the largest `max` among them, since where a join lands doesn't depend on it.
+//! be placed on that line and are counted by value instead: live joins by lag and end under
+//! the largest `max` among them, since where a join lands doesn't depend on it, and ranges
+//! from the oldest group under the furthest end, which takes in the rest.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
@@ -27,8 +28,8 @@ pub(super) struct Ranges {
 	open: usize,
 	/// Ranges with a time start, as spans of starts.
 	time: Coverage,
-	/// Ranges from the oldest group with an end, kept as they are.
-	others: BTreeMap<Range, usize>,
+	/// Ranges from the oldest group with an end, by end: the furthest takes in the rest.
+	oldest: BTreeMap<u64, usize>,
 	/// Live joins by lag and end, each with the budgets its holders ask under.
 	joins: BTreeMap<(Option<Duration>, Option<u64>), BTreeMap<Duration, usize>>,
 	/// The last union read, until a change moves it.
@@ -43,7 +44,8 @@ enum Shape {
 	Time(u64, Option<u64>),
 	/// A live join, by lag and end, and its budget.
 	Join((Option<Duration>, Option<u64>), Duration),
-	Other,
+	/// A range from the oldest group, by its end.
+	Oldest(u64),
 }
 
 impl Shape {
@@ -55,7 +57,7 @@ impl Shape {
 			// An end at the last start covers every group, as an open one does.
 			(Start::Time(start), Some(end)) => Self::Time(start, end.checked_add(1)),
 			(Start::Live { min, .. }, end) => Self::Join((min, end), range.budget()),
-			(Start::Oldest, Some(_)) => Self::Other,
+			(Start::Oldest, Some(end)) => Self::Oldest(end),
 		}
 	}
 }
@@ -81,7 +83,11 @@ impl Ranges {
 				add(budgets, budget);
 				widest.is_none_or(|widest| budget > widest) && !hidden
 			}
-			Shape::Other => add(&mut self.others, range) && !hidden,
+			Shape::Oldest(end) => {
+				let furthest = self.oldest.last_key_value().map(|(furthest, _)| *furthest);
+				add(&mut self.oldest, end);
+				furthest.is_none_or(|furthest| end > furthest) && !hidden
+			}
 		};
 		self.union.take();
 		changed
@@ -110,7 +116,11 @@ impl Ranges {
 				}
 				moved && !hidden(self)
 			}
-			Shape::Other => remove(&mut self.others, range) && !hidden(self),
+			Shape::Oldest(end) => {
+				let furthest = self.oldest.last_key_value().map(|(furthest, _)| *furthest);
+				remove(&mut self.oldest, end);
+				self.oldest.last_key_value().map(|(furthest, _)| *furthest) != furthest && !hidden(self)
+			}
 		};
 		self.union.take();
 		changed
@@ -135,7 +145,10 @@ impl Ranges {
 				end: end.map(|end| end - 1),
 			})
 			.collect();
-		union.extend(self.others.keys());
+		union.extend(self.oldest.last_key_value().map(|(&end, _)| Range {
+			start: Start::Oldest,
+			end: Some(end),
+		}));
 		union.extend(self.joins.iter().filter_map(|(&(min, end), budgets)| {
 			let budget = *budgets.last_key_value()?.0;
 			Some(Range {
@@ -302,6 +315,26 @@ mod tests {
 	use super::super::super::super::subscription::union;
 	use super::*;
 	use rand::{RngExt, SeedableRng};
+
+	/// A range from the oldest group with an end takes in every one ending before it, so only
+	/// the furthest end moves the union.
+	#[test]
+	fn ranges_from_the_oldest_keep_only_the_furthest_end() {
+		let oldest = |end| Range {
+			start: Start::Oldest,
+			end: Some(end),
+		};
+		let mut ranges = Ranges::default();
+		assert!(ranges.add(oldest(3)));
+		assert!(ranges.add(oldest(5)), "a further end moves the union");
+		assert!(!ranges.add(oldest(4)), "a nearer one does not");
+		assert!(!ranges.add(oldest(5)));
+		assert_eq!(ranges.union(), [oldest(5)]);
+		assert!(!ranges.remove(oldest(5)), "another holds the furthest end");
+		assert!(!ranges.remove(oldest(3)));
+		assert!(ranges.remove(oldest(5)), "the furthest end left");
+		assert_eq!(ranges.union(), [oldest(4)]);
+	}
 
 	/// Each change reports exactly whether the union moved, and the union matches a full fold
 	/// of what is held.

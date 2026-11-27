@@ -78,6 +78,14 @@ class GroupProducer:
         """
         self._inner.finish()
 
+    def finish_at(self, end: int) -> None:
+        """Close this group cleanly with its exclusive ``end`` in the track's timescale.
+
+        No other group may start before ``end``. The handle remains so :meth:`abort` can still
+        run.
+        """
+        self._inner.finish_at(end)
+
     def abort(self, error_code: int) -> None:
         """Abort this group with an application error code."""
         self._inner.abort(error_code)

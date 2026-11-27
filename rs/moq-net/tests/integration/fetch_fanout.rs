@@ -66,12 +66,14 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 				let mut group = remote.track("video").unwrap().fetch_group(key, None).await.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");
 				assert!(group.read_frame().await.unwrap().is_none());
-				// FETCH's lite stream type is 3, and its varint occupies one byte.
+				// FETCH's lite stream type is 3 on lite-05/06; lite-07 uses one-shot SUBSCRIBE (2).
+				let lite07 = version == "moq-lite-07-wip".parse::<Version>().unwrap();
+				let fetch_kind = if lite07 { 2 } else { 3 };
 				let fetches = upstream
 					.client_transport
 					.bidi_types()
 					.into_iter()
-					.filter(|kind| *kind == 3)
+					.filter(|kind| *kind == fetch_kind)
 					.count();
 				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {key}");
 			}
@@ -83,7 +85,12 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			1,
 			"metadata is learned once"
 		);
-		assert!(!types.contains(&2), "a fetch-only relay must never subscribe");
+		let lite07 = version == "moq-lite-07-wip".parse::<Version>().unwrap();
+		if lite07 {
+			assert!(!types.contains(&3), "lite-07 must never send FETCH");
+		} else {
+			assert!(!types.contains(&2), "a fetch-only relay must never subscribe");
+		}
 		assert!(track.subscription().is_none());
 	}
 }

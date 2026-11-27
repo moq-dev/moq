@@ -1453,6 +1453,7 @@ let exactRoute: (producer: Producer, path: Path.Valid, options: RouteOptions, re
 export class Producer implements Table {
 	#state = new OriginState();
 	#scope = Scope.all;
+	#priority = 0;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 
 	// Set on a derived handle, which borrows the origin: what it registered, so its close
@@ -1505,6 +1506,9 @@ export class Producer implements Table {
 			blind: (slot) => this.#state.blind(slot as RequestSlot),
 			answer: (path, front) => this.#answer(this.#scope.path(path), front),
 			routes: (path) => wireOf(this.#reader).routes(path),
+			get priority() {
+				return thisProducer.#priority;
+			},
 		});
 	}
 
@@ -1514,10 +1518,32 @@ export class Producer implements Table {
 	 */
 	scope(root: Path.Valid, prefixes: Path.Prefixes): Producer {
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
-		const scope = this.#scope.narrow(root, prefixes);
+		return this.#derive(this.#scope.narrow(root, prefixes), this.#priority);
+	}
+
+	/**
+	 * Rank the link a session given this handle as its `consume` origin lands its routes
+	 * through: higher wins, and every handle starts at the neutral 0. An integer from -128 to 127.
+	 *
+	 * Only an instance's newest epoch is eligible, but among eligible routes priority decides
+	 * before cost, so links to different operators rank by this instead of comparing their
+	 * prices. On moq-lite-07 a route ranks by the lowest priority of any link on its path. The
+	 * result borrows the origin, as {@link scope}'s does, and its own derived handles keep its
+	 * priority.
+	 */
+	withPriority(priority: number): Producer {
+		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
+		if (!Number.isInteger(priority) || priority < -128 || priority > 127) {
+			throw new RangeError("origin priority must be an integer from -128 to 127");
+		}
+		return this.#derive(this.#scope, priority);
+	}
+
+	#derive(scope: Scope, priority: number): Producer {
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
+		producer.#priority = priority;
 		producer.#reader = makeConsumer(this.#state, scope);
 		producer.#borrowed = { releases: new Set(), closed: false };
 		return producer;

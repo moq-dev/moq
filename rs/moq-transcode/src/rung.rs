@@ -165,6 +165,10 @@ impl Writing {
 		self.0.take().expect("owned group").finish().map(drop)
 	}
 
+	fn finish_at(mut self, end: u64) -> moq_net::Result<()> {
+		self.0.take().expect("owned group").finish_at(end).map(drop)
+	}
+
 	fn abort(mut self, err: moq_net::Error) -> moq_net::Result<()> {
 		self.0.take().expect("owned group").abort(err)
 	}
@@ -512,13 +516,16 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					encoder.encode(rung, frame).await?;
 					drain(output, &active, &mut encoder)?;
 				}
-				Some(Item::End) => {
+				Some(Item::End(end)) => {
 					if let Some(mut output) = current.take() {
 						// The source group is complete, so this one has to be too: a
 						// hardware encoder is still holding its last frames.
 						encoder.flush().await?;
 						drain(&mut output, &active, &mut encoder)?;
-						output.finish()?;
+						match end {
+							Some(end) => output.finish_at(end)?,
+							None => output.finish()?,
+						}
 					}
 					// Or during the flush.
 					leaving = !want.now(edge);
@@ -883,7 +890,10 @@ async fn transcode_group(
 ) -> Result<(), Error> {
 	match transcode_group_inner(pipeline, container, source, &mut output, active).await {
 		Ok(()) => {
-			output.finish()?;
+			match source.end() {
+				Some(end) => output.finish_at(end)?,
+				None => output.finish()?,
+			}
 			Ok(())
 		}
 		Err(err) => {

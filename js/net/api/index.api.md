@@ -139,6 +139,7 @@ export * as Clock from "@moq/clock";
 export namespace Connection {
 	export interface AcceptProps {
 		consume?: Origin.Producer;
+		cost?: Origin.Cost;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
@@ -161,6 +162,7 @@ export namespace Connection {
 	export interface ConnectProps {
 		auth?: Auth.Handle;
 		consume?: Origin.Producer;
+		cost?: Origin.Cost;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
@@ -201,6 +203,7 @@ export namespace Connection {
 	export interface Props {
 		backoff?: Connection.Backoff;
 		consume?: Origin.Producer;
+		cost?: Origin.Cost;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
@@ -517,6 +520,7 @@ export namespace Origin {
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		scope(root: Path.Valid, prefixes: Path.Prefixes): Origin.Producer;
+		withPriority(priority: number): Origin.Producer;
 	}
 	export interface Reader {
 		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -637,6 +641,7 @@ export const StreamCode: ((code: number) => StreamCode) & {
 	readonly NotFound: StreamCode;
 	readonly Old: StreamCode;
 	readonly SessionClosed: StreamCode;
+	readonly Skip: StreamCode;
 	readonly TimestampMismatch: StreamCode;
 	readonly TooFarBehind: StreamCode;
 	readonly Unauthorized: StreamCode;

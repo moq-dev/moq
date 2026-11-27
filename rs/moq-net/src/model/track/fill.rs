@@ -1000,6 +1000,13 @@ impl FillGroups {
 		self.inner.floor.is_some()
 	}
 
+	/// Whether this fill asks for a separate flight copy of one group rather than the shared
+	/// cache slot.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_flight(&self) -> bool {
+		self.inner.flight
+	}
+
 	/// The frame group `key` starts from: [`start`](Self::start)'s frame for the first
 	/// group, 0 for the rest.
 	pub fn frame_start(&self, key: u64) -> u64 {
@@ -1600,12 +1607,15 @@ impl Inner {
 	}
 
 	/// Refuse `groups` with `err`, as the source answered, recording them in the track's drops
-	/// as `hole` says, so the later readers it settles do not ask again.
+	/// as `hole` says, so the later readers it settles do not ask again. A time-start lookup
+	/// (`floor.is_some()`) only answers where the time falls and records no drop on the track.
 	fn drop_groups(&self, groups: &RangeSet<u64>, err: Error, hole: super::Hole) {
 		if groups.is_empty() {
 			return;
 		}
-		if let Ok(mut state) = TrackState::modify(&self.state) {
+		if self.floor.is_none()
+			&& let Ok(mut state) = TrackState::modify(&self.state)
+		{
 			for groups in groups.iter() {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
@@ -1715,7 +1725,9 @@ impl Drop for Inner {
 			wanted.iter().flat_map(|run| outcome.resolved.gaps(run)).collect()
 		};
 		if !left.is_empty() && self.result.wanted() {
-			if let Ok(mut state) = TrackState::modify(&self.state) {
+			if self.floor.is_none()
+				&& let Ok(mut state) = TrackState::modify(&self.state)
+			{
 				// Unanswered is a miss downstream, as an explicit `drop_groups` would say.
 				for groups in left.iter() {
 					state.drop_unfed(groups.clone(), super::Hole::drop(StreamError::NotFound));
@@ -1868,5 +1880,12 @@ impl GroupFill {
 	/// is recorded, as a stale verdict under that age.
 	pub(crate) fn reject(self, err: Error) {
 		self.inner.reject(self.key..self.key + 1, err);
+	}
+
+	/// Declare the group never produced (SUBSCRIBE_DROP with SKIP), so waiting readers pass
+	/// over it without recording a loss.
+	pub(crate) fn skip(self) {
+		let owed = self.inner.owed(self.key..self.key + 1);
+		self.inner.drop_groups(&owed, Error::Skipped, super::Hole::Skip);
 	}
 }

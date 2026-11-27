@@ -20,8 +20,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         (try await ffi.nextGroup()).map(GroupConsumer.init)
     }
 
-    /// The next group in arrival order, which may be out of start order. `nil` once
-    /// the track ends.
+    /// The next group in arrival order, which may be out of start order: groups
+    /// already held come in the subscription's group order, newest first unless it
+    /// asks ascending. `nil` once the track ends.
     public func recvGroup() async throws -> GroupConsumer? {
         (try await ffi.recvGroup()).map(GroupConsumer.init)
     }
@@ -62,8 +63,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
-    /// Groups in arrival order, including out-of-order deliveries. The default
-    /// `AsyncSequence` iteration uses start order instead.
+    /// Groups in arrival order, including out-of-order deliveries. Groups already held come in
+    /// the subscription's order, newest first unless it asks ascending, as `recvGroup` returns
+    /// them. The default `AsyncSequence` iteration uses start order instead.
     public var groupsAsArrived: AsyncThrowingStream<GroupConsumer, Swift.Error> {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             (try await ffi.recvGroup()).map(GroupConsumer.init)
@@ -263,6 +265,12 @@ public final class GroupProducer: Sendable {
     /// Mark the group complete. No more frames can be written.
     public func finish() throws {
         try ffi.finish()
+    }
+
+    /// Mark the group complete with its exclusive `end` in the track's timescale.
+    /// No other group may start before `end`.
+    public func finish(at end: UInt64) throws {
+        try ffi.finishAt(end: end)
     }
 
     /// Abort the group with an application error code.

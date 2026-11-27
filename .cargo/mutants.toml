@@ -47,7 +47,7 @@ exclude_re = [
     # Polling a covered copy hands out nothing, so polling it anyway only costs work. An
     # expired copy's groups are past the reader's own budget too: the copy expires a budget
     # after the newer group that makes them stale, and `let_go` arms the same timer.
-    ':\d+:13: replace \|\| with && in Reader::poll_lowest$',
+    ':\d+:13: replace \|\| with && in Reader::poll_first$',
     # A run starting at the window's end or the resume point clips to an empty range, which
     # has no gaps.
     'replace < with <= in Reader::(exhausted|lacking)$',
@@ -66,9 +66,9 @@ exclude_re = [
     # original retries on the new copy and the arm prevents a lost wake.
     'replace \|\| with && in Fetching::(poll_moved|moved)$',
     'replace Fetching::moved -> bool with false$',
-    # The same for `Recover::poll`'s route watch, whose generation it just read; once no
-    # front moves the copy, the read never continues on the watch.
-    ':\d+:43: replace \|\| with && in Recover::poll$',
+    # The same for `Recover::poll`'s route watch, whose generation, stage, and phase it
+    # just read; once no front moves the copy, the read never continues on the watch.
+    ':\d+:(43|55): replace \|\| with && in Recover::poll$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
@@ -76,9 +76,9 @@ exclude_re = [
     'replace == with != in Consumer::subscribe$',
     # A backfill fails only with its route's track, so asking that route again for what it
     # refused fails at once too and is let go: skipping the ask only saves the subscribe.
-    # `poll_lowest` records that refusal for the skip.
+    # `poll_first` records that refusal for the skip.
     ':\d+:19: replace <= with > in Reader::backfill$',
-    ':\d+:30: replace == with != in Reader::poll_lowest$',
+    ':\d+:30: replace == with != in Reader::poll_first$',
     # With no resume point `raised` names no start, and a settled window has no unsettled
     # range: each guard only skips the walk.
     'replace \|\| with && in Reader::raised$',
@@ -98,8 +98,10 @@ exclude_re = [
     # `Placed` only sees ranges `Reader::resolve` placed, with no latest group: each
     # start is a time it contains or the oldest, so it never looks a start up or waits on
     # one, and an `Oldest` end only reaches it from a copy that accepted one, which every
-    # copy refuses.
-    'replace <impl Holdings for Placed>::(next_start|complete|resolves) ',
+    # copy refuses. `ReachedBack` only sees time starts `Reader::resolve` found before every
+    # group held, and answers each `Before`: it never waits on one, looks one up, or places a
+    # live join.
+    'replace <impl Holdings for (Placed|ReachedBack)>::(next_start|complete|resolves) ',
     # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
     # only when a cap at 0 empties every range, so a waiting range stops the window too.
     'replace && with \|\| in Reader::resolve$',
