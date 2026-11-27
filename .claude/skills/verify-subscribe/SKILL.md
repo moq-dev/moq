@@ -70,7 +70,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ### SubscribeAccounting.tla
 
-Sync commit: `f7a41c3ea52fa6b12c6bf698142f428c24ea673b`. Run `git log f7a41c3ea5.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `59418195dc45e0885f946cfd88fd1a4fa216d48f`. Run `git log 59418195dc.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -98,7 +98,7 @@ What the model asks of that code, each found by TLC as a broken rule without it:
 
 ### SubscribeDedup.tla
 
-Sync commit: `f7a41c3ea52fa6b12c6bf698142f428c24ea673b`. Run `git log f7a41c3ea5.. -- rs/moq-net/src/model/track/demand rs/moq-net/src/model/track/demand.rs rs/moq-net/src/lite/subscribe.rs rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/lite/subscriber/fills.rs rs/moq-net/src/model/subscription.rs rs/moq-net/src/model/subscription/window.rs rs/moq-net/src/model/group.rs` to see what changed since.
+Sync commit: `59418195dc45e0885f946cfd88fd1a4fa216d48f`. Run `git log 59418195dc.. -- rs/moq-net/src/model/track/demand rs/moq-net/src/model/track/demand.rs rs/moq-net/src/lite/subscribe.rs rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/lite/subscriber/fills.rs rs/moq-net/src/model/subscription.rs rs/moq-net/src/model/subscription/window.rs rs/moq-net/src/model/group.rs` to see what changed since.
 
 | Code | Model |
 | --- | --- |
