@@ -67,16 +67,19 @@ pub struct Config {
 	/// Maximum number of received bytes to buffer for each incoming connection attempt
 	///
 	/// This limit governs the first packet and those received after it, until the attempt is either
-	/// registered as an active connection or otherwise disposed of. Packets received in excess of
-	/// this limit are dropped, which may require handshake data to be retransmitted.
+	/// registered as an active connection or otherwise disposed of. Each packet counts its length
+	/// plus the fixed size of the record holding it, so a flood of tiny packets is bounded by the
+	/// memory it takes. Packets received in excess of this limit are dropped, which may require
+	/// handshake data to be retransmitted.
 	///
 	/// The default value is 10 MiB. Early-data packets are discarded.
 	pub incoming_buffer_size: u64,
 
 	/// Maximum number of received bytes to buffer collectively for all incoming connection attempts
 	///
-	/// This limit governs each attempt's first packet and those received after it, until the attempt
-	/// is either registered as an active connection or otherwise disposed of. An Initial that would
+	/// This limit governs each attempt's first packet and those received after it, counted as for
+	/// [`incoming_buffer_size`](Self::incoming_buffer_size), until the attempt is either
+	/// registered as an active connection or otherwise disposed of. An Initial that would
 	/// exceed it is dropped, as is any later packet, which may require handshake data to be
 	/// retransmitted.
 	///

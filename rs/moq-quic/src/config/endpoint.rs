@@ -60,9 +60,9 @@ pub struct Config {
 	/// silences everyone, though one address silences only the few that share its slot.
 	///
 	/// Defaults to 20ms, or 1ms with a [`reset_secret`](Self::reset_secret), since a restart
-	/// leaves every peer waiting on a reset at once: 1000 a second resets 2,000 connections in 2s,
-	/// where 20ms takes 40s. A reset is always smaller than the packet that drew it, so this never
-	/// amplifies.
+	/// leaves every peer waiting on a reset at once, and peers sharing one address slot (e.g. behind
+	/// a NAT) wait on each other: 1ms resets 2,000 connections behind one address in 2s, where 20ms
+	/// takes 40s. A reset is always smaller than the packet that drew it, so this never amplifies.
 	///
 	/// Limits the impact of attacks which flood an endpoint with garbage packets, e.g.
 	/// [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay

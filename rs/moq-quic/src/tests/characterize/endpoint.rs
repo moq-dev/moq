@@ -263,16 +263,35 @@ fn short_initial_is_dropped() {
 	assert_eq!(answer(&mut pair.server, now, &datagram), Answer::NewConnection);
 }
 
-/// An Initial whose DCID is shorter than RFC 9000's 8 bytes is refused with a close
+/// An authenticated Initial whose DCID is shorter than RFC 9000's 8 bytes is refused with a close
 #[test]
 fn initial_with_short_cid_is_refused() {
 	let _guard = subscribe();
-	let packet = long(0, Version::V1.wire(), &[0x11; 7], 1200);
-	let answer = answer(&mut endpoint(true), Instant::ZERO, &packet);
+	let mut pair = pair_with(|_| {});
+	let mut client = client_with(|_| {});
+	client.initial_dst_cid_provider = Arc::new(|| ConnectionId::new(&[0x11; 7]));
+	pair.begin_connect(client);
+	pair.drive_client();
+	let (_, _, datagram) = pair.server.inbound.pop_front().unwrap();
+	let now = pair.time;
+	let answer = answer(&mut pair.server, now, &datagram);
 	let Answer::Response(close) = answer else {
 		panic!("expected an Initial close, got {answer:?}");
 	};
 	assert_eq!(close[0] & 0xf0, 0xc0, "a long-header Initial");
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+}
+
+/// Junk shaped like an Initial with a short or empty DCID fails authentication, so it earns no
+/// close that a spoofed source could aim at a victim
+#[test]
+fn unauthenticated_initial_with_short_cid_gets_no_reply() {
+	let _guard = subscribe();
+	let mut server = endpoint(true);
+	for dst_cid in [&[0x11; 7][..], &[]] {
+		let packet = long(0, Version::V1.wire(), dst_cid, 1200);
+		assert_eq!(answer(&mut server, Instant::ZERO, &packet), Answer::Nothing);
+	}
 }
 
 /// Garbage under header protection unmasks to random reserved bits, and when they pass as zero

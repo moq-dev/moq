@@ -29,7 +29,7 @@ use crate::{
 	frame,
 	packet::{
 		FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, PacketDecodeError, PacketNumber,
-		PartialDecode, ProtectedInitialHeader,
+		PartialDecode,
 	},
 	server,
 	shared::{
@@ -267,21 +267,22 @@ impl Endpoint {
 				RouteDatagramTo::Incoming(incoming_idx) => {
 					let incoming_buffer = &mut self.incoming_buffers[incoming_idx];
 					let config = &incoming_buffer.server_config;
+					let size = buffered_size(datagram_len);
 
 					if incoming_buffer
 						.total_bytes
-						.checked_add(datagram_len as u64)
+						.checked_add(size)
 						.is_some_and(|n| n <= config.incoming_buffer_size)
 						&& self
 							.all_incoming_buffers_total_bytes
-							.checked_add(datagram_len as u64)
+							.checked_add(size)
 							.is_some_and(|n| n <= config.incoming_buffer_size_total)
 					{
 						let mut event = event;
 						event.detach();
 						incoming_buffer.datagrams.push(event);
-						incoming_buffer.total_bytes += datagram_len as u64;
-						self.all_incoming_buffers_total_bytes += datagram_len as u64;
+						incoming_buffer.total_bytes += size;
+						self.all_incoming_buffers_total_bytes += size;
 					}
 
 					None
@@ -495,12 +496,13 @@ impl Endpoint {
 		// reply with CONNECTION_REFUSED would starve packet processing for existing connections.
 		// An attempt holds its first datagram until the application disposes of it, so the byte
 		// budget bounds memory however large the datagrams are, and the count bounds the slots.
+		let size = buffered_size(datagram_len);
 		if self.cids_exhausted()
 			|| self.incoming_buffers.len() >= server_config.max_incoming
-			|| datagram_len as u64 > server_config.incoming_buffer_size
+			|| size > server_config.incoming_buffer_size
 			|| self
 				.all_incoming_buffers_total_bytes
-				.checked_add(datagram_len as u64)
+				.checked_add(size)
 				.is_none_or(|n| n > server_config.incoming_buffer_size_total)
 		{
 			debug!("ignoring initial for connection {} due to saturation", dst_cid);
@@ -514,17 +516,6 @@ impl Endpoint {
 			warn!("dropping initial: the server's TLS provider lacks TLS13_AES_128_GCM_SHA256");
 			return None;
 		};
-
-		if let Err(reason) = self.early_validate_first_packet(header) {
-			return Some(DatagramEvent::Response(self.initial_close(
-				version,
-				addresses,
-				&crypto,
-				header.src_cid,
-				reason,
-				buf,
-			)));
-		}
 
 		// The attempt is charged for this datagram's length, so it must not pin the receive batch.
 		event.detach();
@@ -558,6 +549,17 @@ impl Endpoint {
 			return None;
 		}
 
+		if let Err(reason) = self.early_validate_first_packet(&header) {
+			return Some(DatagramEvent::Response(self.initial_close(
+				version,
+				addresses,
+				&crypto,
+				header.src_cid,
+				reason,
+				buf,
+			)));
+		}
+
 		let server_config = self.server_config.as_ref().unwrap().clone();
 
 		let token = match IncomingToken::from_header(&header, &server_config, addresses.remote) {
@@ -578,9 +580,9 @@ impl Endpoint {
 		let incoming_idx = self.incoming_buffers.insert(IncomingBuffer {
 			server_config,
 			datagrams: Vec::new(),
-			total_bytes: datagram_len as u64,
+			total_bytes: size,
 		});
-		self.all_incoming_buffers_total_bytes += datagram_len as u64;
+		self.all_incoming_buffers_total_bytes += size;
 		self.index
 			.insert_initial_incoming(addresses, header.dst_cid, incoming_idx);
 
@@ -829,14 +831,14 @@ impl Endpoint {
 		Ok((ch, conn))
 	}
 
-	/// Check if we should refuse a connection attempt regardless of the packet's contents
-	fn early_validate_first_packet(&mut self, header: &ProtectedInitialHeader) -> Result<(), TransportError> {
+	/// Check if we should refuse an authenticated connection attempt by its header alone
+	fn early_validate_first_packet(&mut self, header: &InitialHeader) -> Result<(), TransportError> {
 		// RFC9000 §7.2 dictates that initial (client-chosen) destination CIDs must be at least 8
 		// bytes. If this is a Retry packet, then the length must instead match our usual CID
 		// length. If we ever issue non-Retry address validation tokens via `NEW_TOKEN`, then we'll
 		// also need to validate CID length for those after decoding the token.
 		if header.dst_cid.len() < 8
-			&& (header.token_pos.is_empty() || header.dst_cid.len() != self.local_cid_generator.cid_len())
+			&& (header.token.is_empty() || header.dst_cid.len() != self.local_cid_generator.cid_len())
 		{
 			debug!(
 				"rejecting connection due to invalid DCID length {}",
@@ -1120,6 +1122,15 @@ impl Endpoint {
 		self.all_incoming_buffers_total_bytes
 	}
 
+	/// Datagrams buffered for pending attempts after their first
+	#[cfg(test)]
+	pub(crate) fn incoming_buffered_datagrams(&self) -> usize {
+		self.incoming_buffers
+			.iter()
+			.map(|(_, buffer)| buffer.datagrams.len())
+			.sum()
+	}
+
 	#[cfg(test)]
 	pub(crate) fn known_connections(&self) -> usize {
 		let x = self.connections.len();
@@ -1187,7 +1198,16 @@ impl fmt::Debug for Endpoint {
 struct IncomingBuffer {
 	server_config: Arc<server::Config>,
 	datagrams: Vec<DatagramConnectionEvent>,
+	/// What [`buffered_size`] charged for every datagram held, the first included
 	total_bytes: u64,
+}
+
+/// What an attempt is charged for holding a datagram: its bytes plus the event that carries them
+///
+/// A datagram can be a single byte, so its length alone would let a byte budget hold millions of
+/// events, each far larger than the bytes it was charged for.
+fn buffered_size(datagram_len: usize) -> u64 {
+	(datagram_len + mem::size_of::<DatagramConnectionEvent>()) as u64
 }
 
 /// Part of protocol state incoming datagrams can be routed to

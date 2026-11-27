@@ -1310,7 +1310,7 @@ fn first_datagrams_count_toward_the_incoming_byte_budget() {
 	pair.drive_client();
 	pair.drive_server();
 	assert_eq!(pair.server.waiting_incoming.len(), 1);
-	assert_eq!(pair.server.incoming_buffer_bytes(), 1200);
+	assert!(pair.server.incoming_buffer_bytes() > 1200);
 
 	// Disposing of the attempt frees its bytes for the next Initial, which the client retransmits.
 	let incoming = pair.server.pop_waiting_incoming();
@@ -1368,6 +1368,51 @@ fn retransmitted_zero_length_cid_initial_joins_its_attempt() {
 	pair.server.try_accept(incoming, pair.time).unwrap();
 	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
 	assert_eq!(pair.server.open_connections(), 1);
+}
+
+/// With zero-length CIDs a single `0x40` byte routes by four-tuple to a pending attempt, so a flood
+/// of them must be bounded by what each buffered datagram holds, not by its few wire bytes.
+#[test]
+fn tiny_datagrams_to_a_pending_attempt_are_bounded_by_what_they_hold() {
+	let _guard = subscribe();
+	let limit = 64 << 10;
+	let mut server_config = server_config();
+	server_config.incoming_buffer_size = limit;
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config),
+			cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0)))),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(Endpoint::new(endpoint::Config::default(), true).unwrap(), server);
+	pair.server.handle_incoming = Box::new(|incoming| match incoming.remote_address_validated() {
+		true => IncomingConnectionBehavior::Wait,
+		false => IncomingConnectionBehavior::Retry,
+	});
+	pair.begin_connect(client_config());
+	// Initial, Retry, then the retried Initial with an empty destination CID
+	pair.drive();
+	assert_eq!(pair.server.waiting_incoming.len(), 1);
+	let before = pair.server.incoming_buffered_datagrams();
+
+	let mut buf = Vec::new();
+	for _ in 0..limit {
+		let received = Received {
+			remote: pair.client.addr,
+			local_ip: None,
+			ecn: None,
+			data: [0x40][..].into(),
+			arrival: None,
+		};
+		assert!(pair.server.handle(pair.time, received, &mut buf).is_none());
+	}
+	let tiny = pair.server.incoming_buffered_datagrams() - before;
+	assert!(tiny > 0, "datagrams under the limit are still buffered");
+	let held = tiny * (1 + mem::size_of::<crate::shared::DatagramConnectionEvent>());
+	assert!(held as u64 <= limit, "{tiny} datagrams hold {held} bytes, past {limit}");
 }
 
 /// Verify that when the handshake fails (here via ALPN mismatch) after `start_accept` has
@@ -6236,39 +6281,6 @@ fn oversized_datagrams_are_dropped() {
 		send_buffer_size - Datagram::SIZE_BOUND,
 		"expected the send buffer to be empty after too large datagrams were dropped",
 	);
-}
-
-#[test]
-fn reject_short_idcid() {
-	let _guard = subscribe();
-	let client_addr = "[::2]:7890".parse().unwrap();
-	let mut server = Endpoint::new(
-		endpoint::Config {
-			server: Some(server_config()),
-			..endpoint::Config::default()
-		},
-		true,
-	)
-	.unwrap();
-	let now = Instant::now();
-	let mut buf = Vec::with_capacity(server.max_udp_payload_size() as usize);
-	// Initial header that has an empty DCID but is otherwise well-formed
-	let mut initial = BytesMut::from(hex!("c4 00000001 00 00 00 3f").as_ref());
-	initial.resize(MIN_INITIAL_SIZE.into(), 0);
-	let event = server.handle(
-		now,
-		Received {
-			remote: client_addr,
-			local_ip: None,
-			ecn: None,
-			data: initial,
-			arrival: None,
-		},
-		&mut buf,
-	);
-	let Some(DatagramEvent::Response(Transmit { .. })) = event else {
-		panic!("expected an initial close");
-	};
 }
 
 /// Ensure that a connection can be made when a preferred address is advertised by the server,
