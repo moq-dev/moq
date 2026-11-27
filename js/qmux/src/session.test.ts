@@ -18,6 +18,8 @@ import type { WebSocketLike, WebSocketStreamLike } from "./web-socket-stream.ts"
 // holds).
 class FakePeer {
 	static last: FakePeer | undefined;
+	/** Leave the next sockets connecting until the test calls {@link open}. */
+	static deferOpen = false;
 
 	readonly url: string;
 	readonly opened: Promise<{
@@ -35,6 +37,7 @@ class FakePeer {
 	#unblockWrites: (() => void) | undefined;
 	#pongResolve?: () => void;
 	#writable: WritableStream<Uint8Array>;
+	#open: () => void;
 
 	/** Raw chunks the Session has written. */
 	sent: Uint8Array[] = [];
@@ -67,7 +70,10 @@ class FakePeer {
 			},
 		});
 		this.#writable = writable;
-		this.opened = Promise.resolve({ readable, writable, protocol, extensions: "" });
+		const opened = Promise.withResolvers<Awaited<FakePeer["opened"]>>();
+		this.opened = opened.promise;
+		this.#open = () => opened.resolve({ readable, writable, protocol, extensions: "" });
+		if (!FakePeer.deferOpen) this.#open();
 		const closed = Promise.withResolvers<{ closeCode?: number; reason?: string }>();
 		this.closed = closed.promise;
 		this.#closedResolve = closed.resolve;
@@ -103,6 +109,10 @@ class FakePeer {
 	}
 
 	// --- test controls ---
+	/** Finish connecting a socket created while {@link FakePeer.deferOpen} was set. */
+	open() {
+		this.#open();
+	}
 	/** Whether the session took the socket's writable, which it does as it starts. */
 	get started(): boolean {
 		return this.#writable.locked;
@@ -1543,6 +1553,30 @@ describe("Session integration (scripted peer)", () => {
 				expect(err.message).toContain("idle timeout");
 				expect(peer.has("ping_request")).toBe(false);
 			} finally {
+				installed.close();
+			}
+		});
+
+		test("the idle deadline starts when the socket opens", async () => {
+			// A WebSocket that takes longer to open than the idle timeout still gets the whole
+			// window to exchange parameters.
+			const clock = new Manual();
+			const installed = clock.install();
+			FakePeer.deferOpen = true;
+			try {
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
+				FakePeer.deferOpen = false;
+				await clock.advance(Duration.millis(200));
+				peer.open();
+				await started(peer);
+
+				await clock.advance(Duration.millis(119));
+				peer.send({ type: "transport_parameters", params: peerParams() });
+				await session.ready;
+				session.close();
+				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
+			} finally {
+				FakePeer.deferOpen = false;
 				installed.close();
 			}
 		});

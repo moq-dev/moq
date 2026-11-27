@@ -1023,7 +1023,9 @@ export class Session implements WebTransport {
 		this.#connCredit = new Credit(0n);
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
-		// Our own idle deadline applies until the peer's parameters arrive.
+		// Our own idle deadline applies until the peer's parameters arrive, counted from the
+		// open rather than construction, so a slow WebSocket open doesn't eat the window.
+		this.#lastRecvAt = now();
 		this.#startIdleTimerIfEnabled();
 		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
 		// a peer that never sends its parameters can't hold `ready` forever.
