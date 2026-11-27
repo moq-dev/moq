@@ -5621,7 +5621,7 @@ impl Producer {
 	}
 
 	/// [`Self::new`] for a metadata copy, which a test reads a metadata Group Stream into.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn new_meta(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>, info: Info) -> Self {
 		Self::create(broadcast, name.into(), info, true)
 	}

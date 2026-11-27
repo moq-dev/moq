@@ -94,7 +94,10 @@ async fn chain(upstream: &str, downstream: &str) -> Chain {
 
 	let relay = origin(2);
 	let end = origin(3);
-	let (upstream_bill, downstream_bill) = (stats::Registry::new(Default::default()), stats::Registry::new(Default::default()));
+	let (upstream_bill, downstream_bill) = (
+		stats::Registry::new(Default::default()),
+		stats::Registry::new(Default::default()),
+	);
 	let first = hop(upstream.parse().unwrap(), &publisher, &relay, &upstream_bill).await;
 	let second = hop(downstream.parse().unwrap(), &relay, &end, &downstream_bill).await;
 
@@ -185,7 +188,11 @@ async fn metadata_pulls_payload_only_across_an_older_hop() {
 		.expect("subscribe timeout")
 		.expect("subscribe");
 	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
-	assert_eq!(sent(&chain.upstream), (BIG as u64, 2), "the older hop carried the payload");
+	assert_eq!(
+		sent(&chain.upstream),
+		(BIG as u64, 2),
+		"the older hop carried the payload"
+	);
 	assert_eq!(sent(&chain.downstream), (0, 0), "the relay sent payload");
 }
 

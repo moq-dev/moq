@@ -5771,10 +5771,13 @@ impl Cursor {
 		// The batch is drained: refill it from the log without the lock, unless a plain
 		// read of a compressed group has to inflate under it.
 		if (!self.compressed || self.raw)
-			&& self
-				.prefetch
-				.fill_log(&mut self.log, &self.alive.pace, index, budget, self.compressed || self.alive.meta)
-				> 0
+			&& self.prefetch.fill_log(
+				&mut self.log,
+				&self.alive.pace,
+				index,
+				budget,
+				self.compressed || self.alive.meta,
+			) > 0
 		{
 			self.refresh_if_stale();
 			let (frames, bytes) = self.prefetch.buffered();

@@ -1931,7 +1931,10 @@ mod tests {
 				}),
 				&[Action::End { err: Error::Unroutable }],
 			);
-			assert_eq!(front.lost(&name("video")).map(|err| err.to_string()), Some(err.to_string()));
+			assert_eq!(
+				front.lost(&name("video")).map(|err| err.to_string()),
+				Some(err.to_string())
+			);
 
 			// A minted identity has no other route, and a local publisher's word is the track's
 			// verdict with no news in flight to overtake it: either refusal ends the track, as

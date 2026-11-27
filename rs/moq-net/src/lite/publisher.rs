@@ -8936,16 +8936,18 @@ mod serve_group_test {
 		assert_eq!(r.varint().unwrap(), 0, "a group stream");
 		let header = lite::Group::decode(&mut r, version).unwrap();
 		let rest = bytes::Bytes::copy_from_slice(r.rest());
-		let mut reader = crate::coding::Reader::new(
-			crate::transport::poll::Buffered::new(Once(Some(rest))),
-			version,
-		);
+		let mut reader = crate::coding::Reader::new(crate::transport::poll::Buffered::new(Once(Some(rest))), version);
 		let track = track::Producer::new_meta(Arc::new(broadcast::Info::default()), "test", info.clone());
 		let producer = track.create_group(group::Info { start: header.key }).unwrap();
 		let mut consumer = producer.consume();
 		let mut group = crate::recv::Group::new(producer);
 		let framing = lite::Framing::new(&info, version);
-		let mut ingest = lite::FrameIngest::new(framing, false, header.frame_start, lite::Clock::new(version, header.key));
+		let mut ingest = lite::FrameIngest::new(
+			framing,
+			false,
+			header.frame_start,
+			lite::Clock::new(version, header.key),
+		);
 		let waiter = kio::Waiter::noop();
 		// The whole stream is ready, so only the ingest's own yields leave it pending.
 		let end = (0..bytes.len() + 64)

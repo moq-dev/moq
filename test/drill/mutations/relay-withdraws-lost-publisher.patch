@@ -28,7 +28,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 +			crate::model::broadcast::RequestValidity::for_source(&*entry.dynamic, request.path())
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
- 		// The handler exists before the requester sees the source, so a track it
+ 		// A metadata reader gets a copy of its own, filled by a metadata subscription.
 @@ -10586,7 +10586,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
