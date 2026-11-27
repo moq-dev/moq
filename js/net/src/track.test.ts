@@ -7357,3 +7357,39 @@ test("local group finishAt skips its span while cached and preserves it on evict
 		installed.close();
 	}
 });
+
+// A read by arrival never raises its key cursor, and a cached group below its range holds its
+// hand-out floor, so only its budget bounds the fill verdicts it holds: a publisher keying groups
+// by timestamp skips the keys between, one verdict each.
+test("an arrival read holds fill verdicts only within its budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const producer = new TrackProducer("audio").accept({ timescale: Timescale.MILLI, maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill());
+	})();
+	try {
+		putGroup(producer, 0n, 0);
+		producer.skipGroups(1n, 20n);
+		putGroup(producer, 20n, 20);
+		producer.skipGroups(21n, 40n);
+		const reader = producer.subscribe(latest(Duration.millis(100)));
+		let most = 0;
+		for (let ms = 40n; ms < 5_000n; ms += 20n) {
+			putGroup(producer, ms, Number(ms));
+			producer.skipGroups(ms + 1n, ms + 20n);
+			await clock.advance(Duration.millis(20));
+			for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) group.close();
+			most = Math.max(most, hooks.fillRuns(reader));
+		}
+		// One per skipped stretch the 100 ms budget spans, where it held one per group since the join.
+		expect(most).toBeLessThanOrEqual(100 / 20);
+		reader.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});

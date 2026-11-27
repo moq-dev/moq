@@ -1143,6 +1143,8 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/** How many runs the subscriber holds for its fills: asked, given up, heads, and adopted verdicts. */
+	fillRuns: (subscriber: Subscriber) => number;
 	/**
 	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
 	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
@@ -1757,6 +1759,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	tryDrop: () => {
+		throw new Error("track.ts not loaded");
+	},
+	fillRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	askUnproven: () => {

@@ -3695,6 +3695,9 @@ export class Subscriber {
 	// or once it expires, which must not reopen what this reader already gave up. Only a wider budget
 	// takes a stale one back, and the read passing it forgets it. Mirrors the Rust `Misses::adopt_drops`.
 	#adopted: DropRun[] = [];
+	// The newest group handed out above a gap that is past the widest budget it was judged under;
+	// see #pastBudget.
+	#passed?: { widest: number; key: bigint };
 	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
 	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
 	// what it still reads, so a widening back over one asks it afresh.
@@ -4746,7 +4749,7 @@ export class Subscriber {
 			drift ??= this.#drift();
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
-			const read = max(this.#cursor.peek().start, this.#nextKey);
+			const read = max(max(this.#cursor.peek().start, this.#nextKey), this.#pastBudget(drift));
 			for (const runs of [this.#asked, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
 			cutRun(this.#adopted, 0n, read);
 			const budget = drift.budget;
@@ -4756,7 +4759,7 @@ export class Subscriber {
 			// Below where the feed starts, only the history the copy's start rule leaves fillable.
 			const floor = fillFloor(producer, this.#window.start());
 			const { drops, refused } = this.#state;
-			const low = floor === undefined ? start : max(start, floor);
+			const low = max(floor === undefined ? start : max(start, floor), read);
 			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
 			const above = max(low, edge);
 			const unknown = this.#unknownRuns(budget, coverage);
@@ -4851,6 +4854,28 @@ export class Subscriber {
 			this.#fillsMoved(stale);
 		}
 		return owed;
+	}
+
+	// The lowest key a fill could still bring this reader: its hand-out floor, raised to each group
+	// it handed out above a gap once that group is past the widest budget, since every key below is
+	// older and so past it too, as #forgetPastBudget reasons. That floor holds below a cached group
+	// no range covers, and an arrival read never raises its key cursor, so without this its fill
+	// verdicts since the join pile up and are judged again on every change. Only a widening lowers it.
+	#pastBudget(drift: Drift): bigint {
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		const widest = drift.budget.widest();
+		if (!this.#passed || widest > this.#passed.widest) this.#passed = { widest, key: floor };
+		const passed = this.#passed;
+		passed.widest = widest;
+		const judge = { ...drift, budget: Budget.uniform(widest) };
+		for (
+			let next = this.#delivered.nextAboveGap(max(passed.key, floor));
+			next !== undefined && this.#staleAt(next, judge);
+			next = this.#delivered.nextAboveGap(next)
+		) {
+			passed.key = next;
+		}
+		return max(passed.key, floor);
 	}
 
 	// Take what changed since the last probe as unjudged again: every key once the terms it
@@ -5354,6 +5379,11 @@ export class Subscriber {
 				.filter((run) => run.skip)
 				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
+		hooks.fillRuns = (subscriber) =>
+			subscriber.#asked.length +
+			subscriber.#givenUp.length +
+			subscriber.#heads.length +
+			subscriber.#adopted.length;
 		// Mirrors the Rust `Subscriber::ask_unproven`: a copy that is another front's logical track
 		// asks its serving copy the same way, one level per nesting.
 		hooks.askUnproven = (subscriber, unproven) => {
