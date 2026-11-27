@@ -226,13 +226,16 @@ export function subscriptionPolicy(ranges: readonly WireRange[]): Policy {
 export interface Steer {
 	/** The subscription's as a whole, which a group no live range with a policy wants goes out at. */
 	whole: Policy;
-	/** The policy of the live range with Range ID `id`, undefined once retired. */
-	policy(id: bigint): Policy | undefined;
+	/**
+	 * The policy and budget in milliseconds of the live range with Range ID `id`, as the latest
+	 * update left it, undefined once retired.
+	 */
+	steering(id: bigint): { policy: Policy; budget: number } | undefined;
 }
 
 /**
- * The policy a group goes out at, `covers` being the ranges covering it with their budgets in
- * milliseconds, and `aged` the widest budget it is known to have aged past: the highest priority
+ * The policy a group goes out at, `covers` being the Range IDs covering it, each at its current
+ * budget, and `aged` the widest budget it is known to have aged past: the highest priority
  * among the ranges still wanting it, at that priority's order, descending breaking a tie. The
  * subscription's whole when no range with a policy wants it. `lasts` is the budget whose aging may
  * lower that policy, undefined once none can: a range ranked below it wanting the group longer.
@@ -240,13 +243,14 @@ export interface Steer {
  */
 export function groupPolicy(
 	steer: Steer,
-	covers: readonly (readonly [bigint, number])[],
+	covers: readonly bigint[],
 	aged?: number,
 ): { policy: Policy; lasts?: number } {
 	const wanting: [Policy, number][] = [];
-	for (const [id, budget] of covers) {
-		const policy = aged === undefined || budget > aged ? steer.policy(id) : undefined;
-		if (policy) wanting.push([policy, budget]);
+	for (const id of covers) {
+		const steering = steer.steering(id);
+		if (steering && (aged === undefined || steering.budget > aged))
+			wanting.push([steering.policy, steering.budget]);
 	}
 	let top: Policy | undefined;
 	for (const [policy] of wanting) {

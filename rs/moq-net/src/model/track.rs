@@ -13166,12 +13166,13 @@ impl Subscriber {
 		self.poll_group(false, waiter)
 	}
 
-	/// [`Self::poll_recv_group`], handing out the next group only if its key lies in
-	/// `admit`: one outside stays next, and the read is `Pending` without parking on it.
+	/// [`Self::poll_recv_group`], handing out the next group only if `admit` takes its key,
+	/// asked with this subscriber: one refused stays next, and the read is `Pending` without
+	/// parking on it.
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_recv_group_in(
 		&mut self,
-		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		admit: impl FnOnce(&mut Self, u64) -> bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group_in(false, admit, waiter)
@@ -13180,14 +13181,14 @@ impl Subscriber {
 	/// The next group an arrival read picks, or in key order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		self.poll_group_in(ordered, (ops::Bound::Unbounded, ops::Bound::Unbounded), waiter)
+		self.poll_group_in(ordered, |_, _| true, waiter)
 	}
 
 	/// [`Self::poll_group`], refusing a next group whose key lies outside `admit`.
 	fn poll_group_in(
 		&mut self,
 		ordered: bool,
-		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		admit: impl FnOnce(&mut Self, u64) -> bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
 		let res = self.poll_group_unsettled(ordered, admit, waiter);
@@ -13204,7 +13205,7 @@ impl Subscriber {
 	fn poll_group_unsettled(
 		&mut self,
 		ordered: bool,
-		admit: (ops::Bound<u64>, ops::Bound<u64>),
+		admit: impl FnOnce(&mut Self, u64) -> bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
@@ -13220,20 +13221,20 @@ impl Subscriber {
 			Inner::Resume(resume, _) if resume.parked(walk, waiter) => return Poll::Pending,
 			_ => {}
 		}
-		match self.poll_peek_group(ordered, waiter) {
-			Poll::Ready(Ok(Some(reserved))) if admit.contains(&reserved.key()) => {
-				Poll::Ready(self.take(reserved).map(Some))
-			}
-			res => {
-				// What the peek skipped for age counts even when nothing is handed out.
-				self.count_stale(&self.stats.meter());
-				match res {
-					Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
-					// Refused: it stays next, so nothing behind it is either.
-					Poll::Ready(Ok(Some(_))) => Poll::Pending,
-					res => res.map(|res| res.map(|_| None).map_err(Error::from)),
-				}
-			}
+		let res = match self.poll_peek_group(ordered, waiter) {
+			Poll::Ready(Ok(Some(reserved))) => match admit(self, reserved.key()) {
+				true => return Poll::Ready(self.take(reserved).map(Some)),
+				false => Poll::Ready(Ok(Some(reserved))),
+			},
+			res => res,
+		};
+		// What the peek skipped for age counts even when nothing is handed out.
+		self.count_stale(&self.stats.meter());
+		match res {
+			Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
+			// Refused: it stays next, so nothing behind it is either.
+			Poll::Ready(Ok(Some(_))) => Poll::Pending,
+			res => res.map(|res| res.map(|_| None).map_err(Error::from)),
 		}
 	}
 
@@ -15021,8 +15022,7 @@ impl Ordered {
 			let mut failed = None;
 			if !self.inner.is_closed() {
 				let _ = group.poll_closed(waiter);
-				let admit = (ops::Bound::Unbounded, ops::Bound::Excluded(key));
-				match self.inner.poll_group_in(true, admit, waiter) {
+				match self.inner.poll_group_in(true, |_, lower| lower < key, waiter) {
 					Poll::Pending | Poll::Ready(Ok(None)) => {}
 					Poll::Ready(Ok(Some(lower))) => {
 						self.held = Some(group);

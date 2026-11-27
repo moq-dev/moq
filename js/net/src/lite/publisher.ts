@@ -797,6 +797,15 @@ function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	return range;
 }
 
+// `current`, a held range, at the policy a retune `asked` for, and a live join at its new max.
+function retunedRange(current: WireRange, asked: WireRange): WireRange {
+	const range: WireRange = { ...current, priority: asked.priority, order: asked.order };
+	const max = asked.start?.live?.max ?? asked.start?.joined?.max;
+	if (max !== undefined && range.start?.live) range.start = { live: { ...range.start.live, max } };
+	else if (max !== undefined && range.start?.joined) range.start = { joined: { ...range.start.joined, max } };
+	return range;
+}
+
 /** A lite-07 range still waiting for its SUBSCRIBE_START, as it was asked. Mirrors the Rust `Unstarted`. */
 interface Asked {
 	/** Its staleness budget in milliseconds when it starts with a live join not yet placed, which starts past the groups that budget expired. */
@@ -1588,11 +1597,19 @@ export class Publisher {
 					}
 					// Lite-07 hands the model the edit by Range ID, so it costs the ranges it names
 					// whatever else is live. A pinned or retuned range is replaced in place, keeping its
-					// Range ID: a live join is never pinned (see `due`), so a retune replaces it as it
-					// stands, and the model keeps it placed where it was.
+					// Range ID. A retune changes only a range's policy and a live join's max: it keeps the
+					// range as it resolved, pinned in this same edit or before, so a time start is never
+					// looked up again. Mirrors the Rust `TrackRun::edit`.
 					for (const id of retired) unpinned.remove(id);
-					const pins = pinDue();
-					const replaced = [...pins, ...retuned];
+					const pinned = new Map(pinDue());
+					const tuned: [bigint, WireRange][] = [];
+					for (const [id, asked] of retuned) {
+						const current = pinned.get(id) ?? requested.get(id);
+						if (current === undefined) continue;
+						pinned.delete(id);
+						tuned.push([id, retunedRange(current, asked)]);
+					}
+					const replaced = [...pinned, ...tuned];
 					for (const id of retired) requested.remove(id);
 					for (const [id, range] of [...replaced, ...added]) requested.insert(id, range);
 					for (const [id, range] of added) unpinned.insert(id, due(range, false));
@@ -2396,25 +2413,27 @@ export class Publisher {
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);
-		// Lite-07: the policy of the live range with Range ID `id`, as the latest update left it.
-		// Mirrors the Rust `Steer::policy`.
-		const rangePolicy = (id: bigint) => {
+		// Lite-07: the policy and budget of the live range with Range ID `id`, as the latest update
+		// left it, so a retuned max moves a group already going out. Mirrors the Rust `Steering::of`.
+		const rangeSteering = (id: bigint) => {
 			const range = controls.range(id);
-			return range && policyOf(range);
+			if (!range) return undefined;
+			const max = range.start?.live?.max ?? range.start?.joined?.max;
+			return { policy: policyOf(range), budget: typeof max === "number" ? max : NO_MAX_DELAY };
 		};
 		// Lite-07: a group goes out at the top of the live ranges still wanting it, falling as it ages
 		// past the ones above, so its stream ranks by its own policy. The ranges covering it are fixed
 		// as it goes out, as the Rust `GroupServe::covered_by`.
 		const rankingOf = (group: group.Consumer): Ranking | undefined => {
 			if (!hasRanges(this.version)) return undefined;
-			const covers = hooks.servingCovering(track, group.start);
+			const covers = hooks.servingCovering(track, group.start).map(([id]) => id);
 			const expiry = hooks.groupExpiry(group);
 			// The widest budget the group is known to have aged past, which only grows.
 			let aged: number | undefined;
 			return {
 				policy: (whole) => {
 					for (;;) {
-						const { policy, lasts } = groupPolicy({ whole, policy: rangePolicy }, covers, aged);
+						const { policy, lasts } = groupPolicy({ whole, steering: rangeSteering }, covers, aged);
 						if (lasts === undefined || !expiry?.aged?.(lasts)) return policy;
 						aged = lasts;
 					}

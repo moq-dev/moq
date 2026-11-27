@@ -1647,6 +1647,38 @@ test("lite draft-07: a retuned range moves its in-flight groups", async () => {
 	}
 });
 
+// A retune changes only a resolved time range's policy: the range keeps the group it resolved to
+// rather than looking its time up again. Mirrors the Rust
+// `lite07_a_retune_keeps_a_time_range_where_it_resolved`.
+test("lite draft-07: a retune keeps a time range where it resolved", async () => {
+	using clock = manual();
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		ranges: [{ start: { time: 4500n }, priority: 2 }],
+	});
+	const groups = [sub.track.createGroup(4000n), sub.track.createGroup(5000n)];
+	try {
+		groups[0].writeFrame(textFrame("x", Timestamp.fromMillis(4000)));
+		groups[1].writeFrame(textFrame("x", Timestamp.fromMillis(5000)));
+		expect([await sub.servedHeader(), await sub.servedHeader()].sort()).toEqual([4000n, 5000n]);
+		await clock.advance(Duration.ZERO);
+
+		const before = sub.track.subscription.peek();
+		await new SubscribeUpdate({
+			priority: 7,
+			ranges: [],
+			retune: [[0n, { priority: 7, order: "ascending", max: null }]],
+		}).encode(sub.client.writer, Version.DRAFT_07);
+		while (sub.track.subscription.peek() === before) await sub.track.subscription.changed();
+		expect(sub.track.subscription.peek()?.ranges).toEqual([
+			expect.objectContaining({ start: 4000n, priority: 7, order: "ascending" }),
+		]);
+	} finally {
+		for (const group of groups) group.finish();
+		await sub.close();
+	}
+});
+
 // A subscription starting partway into a group gets a stream with Frame Start above 0, whose first
 // delta still counts from the group's start: it carries no frame 0 to count from.
 test("lite-07 counts a resumed stream's first delta from the group's start", async () => {

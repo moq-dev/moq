@@ -37,7 +37,7 @@ function first<T>(section: { renditions: Record<string, T> } | undefined): [stri
 
 /** Read catalog updates until `pick` finds what it needs in one. */
 async function catalog<T>(bc: Moq.Broadcast.Consumer, pick: (root: Catalog.Root) => T | undefined): Promise<T> {
-	const track = bc.track("catalog.json").subscribe({ ranges: [{ priority: Catalog.PRIORITY.catalog }] });
+	const track = bc.track("catalog.json").subscribe(subscription(Catalog.PRIORITY.catalog));
 	const decoder = new Json.Snapshot.Decoder<Catalog.Root>({ schema: Catalog.RootSchema });
 	for (;;) {
 		const group = await track.recvGroup();
@@ -99,20 +99,15 @@ async function video(bc: Moq.Broadcast.Consumer, [name, config]: [string, Catalo
 const AUDIO_BUDGET = 5000;
 
 /**
- * The subscription fields holding the latency budget, which releases spelled `maxAge`, then
- * `maxDelay`, then `delay: { max }`, and the checkout spells as the live join's `max`.
+ * The subscription fields holding the latency budget in a released package, which spelled it
+ * `maxAge`, then `maxDelay`, then `delay: { max }`.
  */
 function budget(millis: number): Record<string, unknown> {
 	// Each version refuses the older names, which a throwaway local track shows without a session.
-	const spellings = [
-		{ maxAge: millis },
-		{ maxDelay: millis },
-		{ delay: { max: duration(millis) } },
-		{ ranges: [{ start: { live: { min: duration(0), max: duration(millis) } } }] },
-	];
+	const spellings = [{ maxAge: millis }, { maxDelay: millis }, { delay: { max: duration(millis) } }];
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
-		for (const spelling of spellings.slice(0, -1)) {
+		for (const spelling of spellings) {
 			const track = broadcast.createTrack(`probe-${Object.keys(spelling)[0]}`);
 			if (!track) throw new Error("the probe track already exists");
 			try {
@@ -122,10 +117,33 @@ function budget(millis: number): Record<string, unknown> {
 				if (!(err instanceof TypeError)) throw err;
 			}
 		}
-		return spellings[spellings.length - 1];
+		throw new Error("the installed package takes no known budget spelling");
 	} finally {
 		broadcast.close();
 	}
+}
+
+/**
+ * A live subscription at `priority`, under a `millis` budget when given: released packages take a
+ * top-level priority beside the budget (see {@link budget}), the checkout a priority on the live join.
+ * Without a budget, released packages keep their default and the checkout joins at the latest group.
+ */
+function subscription(priority: number, millis?: number): Moq.Track.Subscription {
+	const broadcast = new Moq.Broadcast.Producer();
+	try {
+		const track = broadcast.createTrack("probe-priority");
+		if (!track) throw new Error("the probe track already exists");
+		try {
+			track.subscribe({ priority } as Moq.Track.Subscription).close();
+			return { priority, ...(millis === undefined ? {} : budget(millis)) } as Moq.Track.Subscription;
+		} catch (err) {
+			if (!(err instanceof TypeError)) throw err;
+		}
+	} finally {
+		broadcast.close();
+	}
+	const live = { min: duration(0), max: duration(millis ?? 0) };
+	return { ranges: [{ start: { live }, priority }] } as Moq.Track.Subscription;
 }
 
 /** Interleaved f32 samples, copied in the decoder's own layout. */
@@ -192,11 +210,7 @@ async function audio(
 	// In sequence order, as a stateful decoder needs. An fMP4 fragment lands the tail of one audio
 	// group and the head of the next in one burst, and the default budget of zero drops that tail
 	// once the next group arrives, so allow a backlog; a group that never arrives still leaves a gap.
-	const subscription = { priority: Catalog.PRIORITY.audio, ...budget(AUDIO_BUDGET) };
-	const track = bc
-		.track(name)
-		.subscribe(subscription as Moq.Track.Subscription)
-		.ordered();
+	const track = bc.track(name).subscribe(subscription(Catalog.PRIORITY.audio, AUDIO_BUDGET)).ordered();
 	const feed = (async () => {
 		for (let frame = await track.readFrame(); frame; frame = await track.readFrame()) {
 			for (const { timestamp, payload } of format.decode(frame.payload, frame.timestamp)) {
