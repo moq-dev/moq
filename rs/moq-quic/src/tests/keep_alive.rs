@@ -327,6 +327,23 @@ fn unacknowledging_peer_keeps_probes_within_the_window() {
 	assert!(excess <= bound, "{excess} bytes past the window, past {bound}");
 }
 
+/// A probe still waiting to leave, as behind a stalled socket, spends the exempt budget once
+/// however many times the keep-alive fires before it goes
+#[test]
+fn unsent_probe_spends_the_budget_once() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, _) = connect();
+	pair.drive();
+	let until = pair.time.saturating_add(SOFT / 2 * 3 + Duration::from_millis(100));
+	let conn = pair.client_conn_mut(client_ch);
+	// Nothing transmits, so the first probe's reservation stays unsent through three firings.
+	while let Some(at) = conn.poll_timeout().filter(|&at| at <= until) {
+		conn.handle_timeout(at);
+	}
+	assert!(!conn.is_closed());
+	assert_eq!(conn.exempt_probes_spent(), 1);
+}
+
 /// Anyone on the path can send a Version Negotiation packet, so one says nothing of the peer and
 /// leaves a stale session stale
 #[test]
