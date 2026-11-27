@@ -126,6 +126,14 @@ SrcDead(u, s, g) ==
     /\ \/ cp[<<u, s>>].st # "live"
        \/ g \in cp[<<u, s>>].bad
 
+\* The source's stream for g closed with bare FIN at a Position End cap (lite-07): it will
+\* bring no more frames on this subscription, though the serving route can still fetch the rest.
+SrcStopped(u, s, g) ==
+    /\ u # "O"
+    /\ cp[<<u, s>>].fr[g] = cp[<<u, s>>].stop[g]
+    /\ cp[<<u, s>>].stop[g] < F
+    /\ g \notin cp[<<u, s>>].fetch
+
 \* The groups some copy at u holds, from its first frame.
 HeldAt(u) == {g \in Groups : \E s \in Srcs(u) : SrcFr(u, s, g) >= 0}
 
@@ -170,8 +178,12 @@ Stopped(c, at) ==
     ELSE LET p == CHOOSE p \in at : TRUE IN
          [c EXCEPT !.stop[p[1]] = IF @ < p[2] THEN @ ELSE p[2]]
 
-\* A copy serving again asks every group whole.
-Unstopped(c) == [c EXCEPT !.stop = [g \in Groups |-> F]]
+\* A copy serving again asks every unstarted group whole; a group whose stream already
+\* started under a Position End FINs at that stop (lite-07 closes at Position End without
+\* GROUP_END) and is recovered via a fresh one-shot SUBSCRIBE (`Ask`), never resumed on
+\* the same subscription.
+Unstopped(c) ==
+    [c EXCEPT !.stop = [g \in Groups |-> IF c.fr[g] >= 0 /\ c.stop[g] < F THEN c.stop[g] ELSE F]]
 
 \* Where a switch at u resumes its readers (`Producer::subscription`, `Reader::resume_at`):
 \* each open reader's boundary group, past the most frames of it a copy at u holds; the
@@ -221,14 +233,19 @@ Routable(w) == IF w = "O" THEN TRUE ELSE alive[w] = "up" /\ front[w].end # "err"
 Shows(w) == Routable(w) \/ (w # "O" /\ alive[w] = "shown")
 
 \* A complete copy (`TrackState::is_complete` once every group below the end
-\* finished): its upstream ended it, and it holds every frame of every group
-\* from the first it asked or fetched through the last (`reaches`), which a
-\* copy capped below the last never does until it fetches the rest.
+\* settled, `Slot::is_settled`): its upstream ended it, and every group from
+\* the first it asked or fetched through the last reached F, failed, or closed
+\* cleanly at its Position End stop (`stop[g]`) without an active fetch. A copy
+\* capped below the last group (`fr[g] = -1`) is not complete until it asks for
+\* the rest.
 Whole(e) ==
     LET have == cp[e].ask \cup cp[e].fetch IN
     /\ cp[e].fin
     /\ have # {}
-    /\ \A g \in Groups : g >= Min(have) => cp[e].fr[g] = F \/ g \in cp[e].bad
+    /\ \A g \in Groups : g >= Min(have) =>
+        \/ cp[e].fr[g] = F
+        \/ (g \notin cp[e].fetch /\ cp[e].fr[g] = cp[e].stop[g])
+        \/ g \in cp[e].bad
 
 \* A held copy at u may still land g: it is live, lacks g, and either its
 \* subscription asked for g and is not done or it fetched g, which lands after
@@ -262,12 +279,13 @@ Drained(e) ==
            /\ ~Askable(u, g)
 
 \* Where a short group can continue at u: a copy holding it whose source is
-\* still alive or holds a frame past the reader's (`Recover::held`).
+\* still alive (and not stopped short at a Position End) or holds a frame past
+\* the reader's (`Recover::held`).
 Holders(u, e, g) ==
     {s \in Srcs(u) :
         /\ s # cp[e].src[g]
         /\ SrcFr(u, s, g) >= 0
-        /\ ~SrcDead(u, s, g) \/ SrcFr(u, s, g) > cp[e].fr[g]}
+        /\ (~SrcDead(u, s, g) /\ ~SrcStopped(u, s, g)) \/ SrcFr(u, s, g) > cp[e].fr[g]}
 
 \* The group's source has nothing more for the reader now.
 Exhausted(e, g) == SrcFr(e[2], cp[e].src[g], g) <= cp[e].fr[g]
@@ -333,6 +351,7 @@ Recover(e, g, s) ==
     /\ front[u].end # "err"
     /\ s \in Holders(u, e, g)
     /\ \/ SrcDead(u, cp[e].src[g], g)
+       \/ SrcStopped(u, cp[e].src[g], g)
        \/ cp[e].src[g] # front[u].cur /\ s = front[u].cur
     /\ cp' = [cp EXCEPT ![e].src[g] = s]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
@@ -352,17 +371,17 @@ Ask(u, g) ==
         short == \E e \in Downs(u) :
                      /\ Short(e, g)
                      /\ Exhausted(e, g)
-                     /\ cp[e].src[g] # w
                      /\ Holders(u, e, g) = {}
+                     /\ \/ cp[e].src[g] # w
+                        \/ cp[Serving(u)].fr[g] = cp[Serving(u)].stop[g] /\ cp[Serving(u)].stop[g] < F
     IN
     /\ u \in Relays
     /\ front[u].end # "err"
     /\ \E e0 \in {Answering(u), Serving(u)} :
-        /\ \/ e0 = Answering(u) /\ missing
-           \/ e0 = Serving(u) /\ short
+        /\ \/ e0 = Answering(u) /\ missing /\ g \notin cp[e0].ask \cup cp[e0].fetch /\ cp[e0].fr[g] = -1
+           \/ e0 = Serving(u) /\ short /\ g \notin cp[e0].fetch
+              /\ ((cp[e0].fr[g] = -1 /\ g \notin cp[e0].ask) \/ (cp[e0].fr[g] = cp[e0].stop[g] /\ cp[e0].stop[g] < F))
         /\ Live(e0)
-        /\ g \notin cp[e0].ask \cup cp[e0].fetch
-        /\ cp[e0].fr[g] = -1
         /\ cp' = [cp EXCEPT ![e0].fetch = @ \cup {g}]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 

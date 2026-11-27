@@ -9,6 +9,7 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeReason, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionClosed } from "../error.ts";
+import { Cost } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -136,6 +137,8 @@ export class Connection implements Session {
 		early = [],
 		peerImplementation,
 		liveness,
+		linkCost,
+		priority = 0,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -169,6 +172,10 @@ export class Connection implements Session {
 		peerImplementation?: string;
 		/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
 		liveness?: Getter<Liveness>;
+		/** What crossing this link costs, which the SETUP exchange settled. Defaults to free. */
+		linkCost?: Cost;
+		/** This link's rank, which every route the peer sends carries. Defaults to 0. */
+		priority?: number;
 	}) {
 		this.liveness = liveness;
 		this.url = url;
@@ -231,6 +238,7 @@ export class Connection implements Session {
 			goaway: this.#goaway,
 			grant: this.#auth.scope,
 			auth: this.#auth,
+			link: { cost: linkCost ?? Cost.zero, priority },
 		});
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),

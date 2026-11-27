@@ -102,6 +102,7 @@ pub struct Server {
 	receive_window: Option<NonZeroU64>,
 	allocator: Option<crate::bandwidth::Allocator>,
 	keep_alive: Option<crate::transport::KeepAlive>,
+	cost: Option<u64>,
 }
 
 impl Default for Server {
@@ -118,6 +119,7 @@ impl Default for Server {
 			receive_window: None,
 			allocator: None,
 			keep_alive: None,
+			cost: None,
 		}
 	}
 }
@@ -250,6 +252,18 @@ impl Server {
 		self
 	}
 
+	/// Price every session this server accepts, as [`Client::with_cost`](crate::Client::with_cost)
+	/// prices a dialed link: added to the route cost of every announcement the client sends,
+	/// and declared in our SETUP so the client adds it to every announcement we send.
+	///
+	/// A price set here wins over the one the client declares. Without one, the client's
+	/// price applies, then `1`. Zero is refused on moq-lite-07. Price one session after
+	/// authorizing it with [`Handshake::with_cost`].
+	pub fn with_cost(mut self, cost: impl Into<crate::origin::Cost>) -> Self {
+		self.cost = Some(cost.into().value());
+		self
+	}
+
 	/// The Implementation our SETUP carries, or `None` to omit it.
 	fn implementation(&self) -> Option<String> {
 		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
@@ -282,14 +296,14 @@ impl Server {
 		let (publish, subscribe) = self.stat_tagged_origins();
 
 		// We report what the transport actually measures; a server never
-		// advertises a request Path or Role, and only the dialing side prices a
-		// link. Versions without a Setup Stream have nothing to advertise.
+		// advertises a request Path or Role. Versions without a Setup Stream have
+		// nothing to advertise.
 		let our_setup = if version.has_setup_stream() {
 			lite::Setup {
 				probe: lite::ProbeLevel::detect(&session),
 				path: None,
 				role: None,
-				cost: None,
+				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
 				node: None,
@@ -951,8 +965,7 @@ impl PausedIetf {
 			publish,
 			subscribe,
 			peer_node,
-			// Only the dialing side prices a link.
-			cost: None,
+			cost: server.cost,
 			version,
 			path: None,
 			authority: None,
@@ -1240,6 +1253,13 @@ impl Handshake {
 	/// [`Server::with_keep_alive`].
 	pub fn with_keep_alive(self, keep_alive: crate::transport::KeepAlive) -> Self {
 		self.configure(|server| server.keep_alive = Some(keep_alive))
+	}
+
+	/// Price this session's link; see [`Server::with_cost`]. Overrides any value from the
+	/// [`Server`] builder, so a server can price a peer once it knows who it is.
+	pub fn with_cost(self, cost: impl Into<crate::origin::Cost>) -> Self {
+		let cost = cost.into().value();
+		self.configure(|server| server.cost = Some(cost))
 	}
 
 	/// Open the receive window to `window` on [`ok`](Self::ok). Overrides any value from the

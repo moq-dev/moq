@@ -127,8 +127,11 @@ that held lookup counts as demand. So the retaining audio encoder replayed its w
 as fresh groups ahead of the live edge. [moq-dev/moq#9572](https://github.com/moq-dev/moq/pull/9572)
 replays retained audio only for a live subscription, in JS and Rust: 20 of 20 runs that reached the
 return passed it, against 1 of 24 without the fix. Its validation left 5 of 24 runs failing the
-earlier rejoin or reattach step, which the [rejoin replay](/quest/m0/interop-green/rejoin-replay.md)
-child owns.
+earlier rejoin or reattach step. Remeasured on `main` in
+[moq-dev/moq#9620](https://github.com/moq-dev/moq/pull/9620), both steps passed in all 12 ARM runs,
+so the child that owned them was deleted (decided 2026-11-26, maintainer). Its trace showed a
+lite-06 cold join replays about 2 s of retained audio that the player skips through; that waits
+for lite-07, whose joins state their lag (rejected: fixing it for lite-06).
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

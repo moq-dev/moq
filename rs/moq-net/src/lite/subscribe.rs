@@ -56,10 +56,9 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Either end may
-	/// fall partway through a group. A group's start is its time, so lite-07 sends one at a
-	/// group's first frame as an [`Anchor::Time`], an end as the time just before it, and one
-	/// partway through a group as its Position type.
+	/// A position: a start delivers from it, and an end stops just before it. Matches the
+	/// named group exactly (never falling back to an earlier group whose span contains it).
+	/// Frame may be 0 (whole group from frame 0, or exclusive end before that group's frame 0).
 	Absolute(crate::track::Position),
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
@@ -338,11 +337,12 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, a start the max age places and the live edge as an end. Type 2 is a position
-/// partway through a group, never at frame 0, which type 1 says. Type 3, a live join's lag then
-/// its max age, each in milliseconds plus one with zero for no limit, is a start only,
-/// so `end` refuses it. So is type 4, a live join already placed: its group's start, a frame
-/// that may be 0, then its max age as type 3 carries it.
+/// anchor, a start the max age places and the live edge as an end. Type 1 is a presentation
+/// time (containment lookup, inclusive as an end). Type 2 is a position (exact group match,
+/// exclusive as an end), whose frame may be 0. Type 3, a live join's lag then its max age,
+/// each in milliseconds plus one with zero for no limit, is a start only, so `end` refuses it.
+/// So is type 4, a live join already placed: its group's start, a frame that may be 0, then
+/// its max age as type 3 carries it.
 fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
@@ -350,9 +350,6 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 		2 => {
 			let group = r.varint()?;
 			let frame = r.varint()?;
-			if frame == 0 {
-				return Err(DecodeError::InvalidValue);
-			}
 			Some(Anchor::Absolute(crate::track::Position { group, frame }))
 		}
 		3 if !end => Some(Anchor::Live {
@@ -372,12 +369,11 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 
 /// The lite-07 type and values of a range's start or `end`, the inverse of [`decode_anchor`].
 ///
-/// An absolute position at a group's first frame goes out as its group's time: a start as
-/// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
-/// nothing a time can say. One partway through a group goes out as a position, its group's
-/// start then the frame: a start from that frame, an end before it. A live join goes out as its
-/// lag then its max age, each in milliseconds rounded up, plus one so zero says no limit, and one already placed as its
-/// position then its max age, each only as a start.
+/// An absolute position always goes out as type 2 (its group's start then its frame, which
+/// may be 0): a start from that exact group/frame, an exclusive end just before it. A time
+/// anchor goes out as type 1 (containment lookup, inclusive as an end). A live join goes out
+/// as its lag then its max age, each in milliseconds rounded up, plus one so zero says no
+/// limit, and one already placed as its position then its max age, each only as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 3]), EncodeError> {
 	// Plus one, so zero says no limit.
 	let millis = |limit: Option<std::time::Duration>| {
@@ -386,21 +382,10 @@ fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 
 	Ok(match anchor {
 		None => (0, [None, None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None, None]),
+		Some(Anchor::Absolute(position)) => (2, [Some(position.group), Some(position.frame), None]),
 		Some(Anchor::Live { .. } | Anchor::Joined { .. }) if end => return Err(EncodeError::InvalidState),
 		Some(Anchor::Live { min, max }) => (3, [Some(millis(min)), Some(millis(max)), None]),
 		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(millis(max))]),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => {
-			(2, [Some(position.group), Some(position.frame), None])
-		}
-		Some(Anchor::Absolute(position)) if end => (
-			1,
-			[
-				Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
-				None,
-				None,
-			],
-		),
-		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None, None]),
 	})
 }
 
@@ -1854,33 +1839,35 @@ mod test {
 		assert_eq!(resolved, msg.ranges);
 	}
 
-	/// Lite-07 has no absolute anchor: a group's position goes out as its start's time, an
-	/// exclusive end as the inclusive time before it, so the publisher reads the same groups.
+	/// Lite-07 carries `Anchor::Absolute` as Position (type 2), allowing frame 0 and exact
+	/// group 0 without underflow (separate from `Anchor::Time`, type 1).
 	#[test]
-	fn lite07_sends_an_absolute_anchor_as_a_time() {
+	fn lite07_roundtrips_position_at_frame_zero() {
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![Range {
 			start: absolute(7, 0),
 			end: absolute(10, 0),
 		}];
-		assert_eq!(
-			roundtrip(&msg, Version::Lite07).ranges,
-			[Range {
-				start: Some(Anchor::Time(7)),
-				end: Some(Anchor::Time(9)),
-			}]
-		);
-		// Nothing comes before group 0, so an end there is refused, as on the older wires.
-		msg.ranges[0] = Range {
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let wire = encode(&msg, Version::Lite07).unwrap();
+		// Type 2, group 7, frame 0, then type 2, group 10, frame 0.
+		assert!(wire.ends_with(&[1, 2, 7, 0, 2, 10, 0]), "{wire:?}");
+
+		// Group 0 works cleanly without underflow: [Position(0, 0), Position(1, 0)) and
+		// even an empty [None, Position(0, 0)).
+		msg.ranges = vec![Range {
+			start: absolute(0, 0),
+			end: absolute(1, 0),
+		}];
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		msg.ranges = vec![Range {
 			start: None,
 			end: absolute(0, 0),
-		};
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
+		}];
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 	}
 
-	/// A lite-07 start may fall partway through a group, as its Position type: the group's
-	/// start, then the frame, and so may an end, which stops before that frame. A Position at
-	/// frame 0, which a Time says, is refused.
+	/// A lite-07 start or end may be a Position (type 2), at frame 0 or partway through a group.
 	#[test]
 	fn lite07_starts_and_ends_partway_through_a_group() {
 		let mut msg = framed_sample();
@@ -1910,9 +1897,9 @@ mod test {
 			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
 		};
 		assert!(decode(&[1, 2, 7, 4, 0]).is_ok());
-		assert!(matches!(decode(&[1, 2, 7, 0, 0]), Err(DecodeError::InvalidValue)));
+		assert!(decode(&[1, 2, 7, 0, 0]).is_ok());
 		assert!(decode(&[1, 1, 7, 2, 9, 4]).is_ok());
-		assert!(matches!(decode(&[1, 1, 7, 2, 9, 0]), Err(DecodeError::InvalidValue)));
+		assert!(decode(&[1, 1, 7, 2, 9, 0]).is_ok());
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,

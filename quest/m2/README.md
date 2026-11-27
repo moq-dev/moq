@@ -46,6 +46,18 @@ This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
 moq-dev/moq#9564.
 Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
 
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ the cut also waits on
+[Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md)
+(renaming `Instance` to `Identity` across every wire message, capping it at
+256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
+keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both
+[Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md)
+and [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) (reversing the
+2026-11-25 deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD
+indexing is an immediate consumer and `moq_subscription` changes the C ABI;
+rejected: moving only the wire into `m2`, leaving both in `m3`).
+
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what
 that audit found. Fifteen reviewers judged about 480 work lines for a

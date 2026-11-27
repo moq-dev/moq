@@ -1224,7 +1224,9 @@ fn accepting_state_buffers_retransmitted_initials() {
 	let incoming = pair.server.pop_waiting_incoming();
 
 	let accepting = pair.server.start_split_accept(incoming, pair.time);
-	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+	// Until `finish_accept`, the attempt holds its first datagram.
+	let first_datagram = pair.server.incoming_buffer_bytes();
+	assert!(first_datagram >= 1200);
 	assert_eq!(pair.server.open_connections(), 0);
 
 	// With no server response, the client's next wakeup is its loss timer. Advancing to it and
@@ -1236,7 +1238,7 @@ fn accepting_state_buffers_retransmitted_initials() {
 	pair.drive_server();
 
 	assert!(pair.server.waiting_incoming.is_empty());
-	assert!(pair.server.incoming_buffer_bytes() > 0);
+	assert!(pair.server.incoming_buffer_bytes() > first_datagram);
 
 	let server_ch = pair.server.finish_split_accept(accepting);
 	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
@@ -1291,6 +1293,127 @@ fn max_incoming_counts_accepts_in_progress() {
 
 	pair.server.finish_split_accept(accepting);
 	assert_eq!(pair.server.open_connections(), 1);
+}
+
+/// The shared byte budget bounds what pending attempts hold, first datagram included, so Initials
+/// stop being taken once it is spent however many slots remain.
+#[test]
+fn first_datagrams_count_toward_the_incoming_byte_budget() {
+	let _guard = subscribe();
+	let mut server_config = server_config();
+	// Room for one 1200-byte Initial, not two
+	server_config.incoming_buffer_size_total = 2000;
+	let mut pair = Pair::new(endpoint::Config::default(), server_config);
+	pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+
+	let _first = pair.begin_connect(client_config());
+	let _second = pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	assert_eq!(pair.server.waiting_incoming.len(), 1);
+	assert!(pair.server.incoming_buffer_bytes() > 1200);
+
+	// Disposing of the attempt frees its bytes for the next Initial, which the client retransmits.
+	let incoming = pair.server.pop_waiting_incoming();
+	pair.server.reject(incoming);
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+	pair.time = pair.client.next_wakeup().unwrap();
+	pair.drive_client();
+	pair.drive_server();
+	assert_eq!(pair.server.waiting_incoming.len(), 1);
+}
+
+/// An Initial larger than one attempt may hold is dropped, though the shared budget has room.
+#[test]
+fn an_initial_past_the_per_attempt_limit_is_dropped() {
+	let _guard = subscribe();
+	let mut server_config = server_config();
+	server_config.incoming_buffer_size = 1000;
+	let mut pair = Pair::new(endpoint::Config::default(), server_config);
+	pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+
+	pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	assert!(pair.server.waiting_incoming.is_empty());
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+}
+
+/// A retried Initial with a zero-length destination CID has nothing but its four-tuple to match a
+/// retransmit on, which must reach the pending attempt rather than start a second one.
+#[test]
+fn retransmitted_zero_length_cid_initial_joins_its_attempt() {
+	let _guard = subscribe();
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config()),
+			cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0)))),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(Endpoint::new(endpoint::Config::default(), true).unwrap(), server);
+	pair.server.handle_incoming = Box::new(|incoming| match incoming.remote_address_validated() {
+		true => IncomingConnectionBehavior::Wait,
+		false => IncomingConnectionBehavior::Retry,
+	});
+
+	pair.begin_connect(client_config());
+	// Driving to idle has the client resend its Initial, with the same token and empty destination
+	// CID, until its handshake gives up. Each lands in the one attempt.
+	pair.drive();
+	let incoming = pair.server.pop_waiting_incoming();
+	assert!(pair.server.incoming_buffer_bytes() >= 2 * 1200);
+
+	pair.server.try_accept(incoming, pair.time).unwrap();
+	assert_eq!(pair.server.incoming_buffer_bytes(), 0);
+	assert_eq!(pair.server.open_connections(), 1);
+}
+
+/// With zero-length CIDs a single `0x40` byte routes by four-tuple to a pending attempt, so a flood
+/// of them must be bounded by what each buffered datagram holds, not by its few wire bytes.
+#[test]
+fn tiny_datagrams_to_a_pending_attempt_are_bounded_by_what_they_hold() {
+	let _guard = subscribe();
+	let limit = 64 << 10;
+	let mut server_config = server_config();
+	server_config.incoming_buffer_size = limit;
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config),
+			cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0)))),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(Endpoint::new(endpoint::Config::default(), true).unwrap(), server);
+	pair.server.handle_incoming = Box::new(|incoming| match incoming.remote_address_validated() {
+		true => IncomingConnectionBehavior::Wait,
+		false => IncomingConnectionBehavior::Retry,
+	});
+	pair.begin_connect(client_config());
+	// Initial, Retry, then the retried Initial with an empty destination CID
+	pair.drive();
+	assert_eq!(pair.server.waiting_incoming.len(), 1);
+	let before = pair.server.incoming_buffered_datagrams();
+
+	let mut buf = Vec::new();
+	for _ in 0..limit {
+		let received = Received {
+			remote: pair.client.addr,
+			local_ip: None,
+			ecn: None,
+			data: [0x40][..].into(),
+			arrival: None,
+		};
+		assert!(pair.server.handle(pair.time, received, &mut buf).is_none());
+	}
+	let tiny = pair.server.incoming_buffered_datagrams() - before;
+	assert!(tiny > 0, "datagrams under the limit are still buffered");
+	let held = tiny * (1 + mem::size_of::<crate::shared::DatagramConnectionEvent>());
+	assert!(held as u64 <= limit, "{tiny} datagrams hold {held} bytes, past {limit}");
 }
 
 /// Verify that when the handshake fails (here via ALPN mismatch) after `start_accept` has
@@ -5375,6 +5498,73 @@ fn ack_frequency_update_max_delay() {
 	assert!(pair.server_conn_mut(server_ch).stats().frame_rx.ack_frequency >= 2);
 }
 
+/// A lost ACK_FREQUENCY frame is sent again, though the delay it asked for has not changed
+#[test]
+fn lost_ack_frequency_is_resent() {
+	let _guard = subscribe();
+	let mut config = client_config();
+	config.transport.ack_frequency = Some(transport::ack_frequency::Config {
+		max_ack_delay: Some(Duration::from_millis(200)),
+		..transport::ack_frequency::Config::default()
+	});
+	let mut pair = Pair::default();
+	// An RTT past the configured delay holds the request at it, so only a loss sends another
+	pair.latency = Duration::from_millis(150);
+	let client_ch = pair.begin_connect(config);
+	let sent = |pair: &mut Pair| pair.client_conn_mut(client_ch).stats().frame_tx.ack_frequency;
+	while sent(&mut pair) == 0 {
+		assert!(pair.step(), "the client never asked");
+	}
+	// Lose the request on its way
+	pair.server.inbound.clear();
+	pair.drive();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	assert!(pair.server_conn_mut(server_ch).stats().frame_rx.ack_frequency > 0);
+	assert!(sent(&mut pair) > 1);
+}
+
+/// A Handshake ACK leaves the timer that sends a pending 1-RTT ACK running
+#[test]
+fn handshake_ack_leaves_the_max_ack_delay() {
+	let _guard = subscribe();
+	// Packet numbers without gaps, so no PING below arrives out of order
+	let mut pair = Pair::default_with_deterministic_pns();
+	// A PTO well past the max ACK delay, so no probe stands in for the timer
+	pair.latency = Duration::from_millis(50);
+	let client_ch = pair.begin_connect(client_config_with_deterministic_pns());
+	while !is_connected(pair.client_conn_mut(client_ch)) {
+		assert!(pair.step(), "the handshake stalled");
+	}
+	// Losing everything the client sends keeps the server from confirming the handshake, so the
+	// client keeps its Handshake keys. The client takes what the server already sent, and
+	// acknowledges it once its max ACK delay runs out.
+	for wait in [pair.latency, Duration::from_millis(25)] {
+		pair.server.inbound.clear();
+		pair.time = pair.time.saturating_add(wait);
+		pair.drive_client();
+	}
+	pair.server.inbound.clear();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let ping = |pair: &mut Pair, space| {
+		let now = pair.time;
+		let packet = pair.server_conn_mut(server_ch).forge_packet(now, space, &[0x01]);
+		pair.client.inbound.push_back((now, None, packet.as_slice().into()));
+		pair.drive_client();
+	};
+	let acks = |pair: &mut Pair| pair.client_conn_mut(client_ch).stats().frame_tx.acks;
+
+	// A lone 1-RTT PING waits for the max ACK delay
+	let before = acks(&mut pair);
+	ping(&mut pair, SpaceId::Data);
+	assert_eq!(acks(&mut pair), before);
+	// A Handshake PING is acknowledged at once
+	ping(&mut pair, SpaceId::Handshake);
+	assert_eq!(acks(&mut pair), before + 1);
+	pair.time = pair.time.saturating_add(Duration::from_millis(25));
+	pair.drive_client();
+	assert_eq!(acks(&mut pair), before + 2, "the 1-RTT ACK never went out");
+}
+
 fn stream_chunks(mut recv: recv::Stream<'_>) -> Vec<u8> {
 	let mut buf = Vec::new();
 
@@ -6159,39 +6349,6 @@ fn oversized_datagrams_are_dropped() {
 		send_buffer_size - Datagram::SIZE_BOUND,
 		"expected the send buffer to be empty after too large datagrams were dropped",
 	);
-}
-
-#[test]
-fn reject_short_idcid() {
-	let _guard = subscribe();
-	let client_addr = "[::2]:7890".parse().unwrap();
-	let mut server = Endpoint::new(
-		endpoint::Config {
-			server: Some(server_config()),
-			..endpoint::Config::default()
-		},
-		true,
-	)
-	.unwrap();
-	let now = Instant::now();
-	let mut buf = Vec::with_capacity(server.max_udp_payload_size() as usize);
-	// Initial header that has an empty DCID but is otherwise well-formed
-	let mut initial = BytesMut::from(hex!("c4 00000001 00 00 00 3f").as_ref());
-	initial.resize(MIN_INITIAL_SIZE.into(), 0);
-	let event = server.handle(
-		now,
-		Received {
-			remote: client_addr,
-			local_ip: None,
-			ecn: None,
-			data: initial,
-			arrival: None,
-		},
-		&mut buf,
-	);
-	let Some(DatagramEvent::Response(Transmit { .. })) = event else {
-		panic!("expected an initial close");
-	};
 }
 
 /// Ensure that a connection can be made when a preferred address is advertised by the server,
@@ -7035,9 +7192,8 @@ fn old_ce_marks_report_no_new_congestion() {
 }
 
 /// A path that starts bleaching the ECN field or re-marking it ECT(1) reports no CE, though the
-/// bottleneck marks every packet, and re-marking fails validation, so the sender stops using
-/// ECN. Bleaching is only caught once an ACK's count increase falls short of its ACK ranges,
-/// which may not happen within this transfer.
+/// bottleneck marks every packet, and either fails validation, so the sender stops using ECN:
+/// bleaching once an ACK's count increase falls short of the marked packets it acknowledges.
 #[test]
 fn invalid_ecn_feedback_reports_no_congestion() {
 	let _guard = subscribe();
@@ -7053,10 +7209,52 @@ fn invalid_ecn_feedback_reports_no_congestion() {
 		pair.client_send(client_ch, s).write(&mut &[42; 16 * 1024][..]).unwrap();
 		pair.drive();
 		assert_eq!(ce_events(&log), 0, "{rewrite:?}");
-		if rewrite.is_some() {
-			assert!(!pair.client_conn_mut(client_ch).using_ecn());
-		}
+		assert!(!pair.client_conn_mut(client_ch).using_ecn(), "{rewrite:?}");
 	}
+}
+
+/// A PATH_RESPONSE sent off the path goes unmarked, so an ACK of it that raises no ECN count is
+/// not taken for bleaching
+#[test]
+fn off_path_response_keeps_ecn() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	pair.drive();
+	assert!(pair.server_conn_mut(server_ch).using_ecn());
+	let responses = pair.server_conn_mut(server_ch).stats().frame_tx.path_response;
+
+	// A PATH_CHALLENGE from another address of the client, which the server answers there
+	// without migrating
+	let probe = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	let mut payload = vec![0x1a, 1, 2, 3, 4, 5, 6, 7, 8];
+	payload.resize(1100, 0);
+	let now = pair.time;
+	let packet = pair
+		.client_conn_mut(client_ch)
+		.forge_packet(now, SpaceId::Data, &payload);
+	pair.server
+		.inbound
+		.push_back((now, Some(EcnCodepoint::Ect0), packet.as_slice().into()));
+	pair.server.drive(now, probe);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).stats().frame_tx.path_response,
+		responses + 1
+	);
+
+	// The response reaches the client as sent
+	let (off_path, on_path): (std::collections::VecDeque<_>, _) = mem::take(&mut pair.server.outbound)
+		.into_iter()
+		.partition(|(transmit, _)| transmit.remote == probe);
+	pair.server.outbound = on_path;
+	assert_eq!(off_path.len(), 1);
+	for (transmit, datagram) in off_path {
+		assert_eq!(transmit.ecn, None);
+		pair.client.inbound.push_back((now, transmit.ecn, datagram[..].into()));
+	}
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert!(pair.server_conn_mut(server_ch).using_ecn());
 }
 
 /// A receiver that pads its ACK-only packets counts them in flight. ACKs and losses of them,
@@ -7211,6 +7409,56 @@ fn window_blocked_backlog_is_not_app_limited() {
 fn pacing_blocked_backlog_is_not_app_limited() {
 	// 1 Mbit/s holds the backlog back long before the unlimited window fills.
 	check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+}
+
+/// ACKs due now go out alone while the client's `factory` controller holds back the data they
+/// would ride with, since an ACK-only packet is not congestion controlled (RFC 9002 §7) and
+/// holding it stalls the peer
+fn check_acks_go_alone(factory: PacketRecorderFactory) {
+	let _guard = subscribe();
+	let mut config = client_config();
+	config.transport.congestion = Arc::new(factory);
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect_with(config);
+	// Refill a pacer the handshake drained, as `check_blocked_backlog_is_not_app_limited` does.
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+
+	// A backlog the limit holds back, none of it acknowledged
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.drive_client();
+	pair.server.inbound.clear();
+
+	// Two PINGs are due an ACK at once
+	let before = pair.client_conn_mut(client_ch).stats().frame_tx;
+	for _ in 0..2 {
+		pair.server_conn_mut(server_ch).ping();
+		pair.drive_server();
+	}
+	pair.drive_client();
+	let after = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert!(after.acks > before.acks, "the held data held its ACKs back");
+	assert_eq!(after.stream, before.stream, "data went past the limit");
+}
+
+#[test]
+fn acks_go_alone_when_the_window_is_full() {
+	check_acks_go_alone(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+}
+
+#[test]
+fn acks_go_alone_while_the_pacer_holds_data() {
+	check_acks_go_alone(PacketRecorderFactory {
 		pacing_rate: Some(125_000),
 		..Default::default()
 	});

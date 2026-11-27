@@ -1,6 +1,7 @@
 import type { Duration } from "@moq/clock";
 import { type Getter, race } from "@moq/signals";
 import { ConnectTimeout, closeReason, error, fromClose, ProtocolViolation } from "../error.ts";
+import type { Cost } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
@@ -9,7 +10,7 @@ import { Stream } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import { after } from "../util/timer.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { checkCost, DEFAULT_TIMEOUT, exchangeSetup, handsOff, type Link, link } from "./handshake.ts";
 import * as KeepAlive from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 
@@ -40,6 +41,12 @@ export interface AcceptProps {
 	 */
 	consume?: OriginProducer;
 
+	/**
+	 * Price this link; see the `cost` connect option. Wins over the price the client declares, so
+	 * a server can price a peer it recognizes.
+	 */
+	cost?: Cost;
+
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
 	implementation?: string;
 
@@ -56,7 +63,7 @@ type SessionProps = {
 	implementation: string;
 	/** The peer's liveness, under a keep-alive. */
 	liveness?: Getter<KeepAlive.Liveness>;
-};
+} & Link;
 
 /**
  * Server-side handshake: accepts a transport and performs the server half of the SETUP exchange.
@@ -66,6 +73,7 @@ type SessionProps = {
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Session> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.signal?.throwIfAborted();
+	checkCost(props.cost);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 	const deadline = new AbortController();
 	const signal = props.signal ? AbortSignal.any([props.signal, deadline.signal]) : deadline.signal;
@@ -115,6 +123,7 @@ async function acceptInner(
 		client: false,
 		implementation: props.implementation ?? IMPLEMENTATION,
 		liveness: props.keepAlive && KeepAlive.start(transport, props.keepAlive),
+		...link(props),
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_23) {

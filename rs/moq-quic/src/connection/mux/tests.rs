@@ -199,6 +199,27 @@ fn close_delivers_application_close() {
 }
 
 /// A record carrying the peer's parameters, then `frame`
+/// A close the transport parameters leave no room for goes in the next record
+#[test]
+fn close_spills_past_the_transport_parameters() {
+	let now = Instant::now();
+	let mut conn = Connection::new(config(Version::QMux01), Side::Client, now);
+	conn.close(VarInt::from_u32(7), "bye".into());
+	let mut buf = BytesMut::new();
+	assert!(conn.fill_into(&mut buf, 8, now).is_some());
+	assert!(matches!(conn.end, End::Closing { frame: Some(_), .. }));
+
+	buf.clear();
+	let budget = conn.budget();
+	assert!(conn.fill_into(&mut buf, budget, now).is_some());
+	assert!(matches!(conn.end, End::Closed(_)));
+	let frames: Vec<_> = crate::frame::Iter::new(buf.freeze()).unwrap().collect();
+	assert_matches::assert_matches!(
+		&frames[..],
+		[Ok(frame::Frame::Close(Close::Application(close)))] if close.reason == "bye"
+	);
+}
+
 fn after_params(version: Version, frame: &[u8]) -> Bytes {
 	let mut peer = Connection::new(config(version), Side::Client, Instant::now());
 	let mut record = peer.transmit(Instant::now()).unwrap().to_vec();
