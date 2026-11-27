@@ -160,7 +160,7 @@ would need a breaking release had it landed right after the cut:
   PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
   which fails the route key lane on a Chromium below 158, so only the pinned
   toolchain clears it. As an early signal, before the rename, run the route
-  key lane (`test/interop/clients/js/route-key.ts`) once with Playwright
+  key lane once with Playwright
   1.65.0 or later from npm, which bundles Chromium 158, and put the result in
   the PR. If the tab fails, stop and report it, since only the wire can fix
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
@@ -290,5 +290,5 @@ decrease (rejected: the next wip version after the cut).
 
 ## Related
 
-- [Takeover](/quest/m3/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
+- [Takeover](/quest/m4/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
 - [The moq.pro mesh runs lite-07](/quest/m5/lite07-mesh.md) - the deployment condition that follows this
