@@ -501,6 +501,8 @@ function orderOf(order: Order | undefined): Order {
 export class Request {
 	/** The requested track name. */
 	readonly name: string;
+	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. */
+	readonly meta: boolean;
 
 	#producer: Producer;
 	#pending: Set<Request>;
@@ -508,6 +510,7 @@ export class Request {
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
+		this.meta = options.meta ?? false;
 		this.#producer = options.producer;
 		this.#pending = options.pending;
 		this.#lookups = options.lookups;
@@ -1583,6 +1586,9 @@ export class Producer {
 	#produced: Run[] = [];
 	// One past the last append: every key below it arrived, was given up, or was skipped.
 	#appended?: bigint;
+	// A metadata copy, whose groups hold each frame's header alone: a broadcast entry apart from
+	// the payload copy, which no payload reader is ever handed. Fixed before any group.
+	#meta = false;
 
 	constructor(name: string) {
 		checkName(name);
@@ -1741,6 +1747,10 @@ export class Producer {
 			if (!producer.#account.empty || producer.#state.drops.size > 0)
 				throw new Error("track already caches groups");
 			producer.#account = producer.#openAccount(pool);
+		};
+		hooks.metaTrack = (producer) => {
+			if (producer.#cache.size > 0 || producer.#received > 0n) throw new Error("track already holds groups");
+			producer.#meta = true;
 		};
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#requested;
@@ -2900,6 +2910,13 @@ export class Producer {
 		return rescaled.key ?? BigInt(rescaled.value);
 	}
 
+	// A new group of this track: a metadata copy's holds each frame's header alone.
+	#newGroup(key: bigint): GroupProducer {
+		const group = new GroupProducer(key);
+		if (this.#meta) hooks.metaGroup(group);
+		return group;
+	}
+
 	// Hold a group to this track's timedness, once the track has committed it.
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
@@ -2960,7 +2977,7 @@ export class Producer {
 		if (key < this.#received) throw new TimestampMismatch();
 		this.#writable(key);
 		this.#refuseSkipped(key);
-		const group = new GroupProducer(key);
+		const group = this.#newGroup(key);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group);
@@ -3099,7 +3116,7 @@ export class Producer {
 			this.#uncache(existing, true);
 		}
 
-		const group = new GroupProducer(key);
+		const group = this.#newGroup(key);
 		// Mirrors copy the absolute indices, so set them before publishing to any sink.
 		hooks.startGroup(group, start);
 		this.#bind(group);
