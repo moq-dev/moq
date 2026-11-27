@@ -102,8 +102,8 @@ export interface Config {
 	frameSamples?: 960 | 1024;
 	/** The decoded rate: under SBR, the extension rate rather than the core's. */
 	sampleRate: number;
-	/** The decoded channels: two under PS, which a mono core carries. */
-	numberOfChannels: number;
+	/** The decoded channels: two under PS, which a mono core carries. Undefined when an unparsed program config element names them. */
+	numberOfChannels?: number;
 }
 
 // The object types whose specific config is a GASpecificConfig, which a sync extension follows.
@@ -118,10 +118,10 @@ const SYNC_EXTENSION_PS = 0x548;
  *
  * Mirrors `aac::Config::parse` in rs/moq-mux: SBR and PS report the extension rate and stereo, not
  * their AAC-LC core, whether signaled explicitly or by a backward-compatible sync extension. A sync
- * extension behind fields this doesn't follow reports the core. Undefined when the config is
- * truncated, names a reserved rate or channelConfiguration, or takes its channels from a program
- * config element, except under explicit PS, which is stereo whatever that element says and is
- * accepted without parsing it.
+ * extension behind fields this doesn't follow, such as a program config element, reports the core.
+ * That element isn't parsed, so the channel count it names is left undefined, except under PS,
+ * which is stereo. Undefined when the config is truncated or names a reserved rate or
+ * channelConfiguration.
  */
 export function parseConfig(asc: Uint8Array): Config | undefined {
 	const bits = asc.byteLength * 8;
@@ -155,7 +155,10 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 	let rate = sampleRate();
 	const coreSampleRate = rate;
 	const channelConfiguration = read(4);
-	let numberOfChannels = CHANNEL_COUNTS[channelConfiguration];
+	// 0 defers to a program config element, which isn't parsed here.
+	const programConfig = channelConfiguration === 0;
+	let numberOfChannels: number | undefined = CHANNEL_COUNTS[channelConfiguration];
+	if (!programConfig && numberOfChannels === undefined) return undefined;
 	// Explicit SBR (5) or PS (29) plays at the extension rate that follows, over a core object type.
 	const explicit = type === 5 || type === 29;
 	let core = type;
@@ -164,22 +167,21 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 		core = objectType();
 		// extensionChannelConfiguration, only for ER BSAC.
 		if (core === 22) read(4);
-		// PS always decodes to stereo, even over a core whose channels a program config element
-		// names, which isn't parsed here; a reserved channelConfiguration is still refused.
-		if (type === 29 && (channelConfiguration === 0 || numberOfChannels !== undefined)) numberOfChannels = 2;
+		// PS always decodes to stereo, whatever channels the core has.
+		if (type === 29) numberOfChannels = 2;
 	}
-	if (truncated || rate === undefined || coreSampleRate === undefined || numberOfChannels === undefined) {
-		return undefined;
-	}
+	if (truncated || rate === undefined || coreSampleRate === undefined) return undefined;
 	const config: Config = { coreSampleRate, sampleRate: rate, numberOfChannels };
-	if (!GENERAL_AUDIO.has(core)) return config;
+	// Only a GASpecificConfig puts a program config element next.
+	if (!GENERAL_AUDIO.has(core)) return programConfig ? undefined : config;
 
 	// The GASpecificConfig: frameLengthFlag, ahead of any program config element, then
 	// dependsOnCoreCoder (then a 14-bit coreCoderDelay) and extensionFlag.
 	const frameLength = read(1);
 	if (truncated) return config;
 	if (core === AAC_LC) config.frameSamples = frameLength === 1 ? 960 : 1024;
-	if (explicit) return config;
+	// The fields after an unparsed program config element, a sync extension's included, stay unread.
+	if (explicit || programConfig) return config;
 	if (read(1) === 1) read(14);
 	const extension = read(1) === 1;
 	// layerNr.

@@ -46,6 +46,9 @@ test("raw times AAC packets at the AudioSpecificConfig's core rate", () => {
 	// SBR at the core's own rate, and plain AAC-LC, likewise.
 	expect(format("119056e598").decode(new Uint8Array([1]), ts)[0].duration).toEqual(core48k);
 	expect(format("1190").decode(new Uint8Array([1]), ts)[0].duration).toEqual(core48k);
+	// FFmpeg's quad AAC-LC, whose channels a program config element names.
+	const quad = "118004c4040021100c4c61766336332e312e31303156e500";
+	expect(format(quad).decode(new Uint8Array([1]), ts)[0].duration).toEqual(core48k);
 	// frameLengthFlag set: 960 samples, 20 ms at 48 kHz.
 	expect(format("1194").decode(new Uint8Array([1]), ts)[0].duration).toEqual(Duration.millis(20));
 });

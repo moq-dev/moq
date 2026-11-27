@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { audioSpecificConfig, objectType, parseConfig, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
+import * as Hex from "./hex";
 
 describe("pickRate", () => {
 	// 44.1kHz is in the AAC table, unlike Opus, so it must survive untouched.
@@ -175,10 +176,19 @@ describe("parseConfig", () => {
 		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x84, 0x00]))?.frameSamples).toBeUndefined();
 	});
 
+	// A program config element names the channels, which isn't parsed, but the frame clock comes before it.
+	it("reads the frame clock ahead of a program config element", () => {
+		expect(parseConfig(Hex.toBytes("118004c4040021100c4c61766336332e312e31303156e500"))).toEqual({
+			coreSampleRate: 48000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: undefined,
+		});
+	});
+
 	it("refuses what it can't read", () => {
 		expect(parseConfig(new Uint8Array([0x12]))).toBeUndefined();
-		// A program config element's channels, and a reserved channelConfiguration.
-		expect(parseConfig(new Uint8Array([0x12, 0x00]))).toBeUndefined();
+		// A reserved channelConfiguration.
 		expect(parseConfig(new Uint8Array([0x12, 0x40]))).toBeUndefined();
 	});
 });

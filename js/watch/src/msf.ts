@@ -92,7 +92,7 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 function codecAudio(
 	codec: string,
 	init: Uint8Array | undefined,
-): { sampleRate: number; numberOfChannels: number } | undefined {
+): { sampleRate: number; numberOfChannels?: number } | undefined {
 	if (!init) return undefined;
 	if (Util.Aac.objectType(codec) !== undefined) return Util.Aac.parseConfig(init);
 	if (codec !== "opus") return undefined;
