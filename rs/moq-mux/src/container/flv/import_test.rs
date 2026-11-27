@@ -1378,9 +1378,15 @@ const ASC_48K: [u8; 2] = [0x11, 0x90];
 /// 2048 samples, 42.667 ms, a packet.
 const ASC_HE: [u8; 4] = [0x2b, 0x11, 0x88, 0x00];
 
-/// AudioSpecificConfig for AAC Main, 48 kHz, stereo, whose packets this importer states no
-/// duration for.
+/// [`ASC_HE`] with its frameLengthFlag set: 1920 samples, 40 ms, a packet.
+const ASC_HE_960: [u8; 4] = [0x2b, 0x11, 0x8a, 0x00];
+
+/// AudioSpecificConfig for AAC Main, 48 kHz, stereo: 1024 samples a packet, as AAC-LC.
 const ASC_MAIN: [u8; 2] = [0x09, 0x90];
+
+/// AudioSpecificConfig for ER AAC LD, 48 kHz, stereo, whose packets this importer states no
+/// duration for.
+const ASC_LD: [u8; 3] = [0xb9, 0x90, 0x00];
 
 /// An audio-only FLV of 24 ms MP3 frames (MPEG-1 Layer III, 48 kHz) at `timestamps` (ms).
 fn mp3_tags(timestamps: &[u32]) -> Vec<u8> {
@@ -1398,17 +1404,64 @@ fn mp3_tags(timestamps: &[u32]) -> Vec<u8> {
 }
 
 /// A gap before the first spacing never sets where a group ends: MP3 frames state their duration
-/// in their header, HE-AAC packets by their SBR, and a codec whose packets state none closes its
+/// in their header, AAC packets by their config, and a codec whose packets state none closes its
 /// group at the next tag.
 #[tokio::test]
 async fn a_gap_before_the_first_spacing_keeps_the_next_timestamp() {
 	let published = audio_published(&mp3_tags(&[0, 72, 96, 120])).await;
 	assert_eq!(published, [0, 72_000, 96_000, 120_000]);
 
-	for asc in [&ASC_HE[..], &ASC_MAIN] {
+	for asc in [&ASC_HE[..], &ASC_MAIN, &ASC_LD] {
 		let published = audio_published(&aac_tags_with(asc, &[0, 85, 128, 170])).await;
 		assert_eq!(published, [0, 85_000, 128_000, 170_000], "{asc:x?}");
 	}
+}
+
+/// Import an audio-only FLV and return each audio group's start and declared end (µs).
+async fn audio_groups(data: &[u8]) -> Vec<(u64, Option<u64>)> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	importer.decode(data).unwrap();
+	let _finished = importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.audio.renditions.keys().next().unwrap();
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(3600)),
+			max: Some(Duration::from_secs(3600)),
+		},
+	)]);
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut groups = Vec::new();
+	while let Some(mut group) = track.recv_group().await.unwrap() {
+		while group.read_frame().await.unwrap().is_some() {}
+		groups.push((group.start, group.end()));
+	}
+	// The newest group arrives first.
+	groups.sort();
+	groups
+}
+
+/// A group holding a packet whose duration is unknown declares no end, so a gap after it isn't
+/// declared as audio. One whose packets state theirs ends where they do, at the end of input too.
+#[tokio::test]
+async fn groups_end_only_where_their_audio_is_known_to() {
+	let groups = audio_groups(&aac_tags_with(&ASC_LD, &[0, 85, 128])).await;
+	assert_eq!(groups, [(0, None), (128_000, None)]);
+
+	// 21.333 ms AAC-LC packets, the last ending at 85 ms, not one 64 ms spacing past it.
+	let groups = audio_groups(&aac_tags_with(&ASC_48K, &[0, 64])).await;
+	assert_eq!(groups, [(0, Some(85_000))]);
+}
+
+/// HE-AAC signaling 960-sample core frames plays 40 ms a packet, so a group closing before the
+/// next tag ends where that tag lands.
+#[tokio::test]
+async fn he_aac_honors_its_frame_length() {
+	let published = audio_published(&aac_tags_with(&ASC_HE_960, &[0, 40, 80, 120, 160])).await;
+	assert_eq!(published, [0, 40_000, 80_000, 120_000, 160_000]);
 }
 
 /// A group full of Opus packets, whose durations count 48 kHz samples against FLV's ms clock,

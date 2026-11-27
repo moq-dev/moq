@@ -952,6 +952,12 @@ where
 		self.close(measured, bound, marker_at, None)
 	}
 
+	/// Close the current group without declaring where it ends, for a source that can't tell where
+	/// its last frame stops. The next write must be a keyframe.
+	pub(crate) fn cut_unended(&mut self) -> crate::Result<()> {
+		self.close(None, None, None, None)
+	}
+
 	/// Where a group cut at `end` ends: there, or at its moved keyframe when only that frame
 	/// presents past it.
 	fn bound(&self, end: Option<moq_net::Timestamp>) -> crate::Result<Option<moq_net::Timestamp>> {

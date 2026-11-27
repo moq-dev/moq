@@ -172,13 +172,27 @@ struct AudioStream {
 	config: AudioConfig,
 	/// Where the open group closes.
 	join: crate::container::Join,
-	/// The latest frame's timestamp, whose spacing to the next measures how long frames play.
+	/// The latest frame's timestamp, which a tag repeating it adds nothing to.
 	previous: Option<Timestamp>,
-	/// The shortest spacing between frames so far, which estimates how long a frame plays when its
-	/// codec doesn't say: a gap only lengthens a spacing.
-	spacing: Option<Timestamp>,
-	/// Where the open group's audio ends, estimated from `spacing` where the codec doesn't say.
+	/// Where the open group's audio ends, as its frames' codec states it, or `None` once a frame
+	/// states nothing, which leaves the group with no end to declare.
 	end: Option<Timestamp>,
+}
+
+impl AudioStream {
+	/// Close the open group where its audio ends, capped at `cap`, or with no declared end when a
+	/// frame's duration is unknown.
+	fn close(&mut self, cap: Option<Timestamp>) -> crate::Result<()> {
+		if self.track.needs_keyframe() {
+			return Ok(());
+		}
+		match self.end {
+			Some(end) => self
+				.track
+				.cut(Some(cap.map_or(end, |cap| crate::container::earlier(end, cap)))),
+			None => self.track.cut_unended(),
+		}
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -599,9 +613,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Write one audio frame, which forwards at once, closing its group once that carries a join.
 	///
 	/// A tag states no duration, so each frame plays as long as its codec says. A group its stated
-	/// durations fill closes with the frame that fills it. A codec that says nothing leaves its group
-	/// open until the next tag. A frame a gap or rewind puts outside the open group opens a new one,
-	/// so the producer checks it as a group start.
+	/// durations fill closes with the frame that fills it. A frame a gap or rewind puts outside the
+	/// open group closes it first and opens a new one, so the producer checks it as a group start. A
+	/// group holding a frame whose codec says nothing closes there with no declared end.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
@@ -621,39 +635,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		let previous = stream.previous.replace(timestamp);
-		if let Some(delta) = previous.and_then(|previous| timestamp.checked_sub(previous).ok()) {
-			stream.spacing = Some(
-				stream
-					.spacing
-					.map_or(delta, |spacing| crate::container::earlier(spacing, delta)),
-			);
-		}
 		let stated = stated_duration(&stream.config, data);
-		let stated_end = stated.and_then(|duration| after(timestamp, duration));
-		// Where the frame's audio ends, for a cut before the next tag: as stated, else estimated from
-		// the shortest spacing.
-		let end = stated_end
-			.or_else(|| stream.spacing.and_then(|spacing| after(timestamp, spacing)))
-			.unwrap_or(timestamp);
+		let end = stated.and_then(|duration| after(timestamp, duration));
 		// The frame carries its duration only where the track's timescale counts it in whole units,
 		// as a CMAF track must; elsewhere the producer measures each frame to the next.
 		let duration = stated.filter(|duration| whole(*duration, stream.track.track().info().timescale));
 		let result = (|| {
 			if !stream.track.needs_keyframe() && stream.join.opens(timestamp) {
-				// After a gap the group ends where its audio does, but never past this frame, which
-				// would move it. A rewind leaves the producer to check this frame against the end.
-				let bound = match (stream.end, previous) {
-					(Some(end), Some(previous)) if timestamp > previous => {
-						Some(crate::container::earlier(end, timestamp))
-					}
-					(end, _) => end,
-				};
-				stream.track.cut(bound)?;
+				// After a gap the group never ends past this frame, which would move it. A rewind
+				// leaves the producer to check this frame against the end.
+				stream.close(previous.filter(|previous| timestamp > *previous).map(|_| timestamp))?;
 			}
 			let keyframe = stream.track.needs_keyframe();
 			if keyframe {
 				stream.join.reset();
-				stream.end = None;
 			}
 			stream.track.write(Frame {
 				timestamp,
@@ -661,10 +656,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
 			})?;
-			stream.end = Some(stream.end.map_or(end, |reach| crate::container::later(reach, end)));
-			// Only stated ends fill a group, so an estimate never closes one past the next tag.
-			if let Some(reach) = stream.join.fill(timestamp, stated_end.unwrap_or(timestamp)) {
-				stream.track.cut(Some(reach))?;
+			stream.end = match (keyframe, stream.end, end) {
+				(true, _, end) => end,
+				(false, Some(reach), Some(end)) => Some(crate::container::later(reach, end)),
+				(false, _, _) => None,
+			};
+			// Only a stated end fills a group: an unstated one counts this frame's start alone.
+			if stream.join.fill(timestamp, end.unwrap_or(timestamp)).is_some() {
+				stream.close(None)?;
 			}
 			Ok(())
 		})();
@@ -803,7 +802,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config,
 				join: crate::container::Join::default(),
 				previous: None,
-				spacing: None,
 				end: None,
 			},
 		);
@@ -823,6 +821,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Retire any existing audio track `track_id` and allocate a fresh one.
 	fn replace_audio(&mut self, track_id: u8) -> crate::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.audio.remove(&track_id) {
+			old.close(None)?;
 			old.track.end()?;
 		}
 		Ok(self
@@ -867,7 +866,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			result = result.and(stream.finish());
 		}
 		for stream in self.audio.values_mut() {
-			result = result.and(stream.track.end());
+			// No tag follows, so the open group ends where its audio does, which the producer would
+			// otherwise estimate from the spacing of its last frames.
+			result = result.and(stream.close(None)).and(stream.track.end());
 		}
 		match &result {
 			// A refusal keeps refusing input with its own cause.
@@ -1037,10 +1038,7 @@ fn stated_duration(config: &AudioConfig, data: &[u8]) -> Option<Timestamp> {
 		AudioCodec::Mp3 => return crate::codec::mp3::duration(data),
 		AudioCodec::Ac3 => crate::codec::ac3::parse_header(data).ok()?,
 		AudioCodec::Ec3 => crate::codec::eac3::parse_header(data).ok()?,
-		// SBR and PS decode an AAC packet to 2048 samples, at the extension rate the ASC reports.
-		AudioCodec::AAC(aac) if matches!(aac.profile, 5 | 29) => {
-			return Timestamp::from_scale(2048, config.sample_rate.into()).ok();
-		}
+		AudioCodec::AAC(_) => return crate::codec::aac::frame_duration(config.description.as_deref()?),
 		_ => return crate::container::legacy::Audio::new(config)?.duration(data),
 	};
 	Timestamp::from_scale(header.samples, header.sample_rate.into()).ok()
