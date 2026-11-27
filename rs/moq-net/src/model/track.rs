@@ -2112,6 +2112,35 @@ impl TrackState {
 		self.lookup.range(keys).map(|(_, slot)| slot.arrived).max()
 	}
 
+	/// Absorb declared skips within `bounds` touching `handed` (or changed since `*seen`) into
+	/// `delivered`, so arrival-order readers that never poll drops keep consecutive sparse groups
+	/// one run without absorbing kept-out keys outside the reader's local range.
+	fn absorb_skips(&self, delivered: &mut Delivered, handed: Option<u64>, bounds: ops::Range<u64>, seen: &mut u64) {
+		if bounds.is_empty() {
+			return;
+		}
+		if let Some(key) = handed
+			&& let Some(next) = key.checked_add(1)
+			&& let Some((run, Hole::Skip)) = self.drops.get_key_value(&next)
+		{
+			delivered.absorb_skip(next.max(bounds.start)..run.end.min(bounds.end));
+		}
+		if delivered.runs() > 1 && self.drops_changes.revision() != *seen {
+			for changed in self.drops_changes.since(*seen) {
+				let changed = changed.start.max(bounds.start)..changed.end.min(bounds.end);
+				if changed.is_empty() {
+					continue;
+				}
+				for (run, hole) in self.drops.overlapping(&changed) {
+					if *hole == Hole::Skip {
+						delivered.absorb_skip(run.start.max(bounds.start)..run.end.min(bounds.end));
+					}
+				}
+			}
+			*seen = self.drops_changes.revision();
+		}
+	}
+
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
 	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
@@ -8421,41 +8450,15 @@ impl Consumer {
 	}
 
 	/// Absorb declared skips within `bounds` touching `key` (or changed since `*seen`) into
-	/// `delivered` so arrival-order readers that never poll drops keep consecutive sparse groups
-	/// one run without absorbing kept-out keys outside the reader's local range.
+	/// `delivered` for an arrival-order reader that never polls drops.
 	pub(super) fn absorb_skips(&self, delivered: &mut Delivered, key: u64, bounds: ops::Range<u64>, seen: &mut u64) {
 		if let Some(serving) = self.serving() {
 			serving.absorb_skips(delivered, key, bounds, seen);
 			return;
 		}
-		if bounds.is_empty() {
-			return;
-		}
 		self.with_state(|state| {
-			let Some(state) = state else {
-				return;
-			};
-			let state = state.read();
-			if let Some(next) = key.checked_add(1)
-				&& let Some((run, Hole::Skip)) = state.drops.get_key_value(&next)
-			{
-				let clipped = next.max(bounds.start)..run.end.min(bounds.end);
-				delivered.absorb_skip(clipped);
-			}
-			if delivered.runs() > 1 {
-				for changed in state.drops_changes.since(*seen) {
-					let changed = changed.start.max(bounds.start)..changed.end.min(bounds.end);
-					if changed.is_empty() {
-						continue;
-					}
-					for (run, hole) in state.drops.overlapping(&changed) {
-						if *hole == Hole::Skip {
-							let clipped = run.start.max(bounds.start)..run.end.min(bounds.end);
-							delivered.absorb_skip(clipped);
-						}
-					}
-				}
-				*seen = state.drops_changes.revision();
+			if let Some(state) = state {
+				state.read().absorb_skips(delivered, Some(key), bounds, seen);
 			}
 		});
 	}
@@ -8749,6 +8752,7 @@ impl Subscribing {
 				Logical {
 					state: self.state.clone(),
 					record: Record::default(),
+					reports: false,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -9177,6 +9181,9 @@ enum Inner {
 struct Logical {
 	state: kio::Consumer<TrackState>,
 	record: Record,
+	/// True once drops are polled or a wire publisher accesses this reader's record, so skips
+	/// enter `delivered` only after they are reported rather than on hand-out.
+	reports: bool,
 }
 
 /// A group a [`Subscriber`] reserved without handing it out; see
@@ -10121,6 +10128,9 @@ struct Cursor {
 	/// The [`TrackState::drops_changes`] revision absorbed into `record.delivered` when this
 	/// cursor does not poll drops.
 	skips_seen: u64,
+	/// True once a wire publisher accesses this cursor's record (or its parent front reader polls
+	/// drops), so skips enter `delivered` only after they are reported rather than on hand-out.
+	wired: bool,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
@@ -10716,6 +10726,7 @@ impl Cursor {
 			seek_pending: BTreeMap::new(),
 			record: Record::default(),
 			skips_seen: 0,
+			wired: false,
 			drops: None,
 			misses: None,
 			kept_out: None,
@@ -11301,28 +11312,9 @@ impl Cursor {
 				}
 			}
 		}
-		if !settled.is_empty() {
-			let floor = self.floor();
-			let end = self.end_key.unwrap_or(u64::MAX);
-			let state = self.state.read();
-			for run in settled {
-				self.record.written_off.remove(run.clone());
-				self.record.delivered.insert_run(run.clone());
-				if self.drops.is_some()
-					&& let Some(misses) = &mut self.misses
-				{
-					misses.forget(run.clone());
-				}
-				if let Some((skip, Hole::Skip)) = state.drops.get_key_value(&run.end) {
-					let clipped = run.end.max(floor)..skip.end.min(end);
-					if let Some(absorbed) = self.record.absorb_skip(clipped)
-						&& self.drops.is_some()
-						&& let Some(misses) = &mut self.misses
-					{
-						misses.forget(absorbed);
-					}
-				}
-			}
+		for run in settled {
+			self.record.written_off.remove(run.clone());
+			self.record.delivered.insert_run(run);
 		}
 	}
 
@@ -11684,6 +11676,12 @@ impl Cursor {
 		})
 	}
 
+	/// Whether this cursor reports drops or backs a wire publisher, so declared skips must enter
+	/// `delivered` only after being reported (`Record::report` / `skip_settled`).
+	fn reports(&self) -> bool {
+		self.drops.is_some() || self.wired
+	}
+
 	/// Record `key` as handed out. An ordered read never goes back, and any reader
 	/// stops expecting what is past its budget, so only the gaps within it cost memory.
 	fn hand_out(&mut self, key: u64, ordered: bool) {
@@ -11693,11 +11691,17 @@ impl Cursor {
 		}
 		self.prune_skipped();
 		self.record.delivered.insert(key);
-		if !ordered {
-			self.absorb_skips(Some(key));
-		}
 		let mut delivered = std::mem::take(&mut self.record.delivered);
-		self.forget_past_budget(&mut delivered, self.filter.window.budget(), None);
+		if !ordered && !self.reports() {
+			let bounds = self.floor()..self.end_key.unwrap_or(u64::MAX);
+			let state = self.state.read();
+			state.absorb_skips(&mut delivered, Some(key), bounds, &mut self.skips_seen);
+			if delivered.above_gap().is_some() {
+				self.forget_past_budget_with(&state, &mut delivered, self.filter.window.budget(), None);
+			}
+		} else {
+			self.forget_past_budget(&mut delivered, self.filter.window.budget(), None);
+		}
 		self.record.delivered = delivered;
 		self.retire_written_off();
 		// Only prune `misses.given_up` once drops are being polled (so any give-up was already
@@ -11717,44 +11721,6 @@ impl Cursor {
 		}
 	}
 
-	/// Absorb declared skips within the local bounds into `delivered` so consecutive sparse groups
-	/// coalesce into one run without absorbing kept-out keys outside `floor..end_key`.
-	fn absorb_skips(&mut self, handed: Option<u64>) {
-		let floor = self.floor();
-		let end = self.end_key.unwrap_or(u64::MAX);
-		if floor >= end {
-			return;
-		}
-		let state = self.state.read();
-		if let Some(key) = handed
-			&& let Some(next) = key.checked_add(1)
-			&& let Some((run, Hole::Skip)) = state.drops.get_key_value(&next)
-		{
-			let clipped = next.max(floor)..run.end.min(end);
-			if let Some(absorbed) = self.record.absorb_skip(clipped)
-				&& self.drops.is_some()
-				&& let Some(misses) = &mut self.misses
-			{
-				misses.forget(absorbed);
-			}
-		}
-		if self.drops.is_none() && self.record.delivered.runs() > 1 {
-			for changed in state.drops_changes.since(self.skips_seen) {
-				let changed = changed.start.max(floor)..changed.end.min(end);
-				if changed.is_empty() {
-					continue;
-				}
-				for (run, hole) in state.drops.overlapping(&changed) {
-					if *hole == Hole::Skip {
-						let clipped = run.start.max(floor)..run.end.min(end);
-						self.record.absorb_skip(clipped);
-					}
-				}
-			}
-			self.skips_seen = state.drops_changes.revision();
-		}
-	}
-
 	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
 	/// holds it or not: one landing there would be written off. A group skipped as stale is
 	/// not forgotten, since a wider budget owes it again, and neither is one a widening still
@@ -11766,8 +11732,18 @@ impl Cursor {
 		if delivered.above_gap().is_none() {
 			return;
 		}
-		let owed = self.filter.owed.first().map(|run| *run.start());
 		let state = self.state.read();
+		self.forget_past_budget_with(&state, delivered, budget, keep);
+	}
+
+	fn forget_past_budget_with(
+		&self,
+		state: &TrackState,
+		delivered: &mut Delivered,
+		budget: Budget,
+		keep: Option<u64>,
+	) {
+		let owed = self.filter.owed.first().map(|run| *run.start());
 		let kept = (self.record.skipped.lowest().into_iter()).chain(owed).chain(keep).min();
 		let budgets = budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
@@ -11802,7 +11778,7 @@ impl Cursor {
 				.expect("the oldest run is below its successor");
 			// Searched only in the gaps this split retires, so a read that folds nothing never
 			// walks the runs it has piled up.
-			let outside = self.lowest_uncovered(delivered, &state, last);
+			let outside = self.lowest_uncovered(delivered, state, last);
 			if let Some(kept) = kept.into_iter().chain(outside).min()
 				&& kept < last
 			{
@@ -11996,10 +11972,8 @@ impl Cursor {
 		self.let_go_kept_out();
 		self.look_up(waiter);
 		self.rejudge(drift);
-		if self.drops.is_none() && self.record.delivered.runs() > 1 {
-			self.absorb_skips(None);
-		}
-		let taken = &self.record.delivered;
+		let floor = self.floor();
+		let reports = self.reports();
 		let (window, cap, revision) = (&self.filter.window, self.end_key, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
@@ -12009,6 +11983,15 @@ impl Cursor {
 		// One lock for the judgement, since every subscriber of the track probes through it.
 		let asks = {
 			let state = self.state.read();
+			if !reports && self.record.delivered.runs() > 1 && state.drops_changes.revision() != self.skips_seen {
+				state.absorb_skips(
+					&mut self.record.delivered,
+					None,
+					floor..cap.unwrap_or(u64::MAX),
+					&mut self.skips_seen,
+				);
+			}
+			let taken = &self.record.delivered;
 			misses.judge(
 				&state,
 				(from, revision, cap),
@@ -12555,15 +12538,7 @@ impl Cursor {
 	fn pass_end(&mut self, end: u64) {
 		self.commit_seek_stale(end);
 		self.skip_ordered(end);
-		let before = self.record.delivered.floor();
 		self.record.delivered.forget_below(end);
-		let after = self.record.delivered.floor();
-		if after > before
-			&& self.drops.is_some()
-			&& let Some(misses) = &mut self.misses
-		{
-			misses.forget(before..after);
-		}
 	}
 
 	/// Let go of the heads asked below `next`, which an ordered read never goes back for:
@@ -13315,7 +13290,7 @@ impl Subscriber {
 					delivered.forget_below(key);
 				}
 				delivered.insert(key);
-				if !ordered {
+				if !ordered && !logical.reports {
 					resume.absorb_skips(delivered, key);
 				}
 				resume.forget_past_budget(delivered);
@@ -13387,9 +13362,22 @@ impl Subscriber {
 		}
 	}
 
+	/// Mark this subscriber (and any route copies behind it) as drop-reporting, so declared skips
+	/// enter `delivered` only after being reported rather than on hand-out.
+	pub(super) fn mark_reporting(&mut self) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.wired = true,
+			Inner::Resume(resume, logical) => {
+				logical.reports = true;
+				resume.mark_reporting();
+			}
+		}
+	}
+
 	/// What this reader settled, for its publisher to record what its wire was told.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn record_mut(&mut self) -> &mut Record {
+		self.mark_reporting();
 		match &mut self.inner {
 			Inner::Plain(cursor) => &mut cursor.record,
 			Inner::Resume(_, logical) => &mut logical.record,
@@ -13402,9 +13390,13 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn untell(&mut self, range: ops::Range<u64>) {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.record.untell(range),
+			Inner::Plain(cursor) => {
+				cursor.record.untell(range.clone());
+				cursor.record.delivered.remove(range);
+			}
 			Inner::Resume(resume, logical) => {
 				logical.record.untell(range.clone());
+				logical.record.delivered.remove(range.clone());
 				resume.untell(range);
 			}
 		}
@@ -13416,14 +13408,14 @@ impl Subscriber {
 	pub(crate) fn skip_settled(&mut self, range: ops::Range<u64>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
-				if let Some(absorbed) = cursor.record.absorb_skip(range)
+				if let Some(absorbed) = cursor.record.delivered.absorb_skip(range)
 					&& let Some(misses) = &mut cursor.misses
 				{
 					misses.forget(absorbed);
 				}
 			}
 			Inner::Resume(_, logical) => {
-				logical.record.absorb_skip(range);
+				logical.record.delivered.absorb_skip(range);
 			}
 		}
 	}
@@ -13439,7 +13431,7 @@ impl Subscriber {
 			Inner::Plain(cursor) if cursor.drops.is_some() => {
 				cursor.record.tell(key..end, Report::Final);
 			}
-			Inner::Resume(_, logical) if !logical.record.reported.is_empty() => {
+			Inner::Resume(_, logical) if logical.reports => {
 				logical.record.tell(key..end, Report::Final);
 			}
 			_ => {}
@@ -14086,6 +14078,7 @@ impl Subscriber {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
+		self.mark_reporting();
 		// What a publisher told its wire since is billed now.
 		self.settle_record(None);
 		match &mut self.inner {
@@ -35828,6 +35821,89 @@ mod test {
 			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
 		}
 		assert!(most <= 12, "record + misses grew to {most} runs");
+	}
+
+	/// A drop-reporting reader (plain or behind a front) under cache pool debt never absorbs
+	/// unreported skips on hand-out, so `Record::fold` cannot mark them `Final` before
+	/// `poll_drop` emits `SUBSCRIBE_SKIP`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reporting_reader_under_pool_debt_never_loses_an_unreported_skip() {
+		let from_zero = || {
+			Subscription::default().with_ranges([Range {
+				start: Start::Time(0),
+				end: None,
+			}])
+		};
+		// Plain subscriber under pool debt.
+		{
+			let (producer, pool) = pooled_producer(1 << 20);
+			producer.received();
+			let mut sub = producer.subscribe(from_zero());
+			// Mark as drop-reporting (as TrackRun does before receiving groups).
+			assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+			let mut g0 = producer.create_group(group::Info { start: 0 }).unwrap();
+			g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"a"[..]).unwrap();
+			g0.finish_at(10).unwrap();
+			producer.skip_groups(1..10);
+			assert_eq!(drain_groups(&mut sub), [0]);
+
+			let mut g1 = producer.create_group(group::Info { start: 10 }).unwrap();
+			g1.write_frame(Timestamp::from_millis(10).unwrap(), &b"b"[..]).unwrap();
+			g1.finish_at(20).unwrap();
+			producer.skip_groups(11..20);
+
+			// Shrink the pool below what the track holds so handing out group 10 triggers
+			// debt folding in `settle_record`.
+			pool.resize(1);
+			assert_eq!(drain_groups(&mut sub), [10]);
+			let drops = drained_drops(&mut sub);
+			assert!(
+				drops.contains(&(1, 10)) && drops.contains(&(11, 20)),
+				"unreported skips must survive pool debt: {drops:?}"
+			);
+		}
+		// Front (resume) subscriber under pool debt.
+		{
+			let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 20));
+			let broadcast = Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			});
+			let routes = super::super::resume::Producer::new();
+			let logical = Request::new(broadcast.clone(), "sparse")
+				.routes(routes.consume())
+				.accept(crate::track::Info::timed());
+			let source = Producer::new(broadcast, "sparse", crate::track::Info::timed());
+			source.received();
+			routes.serve(source.consume());
+
+			let mut sub = match logical.consume().subscribe(from_zero()).poll_ok(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(sub)) => sub,
+				_ => panic!("logical subscription should resolve"),
+			};
+			assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+			let mut g0 = source.create_group(group::Info { start: 0 }).unwrap();
+			g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"a"[..]).unwrap();
+			g0.finish_at(10).unwrap();
+			source.skip_groups(1..10);
+			assert_eq!(drain_groups(&mut sub), [0]);
+
+			let mut g1 = source.create_group(group::Info { start: 10 }).unwrap();
+			g1.write_frame(Timestamp::from_millis(10).unwrap(), &b"b"[..]).unwrap();
+			g1.finish_at(20).unwrap();
+			source.skip_groups(11..20);
+
+			pool.resize(1);
+			assert_eq!(drain_groups(&mut sub), [10]);
+			let drops = drained_drops(&mut sub);
+			assert!(
+				drops.contains(&(1, 10)) && drops.contains(&(11, 20)),
+				"front reader unreported skips must survive pool debt: {drops:?}"
+			);
+		}
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

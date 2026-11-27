@@ -152,13 +152,6 @@ impl Record {
 			self.reported.remove(range);
 		}
 	}
-
-	/// Absorb `range` of declared skips (keys never produced) into `delivered` where it extends
-	/// an existing run rightward (or starts at 0), returning the subrange absorbed so the caller
-	/// can drop covered verdicts from `Misses`.
-	pub fn absorb_skip(&mut self, range: Range<u64>) -> Option<Range<u64>> {
-		self.delivered.absorb_skip(range)
-	}
 }
 
 impl Accounted for Record {
@@ -519,9 +512,18 @@ impl Record {
 		loop {
 			let (next, step) = match self.reported.get_key_value(&end) {
 				Some((run, _)) => {
-					// A reported run overlapping a delivered run costs both runs.
-					let both = self.delivered.next_from(end).is_some_and(|first| first < run.end);
-					(run.end, 1 + usize::from(both))
+					// Count distinct runs overlapping this reported run up to the folding
+					// threshold so alternating served groups and drops under one coalesced
+					// `Report::Final` run compact under debt.
+					let span = end..run.end;
+					let mut extra = self.delivered.count_runs_in(span.clone(), 2);
+					if extra < 2 && fold == Fold::Debt {
+						extra += self.written_off.overlapping(&span).take(2 - extra).count();
+						if extra < 2 && self.skipped.next_from(end).is_some_and(|key| key < run.end) {
+							extra += 1;
+						}
+					}
+					(run.end, 1 + extra)
 				}
 				None if self.pending.contains_key(&end) => break,
 				None => {
@@ -1174,7 +1176,7 @@ mod test {
 						let end = (start + 1 + rng.below(12)).min(MAX_KEY);
 						if (start..end).all(|k| !handed.contains(&k)) {
 							let before_runs = record.delivered.runs();
-							record.absorb_skip(start..end);
+							record.delivered.absorb_skip(start..end);
 							if start > 0 {
 								assert!(
 									record.delivered.runs() <= before_runs,
@@ -1219,5 +1221,53 @@ mod test {
 				);
 			}
 		}
+	}
+
+	/// Alternating served groups and real drops above key 0 coalesce into one `Report::Final` run
+	/// in `reported` while leaving one run per served group in `delivered`. Under cache debt,
+	/// `Record::fold` counts those fragmented `delivered` runs and compacts the stretch to 2 runs.
+	#[test]
+	fn a_debt_folds_fragmented_delivered_runs_under_one_final_report() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		const BASE: u64 = 1_000;
+		for n in 0..500u64 {
+			let key = BASE + 2 * n;
+			record.delivered.insert(key);
+			record.tell(key..key + 1, Report::Final);
+			assert_eq!(
+				record.report(key + 1..key + 2, &Hole::drop(StreamError::NotFound), false),
+				Some(key + 1..key + 2)
+			);
+		}
+		assert_eq!(record.reported.len(), 1, "reported coalesced into one Final run");
+		assert_eq!(record.delivered.runs(), 500, "delivered fragmented by real drops");
+		record.settle(
+			|| track.clone(),
+			&mut (),
+			Standing {
+				from: BASE,
+				..Default::default()
+			},
+		);
+		assert!(pool.used() >= 500 * RUN_OVERHEAD);
+
+		owe(&track, pool.used());
+		record.settle(
+			|| track.clone(),
+			&mut (),
+			Standing {
+				from: BASE,
+				..Default::default()
+			},
+		);
+		assert_eq!(record.delivered.runs(), 1, "delivered compacted to one run");
+		assert_eq!(record.reported.len(), 1, "reported stays one run");
+		assert_eq!(
+			pool.used(),
+			RUN_OVERHEAD,
+			"only the reported run bills above one delivered run"
+		);
+		assert!(!record.told(BASE - 1), "keys below the reader's start stay untold");
 	}
 }

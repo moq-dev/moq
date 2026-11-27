@@ -607,6 +607,7 @@ impl Consumer {
 				received_checked: None,
 				declared: None,
 				declared_error: None,
+				reports: false,
 			})
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
@@ -775,6 +776,8 @@ struct Copy {
 	/// The [`track::TrackState::drops_changes`] revision absorbed into the logical reader's
 	/// `delivered` set on this copy when the reader does not poll drops.
 	skips_seen: u64,
+	/// True when the owning logical reader reports drops, propagated to `sub` once ready.
+	reports: bool,
 	/// Capped when replaced, at the boundary the copy replacing it starts at, or for a
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
@@ -1061,12 +1064,15 @@ impl Copy {
 			let sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
 			// The routes judge where the reader ends, not each copy.
-			let sub = sub
+			let mut sub = sub
 				.with_range((
 					Bound::Included(self.start(groups.0)),
 					groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				))
 				.parked();
+			if self.reports {
+				sub.mark_reporting();
+			}
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
@@ -1638,6 +1644,12 @@ impl Subscriber {
 		self.reader().untell(range)
 	}
 
+	/// Mark every existing and future copy as drop-reporting so skips enter `delivered` only
+	/// after being reported.
+	pub(super) fn mark_reporting(&mut self) {
+		self.reader().mark_reporting();
+	}
+
 	/// Absorb declared skips on the serving copy within local bounds into the logical reader's
 	/// `delivered` set.
 	pub(super) fn absorb_skips(&mut self, delivered: &mut Delivered, key: u64) {
@@ -2188,6 +2200,8 @@ struct Reader {
 	/// last checked against it, so a poll rechecks those runs only after one may be gone.
 	/// `None` until the serving copy is first checked.
 	received_checked: Option<u64>,
+	/// True once the owning logical reader polls drops or backs a wire publisher.
+	reports: bool,
 }
 
 impl Reader {
@@ -2624,6 +2638,7 @@ impl Reader {
 			resolved,
 			replaced: false,
 			skips_seen: 0,
+			reports: self.reports,
 			until: None,
 			cap: None,
 			done: None,
@@ -3468,16 +3483,23 @@ impl Reader {
 		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
 		// each poll reports one run, so such a pass would cost the queue squared to drain it,
 		// and a new reader can be handed one run per cached group and per gap between them.
-		// Declared skips stay: a reader may absorb a skip into `delivered` before polling drops,
-		// and `logical.record.reported` still needs it to coalesce and deduplicate.
+		// A queued skip that falls outside `self.groups` (e.g. after a range start rises) is also
+		// removed and untold on the copies so it is not re-walked forever yet can still be
+		// re-reported if a later update widens back over it.
+		let (start, end) = self.groups;
 		while let Some((run, hole)) = self
 			.drops
 			.first_range_value()
 			.map(|(run, hole)| (run.clone(), hole.clone()))
-			&& hole != track::Hole::Skip
-			&& delivered.covers(run.clone())
 		{
-			self.remove_drop(run);
+			if delivered.covers(run.clone()) {
+				self.remove_drop(run);
+			} else if hole == track::Hole::Skip && (run.end <= start || end.is_some_and(|cap| run.start >= cap)) {
+				self.remove_drop(run.clone());
+				self.untell(run);
+			} else {
+				break;
+			}
 		}
 		// The common case: nothing to report on one route, and the serving copy's own poll
 		// above wakes this for the next run it gives up. A replaced copy is still judged:
@@ -3489,7 +3511,6 @@ impl Reader {
 		// holds nothing back, and letting one go wakes this too.
 		self.let_go(delivered, waiter);
 		let serving = self.generation;
-		let (start, end) = self.groups;
 		let mut feeding = RangeSet::new();
 		for copy in &self.copies {
 			if Some(copy.generation) == serving || !copy.feeds {
@@ -3502,26 +3523,31 @@ impl Reader {
 			}
 		}
 		let mut passed = Vec::new();
+		let mut outside = Vec::new();
 		let next = self.drops.iter().find_map(|(run, err)| {
-			if *err != track::Hole::Skip && delivered.covers(run.clone()) {
+			if delivered.covers(run.clone()) {
 				passed.push(run.clone());
 				return None;
 			}
-			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
-			if run.is_empty() {
+			let clipped = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
+			if clipped.is_empty() {
+				if *err == track::Hole::Skip {
+					outside.push(run.clone());
+				}
 				return None;
 			}
-			let open = match err {
-				track::Hole::Skip => feeding.gaps(&run).next()?,
-				track::Hole::Drop { .. } => delivered
-					.gaps(run)
-					.into_iter()
-					.find_map(|gap| feeding.gaps(&gap).next())?,
-			};
+			let open = delivered
+				.gaps(clipped)
+				.into_iter()
+				.find_map(|gap| feeding.gaps(&gap).next())?;
 			Some((open, err.clone()))
 		});
 		for run in passed {
 			self.remove_drop(run);
+		}
+		for run in outside {
+			self.remove_drop(run.clone());
+			self.untell(run);
 		}
 		let Some((open, err)) = next else {
 			return Poll::Pending;
@@ -3539,6 +3565,19 @@ impl Reader {
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
 				sub.untell(range.clone());
+			}
+		}
+	}
+
+	fn mark_reporting(&mut self) {
+		if self.reports {
+			return;
+		}
+		self.reports = true;
+		for copy in &mut self.copies {
+			copy.reports = true;
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.mark_reporting();
 			}
 		}
 	}
@@ -3675,6 +3714,7 @@ impl Reader {
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
 			skips_seen: 0,
+			reports: self.reports,
 			until: Some(lowered.end.checked_sub(1)),
 			cap: None,
 			since: Some(track.now()),
@@ -16147,5 +16187,50 @@ mod test {
 		for i in 1000..1064 {
 			read(i, 16 * 1024);
 		}
+	}
+
+	/// Queued skip runs that fall outside `self.groups` after a range start rises are evicted from
+	/// `Reader::drops` (instead of lingering forever) and untold on the copies so a later range
+	/// widening back over them still reports those skips.
+	#[test]
+	#[cfg(feature = "async")]
+	fn empty_clipped_skip_runs_leave_the_drop_queue_and_reappear_on_widen() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		a.received();
+		routes.serve(a.consume());
+
+		// Queue several disjoint sparse skips below key 100 and one above.
+		for k in [0u64, 10, 20, 30, 100] {
+			let mut g = a.create_group(group::Info { start: k }).unwrap();
+			g.write_frame(ts(k), &b"x"[..]).unwrap();
+			g.finish_at(k + 5).unwrap();
+			a.skip_groups(k + 1..k + 5);
+		}
+		let mut sub = subscribe(&logical, HOUR);
+		// Poll one skip so the serving copy queues the rest into `Reader::drops`.
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((1..5, track::Hole::Skip))
+		);
+		// Raise the local range start past the queued skips below 100.
+		sub.set_range(100..);
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((101..105, track::Hole::Skip))
+		);
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+
+		// Lowering the range back over 10..35 re-reports the skips that were evicted while outside.
+		sub.set_range(10..);
+		let mut again = Vec::new();
+		while let Poll::Ready((run, track::Hole::Skip)) = sub.poll_drop(&kio::Waiter::noop()) {
+			again.push(run);
+		}
+		assert_eq!(again, [11..15, 21..25, 31..35]);
 	}
 }

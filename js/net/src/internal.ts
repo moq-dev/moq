@@ -692,7 +692,7 @@ export interface ResumeSource {
 	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
 	 */
-	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
+	tryDrop(delivered: Delivered, passing?: bigint, fold?: boolean): (Recv & { kind: "drop" }) | undefined;
 	/**
 	 * Whether the reader's bounded window has nothing left to deliver: every key of the whole window
 	 * the logical reader (`delivered`) lacks is accounted for, as {@link accounts} judges. A copy
@@ -729,6 +729,8 @@ export interface ResumeSource {
 	untell(start: bigint, end: bigint): void;
 	/** Absorb declared skips on the serving copy into the logical reader's `delivered` set. */
 	absorbSkips(delivered: Delivered, key: bigint): void;
+	/** Mark every existing and future copy as drop-reporting (and optionally wired). */
+	markReporting(wired: boolean): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1277,6 +1279,8 @@ export const hooks: {
 	 * `delivered`, returning the new drops revision.
 	 */
 	absorbSkips: (subscriber: Subscriber, delivered: Delivered, key: bigint, seen: number) => number;
+	/** Mark `subscriber` (and any route copies behind it) as drop-reporting. */
+	markReporting: (subscriber: Subscriber) => void;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1815,6 +1819,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	absorbSkips: () => {
+		throw new Error("track.ts not loaded");
+	},
+	markReporting: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

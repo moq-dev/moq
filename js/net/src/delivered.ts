@@ -85,6 +85,23 @@ export class Delivered {
 		return undefined;
 	}
 
+	/** Forget that any key in `[start, end)` was handed out, splitting any run it cuts. */
+	remove(start: bigint, end: bigint): void {
+		if (start >= end) return;
+		const last = end - 1n;
+		let first = this.#below(start);
+		if (first < 0 || this.#runs[first][1] < start) first++;
+		let stop = first;
+		while (stop < this.#runs.length && this.#runs[stop][0] <= last) stop++;
+		if (first >= stop) return;
+		const pieces: [bigint, bigint][] = [];
+		const lowest = this.#runs[first];
+		if (lowest[0] < start) pieces.push([lowest[0], start - 1n]);
+		const highest = this.#runs[stop - 1];
+		if (highest[1] > last) pieces.push([last + 1n, highest[1]]);
+		this.#runs.splice(first, stop - first, ...pieces);
+	}
+
 	/** A record of what either this or `other` handed out. */
 	union(other: Delivered): Delivered {
 		const union = new Delivered();

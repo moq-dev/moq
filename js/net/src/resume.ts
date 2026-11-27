@@ -584,6 +584,10 @@ class Reader implements ResumeSource {
 	#record: (info: track.Info, source: Source) => void;
 	/** The first frame of each group the reader reads whole from, applied to every copy; see `hooks.wholeGroups`. */
 	#whole?: (key: bigint) => number | undefined;
+	/** True once the owning logical reader polls drops or backs a wire publisher. */
+	#reports = false;
+	/** True when the owning logical reader backs a wire publisher, whose copies must never fold. */
+	#wired = false;
 
 	/** `parent` is the newest copy of the reader this one forks, if any. */
 	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void, parent?: Copy) {
@@ -813,6 +817,7 @@ class Reader implements ResumeSource {
 		source.retain();
 		this.#readWhole(copy);
 		this.#bound(copy);
+		if (this.#reports) hooks.markReporting(copy.sub);
 		this.#copies.splice(index, 0, copy);
 		this.route.copied();
 		const shell = this.#shell;
@@ -1425,7 +1430,7 @@ class Reader implements ResumeSource {
 		this.#reopen();
 		this.#backfillGaps(delivered);
 		if (dispositions) {
-			const dropped = this.#tryDrop(delivered);
+			const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
 			if (dropped) return dropped;
 		}
 		// The first group any copy holds next: the lowest for an ordered read, else the first in
@@ -1448,7 +1453,7 @@ class Reader implements ResumeSource {
 			if (!next) break;
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
-				const dropped = this.#tryDrop(delivered);
+				const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
 				if (dropped) return dropped;
 				continue;
 			}
@@ -1490,7 +1495,7 @@ class Reader implements ResumeSource {
 				}
 				const recv = this.#take(copy, ordered, dispositions, admit);
 				if (recv.kind === "drop") {
-					const dropped = this.#tryDrop(delivered);
+					const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
 					if (dropped) return dropped;
 					continue;
 				}
@@ -1534,7 +1539,7 @@ class Reader implements ResumeSource {
 		this.#letGo(delivered);
 		// A copy that ran out or was let go no longer holds back a drop.
 		if (dispositions) {
-			const dropped = this.#tryDrop(delivered);
+			const dropped = this.#tryDrop(delivered, 0n, ordered && !this.#wired);
 			if (dropped) return dropped;
 		}
 		const generation = this.route.generation;
@@ -1676,11 +1681,11 @@ class Reader implements ResumeSource {
 		return givenUp;
 	}
 
-	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {
+	tryDrop(delivered: Delivered, passing?: bigint, fold = false): (Recv & { kind: "drop" }) | undefined {
 		this.#delivered = delivered;
 		this.sync();
 		this.#learnEnd();
-		return this.#tryDrop(delivered, passing);
+		return this.#tryDrop(delivered, passing, fold);
 	}
 
 	/**
@@ -1689,12 +1694,14 @@ class Reader implements ResumeSource {
 	 * is under its bound, so a run there waits until that copy no longer feeds. Mirrors the
 	 * Rust `Reader::poll_drop`.
 	 */
-	#tryDrop(delivered: Delivered, passing = 0n): (Recv & { kind: "drop" }) | undefined {
+	#tryDrop(delivered: Delivered, passing = 0n, fold = false): (Recv & { kind: "drop" }) | undefined {
 		if (this.#closed) return undefined;
-		// Below what the reader handed out or passed, no copy's drop is reported, so each copy's
-		// record folds there, even one that hands out nothing while the reader returns gaps.
-		const at = delivered.runEnd(0n) ?? 0n;
-		for (const copy of this.#copies) hooks.fold(copy.sub, at);
+		// For a key-order reader (which never widens backward and is never wired), fold each copy's
+		// record below the handed-out/passed prefix so a copy returning only gaps stays bounded.
+		if (fold && !this.#wired) {
+			const at = delivered.runEnd(0n) ?? 0n;
+			for (const copy of this.#copies) hooks.fold(copy.sub, at);
+		}
 		const serving = this.#serving();
 		if (serving) {
 			// A received stale run queued here that a new upstream subscription superseded since is
@@ -1709,8 +1716,21 @@ class Reader implements ResumeSource {
 				this.#queueDrop(serving, dropped);
 			}
 		}
-		this.#drops = this.#drops.filter((run) => run.skip || !delivered.covers(run.start, run.end));
 		const cursor = this.#shell.cursor.peek();
+		const outside: Run[] = [];
+		this.#drops = this.#drops.filter((run) => {
+			if (delivered.covers(run.start, run.end)) return false;
+			if (run.skip) {
+				const from = max(run.start, cursor.start);
+				const end = min(run.end, cursor.end ?? run.end);
+				if (from >= end) {
+					outside.push({ start: run.start, end: run.end });
+					return false;
+				}
+			}
+			return true;
+		});
+		for (const run of outside) this.untell(run.start, run.end);
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
 			if (copy === serving || !this.#feeds(copy)) continue;
@@ -1721,8 +1741,7 @@ class Reader implements ResumeSource {
 			const from = max(run.start, cursor.start);
 			const end = min(run.end, cursor.end ?? run.end);
 			if (from >= end) continue;
-			const gaps = run.skip ? [{ start: from, end }] : delivered.gaps(from, end);
-			for (const gap of gaps) {
+			for (const gap of delivered.gaps(from, end)) {
 				const [open] =
 					gap.start < passing
 						? [{ start: gap.start, end: min(gap.end, passing) }]
@@ -2252,6 +2271,15 @@ class Reader implements ResumeSource {
 		const serving = this.#copies.at(-1);
 		if (!serving) return;
 		serving.skipsSeen = hooks.absorbSkips(serving.sub, delivered, key, serving.skipsSeen ?? 0);
+	}
+
+	markReporting(wired: boolean): void {
+		const changed = !this.#reports || (wired && !this.#wired);
+		this.#reports = true;
+		if (wired) this.#wired = true;
+		if (changed) {
+			for (const copy of this.#copies) hooks.markReporting(copy.sub);
+		}
 	}
 
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader

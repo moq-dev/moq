@@ -60,11 +60,30 @@ class Process:
         except ValueError:
             raise SystemExit(f"error: expected label=pid=log, got {spec!r}")
         self.log = Path(log)
-        self.answered = 0
+        self.offset = 0
+        self.pending = ""
+
+    def _read_lines(self):
+        """Read only complete lines appended to the log since the last poll."""
+        try:
+            with self.log.open("rb") as f:
+                f.seek(self.offset)
+                chunk = f.read()
+                self.offset += len(chunk)
+        except FileNotFoundError:
+            return ""
+        if not chunk:
+            return ""
+        text = self.pending + chunk.decode("utf-8", errors="replace")
+        if "\n" not in text:
+            self.pending = text
+            return ""
+        complete, self.pending = text.rsplit("\n", 1)
+        return complete + "\n"
 
     def wait_ready(self):
         deadline = time.monotonic() + READY_SECONDS
-        while READY not in ANSI.sub("", self.log.read_text(errors="replace")):
+        while READY not in ANSI.sub("", self._read_lines()):
             if not self.alive():
                 raise SystemExit(f"error: {self.label} (pid {self.pid}) exited before it answered SIGUSR1")
             if time.monotonic() > deadline:
@@ -91,11 +110,15 @@ class Process:
             raise SystemExit(f"error: {self.label} (pid {self.pid}) exited while being sampled")
         # VmRSS reads `1234 kB`.
         rss = int(status["VmRSS"].split()[0]) * 1024
+        # Drain any non-heap log output written since the previous sample before signalling.
+        if heap_lines(self._read_lines()):
+            raise SystemExit(f"error: {self.label} logged an unsolicited jemalloc heap report before SIGUSR1")
         os.kill(self.pid, signal.SIGUSR1)
         deadline = time.monotonic() + ANSWER_SECONDS
-        while True:
-            answers = heap_lines(self.log.read_text(errors="replace"))
-            if len(answers) > self.answered:
+        answers = []
+        while not answers:
+            answers = heap_lines(self._read_lines())
+            if answers:
                 break
             if time.monotonic() > deadline:
                 raise SystemExit(
@@ -103,10 +126,9 @@ class Process:
                     "is it built with the jemalloc feature?"
                 )
             time.sleep(0.02)
-        if len(answers) != self.answered + 1:
-            raise SystemExit(f"error: {self.label} answered {len(answers) - self.answered} heap reports to one SIGUSR1")
-        self.answered = len(answers)
-        allocated, resident = answers[-1]
+        if len(answers) != 1:
+            raise SystemExit(f"error: {self.label} answered {len(answers)} heap reports to one SIGUSR1")
+        allocated, resident = answers[0]
         return {
             "label": self.label,
             "rss": rss,

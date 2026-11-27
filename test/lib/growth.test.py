@@ -92,6 +92,21 @@ class HeapLines(unittest.TestCase):
         )
         self.assertEqual(growth.heap_lines(log), [(123, 456), (7, 8)])
 
+    def test_incremental_log_reading_handles_partial_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "relay.log"
+            log.write_text("boot\n")
+            proc = growth.Process(f"relay=1={log}")
+            self.assertEqual(proc._read_lines(), "boot\n")
+            with log.open("a") as f:
+                f.write("jemalloc heap alloc")
+            self.assertEqual(proc._read_lines(), "")
+            with log.open("a") as f:
+                f.write("ated=100 resident=200\n")
+            self.assertEqual(growth.heap_lines(proc._read_lines()), [(100, 200)])
+            # Nothing new appended: nothing re-read.
+            self.assertEqual(proc._read_lines(), "")
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())

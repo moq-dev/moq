@@ -209,6 +209,20 @@ impl Delivered {
 	pub fn runs(&self) -> usize {
 		self.runs.len()
 	}
+
+	/// Count distinct runs overlapping `groups`, stopping at `limit`.
+	pub fn count_runs_in(&self, groups: std::ops::Range<u64>, limit: usize) -> usize {
+		if groups.is_empty() || limit == 0 {
+			return 0;
+		}
+		let from = self
+			.runs
+			.range(..=groups.start)
+			.next_back()
+			.filter(|(_, last)| **last >= groups.start)
+			.map_or(groups.start, |(start, _)| *start);
+		self.runs.range(from..groups.end).take(limit).count()
+	}
 }
 
 #[cfg(test)]
@@ -334,5 +348,22 @@ mod test {
 		delivered.forget_below(13);
 		assert_eq!(runs(&delivered), [(0, 12)]);
 		assert_eq!(delivered.above_gap(), None);
+	}
+
+	#[test]
+	fn count_runs_in_counts_overlapping_runs_up_to_limit() {
+		let mut delivered = Delivered::default();
+		delivered.insert_run(10..15);
+		for key in [20, 22, 24, 26] {
+			delivered.insert(key);
+		}
+		assert_eq!(delivered.count_runs_in(0..10, 4), 0);
+		assert_eq!(delivered.count_runs_in(12..14, 4), 1);
+		assert_eq!(delivered.count_runs_in(14..21, 4), 2);
+		assert_eq!(delivered.count_runs_in(20..30, 2), 2);
+		assert_eq!(delivered.count_runs_in(20..30, 10), 4);
+		assert_eq!(delivered.count_runs_in(21..22, 4), 0);
+		assert_eq!(delivered.count_runs_in(20..20, 4), 0);
+		assert_eq!(delivered.count_runs_in(20..30, 0), 0);
 	}
 }
