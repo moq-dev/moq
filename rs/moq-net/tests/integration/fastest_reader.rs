@@ -334,8 +334,15 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		let mut group = track.append_next().unwrap();
 		let written = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 		let progress = written.clone();
+		// A group nobody reads yet is ingested unpaced, so the reader attaches after the
+		// first frame and before the rest: otherwise hop 2 holds whatever arrived before the
+		// test picked the group up, which depends on the scheduler, not on pacing.
+		let (attached, mut attach) = futures::channel::oneshot::channel::<()>();
 		let writer = kio::clock::sim::spawn(async move {
 			for index in 0..TOTAL {
+				if index == 1 {
+					(&mut attach).await.expect("the reader attaches");
+				}
 				let payload = Bytes::from(vec![(index % 251) as u8; FRAME]);
 				let info = frame::Info {
 					size: FRAME as u64,
@@ -348,6 +355,7 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 			group.finish().unwrap();
 		});
 		let mut reader = subscriber.recv_group().await.unwrap().unwrap();
+		attached.send(()).unwrap();
 		// Simulated time advances only once all drivers and the paced writer park.
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let parked = written.load(std::sync::atomic::Ordering::Relaxed);

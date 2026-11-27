@@ -10653,6 +10653,7 @@ dependencies = [
  "foldhash",
  "form_urlencoded",
  "fs-err",
+ "futures",
  "futures-channel",
  "futures-core",
  "futures-executor",
