@@ -4,10 +4,27 @@
 
 Every change that would need a semver-breaking release if it landed right
 after the next cut of `main` into `release`. The
-[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
-complete it before cutting main into release.
+[release cut](/quest/m3/release/cut.md) and its pre-cut reviews wait on this
+milestone (plus `cut.md`'s m0 blockers, not m1); complete it before cutting
+main into release.
 
 ## Plan
+
+Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
+
+- ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
+  on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
+  `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
+  `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its
+  c2rust surface; rejected: also fencing `App::source`, `Applied::cut`, and
+  `error-matches` `Ok(None)` before `0.22.0`; leaving all fences for the next
+  API cut).
+- ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
+  five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
+  and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
+  and [kio crates.io publish](/quest/m0/kio-crates-io.md) to m0 as a direct
+  `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
+  in m2).
 
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId

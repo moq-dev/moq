@@ -4,7 +4,7 @@
 
 Reduce QMux TCP and WebSocket latency, syscall overhead, mutex churn, and send-path copies on Linux and macOS, verified with before/after bufferbloat and micro-benchmark measurements, with no wire or breaking public API changes.
 
-Boundaries and non-goals: covers kernel-socket QMux transports in `rs/qmux` and `rs/moq-quic/src/connection/mux/`; does not duplicate [userspace-tcp](/quest/m4/userspace-tcp/qmux.md) or [io_uring stream transports](/quest/m9/stream-transports/README.md). `SO_MAX_PACING_RATE` stays with [rate-websocket](/quest/m3/rate-websocket.md), and kTLS/`SEND_ZC` stay with [ring](/quest/m9/stream-transports/ring.md).
+Boundaries and non-goals: covers kernel-socket QMux transports in `rs/qmux` and `rs/moq-quic/src/connection/mux/`; does not duplicate [userspace-tcp](/quest/m5/userspace-tcp/qmux.md) or [io_uring stream transports](/quest/m4/stream-transports/README.md). `SO_MAX_PACING_RATE` stays with [rate-websocket](/quest/m3/rate-websocket.md), and kTLS/`SEND_ZC` stay with [ring](/quest/m4/stream-transports/ring.md).
 
 ## Plan
 
@@ -35,4 +35,4 @@ Public API: none. Wire: none.
 
 - [Redesign the QUIC I/O boundary around io_uring](/quest/m5/quic-io-boundary.md) - zero-copy transmit boundary
 - [WebSocket enforces bitrate caps](/quest/m3/rate-websocket.md) - `SO_MAX_PACING_RATE` for bitrate-capped TCP/WS sessions
-- [io_uring stream transports](/quest/m9/stream-transports/ring.md) - future kTLS and `SEND_ZC` fanout
+- [io_uring stream transports](/quest/m4/stream-transports/ring.md) - future kTLS and `SEND_ZC` fanout

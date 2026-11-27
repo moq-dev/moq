@@ -11,11 +11,13 @@ plans need.
 
 Decided 2026-11-13 (maintainer, /quest-plan): this milestone requires the
 [release cut](/quest/m3/release/cut.md), so until it lands spare capacity goes
-to m0 to m3 and then to [m9](/quest/m9/README.md)'s lab work (rejected:
+to m0 to m3 (rejected:
 requiring m0, m1, and m2, which lifts only when they empty, and m0 rarely
 does; also gating m3, which holds the cut). The cut's PR deletes the cut
 quest, which lifts this gate for good: from then on m4 holds each cycle's
-wire cut, which it can't require.
+wire cut, which it can't require. Live internal perf, benchmark, `io_uring`,
+simulation, and video-quality quests from the deleted `m9` lab milestone joined
+here on 2026-11-26.
 
 Current rule: m4 holds the wire cut and the work behind it, and moves only
 at a wire cut, whose shift sorts its other quests by kind into m1 (additive),

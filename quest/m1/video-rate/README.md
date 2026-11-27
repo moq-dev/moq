@@ -54,4 +54,4 @@ maintainer wants it this cycle.
 ## Related
 
 - [Probe up to a target bitrate](/quest/m3/probe/README.md) - keeps the estimate near the sum of caps while capped VBR idles
-- [Video quality](/quest/m9/video-quality/README.md) - the VMAF harness that can score the quality levels this epic picks
+- [Video quality](/quest/m4/video-quality/README.md) - the VMAF harness that can score the quality levels this epic picks

@@ -55,4 +55,4 @@ Public API: `@moq/net` remains; enumerate any approved changes. Wire: none.
 
 ## Related
 
-- [Keep moq-net's model in rust2-ts's subset](/quest/m4/rs2ts-model-subset.md) - keeps the translation route measurable
+- [Keep moq-net's model in rust2-ts's subset](/quest/m5/rs2ts-model-subset.md) - keeps the translation route measurable

@@ -23,4 +23,4 @@ Public API: additive (optional ECN/L4S mode on `#[non_exhaustive]` config; `moq-
 
 ## Related
 
-- [Realtime congestion control](/quest/m4/quic-realtime.md) - SCReAMv2 and BBR3 delay-bound candidates that benefit from L4S CE fractions
+- [Realtime congestion control](/quest/m5/quic-realtime.md) - SCReAMv2 and BBR3 delay-bound candidates that benefit from L4S CE fractions
