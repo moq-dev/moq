@@ -3444,7 +3444,8 @@ export class Producer {
 		// unfinished one, a finished one stays readable, and a front that takes either continues it
 		// from another copy. Releasing it here would end that continuation at its next short close.
 		for (const sink of this.#sinks) {
-			sink.aborted = hidden;
+			// Only a sink this close ends records why: one already closed keeps its own end.
+			if (sink.closed.peek() === undefined) sink.aborted = hidden;
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();

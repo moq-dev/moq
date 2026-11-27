@@ -143,11 +143,12 @@ function copyFailed(copy: Copy): boolean {
 }
 
 // Whether the copy's route failed, even after its declared end settled, which ends its readers
-// cleanly: a group it closed short may hold more on the route replacing it. Mirrors the Rust
-// `route_lost`.
+// cleanly: a group it closed short may hold more on the route replacing it. Only a route going
+// away counts then: a subscription reset alone leaves the route serving, and nothing replaces
+// it. Mirrors the Rust `route_lost`, whose copies abort after their end only with the session.
 function routeLost(copy: Copy): boolean {
 	const aborted = hooks.trackAborted(copy.sub);
-	return copyFailed(copy) || (aborted !== undefined && routeFailed(aborted));
+	return copyFailed(copy) || (aborted !== undefined && closing(aborted));
 }
 
 // Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
@@ -2871,7 +2872,8 @@ class Recover implements GroupRecover {
 		// stages the copy to replace it, looks to the route replacing it. Mirrors the Rust
 		// `Recover::wants`.
 		if (cause.kind === "stalled" && copyFailed(copy)) return true;
-		if (cause.kind === "closed" && (routeLost(copy) || route.staged)) return true;
+		// A refusal of the replacement ends that wait: the close stands.
+		if (cause.kind === "closed" && (routeLost(copy) || route.staged) && !route.refusal) return true;
 		if (route.concluded) return true;
 		if (route.generation !== this.#generation) {
 			// A route that returned serves the copy being read again, which a stalled group reuses.

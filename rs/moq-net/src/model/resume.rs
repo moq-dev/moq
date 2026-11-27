@@ -746,7 +746,9 @@ fn copy_failed(copy: &track::Consumer) -> bool {
 }
 
 /// Whether the copy's route failed, even after its declared end settled, which ends its readers
-/// cleanly: a group it closed short may hold more on the route replacing it.
+/// cleanly: a group it closed short may hold more on the route replacing it. A received copy
+/// aborts after its end only with its session (`lite::subscriber`'s `SubscriptionCleanup`), so
+/// a route that serves on never leaves the group waiting. Mirrors the JS `routeLost`.
 fn route_lost(copy: &track::Consumer) -> bool {
 	copy_failed(copy) || copy.aborted().is_some_and(|err| err.retryable())
 }
@@ -6258,6 +6260,39 @@ mod test {
 				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
 			}
 		}
+	}
+
+	/// A copy whose end settled aborts cleanly for its readers, but its session ending still
+	/// says its route failed: a group it closed short reads on from the route replacing it.
+	/// Mirrors the JS `a short group after its settled copy aborts`.
+	#[test]
+	fn a_short_group_waits_for_a_replacement_after_its_settled_copy_fails() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, HOUR);
+		let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+		short.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		let finished = a.finish().unwrap();
+		short.finish().unwrap();
+		finished.abort(SessionError::Internal.into()).unwrap();
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"waits for the route replacing it"
+		);
+
+		let b = copy();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		for (ms, frame) in [(0, b"a"), (1, b"b")] {
+			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		whole.finish_at(2).unwrap();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
 	}
 
 	/// A replacement that holds none of a short group is asked for the rest, which continues
