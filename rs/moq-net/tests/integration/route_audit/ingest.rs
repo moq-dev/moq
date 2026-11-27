@@ -1,4 +1,4 @@
-//! A publisher on two relays: redundant ingest under one Instance, an unsynchronized pair
+//! A publisher on two relays: redundant ingest under one Identity, an unsynchronized pair
 //! under two, and a GOAWAY handing a publisher to another relay.
 //!
 //! Each runs on a ring of six relays with a reader on every relay, the publisher's two
@@ -10,7 +10,7 @@ use crate::path_routes::{cut, land, lite07, quiesce};
 use std::time::Duration;
 
 use crate::support::Draining;
-use moq_net::{Instance, goaway::Goaway};
+use moq_net::{Identity, goaway::Goaway};
 
 /// How an ingest session goes.
 #[derive(Clone, Copy, Debug)]
@@ -30,20 +30,20 @@ impl Loss {
 	}
 }
 
-/// How redundant ingest serves one Instance.
+/// How redundant ingest serves one Identity.
 #[derive(Clone, Copy, Debug)]
 enum Redundant {
 	/// One encoder holding a session to each relay.
 	OneEncoder,
-	/// Two synchronized encoders, one per relay, writing the same bytes under one Instance.
+	/// Two synchronized encoders, one per relay, writing the same bytes under one Identity.
 	Synchronized,
 }
 
-/// One Instance ingested on `R0` and `R3`; the ingest on `lost` goes `how`. Every reader
+/// One Identity ingested on `R0` and `R3`; the ingest on `lost` goes `how`. Every reader
 /// reads on in the broadcast it had, every group once, and no link carries a group twice.
 async fn redundant(redundant: Redundant, lost: usize, how: Loss) {
 	let mesh = ring(6).await;
-	let instance = Instance::random();
+	let identity = Identity::random();
 	let (sources, _feed) = match redundant {
 		Redundant::OneEncoder => {
 			let source = Source::new(1, None);
@@ -51,7 +51,7 @@ async fn redundant(redundant: Redundant, lost: usize, how: Loss) {
 			(vec![source], feed)
 		}
 		Redundant::Synchronized => {
-			let sources = vec![Source::new(1, Some(&instance)), Source::new(2, Some(&instance))];
+			let sources = vec![Source::new(1, Some(&identity)), Source::new(2, Some(&identity))];
 			let feed = Feed::start(sources.iter().map(|source| source.track.clone()).collect(), "P");
 			(sources, feed)
 		}
@@ -93,7 +93,7 @@ async fn synchronized_encoders_read_on_losing_either() {
 }
 
 /// Two unsynchronized encoders, `A` on `R0` and `B` on `R3`, each under its own minted
-/// Instance. `A`'s ingest goes: the readers on `A` restart onto `B` with nothing of `B`
+/// Identity. `A`'s ingest goes: the readers on `A` restart onto `B` with nothing of `B`
 /// spliced into `A`'s broadcast, and the readers already on `B` read on.
 #[kio::test]
 async fn an_unsynchronized_pair_restarts_and_splices_nothing() {

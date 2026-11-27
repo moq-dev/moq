@@ -19,7 +19,7 @@ export type DecoderConfig = Pick<
 /** The routing and decoder state whose changes require a replacement subscription. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.AudioConfig["broadcast"];
-	instance: Catalog.AudioConfig["instance"];
+	identity: Catalog.AudioConfig["identity"];
 	track: Catalog.AudioConfig["track"];
 	decoder: DecoderConfig;
 };
@@ -45,7 +45,7 @@ export function decoderConfigKey(config: Catalog.AudioConfig): string {
 export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
-		instance: config.instance,
+		identity: config.identity,
 		track: config.track,
 		decoder: decoderConfig(config),
 	};

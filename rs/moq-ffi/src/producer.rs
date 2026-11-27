@@ -215,11 +215,11 @@ enum Family {
 
 /// The track-publishing handles of one broadcast.
 ///
-/// A child that drops without finishing aborts itself, so a garbage-collected binding never
-/// leaves a track to drop without a cause, and closing the broadcast aborts every child still
-/// open. A finished track stops being served once its last producer drops, and an importer lets
-/// go of its producer when it finishes, so the broadcast keeps finished producers here instead:
-/// a subscriber arriving after the end still finds the track until the broadcast closes.
+/// A child that drops without finishing releases its track, which ends cleanly while nobody wants
+/// it, and closing the broadcast aborts every child still open. A finished track stops being served
+/// once its last producer drops, and an importer lets go of its producer when it finishes, so the
+/// broadcast keeps finished producers here instead: a subscriber arriving after the end still finds
+/// the track until the broadcast closes.
 #[derive(Clone)]
 pub(crate) struct Children {
 	family: Arc<std::sync::Mutex<Family>>,
@@ -239,6 +239,11 @@ impl Children {
 				_broadcast: broadcast,
 			})),
 		}
+	}
+
+	/// Whether both are the children of one broadcast.
+	fn same(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.family, &other.family)
 	}
 
 	/// The broadcast, while a handle keeping it open still holds it.
@@ -433,6 +438,11 @@ impl MoqBroadcastProducer {
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing. `info` sets
 	/// track properties (priority, max age, timescale); omit for defaults.
+	///
+	/// Errors with `Duplicate` while a live track holds the name, including one whose last
+	/// producer was released while read and whose request handler took its renewal. A renewal
+	/// still queued is served by this: with another `info`, its readers end with
+	/// `MalformedTrack` and the new track takes the name.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
@@ -683,6 +693,22 @@ impl MoqTrackRequest {
 	) -> Result<R, MoqError> {
 		self.inner.answer(f)
 	}
+
+	/// [`answer`](Self::answer) for a producer publishing in the broadcast `children` belong to,
+	/// refusing a request from another broadcast, whose readers would never find that catalog's
+	/// rendition.
+	pub(crate) fn answer_in<R>(
+		&self,
+		children: &Children,
+		f: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
+		if !self.children.same(children) {
+			return Err(MoqError::Codec {
+				reason: "the request belongs to another broadcast".into(),
+			});
+		}
+		self.answer(f)
+	}
 }
 
 #[uniffi::export]
@@ -711,6 +737,10 @@ impl MoqTrackRequest {
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
 	///
 	/// Once the broadcast closed, the track ends with `Unroutable` and this fails with `Closed`.
+	///
+	/// A track asked for again, because its producer was released while read, must be accepted
+	/// with the info it was published with, which its readers hold: another ends the track with
+	/// `MalformedTrack`, and the returned producer's writes fail with it.
 	///
 	/// For media use [`crate::media::MoqMediaTrackProducer::audio`] instead, which lets
 	/// the importer pick the timescale.
@@ -742,8 +772,10 @@ impl MoqTrackRequest {
 
 /// A stream track to which groups and frames can be published.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
@@ -795,8 +827,9 @@ impl Child for MoqTrackProducer {
 impl Drop for MoqTrackProducer {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
-		// A finished track lives on in its broadcast, and may still take groups below its end.
-		std::mem::take(self.phase.get_mut().unwrap()).abort(moq_net::Error::Dropped);
+		// Released, not aborted, so an on-demand track ends without failing a reader that joined
+		// since. A finished track lives on in its broadcast, and may still take groups below its end.
+		drop(std::mem::take(self.phase.get_mut().unwrap()));
 	}
 }
 
@@ -962,33 +995,6 @@ impl MoqTrackProducer {
 			TrackPhase::Closed => return Err(MoqError::Closed),
 		}
 		Ok(())
-	}
-
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing or [`abort`](Self::abort)ing it instead fails a reader that
-	/// joined in between. Returns true once the track is closed, including when it already
-	/// was, and this handle's later calls fail with `Closed`. Returns false, leaving the track
-	/// unchanged, when a reader wants it again, so keep serving and wait for the next null
-	/// on a fresh `demand()`: one that already returned null misses a reader that came and
-	/// went, and waits on.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut phase = self.phase.lock().unwrap();
-		let err = moq_net::Error::App(error_code);
-		*phase = match std::mem::take(&mut *phase) {
-			TrackPhase::Open { raw, family } => match raw.abort_unwanted(err) {
-				Ok(()) => return Ok(true),
-				Err(raw) => TrackPhase::Open { raw, family },
-			},
-			TrackPhase::Finished(raw) => match raw.abort_unwanted(err) {
-				Ok(()) => return Ok(true),
-				Err(raw) => TrackPhase::Finished(raw),
-			},
-			TrackPhase::Closed => return Err(MoqError::Closed),
-		};
-		Ok(false)
 	}
 
 	/// End the track at the live edge.

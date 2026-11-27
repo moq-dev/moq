@@ -3,7 +3,7 @@
 //!
 //! ffmpeg encodes a ladder whose renditions disagree on keyframes: `video0` has a 2s GOP with
 //! B-frames, `video1` a 3s one that overruns the declared 2s join interval and changes resolution
-//! halfway (a reconfigure, so a new rendition instance), and AAC audio packs into the grid. Every
+//! halfway (a reconfigure, so a new rendition identity), and AAC audio packs into the grid. Every
 //! rendition numbers its segments on the one grid while cutting at its own keyframes. The
 //! transport stream is imported and served across a moq-net session while every playlist and the
 //! manifest are polled. Each segment is fetched while listed, until a short window evicts it, and
@@ -88,7 +88,7 @@ async fn segments_match_their_manifests() {
 	for (i, chunk) in chunks.enumerate() {
 		import.decode(chunk).expect("decode");
 		if i == CHUNKS / 3 {
-			// What a publisher's estimator writes back: the rendition keeps its instance and its URLs.
+			// What a publisher's estimator writes back: the rendition keeps its identity and its URLs.
 			// A published jitter only ever rises, so the edit raises it and never lowers it.
 			let mut catalog = catalog.modify(catalog.next_timestamp()).expect("catalog open");
 			for config in catalog.video.renditions.values_mut() {
@@ -128,7 +128,7 @@ async fn settle() {
 async fn encode(dir: &Path) -> Vec<u8> {
 	// video1 in two halves, each opening with its own parameter sets, so the stream reconfigures.
 	// One level for both keeps the codec string, so the rendition keeps its name and the export
-	// replaces its instance rather than adding a rendition.
+	// replaces its identity rather than adding a rendition.
 	let mut halves = Vec::new();
 	for (start, size) in [(0, "320x180"), (RECONFIGURE, "480x270")] {
 		let path = dir.join(format!("video1.{start}.h264"));
@@ -213,7 +213,7 @@ async fn ffmpeg(args: &[&str]) {
 	);
 }
 
-/// Segment cursors over every rendition instance, recording each segment's bytes by rendition
+/// Segment cursors over every rendition identity, recording each segment's bytes by rendition
 /// name and number.
 struct Recorder {
 	recorded: Arc<Mutex<Recorded>>,
@@ -318,7 +318,7 @@ impl Recorder {
 /// What the segment cursors read.
 #[derive(Default)]
 struct Recorded {
-	/// Each rendition's segments by number, across its instances.
+	/// Each rendition's segments by number, across its identities.
 	segments: BTreeMap<String, BTreeMap<u64, Bytes>>,
 	/// Cursors that failed or read something unexpected.
 	failures: Vec<String>,
@@ -578,9 +578,9 @@ impl Seen {
 		newest
 	}
 
-	/// The segments of `name` the DASH manifest may never list: the trailing ones of an instance a
+	/// The segments of `name` the DASH manifest may never list: the trailing ones of an identity a
 	/// reconfigure retired, after the last of its segments a timeline did list. The manifest lists
-	/// only the current instance, and a retired one keeps listing what it had read before the
+	/// only the current identity, and a retired one keeps listing what it had read before the
 	/// reconfigure reached the export (/quest/m3/dash-reconfigure.md).
 	fn retired(&self, name: &str) -> BTreeSet<u64> {
 		let timed: Vec<&Bytes> = self
@@ -739,7 +739,7 @@ impl Seen {
 				.filter_map(|segment| self.bodies.get(&segment.uri))
 				.collect();
 			let recording = recorded.segments.get(name).cloned().unwrap_or_default();
-			// Except that the manifest lists only the current instance, so the last segment of one
+			// Except that the manifest lists only the current identity, so the last segment of one
 			// a reconfigure retires may never be listed (/quest/m3/dash-reconfigure.md).
 			let retired = self.retired(name);
 			let missing: Vec<u64> = recording

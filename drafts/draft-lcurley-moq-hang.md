@@ -133,7 +133,7 @@ type Catalog = {
   "include": Record<string, {
     "version": number | undefined,
     "broadcast": string,
-    "instance": string | undefined,
+    "identity": string | undefined,
   }> | undefined,
   // ... any custom fields ...
 }
@@ -170,7 +170,7 @@ A change raises a version only when a consumer that ignored it would misread the
 This draft writes no root `version`, and needs an entry `version` of 4 only for a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead.
 While a moq-hang-03 consumer matters, a publisher keeps each rendition's `track` equal to its ID, since `version` cannot hide an entry from it.
 
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `sync` ({{sync}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `preference` leaves an older consumer choosing among every rendition it can decode; `instance` ({{field-instance}}) leaves it reading whichever stream it resolves; video `reorder` leaves it inferring decode times from timestamps; video `color`, `projection`, `stereo`, and `interlaced` and audio `layout` leave it presenting the decoded picture or channels unadjusted; `jitter`, `delay`, audio `warmup` ({{field-warmup}}), and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `sync` ({{sync}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `preference` leaves an older consumer choosing among every rendition it can decode; `identity` ({{field-identity}}) leaves it reading whichever stream it resolves; video `reorder` leaves it inferring decode times from timestamps; video `color`, `projection`, `stereo`, and `interlaced` and audio `layout` leave it presenting the decoded picture or channels unadjusted; `jitter`, `delay`, audio `warmup` ({{field-warmup}}), and the data track estimates are hints.
 
 ## Sync {#sync}
 The catalog's root `sync` field holds the broadcast's timeline: the clock every track's timestamps share, and how often a viewer can join its audio and video.
@@ -212,7 +212,7 @@ A zero `interval` is out of range.
 ## Includes {#include}
 The optional root `include` map names whole broadcasts, such as transcoded renditions of the source, whose own catalogs describe their renditions.
 Each key is an include ID.
-Each entry MUST contain a string `broadcast`, resolved against the catalog's broadcast as in {{field-broadcast}}, and MAY contain an `instance` as in {{field-instance}}.
+Each entry MUST contain a string `broadcast`, resolved against the catalog's broadcast as in {{field-broadcast}}, and MAY contain an `identity` as in {{field-identity}}.
 A consumer MUST reject a catalog with a malformed entry or a reference that escapes above the root.
 
 An include MUST share the listing catalog's PTS timeline and root settings, including its `sync.clock` and `sync.interval` ({{sync}}).
@@ -222,8 +222,8 @@ Listing an entry MUST NOT subscribe to the include: a consumer opens its catalog
 An HLS master selects every include it lists, reading their catalogs to describe their renditions, but MUST NOT subscribe to their media until requested by a player.
 It segments an include's renditions on the listing catalog's `sync.interval` ({{sync-interval}}), whatever the include's own catalog declares.
 A publisher producing media on demand MUST answer its catalog without starting media production.
-A selected include resolves like a rendition's reference, under the same rules for `instance` and restarts ({{field-instance}}).
-An include produced on demand has no stream until it resolves, so a publisher omits its `instance` until then.
+A selected include resolves like a rendition's reference, under the same rules for `identity` and restarts ({{field-identity}}).
+An include produced on demand has no stream until it resolves, so a publisher omits its `identity` until then.
 
 An include's rendition IDs belong to its own catalog and MUST NOT replace IDs in the listing catalog, so the same ID MAY name an include, a rendition in the listing catalog, and a rendition in the include.
 An unavailable include does not invalidate the listing catalog.
@@ -236,7 +236,7 @@ A publisher MUST NOT change them for a track once a catalog lists it.
 
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
 The picture size MAY change at any keyframe, which a `description` carrying parameter sets rules out, and `codec` names a profile and level that covers every picture the track carries.
-A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Instance {{moql}}.
+A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Identity {{moql}}.
 A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID; a moq-hang-03 consumer subscribes to the ID instead and reads the old track, so a publisher it still serves renames the ID too.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
@@ -605,7 +605,7 @@ type JsonSchema = {
   "mode": Mode,
   "schema": string | undefined,
   "broadcast": string | undefined,
-  "instance": string | undefined,
+  "identity": string | undefined,
   "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
@@ -623,7 +623,7 @@ type BinarySchema = {
   "mode": Mode,
   "mime": string | undefined,
   "broadcast": string | undefined,
-  "instance": string | undefined,
+  "identity": string | undefined,
   "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
@@ -669,7 +669,7 @@ That is the intended behaviour, since a partial log presented as a whole one is 
 A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
 
 ### broadcast and track {#data-shared}
-The `broadcast`, `instance`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-instance}}, {{field-track}}).
+The `broadcast`, `identity`, and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-identity}}, {{field-track}}).
 
 ### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second, an integer from 0 to 2^53 - 1.
@@ -694,7 +694,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 type CommonExtensions = {
   "version": number | undefined,
   "broadcast": string | undefined,
-  "instance": string | undefined,
+  "identity": string | undefined,
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
@@ -728,26 +728,26 @@ An absent MSF `namespace` inherits the catalog's broadcast.
 Since each endpoint sees paths under its own connection root, a `namespace` equal to the catalog broadcast's path, or matching it on whole trailing segments, also names the catalog's broadcast; a gateway MUST NOT emit a different broadcast's `namespace` that matches so.
 A gateway MUST preserve the namespace and track-name pair or refuse the rendition; it MUST NOT substitute the catalog's broadcast for an unrepresentable reference.
 
-### instance {#field-instance}
-The optional `instance` field names the stream of the broadcast a rendition references ({{field-broadcast}}), as the text of its Instance {{moql}}.
+### identity {#field-identity}
+The optional `identity` field names the stream of the broadcast a rendition references ({{field-broadcast}}), as the text of its Identity {{moql}}.
 Without `broadcast`, it names the stream of the catalog's own broadcast.
-A consumer MUST reject a catalog containing an empty `instance`.
+A consumer MUST reject a catalog containing an empty `identity`, or one longer than 256 UTF-8 bytes, the ceiling {{moql}} puts on an Identity.
 
-A consumer reads each path a catalog instance references from the first broadcast it resolves there, so the catalog and its renditions never resolve one path independently across a replacement.
-An absent `instance` accepts that first broadcast, whichever stream it is.
-A consumer that follows a referenced broadcast's announcements MAY move a rendition without `instance` onto a restarted stream.
+A consumer reads each path a catalog identity references from the first broadcast it resolves there, so the catalog and its renditions never resolve one path independently across a replacement.
+An absent `identity` accepts that first broadcast, whichever stream it is.
+A consumer that follows a referenced broadcast's announcements MAY move a rendition without `identity` onto a restarted stream.
 
-When `instance` is present, the consumer MUST read the rendition only from a broadcast of that Instance.
+When `identity` is present, the consumer MUST read the rendition only from a broadcast of that Identity.
 It MUST fail the rendition rather than fall back to another stream, including one that replaced it before or after resolution, and MUST NOT follow a restart onto another stream for it.
-A later catalog update naming another Instance for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Instance fail instead.
-A new catalog instance resolves its references afresh.
+A later catalog update naming another Identity for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Identity fail instead.
+A new catalog identity resolves its references afresh.
 
-A route that crossed an older moq-lite version or MoQ Transport carries an Instance its receiver minted {{moql}}, which names the announcement rather than the publisher's stream, so there `instance` is best effort: the consumer reads the broadcast it resolved.
-A consumer MUST NOT treat a catalog's `instance` as evidence that a subscription may resume across routes.
+A route that crossed an older moq-lite version or MoQ Transport carries an Identity its receiver minted {{moql}}, which names the announcement rather than the publisher's stream, so there `identity` is best effort: the consumer reads the broadcast it resolved.
+A consumer MUST NOT treat a catalog's `identity` as evidence that a subscription may resume across routes.
 A consumer that predates the field ignores it and does not gain its guarantee.
 
-A publisher SHOULD set `instance` only when it knows the stream it references, and MUST omit it for a broadcast produced on demand, which has no stream until a worker accepts the request.
-MSF {{moqmsf}} has no field for a stream instance, so a gateway converting to MSF drops `instance` and SHOULD report that it did; its readers accept the first stream they resolve.
+A publisher SHOULD set `identity` only when it knows the stream it references, and MUST omit it for a broadcast produced on demand, which has no stream until a worker accepts the request.
+MSF {{moqmsf}} has no field for a stream identity, so a gateway converting to MSF drops `identity` and SHOULD report that it did; its readers accept the first stream they resolve.
 
 ### track {#field-track}
 A rendition's key in its map is its ID, and by default also the name of its track.
@@ -1061,13 +1061,13 @@ This document has no IANA actions.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Removed the MPEG-TS Service Information section: {{moqmpegts}} defines the `mpegts` root section.
 - Removed the Discovery section.
-- Added the optional root `include` map ({{include}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, sharing the listing catalog's timeline and `sync`, opened only on selection, whose rendition IDs stay their own. An HLS master selects the includes it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `sync.interval`; an on-demand publisher answers its catalog without starting media production.
+- Added the optional root `include` map ({{include}}): whole broadcasts named by a relative `broadcast` and an optional `identity`, sharing the listing catalog's timeline and `sync`, opened only on selection, whose rendition IDs stay their own. An HLS master selects the includes it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `sync.interval`; an on-demand publisher answers its catalog without starting media production.
 - Added optional `stats` and `echo` catalog sections, publisher and viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
-- Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `instance` fails a rendition that resolves another stream, and is best effort against an Instance a receiver minted.
+- Added an optional `identity` beside every rendition and data track `broadcast` reference ({{field-identity}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog identity; a present `identity` fails a rendition that resolves another stream, and is best effort against an Identity a receiver minted.
 - A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
-- Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, interlacing, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new stream Instance.
+- Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, interlacing, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new stream Identity.
 - A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
 - Defined the rendition `bitrate` ({{field-bitrate}}): the ceiling of the encoder's rate-control target, which a consumer prices the rendition at.
 - Defined `jitter` from media timestamps alone, the reorder delay and batch spans a publisher writes, replacing the flush delay and its frame-duration examples.

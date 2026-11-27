@@ -1,14 +1,14 @@
 /**
  * One publisher instance's generation epoch, the lowercase hyphenated text of a UUIDv7. The
- * instance announces it as its route's instance, so a subscriber reads it back from the
- * broadcast it resolved ({@link of}). A wire that carries no instance hands the subscriber one
+ * instance announces it as its route's identity, so a subscriber reads it back from the
+ * broadcast it resolved ({@link of}). A wire that carries no identity hands the subscriber one
  * its session minted, which is no epoch: the application supplies the epoch over its own
  * authenticated channel then. Mirrors `moq_e2ee::Epoch`.
  *
  * @module
  */
 
-import { type Broadcast, Instance } from "@moq/net";
+import { type Broadcast, Identity } from "@moq/net";
 import { v7 } from "uuid";
 
 /** A validated UUIDv7, ordered newest last by ordinary string comparison. */
@@ -28,18 +28,18 @@ export function mint(): Valid {
 	return parse(v7());
 }
 
-/** The route instance that announces `epoch`. */
-export function instance(epoch: Valid): Instance.Valid {
-	return epoch as string as Instance.Valid;
+/** The route identity that announces `epoch`. */
+export function identity(epoch: Valid): Identity.Valid {
+	return epoch as string as Identity.Valid;
 }
 
-/** The epoch a resolved broadcast's route announced, if its instance is one. */
+/** The epoch a resolved broadcast's route announced, if its identity is one. */
 export function of(broadcast: Broadcast.Consumer): Valid | undefined {
-	const instance = broadcast.instance;
-	// One a session minted for a wire without instances names no epoch.
-	if (instance === undefined || Instance.isMinted(instance)) return undefined;
+	const identity = broadcast.identity;
+	// One a session minted for a wire without identities names no epoch.
+	if (identity === undefined || Identity.isMinted(identity)) return undefined;
 	try {
-		return parse(instance);
+		return parse(identity);
 	} catch {
 		return undefined;
 	}

@@ -38,12 +38,12 @@ fn include(c: &mut Criterion) {
 				let mut first = None;
 				for index in 0..count {
 					let id = format!("c{index}");
-					let instance = moq_net::Instance::random();
-					first.get_or_insert(instance.clone());
+					let identity = moq_net::Identity::random();
+					first.get_or_insert(identity.clone());
 					let route = origin
 						.route(
 							format!("room/{id}"),
-							moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+							moq_net::origin::RouteOptions::hidden().with_identity(identity, 0),
 						)
 						.unwrap();
 					let mut catalog = Catalog::default();
@@ -62,11 +62,11 @@ fn include(c: &mut Criterion) {
 						Include::new(moq_net::path::Relative::new(&format!("./{id}")).unwrap()),
 					);
 				}
-				let parent = moq_net::Instance::random();
+				let parent = moq_net::Identity::random();
 				let route = origin
 					.route(
 						"room/live",
-						moq_net::origin::RouteOptions::hidden().with_instance(parent.clone(), 0),
+						moq_net::origin::RouteOptions::hidden().with_identity(parent.clone(), 0),
 					)
 					.unwrap();
 				catalogs.push(publish_catalog(route.broadcast(), &root));

@@ -31,12 +31,12 @@ captions on, or a transcoder's extra renditions.
 ## Failover and restarts
 
 A broadcast can be announced over several connections. Seamless failover
-between them needs a [publisher instance](/concept/moq-lite#publisher-instances)
+between them needs a [publisher identity](/concept/moq-lite#publisher-identities)
 carried on every hop (moq-lite 07, opt-in), which names the stream behind a
 broadcast: replicas sharing one fail over mid-group, and a restart is a new
-instance that viewers switch to instead of stalling on the old group numbers.
+identity that viewers switch to instead of stalling on the old group numbers.
 The RTMP, SRT, and WHIP ingests mint one per connection. Over an older wire the
-receiving relay mints an instance per announcement, so failover onto such a
+receiving relay mints an identity per announcement, so failover onto such a
 route is a restart.
 
 ## One protocol both ways

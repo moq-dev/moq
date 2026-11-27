@@ -48,7 +48,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			initial,
 @@ -2419,7 +2421,8 @@ struct SourceServe {
  	path: Path,
- 	instance: Option<crate::Instance>,
+ 	identity: Option<crate::Identity>,
  	node: Option<crate::route::NodeId>,
 -	source: crate::model::broadcast::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
@@ -58,7 +58,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	// A dedicated close-watch handle, since each pending operation needs its own.
 @@ -2587,7 +2590,7 @@ impl SourceServe {
  			path: minted.path,
- 			instance: minted.instance,
+ 			identity: minted.identity,
  			node: minted.node,
 -			source: minted.source,
 +			source: std::mem::ManuallyDrop::new(minted.source),
@@ -73,7 +73,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 +						source: Some((**self.source).clone()),
  						subscriber: self.subscriber.clone(),
  						path: self.path.clone(),
- 						instance: self.instance.clone(),
+ 						identity: self.identity.clone(),
 @@ -10836,11 +10839,7 @@ impl TrackServe {
  	/// still open as the track's verdict: a session that failed its copies before closing their
  	/// sources would end tracks its relay could resume on the next route.

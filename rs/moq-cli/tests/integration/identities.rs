@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use moq_mux::catalog::Stream;
-use moq_net::{Instance, Timestamp, origin, track};
+use moq_net::{Identity, Timestamp, origin, track};
 
 const LITE_07: &str = "moq-lite-07-wip";
 
@@ -74,8 +74,8 @@ struct Published {
 	media: track::Producer,
 }
 
-fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Published {
-	let options = || origin::RouteOptions::default().with_instance(instance.clone(), 0);
+fn publish(origin: &origin::Producer, identity: &Identity, tag: &str) -> Published {
+	let options = || origin::RouteOptions::default().with_identity(identity.clone(), 0);
 	let broadcast = origin.route("live/catalog.hang", options()).unwrap();
 	let sibling = origin.route("live/media", options()).unwrap();
 	// Media's max age, so its superseded groups stay fetchable.
@@ -95,7 +95,7 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 			|catalog| {
 				let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 				audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-				audio.instance = Some(instance.clone());
+				audio.identity = Some(identity.clone());
 				catalog.audio.renditions.insert("audio".into(), audio);
 			},
 			catalog.next_timestamp(),
@@ -109,7 +109,7 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	}
 }
 
-/// Ignore same-instance metadata updates, but keep the actual replacement representation.
+/// Ignore same-identity metadata updates, but keep the actual replacement representation.
 async fn changed(follow: &mut origin::Routes) -> bool {
 	loop {
 		match follow.next().await.unwrap() {
@@ -141,7 +141,7 @@ async fn changed(follow: &mut origin::Routes) -> bool {
 
 async fn replacement(version: &str) {
 	let relay = relay().await;
-	let (a, b) = (Instance::random(), Instance::random());
+	let (a, b) = (Identity::random(), Identity::random());
 	let first_origin = moq_tokio::origin::spawn();
 	let mut first = publish(&first_origin, &a, "A");
 	let first_client = client(LITE_07).with_publisher(&first_origin);
@@ -187,13 +187,13 @@ async fn replacement(version: &str) {
 	let snapshot = catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
 	let pinned = old
-		.resolve(reference.broadcast.as_ref(), reference.instance.as_ref())
+		.resolve(reference.broadcast.as_ref(), reference.identity.as_ref())
 		.await
 		.unwrap();
 	let cold = pinned.track("audio").unwrap();
 	let mut subscription = cold.subscribe(None).await.unwrap();
 	assert_eq!(read(&mut subscription).await, "A:0");
-	// A lazy handle made before the first lookup has no cached instance to fall
+	// A lazy handle made before the first lookup has no cached identity to fall
 	// back to after retirement. This second handle observes the indexed track.
 	let media = pinned.track("audio").unwrap();
 	let mut cached = media
@@ -225,7 +225,7 @@ async fn replacement(version: &str) {
 	assert_eq!(
 		catalog_restart,
 		version == LITE_07,
-		"only lite-07 carries the instance, which restarts in place"
+		"only lite-07 carries the identity, which restarts in place"
 	);
 	assert_eq!(media_restart, catalog_restart);
 
@@ -279,9 +279,9 @@ async fn replacement(version: &str) {
 		.unwrap();
 	let snapshot = fresh_catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
-	assert_eq!(reference.instance.as_ref(), Some(&b));
+	assert_eq!(reference.identity.as_ref(), Some(&b));
 	let new = fresh
-		.resolve(reference.broadcast.as_ref(), reference.instance.as_ref())
+		.resolve(reference.broadcast.as_ref(), reference.identity.as_ref())
 		.await
 		.unwrap();
 	assert!(!new.is_clone(&pinned));
@@ -319,7 +319,7 @@ versions! {
 }
 
 /// A worker claiming `live`, answering each request with a job's exact route: the catalog,
-/// which names `./media` under the job's instance, and the media it references.
+/// which names `./media` under the job's identity, and the media it references.
 struct Worker {
 	claim: origin::Claim,
 	jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
@@ -342,8 +342,8 @@ impl Worker {
 			while let Some(request) = handler.requested().await {
 				let path = request.path().to_string();
 				let route = request.route(origin::RouteOptions::hidden()).unwrap();
-				// Hidden, the job reports the instance it will announce under: the claim's.
-				let instance = route.instance();
+				// Hidden, the job reports the identity it will announce under: the claim's.
+				let identity = route.identity();
 				let (catalog, media) = match path.as_str() {
 					"live/catalog.hang" => {
 						let mut catalog =
@@ -355,7 +355,7 @@ impl Worker {
 									let mut audio =
 										hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 									audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-									audio.instance = Some(instance);
+									audio.identity = Some(identity);
 									catalog.audio.renditions.insert("audio".into(), audio);
 								},
 								catalog.next_timestamp(),
@@ -394,14 +394,14 @@ impl Worker {
 
 /// A player's first catalog read through a worker's claim continues on the job's exact route
 /// over a real lite-07 relay, and the catalog's pinned media resolves through the claim to the
-/// media job under the same instance. Once that media job ends the claim moves on, so the
+/// media job under the same identity. Once that media job ends the claim moves on, so the
 /// held pin is refused rather than answered by a restarted job.
 #[tokio::test]
 async fn a_player_reads_through_a_claim_on_its_first_request() {
 	let relay = relay().await;
 	let worker_origin = moq_tokio::origin::spawn();
 	let worker = Worker::new(&worker_origin);
-	let lent = worker.claim.instance();
+	let lent = worker.claim.identity();
 	let _worker_connection = client(LITE_07)
 		.with_publisher(&worker_origin)
 		.connect(relay.url.clone())
@@ -434,12 +434,12 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 	let snapshot = catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
 	assert_eq!(
-		reference.instance.as_ref(),
+		reference.identity.as_ref(),
 		Some(&lent),
-		"the job serves the claim's instance"
+		"the job serves the claim's identity"
 	);
 	let pinned = source
-		.resolve(reference.broadcast.as_ref(), reference.instance.as_ref())
+		.resolve(reference.broadcast.as_ref(), reference.identity.as_ref())
 		.await
 		.unwrap();
 	let mut subscription = pinned.track("audio").unwrap().subscribe(None).await.unwrap();
@@ -454,7 +454,7 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 	};
 	media.route.broadcast().close();
 	drop(media);
-	assert_ne!(worker.claim.instance(), lent);
+	assert_ne!(worker.claim.identity(), lent);
 	loop {
 		match routes.next().await.unwrap() {
 			origin::RouteEvent {

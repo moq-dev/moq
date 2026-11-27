@@ -193,7 +193,7 @@ class SelectTest(unittest.TestCase):
         for path in (
             "rs/libmoq/src/lib.rs",
             "rs/libmoq/build.rs",
-            "rs/libmoq/c-tests/abort-unwanted.c",
+            "rs/libmoq/c-tests/on-demand-free.c",
             "sh/rs/c-tests.sh",
             "doc/lib/c/index.md",
             "doc/lib/samples.sh",

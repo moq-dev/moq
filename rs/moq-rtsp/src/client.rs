@@ -75,7 +75,7 @@ pub enum End {
 	/// The session's RTP timeline jumped, so its tracks finished before the jump.
 	///
 	/// Its timestamps no longer continue the broadcast's, so the caller finishes the
-	/// broadcast and restarts every session sharing it under a fresh instance.
+	/// broadcast and restarts every session sharing it under a fresh identity.
 	Jumped,
 }
 
@@ -1297,7 +1297,7 @@ mod tests {
 
 	/// Two sessions (a camera's SD and HD URLs) publish renditions of one broadcast. When one
 	/// session's timeline jumps, the caller ends the broadcast and restarts both under a fresh
-	/// instance, each new broadcast with its own catalog.
+	/// identity, each new broadcast with its own catalog.
 	#[tokio::test]
 	async fn two_sessions_restart_together_on_a_jump() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -1320,7 +1320,7 @@ mod tests {
 					let mut catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast.clone(), Default::default()).unwrap();
 					published_tx
-						.send((route.instance(), broadcast.clone(), catalog.clone()))
+						.send((route.identity(), broadcast.clone(), catalog.clone()))
 						.unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
@@ -1336,10 +1336,10 @@ mod tests {
 			}
 		});
 
-		let mut instances = Vec::new();
+		let mut identities = Vec::new();
 		for run in 0..2 {
-			let (instance, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
-			instances.push(instance);
+			let (identity, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
+			identities.push(identity);
 			let mut sd_session = within("SD PLAY", sd.accept(500)).await;
 			let mut hd_session = within("HD PLAY", hd.accept(9000)).await;
 			sd_session.video(0, 500, &[fake::H264_IDR]).await;
@@ -1366,7 +1366,7 @@ mod tests {
 		let ends = within("the caller", caller).await.unwrap();
 		assert_eq!(ends[0], End::Jumped);
 		assert_eq!(ends[1], End::Closed);
-		assert_ne!(instances[1], instances[0], "the restart mints a fresh instance");
+		assert_ne!(identities[1], identities[0], "the restart mints a fresh identity");
 	}
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.

@@ -20,7 +20,7 @@ import fc from "fast-check";
 import type { Grant } from "../auth.ts";
 import { ProtocolViolation } from "../error.ts";
 import { WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import * as Path from "../path.ts";
 import type { Advertised, Advertisements } from "../wire.ts";
 import type { AnnounceBroadcast } from "./announce.ts";
@@ -137,16 +137,16 @@ class Watched<T> {
 	}
 }
 
-/** The claims the peer holds, by Announce ID: each its path and instance. */
+/** The claims the peer holds, by Announce ID: each its path and identity. */
 class Peer {
-	live = new Map<bigint, [Path.Valid, Instance.Valid]>();
+	live = new Map<bigint, [Path.Valid, Identity.Valid]>();
 	#next = 0n;
 
-	start(path: Path.Valid, instance: Instance.Valid) {
-		this.live.set(this.#next++, [path, instance]);
+	start(path: Path.Valid, identity: Identity.Valid) {
+		this.live.set(this.#next++, [path, identity]);
 	}
 
-	end(id: bigint): [Path.Valid, Instance.Valid] {
+	end(id: bigint): [Path.Valid, Identity.Valid] {
 		const held = this.live.get(id);
 		if (!held) throw new Error(`ends ${id}, which is not live`);
 		this.live.delete(id);
@@ -161,7 +161,7 @@ class Peer {
 	}
 
 	holds(): Set<string> {
-		return new Set([...this.live.values()].map(([path, instance]) => `${path} ${instance}`));
+		return new Set([...this.live.values()].map(([path, identity]) => `${path} ${identity}`));
 	}
 }
 
@@ -207,7 +207,7 @@ async function shown(
 	let synced = false;
 	const { stream: fake } = stream((msgs) => {
 		for (const msg of msgs) {
-			if (msg.status === "start") peer.start(msg.suffix, msg.instance);
+			if (msg.status === "start") peer.start(msg.suffix, msg.identity);
 			else if (msg.status === "endedId") peer.end(msg.id);
 			else if (msg.status === "synced") synced = true;
 		}
@@ -230,7 +230,7 @@ async function run(c: Case) {
 	const table = new Watched<Advertisements | undefined>(new Map());
 	const granted = new Watched<Grant | undefined>(grant(c.initial));
 	const claims = new Map<number, { scope: number; route: WireRoute }>();
-	let nextInstance = 0;
+	let nextIdentity = 0;
 	const peer = new Peer();
 	const prefixes = new Map<bigint, { path: Path.Valid; hidden: boolean }>();
 	let nextPrefix = 0n;
@@ -238,15 +238,15 @@ async function run(c: Case) {
 	// Each send's SYNCED checks, run once the send is recorded, outside the answer's call.
 	const checks: Promise<void>[] = [];
 
-	// One identity per claim, wherever it is filed, as the origin keeps it.
-	const identities = new Map<number, object>();
+	// One ref per claim, wherever it is filed, as the origin keeps it.
+	const refs = new Map<number, object>();
 	const publish = () => {
 		const out = new Map<Path.Valid, Advertised[]>();
 		for (const [index, { scope, route }] of claims) {
-			const identity = identities.get(index) ?? {};
-			identities.set(index, identity);
+			const ref = refs.get(index) ?? {};
+			refs.set(index, ref);
 			for (const [at, below] of filed(PATHS[index], SCOPES[scope])) {
-				const snap = { identity, route: below === 0n ? route : { ...route, above: below } };
+				const snap = { ref, route: below === 0n ? route : { ...route, above: below } };
 				out.set(at, [...(out.get(at) ?? []), snap]);
 			}
 		}
@@ -254,30 +254,30 @@ async function run(c: Case) {
 	};
 	const advertise = (path: number, scope: number) => {
 		if (claims.has(path)) return;
-		const instance = Instance.parse(`i${++nextInstance}`);
-		identities.delete(path);
-		claims.set(path, { scope, route: WireRoute.normalize({ instance, epoch: 0n }) });
+		const identity = Identity.parse(`i${++nextIdentity}`);
+		refs.delete(path);
+		claims.set(path, { scope, route: WireRoute.normalize({ identity, epoch: 0n }) });
 		publish();
 	};
 
 	const { stream: fake, pending } = stream((msgs) => {
-		const advertised = new Set([...claims.values()].map((snap) => snap.route.instance));
+		const advertised = new Set([...claims.values()].map((snap) => snap.route.identity));
 		for (const msg of msgs) {
 			switch (msg.status) {
 				case "start": {
-					peer.start(msg.suffix, msg.instance);
-					const claim = [...claims.values()].find(({ route }) => route.instance === msg.instance);
+					peer.start(msg.suffix, msg.identity);
+					const claim = [...claims.values()].find(({ route }) => route.identity === msg.identity);
 					const members = claim && SCOPES[claim.scope];
 					if (members && !patterns(members).matches(msg.suffix))
-						throw new Error(`${msg.suffix} (${msg.instance}) is shown beyond its scope ${members}`);
+						throw new Error(`${msg.suffix} (${msg.identity}) is shown beyond its scope ${members}`);
 					break;
 				}
 				case "change":
 					break;
 				case "endedId": {
-					const [path, instance] = peer.end(msg.id);
-					if (!msg.lost && advertised.has(instance))
-						throw new Error(`${path} (${instance}) ended as withdrawn while still advertised`);
+					const [path, identity] = peer.end(msg.id);
+					if (!msg.lost && advertised.has(identity))
+						throw new Error(`${path} (${identity}) ended as withdrawn while still advertised`);
 					break;
 				}
 				case "ok": {
@@ -405,11 +405,11 @@ test(
 // one at `a` serving `a/q/x` and `a/r/y` is filed at each, so through a handle admitting `a/q/y`
 // and `a/r/y` it serves nothing under `a/q`.
 test("a claim is shown only where its filing and the handle's scope share a path", async () => {
-	const identity = {};
-	const route = WireRoute.normalize({ instance: Instance.parse("i1"), epoch: 0n, above: 2n });
+	const ref = {};
+	const route = WireRoute.normalize({ identity: Identity.parse("i1"), epoch: 0n, above: 2n });
 	const table: Advertisements = new Map([
-		[Path.from("a/q/x"), [{ identity, route }]],
-		[Path.from("a/r/y"), [{ identity, route }]],
+		[Path.from("a/q/x"), [{ ref, route }]],
+		[Path.from("a/r/y"), [{ ref, route }]],
 	]);
 	const allowed = patterns(["a/q/y", "a/r/y"]);
 	for (const grant of [undefined, { publish: patterns([""]), subscribe: patterns([]) }]) {
@@ -422,9 +422,9 @@ test("a claim is shown only where its filing and the handle's scope share a path
 // the answer is still telling a claim change ahead of the OK, rather than checked against the
 // prefixes before the pending edit: there `a/x` would pass, nested below the pending `a`.
 test("an edit sent before the last was answered is refused", async () => {
-	const identity = {};
-	const route = (cost: bigint) => WireRoute.normalize({ instance: Instance.parse("i1"), epoch: 0n, cost });
-	const table = new Signal<Advertisements | undefined>(new Map([[Path.from("b"), [{ identity, route: route(1n) }]]]));
+	const ref = {};
+	const route = (cost: bigint) => WireRoute.normalize({ identity: Identity.parse("i1"), epoch: 0n, cost });
+	const table = new Signal<Advertisements | undefined>(new Map([[Path.from("b"), [{ ref, route: route(1n) }]]]));
 	const { stream: fake, pending } = stream(() => {}, true);
 	const subject = answer(table, new Signal<Grant | undefined>(undefined), undefined, fake);
 	const running = subject.request(false, [], [{ prefix: Path.from("b"), hidden: false }]);
@@ -436,7 +436,7 @@ test("an edit sent before the last was answered is refused", async () => {
 		expect(pending.length).toBe(0);
 
 		// A change the answer tells before the next edit's OK, held in flight.
-		table.set(new Map([[Path.from("b"), [{ identity, route: route(2n) }]]]));
+		table.set(new Map([[Path.from("b"), [{ ref, route: route(2n) }]]]));
 		void subject.request(false, [], [{ prefix: Path.from("a"), hidden: false }]);
 		await settle();
 		expect(pending.length).toBe(1);

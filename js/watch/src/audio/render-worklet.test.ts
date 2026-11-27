@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Message, State } from "./render";
 
-// Load the real processor with only the browser registration boundary replaced. Each instance
+// Load the real processor with only the browser registration boundary replaced. Each identity
 // gets its own port, and the globals are restored before any other test can use them.
 class Processor {
 	readonly sent: State[] = [];

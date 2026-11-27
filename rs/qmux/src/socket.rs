@@ -147,7 +147,7 @@ mod unix {
 		/// Take ownership of an already-duplicated descriptor.
 		///
 		/// Use this when the socket itself has been moved somewhere unreachable (a
-		/// type-erased HTTP upgrade, for instance) and only the descriptor was kept.
+		/// type-erased HTTP upgrade, for identity) and only the descriptor was kept.
 		pub fn from_fd(fd: OwnedFd) -> Self {
 			Self {
 				fd,

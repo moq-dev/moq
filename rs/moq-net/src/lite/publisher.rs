@@ -179,7 +179,7 @@ impl Shared {
 		crate::auth::Gate::new(self.auth.clone(), broadcast.clone(), crate::auth::Direction::Publish)
 	}
 
-	/// The routes a request for `instance` at `broadcast` resolves through when it names
+	/// The routes a request for `identity` at `broadcast` resolves through when it names
 	/// the node `node` that claims it: this node's own when it serves the claim itself,
 	/// else the claim it follows to `node`. `None` when nothing reaches that node or the
 	/// way would lead back to the peer. A request naming no node resolves through any
@@ -189,11 +189,11 @@ impl Shared {
 		&self,
 		origin: origin::Consumer,
 		broadcast: &crate::Path,
-		instance: Option<&crate::Instance>,
+		identity: Option<&crate::Identity>,
 		node: Option<crate::route::NodeId>,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<origin::Consumer>> {
-		let claim = origin.resolve(broadcast).zip(instance.cloned());
+		let claim = origin.resolve(broadcast).zip(identity.cloned());
 		let Some(node) = node else {
 			// The node shows a peer's claim to the sessions it reaches before the session
 			// serving it lands its route in the origin, each on its own task. A peer that
@@ -207,7 +207,7 @@ impl Shared {
 			}
 			return Poll::Ready(Some(origin));
 		};
-		// A node is named for the claim of one instance.
+		// A node is named for the claim of one identity.
 		let Some(claim) = claim else {
 			return Poll::Ready(None);
 		};
@@ -1338,8 +1338,8 @@ impl AnnounceRun {
 		Ok(())
 	}
 
-	/// Replace the peer's advertisement for `suffix` with another instance or epoch: an
-	/// end and a fresh start, so the peer mints another instance for it.
+	/// Replace the peer's advertisement for `suffix` with another identity or epoch: an
+	/// end and a fresh start, so the peer mints another identity for it.
 	fn restart(
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
@@ -1626,8 +1626,8 @@ trait Request: Sized {
 	/// keeps the one copy.
 	fn take_track(msg: &mut Self::Message) -> Cow<'static, str>;
 
-	/// The instance the request pins, if any.
-	fn instance(msg: &Self::Message) -> Option<&crate::Instance>;
+	/// The identity the request pins, if any.
+	fn identity(msg: &Self::Message) -> Option<&crate::Identity>;
 
 	/// The origin node the request names (lite-07), or 0 to let this side select, and
 	/// how many leading segments of its broadcast make up the prefix of the route it
@@ -1967,11 +1967,11 @@ impl<R: Request> RequestServe<R> {
 						let path = R::target(msg).0.clone();
 						let filtered =
 							self.shared
-								.poll_node_filter(origin, &path, R::instance(msg), R::node(msg), waiter);
+								.poll_node_filter(origin, &path, R::identity(msg), R::node(msg), waiter);
 						let Some(origin) = ready!(filtered) else {
 							return Poll::Ready(Err(Error::Unroutable));
 						};
-						*requesting = Some(origin.lookup(path, R::instance(msg)).into_inner());
+						*requesting = Some(origin.lookup(path, R::identity(msg)).into_inner());
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
 					// Any placeholder but `Decode`, so a failed start is answered on the stream.
@@ -2190,8 +2190,8 @@ impl Request for TrackInfoServe {
 		std::mem::take(&mut msg.track)
 	}
 
-	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
-		msg.instance.as_ref()
+	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
+		msg.identity.as_ref()
 	}
 
 	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
@@ -2307,8 +2307,8 @@ impl Request for TracksServe {
 		Cow::Borrowed("")
 	}
 
-	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
-		msg.instance.as_ref()
+	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
+		msg.identity.as_ref()
 	}
 
 	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
@@ -2435,8 +2435,8 @@ impl Request for SubscribeServe {
 		std::mem::take(&mut msg.track)
 	}
 
-	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
-		msg.instance.as_ref()
+	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
+		msg.identity.as_ref()
 	}
 
 	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
@@ -3134,8 +3134,8 @@ impl Request for DatagramServe {
 		std::mem::take(&mut msg.track)
 	}
 
-	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
-		msg.instance.as_ref()
+	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
+		msg.identity.as_ref()
 	}
 
 	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
@@ -3594,8 +3594,8 @@ impl Request for FetchServe {
 		std::mem::take(&mut msg.track)
 	}
 
-	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
-		msg.instance.as_ref()
+	fn identity(msg: &Self::Message) -> Option<&crate::Identity> {
+		msg.identity.as_ref()
 	}
 
 	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
@@ -4966,7 +4966,7 @@ mod announce_test {
 	}
 
 	/// A new best route the wire cannot tell apart (another session, same chain and
-	/// cost) under another instance is another source, in either direction: an end and
+	/// cost) under another identity is another source, in either direction: an end and
 	/// a fresh start.
 	#[kio::test]
 	async fn source_flip_restarts() {
@@ -13948,7 +13948,7 @@ mod tests {
 			for wait in [Wait::Broadcast, Wait::Track] {
 				for close in [Close::Fin, Close::Reset] {
 					let track = lite::Track {
-						instance: None,
+						identity: None,
 						node: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -13957,7 +13957,7 @@ mod tests {
 
 					let subscribe = lite::Subscribe {
 						order: crate::track::Order::Descending,
-						instance: None,
+						identity: None,
 						node: None,
 						id: 0,
 						broadcast: broadcast.clone(),
@@ -13974,7 +13974,7 @@ mod tests {
 
 					if version.has_fetch() {
 						let fetch = lite::Fetch {
-							instance: None,
+							identity: None,
 							node: None,
 							broadcast: broadcast.clone(),
 							track: "video".into(),
@@ -14020,7 +14020,7 @@ mod tests {
 			let mut script = Vec::new();
 			lite::Subscribe {
 				order: crate::track::Order::Descending,
-				instance: None,
+				identity: None,
 				node: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
@@ -14085,7 +14085,7 @@ mod tests {
 
 		let mut script = Vec::new();
 		lite::Track {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -14161,7 +14161,7 @@ mod tests {
 
 	fn legacy_track() -> lite::Track<'static> {
 		lite::Track {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
@@ -14171,7 +14171,7 @@ mod tests {
 	fn legacy_subscribe(priority: i8) -> lite::Subscribe<'static> {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
-			instance: None,
+			identity: None,
 			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
@@ -14364,7 +14364,7 @@ mod tests {
 
 					let mut script = Vec::new();
 					lite::Track {
-						instance: None,
+						identity: None,
 						node: None,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
@@ -14512,7 +14512,7 @@ mod tests {
 					});
 					let msg = lite::Subscribe {
 						order: crate::track::Order::Ascending,
-						instance: None,
+						identity: None,
 						node: None,
 						id: 0,
 						broadcast: crate::Path::from_static("room"),
@@ -14646,7 +14646,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
-			instance: None,
+			identity: None,
 			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
@@ -14776,7 +14776,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
-			instance: None,
+			identity: None,
 			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
@@ -15029,7 +15029,7 @@ mod tests {
 		let run = FetchServe::start(
 			&publisher.shared,
 			lite::Fetch {
-				instance: None,
+				identity: None,
 				node: None,
 				broadcast: crate::Path::new("room").unwrap(),
 				track: Default::default(),
@@ -15099,7 +15099,7 @@ mod tests {
 		});
 		let mut script = Vec::new();
 		lite::Fetch {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -15185,7 +15185,7 @@ mod tests {
 		});
 		let mut script = Vec::new();
 		lite::Fetch {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -15316,7 +15316,7 @@ mod tests {
 			broadcast.announce().unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
-				instance: None,
+				identity: None,
 				node: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
@@ -15374,7 +15374,7 @@ mod tests {
 		broadcast.announce().unwrap();
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 		};
 		let request = request.encode_bytes(version).unwrap().to_vec();
@@ -15429,7 +15429,7 @@ mod tests {
 			broadcast.announce().unwrap();
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
-				instance: None,
+				identity: None,
 				node: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
@@ -15497,7 +15497,7 @@ mod tests {
 
 		let request = lite::Subscribe {
 			order: crate::track::Order::Ascending,
-			instance: None,
+			identity: None,
 			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
@@ -15660,7 +15660,7 @@ mod tests {
 		let version = Version::Lite07;
 		let msg = lite::Subscribe {
 			order: crate::track::Order::Descending,
-			instance: None,
+			identity: None,
 			node: None,
 			id: 0,
 			broadcast: crate::Path::new(broadcast).unwrap(),
