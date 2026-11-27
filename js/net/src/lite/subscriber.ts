@@ -255,7 +255,7 @@ interface SubscribeEntry {
 	// The tick the copy recorded each live join range's answer at, by Range ID (see
 	// `hooks.answerJoin`): one with none is still unanswered.
 	joinTicks: Map<bigint, number>;
-	// The narrowest max in milliseconds each live join range was asked under before its answer, or
+	// The narrowest max in milliseconds each live join range was asked under up to its answer, or
 	// each placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups that max
 	// expired, so the answer places only readers within it.
 	joinBudgets: Map<bigint, number>;
@@ -3468,6 +3468,8 @@ export class Subscriber {
 				if (!entry.joinTicks.has(id)) {
 					const { min, max } = range.start.live;
 					const budget = Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max));
+					// Kept with it, so a retune wider after it lands still finds the answer narrower.
+					entry.joinBudgets.set(id, budget);
 					entry.joinTicks.set(id, hooks.answerJoin(entry.track, min, through(range.end), at, budget));
 				}
 				continue;
