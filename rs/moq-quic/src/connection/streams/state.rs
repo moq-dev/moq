@@ -108,9 +108,8 @@ pub(crate) struct StreamsState {
 	/// Receive streams whose reader may progress without new credit, which holds eviction off:
 	/// every such stream, and possibly some that no longer are, trimmed by the stuck pass
 	pub(super) unlooked: FxHashSet<StreamId>,
-	/// Receive streams whose reader waits for more than it leased, so a lease handed back reruns
-	/// the stuck pass that reader may be waiting on
-	pub(super) waiting: usize,
+	/// A stuck pass waited on a lease out with its reader, so handing it back reruns the pass
+	pub(super) stuck_waiting: bool,
 	/// Credit still held by evicted readers that have not stopped their streams, which holds
 	/// further eviction off
 	pub(super) evicted_held: u64,
@@ -245,7 +244,7 @@ impl StreamsState {
 			evicted: 0,
 			peak_spent: 0,
 			unlooked: FxHashSet::default(),
-			waiting: 0,
+			stuck_waiting: false,
 			evicted_held: 0,
 			#[cfg(test)]
 			scans: 0,
@@ -334,8 +333,6 @@ impl StreamsState {
 			self.waits.wake_ended();
 		}
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
-		// An arrival wakes a waiting reader, which waits again only once it looked.
-		self.waiting -= usize::from(!stopped && rs.lease.waits());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 
@@ -432,8 +429,6 @@ impl StreamsState {
 		};
 		self.waits.wake_ended();
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
-		// An arrival wakes a waiting reader, which waits again only once it looked.
-		self.waiting -= usize::from(!stopped && rs.lease.waits());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 		let credit = if stopped {
@@ -4551,33 +4546,37 @@ mod tests {
 		assert_eq!(client.local_max_data, max_data + WINDOW);
 	}
 
-	/// A pass held off by data that arrived for a waiting reader reruns when that reader leases
-	/// and hands the lease back: it may then park on something else, leaving every reader parked
-	/// on a stuck window.
+	/// Restoring a lease after peeking data (as `moq-net` does between `poll_has_more` and decoding)
+	/// must not evict an active reader just because another stream waits on a full window.
 	#[test]
-	fn restore_after_ready_wait_evicts() {
+	fn restore_mid_decode_does_not_evict_active_reader() {
 		const WINDOW: u64 = 1000;
-		let (mut client, [ready, waiting]) = stuck(WINDOW);
-		data(&mut client, ready, 0, WINDOW as usize / 2, false);
-		assert_eq!(lease(&mut client, ready), WINDOW as usize / 2);
-		assert!(matches!(wait(&mut client, ready, WINDOW as usize), Poll::Pending));
+		let (mut client, [waiting, ready]) = stuck(WINDOW);
 		data(&mut client, waiting, 0, WINDOW as usize, false);
 		assert_eq!(lease(&mut client, waiting), WINDOW as usize);
 		assert!(matches!(wait(&mut client, waiting, 2000), Poll::Pending));
 
-		// The last of the window arrives for the waiting reader, which holds eviction off.
-		data(&mut client, ready, WINDOW / 2, WINDOW as usize / 2, false);
+		// The last of the window arrives for a newer (lower-ranked) stream, holding eviction off.
+		data(&mut client, ready, 0, WINDOW as usize, false);
 		assert_eq!(client.credit_stats().evicted, 0);
 
-		// Its reader looks at everything and parks without waiting on the stream.
+		// Its reader peeks and restores the lease before decoding and releasing it.
 		let mut pending = Retransmits::default();
 		let mut stream = recv(&mut client, &mut pending, ready);
-		let held = stream.lease(0).unwrap();
+		let held = stream.lease(1).unwrap();
 		assert_eq!(held.remaining(), WINDOW as usize);
 		stream.restore(held);
 		client.check_leases();
-		assert_eq!(client.credit_stats().evicted, 1);
-		assert_eq!(wait(&mut client, waiting, 1), Poll::Ready(Err(recv::Error::Evicted)));
+		assert_eq!(client.credit_stats().evicted, 0);
+
+		// The immediate decode still finds its bytes and frees the window without evicting either.
+		let mut stream = recv(&mut client, &mut pending, ready);
+		let mut held = stream.lease(1).unwrap();
+		assert_eq!(held.remaining(), WINDOW as usize);
+		held.advance(WINDOW as usize);
+		stream.release(held);
+		client.check_leases();
+		assert_eq!(client.credit_stats().evicted, 0);
 	}
 
 	/// A plain read whose credit only pays a shrunk window's debt reruns the stuck pass, which

@@ -28,8 +28,7 @@
 (* its stream or some reader has data it has not looked at. Streams in     *)
 (* `Plain` are read with `read()` instead, returning credit as they read,  *)
 (* and the window may shrink once by `Shrink`, a debt that returned credit *)
-(* pays before the peer sees any. Under `Idle`, a reader that restores a   *)
-(* lease may park on another reader of the connection, as a demuxer does.  *)
+(* pays before the peer sees any.                                          *)
 (*                                                                         *)
 (* Each step is one poll of the code that handles one event, under the     *)
 (* connection's lock where the code takes it. A task parks until an event  *)
@@ -48,8 +47,7 @@ CONSTANTS
     Late,       \* a group's first reader may arrive after its writer started
     Leave,      \* a group's last reader may leave it
     Plain,      \* streams read with `read()`, never leased
-    Shrink,     \* how far the connection window may shrink once, or 0
-    Idle        \* a reader may park elsewhere after restoring a lease
+    Shrink      \* how far the connection window may shrink once, or 0
 
 ASSUME FrameLen % Seg = 0 /\ N >= 1 /\ Frames >= 1 /\ Seg >= 1 /\ SW >= 1 /\ W >= 1
 ASSUME Plain \subseteq 1..N /\ Shrink \in 0..(W - 1)
@@ -81,10 +79,11 @@ Order == [i \in Streams |-> N + 1 - i]
 VARIABLES
     \* moq-quic, one record per receive stream (`Recv` and its `Leased`)
     q,
-    \* moq-quic, the connection: credit returned to the peer, and what had returned when the
-    \* window shrank, or None
+    \* moq-quic, the connection: credit returned to the peer, what had returned when the window
+    \* shrank (or None), and `stuck_waiting`
     credited,
     shrink,
+    stuckWaiting,
     \* moq-net ingest, per stream: where its task is, and whether a wake is pending
     pc,         \* "new" (not accepted), "loop" (reading), "out" (a lease in hand), "write"
                 \* (the chunk not yet in the frame), "paused", or "done" (stopped)
@@ -95,11 +94,10 @@ VARIABLES
     wr,         \* units its writer wrote
     rd,         \* where the last frame its fastest reader took ends
     held,       \* whether a reader holds it: "late" (none yet), "held", or "gone"
-    idled,      \* whether its reader parked elsewhere: 0 never, 1 parked, 2 resumed
     \* history
     refused     \* some pause was refused
 
-vars == <<q, credited, shrink, pc, woken, charge, slot, wr, rd, held, idled, refused>>
+vars == <<q, credited, shrink, stuckWaiting, pc, woken, charge, slot, wr, rd, held, refused>>
 
 (***************************************************************************)
 (* A receive stream in moq-quic.                                           *)
@@ -138,9 +136,6 @@ MaxData(cr) == W + cr - (IF shrink = None THEN 0 ELSE Min(cr - shrink, Shrink))
 \* The peer has no connection credit left.
 Stuck(qq, cr) == MaxData(cr) <= DataRecvd(qq)
 
-\* Some reader waits for more than it leased (`StreamsState::waiting`).
-Waiting(qq) == \E s \in Streams : qq[s].want
-
 \* `unlooked`: a reader that may progress without new credit.
 Unlooked(r) == r.rdr = "reading"
     /\ ((Unread(r) > 0 /\ (~r.leased \/ r.want)) \/ r.ready \/ r.out)
@@ -165,7 +160,7 @@ Credit(r) == IF r.rdr = "reading"
 (***************************************************************************)
 (* `StreamsState::evict_if_stuck`, one atomic pass under the lock. It      *)
 (* returns every outcome the order of `unlooked`, a hash set, allows: the  *)
-(* new streams, credit returned, and the streams woken.                    *)
+(* new streams, credit returned, `stuck_waiting`, and the streams woken.   *)
 (***************************************************************************)
 Evict(qq, s) ==
     [qq EXCEPT ![s].filled = qq[s].taken, ![s].want = FALSE, ![s].ready = FALSE,
@@ -187,20 +182,26 @@ EvictLoop(qq, cr, woke, i) ==
 
 Pass(qq, cr) ==
     LET found == {s \in Streams : qq[s].unl /\ Unlooked(qq[s])} IN
-    IF ~Stuck(qq, cr) \/ EvictedHeld(qq) > 0 \/ found # {}
-    THEN {[q |-> qq, cr |-> cr, woke |-> {}]}
+    IF ~Stuck(qq, cr) \/ EvictedHeld(qq) > 0
+    THEN {[q |-> qq, cr |-> cr, sw |-> FALSE, woke |-> {}]}
+    ELSE IF found # {}
+    THEN {[q |-> qq, cr |-> cr, sw |-> qq[s].out, woke |-> {}] : s \in found}
     ELSE LET trimmed == [s \in Streams |-> [qq[s] EXCEPT !.unl = FALSE]]
              e == EvictLoop(trimmed, cr, {}, 1)
-         IN {[q |-> e.q, cr |-> e.cr, woke |-> e.woke]}
+         IN {[q |-> e.q, cr |-> e.cr, sw |-> FALSE, woke |-> e.woke]}
 
-\* Wake the tasks parked on a stream's reads (`Wait::Read`): a lease waiting for data, a
-\* paused stream watching for a reset, or a reader parked elsewhere that watches it too.
-Wake(w, ss) == [s \in Streams |-> w[s] \/ (s \in ss /\ pc[s] \in {"loop", "paused", "idle"})]
+\* No pass: the books as `qq` and `cr` leave them.
+Unpassed(qq, cr) == {[q |-> qq, cr |-> cr, sw |-> stuckWaiting, woke |-> {}]}
+
+\* Wake the tasks parked on a stream's reads (`Wait::Read`): a lease waiting for data, or a
+\* paused stream watching for a reset.
+Wake(w, ss) == [s \in Streams |-> w[s] \/ (s \in ss /\ pc[s] \in {"loop", "paused"})]
 
 \* Apply a pass's outcome `p` on top of a step that leaves `w` as the wakes.
 Settle(p, w) ==
     /\ q' = p.q
     /\ credited' = p.cr
+    /\ stuckWaiting' = p.sw
     /\ woken' = Wake(w, p.woke)
 
 (***************************************************************************)
@@ -253,7 +254,7 @@ Accept(s) ==
     /\ q[s].arr > 0
     /\ pc' = [pc EXCEPT ![s] = "loop"]
     /\ woken' = [woken EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<q, credited, shrink, charge, slot, wr, rd, held, idled, refused>>
+    /\ UNCHANGED <<q, credited, shrink, stuckWaiting, charge, slot, wr, rd, held, refused>>
 
 \* The stream ends: a reader that read it whole stops it, as does one evicted. The session drops
 \* its stream, returning any paused credit and its slot.
@@ -268,7 +269,7 @@ Stop(s) ==
        /\ wr' = [wr EXCEPT ![s] = 0]
        /\ rd' = [rd EXCEPT ![s] = 0]
        /\ held' = [held EXCEPT ![s] = "gone"]
-       /\ UNCHANGED <<shrink, idled, refused>>
+       /\ UNCHANGED <<shrink, refused>>
 
 \* `Stream::poll_lease` for one unit, from `r`: hand out what arrived, or wait for it.
 Lease(s, r, sl, ch) ==
@@ -285,7 +286,7 @@ Lease(s, r, sl, ch) ==
                  LET take == IF chunk >= frameRem THEN frameRem ELSE Min(chunk, segRem) IN
                  /\ q' = [q EXCEPT ![s] = [f EXCEPT !.out = TRUE, !.hand = take, !.unl = TRUE]]
                  /\ pc' = [pc EXCEPT ![s] = "out"]
-                 /\ UNCHANGED <<credited, woken>>
+                 /\ UNCHANGED <<credited, stuckWaiting, woken>>
           ELSE LET waiting == Queue([f EXCEPT !.want = TRUE, !.unl = TRUE]) IN
                \E p \in Pass([q EXCEPT ![s] = waiting], credited) :
                  \* Parked, unless the pass evicted the stream itself.
@@ -312,8 +313,8 @@ Step(s) ==
        ELSE IF sealed /\ Paced(s, wr[s])
        THEN \* `Budgeted::pause`: reserve the credit the stream holds, or read on.
             IF charge[s] # None
-            THEN Park(s) /\ UNCHANGED <<q, credited, shrink, charge, slot, wr, rd, held, idled,
-                                        refused>>
+            THEN Park(s) /\ UNCHANGED <<q, credited, shrink, stuckWaiting, charge, slot, wr, rd,
+                                        held, refused>>
             ELSE LET shrunk == Queue([r EXCEPT !.win = Allowance(sl)])
                      ch == Charge(shrunk)
                  IN IF PausedTotal(charge) + ch <= Cap
@@ -321,18 +322,18 @@ Step(s) ==
                          /\ q' = [q EXCEPT ![s] = shrunk]
                          /\ charge' = [charge EXCEPT ![s] = ch]
                          /\ slot' = [slot EXCEPT ![s] = sl]
-                         /\ UNCHANGED <<credited, shrink, wr, rd, held, idled, refused>>
+                         /\ UNCHANGED <<credited, shrink, stuckWaiting, wr, rd, held, refused>>
                     ELSE /\ Lease(s, shrunk, sl, None)
                          /\ refused' = TRUE
-                         /\ UNCHANGED <<shrink, wr, rd, held, idled>>
+                         /\ UNCHANGED <<shrink, wr, rd, held>>
        ELSE IF sealed
        THEN \* The gate is open: resume, and shape the window, at a frame's start for the
             \* admission and then for the frame, whose first segment is whole.
             LET room == Room(s, wr[s])
                 admitted == IF wr[s] % FrameLen = 0 THEN Shape(r, sl, room, 0) ELSE r
             IN /\ Lease(s, Shape(admitted, sl, room, Seg), sl, None)
-               /\ UNCHANGED <<shrink, wr, rd, held, idled, refused>>
-       ELSE Lease(s, r, slot[s], charge[s]) /\ UNCHANGED <<shrink, wr, rd, held, idled, refused>>
+               /\ UNCHANGED <<shrink, wr, rd, held, refused>>
+       ELSE Lease(s, r, slot[s], charge[s]) /\ UNCHANGED <<shrink, wr, rd, held, refused>>
 
 \* Hand the lease back (`Lease::release` at a seal, a drop short of one, which restores it). The
 \* lease carries the window shaped to the room the chunk leaves (`Lease::set_window`), which the
@@ -344,45 +345,23 @@ HandBack(s) ==
         shaped == Shape(r, sl, Room(s, tk), Unsealed(tk))
         back == Queue([shaped EXCEPT !.out = FALSE, !.taken = tk, !.hand = 0])
         released == [back EXCEPT !.rel = tk]
-        \* A restore reruns the pass while some reader waits (`StreamsState::waiting`): this
-        \* lease may have held it off, and its reader may park elsewhere next.
         passes == IF tk % Seg = 0 THEN Pass([q EXCEPT ![s] = released], credited + tk - r.rel)
-                  ELSE IF Waiting(q) THEN Pass([q EXCEPT ![s] = back], credited)
-                  ELSE {[q |-> [q EXCEPT ![s] = back], cr |-> credited, woke |-> {}]}
+                  ELSE IF stuckWaiting THEN Pass([q EXCEPT ![s] = back], credited)
+                  ELSE Unpassed([q EXCEPT ![s] = back], credited)
     IN /\ pc[s] = "out"
        /\ \E p \in passes : Settle(p, woken)
        /\ pc' = [pc EXCEPT ![s] = "write"]
        /\ slot' = [slot EXCEPT ![s] = sl]
-       /\ UNCHANGED <<shrink, charge, wr, rd, held, idled, refused>>
+       /\ UNCHANGED <<shrink, charge, wr, rd, held, refused>>
 
 \* Write the chunk into the frame, committing it once whole. The window was shaped to the room
-\* it leaves as the lease went back. Short of a seal, under `Idle`, the reader may then park on
-\* something else, such as another stream, once.
+\* it leaves as the lease went back.
 Write(s) ==
     LET w == q[s].taken
     IN /\ pc[s] = "write"
        /\ wr' = [wr EXCEPT ![s] = w]
-       /\ \/ /\ pc' = [pc EXCEPT ![s] = "loop"]
-             /\ UNCHANGED <<woken, idled>>
-          \/ /\ Idle /\ idled[s] = 0 /\ w % Seg # 0
-             /\ pc' = [pc EXCEPT ![s] = "idle"]
-             /\ woken' = [woken EXCEPT ![s] = FALSE]
-             /\ idled' = [idled EXCEPT ![s] = 1]
-       /\ UNCHANGED <<q, credited, shrink, charge, slot, rd, held, refused>>
-
-\* A reader parked on another reader resumes once the peer has credit to send what that one
-\* waits on, or no reader waits, so the one it waits on is not stuck. It watches its own stream
-\* too: an arrival wakes it, and the poll that watches it finds an eviction, even one its own
-\* hand back made before it watched.
-IdleDone(s) == woken[s] \/ q[s].rdr = "evicted" \/ ~Stuck(q, credited) \/ ~Waiting(q)
-
-Resume(s) ==
-    /\ pc[s] = "idle"
-    /\ IdleDone(s)
-    /\ pc' = [pc EXCEPT ![s] = "loop"]
-    /\ woken' = [woken EXCEPT ![s] = TRUE]
-    /\ idled' = [idled EXCEPT ![s] = 2]
-    /\ UNCHANGED <<q, credited, shrink, charge, slot, wr, rd, held, refused>>
+       /\ pc' = [pc EXCEPT ![s] = "loop"]
+       /\ UNCHANGED <<q, credited, shrink, stuckWaiting, woken, charge, slot, rd, held, refused>>
 
 \* A `read()` of every unit that arrived on a `Plain` stream, whose `Chunks::finalize` returns
 \* their credit at once and reruns the pass, or parks for more, or ends the stream.
@@ -397,9 +376,10 @@ Read(s) ==
           THEN Stop(s)
           ELSE IF n > 0
           THEN /\ \E p \in Pass([q EXCEPT ![s] = read], credited + n) : Settle(p, woken)
-               /\ UNCHANGED <<shrink, pc, charge, slot, wr, rd, held, idled, refused>>
+               /\ UNCHANGED <<shrink, pc, charge, slot, wr, rd, held, refused>>
           ELSE /\ woken' = [woken EXCEPT ![s] = FALSE]
-               /\ UNCHANGED <<q, credited, shrink, pc, charge, slot, wr, rd, held, idled, refused>>
+               /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, charge, slot, wr, rd, held,
+                              refused>>
 
 \* The application shrinks the connection window by `Shrink`, once: `set_receive_window`
 \* leaves the advertised limit as debt, and runs no pass, since what arrived and the limit stay.
@@ -407,7 +387,7 @@ ShrinkWindow ==
     /\ Shrink > 0
     /\ shrink = None
     /\ shrink' = credited
-    /\ UNCHANGED <<q, credited, pc, woken, charge, slot, wr, rd, held, idled, refused>>
+    /\ UNCHANGED <<q, credited, stuckWaiting, pc, woken, charge, slot, wr, rd, held, refused>>
 
 (***************************************************************************)
 (* The driver, the peer, and the group's reader.                           *)
@@ -417,7 +397,7 @@ Transmit(s) ==
     /\ q[s].due
     /\ q' = [q EXCEPT ![s].due = FALSE,
                       ![s].msd = IF CanGrant(q[s]) THEN Limit(q[s]) ELSE q[s].msd]
-    /\ UNCHANGED <<credited, shrink, pc, woken, charge, slot, wr, rd, held, idled, refused>>
+    /\ UNCHANGED <<credited, shrink, stuckWaiting, pc, woken, charge, slot, wr, rd, held, refused>>
 
 \* The peer sends one unit, which arrives: `StreamsState::received`.
 Send(s) ==
@@ -434,7 +414,7 @@ Send(s) ==
        /\ DataRecvd(q) < MaxData(credited)
        /\ \E p \in Pass([q EXCEPT ![s] = arrived], cr) :
             Settle(p, IF reading THEN Wake(woken, {s}) ELSE woken)
-       /\ UNCHANGED <<shrink, pc, charge, slot, wr, rd, held, idled, refused>>
+       /\ UNCHANGED <<shrink, pc, charge, slot, wr, rd, held, refused>>
 
 \* The group's reader takes the next committed frame, waking a paused writer.
 Take(s) ==
@@ -443,14 +423,14 @@ Take(s) ==
     /\ rd[s] + FrameLen <= wr[s] - (wr[s] % FrameLen)
     /\ rd' = [rd EXCEPT ![s] = rd[s] + FrameLen]
     /\ woken' = [woken EXCEPT ![s] = woken[s] \/ pc[s] = "paused"]
-    /\ UNCHANGED <<q, credited, shrink, pc, charge, slot, wr, held, idled, refused>>
+    /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, charge, slot, wr, held, refused>>
 
 \* The group's first reader arrives, starting where readers got even.
 Arrive(s) ==
     /\ pc[s] # "done"
     /\ held[s] = "late"
     /\ held' = [held EXCEPT ![s] = "held"]
-    /\ UNCHANGED <<q, credited, shrink, pc, woken, charge, slot, wr, rd, idled, refused>>
+    /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, woken, charge, slot, wr, rd, refused>>
 
 \* The group's last reader leaves, which the writer's pace gate watches for.
 Drop(s) ==
@@ -459,7 +439,7 @@ Drop(s) ==
     /\ held[s] = "held"
     /\ held' = [held EXCEPT ![s] = "gone"]
     /\ woken' = [woken EXCEPT ![s] = woken[s] \/ pc[s] = "paused"]
-    /\ UNCHANGED <<q, credited, shrink, pc, charge, slot, wr, rd, idled, refused>>
+    /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, charge, slot, wr, rd, refused>>
 
 Done == \A s \in Streams : pc[s] = "done"
 
@@ -467,6 +447,7 @@ Init ==
     /\ q = [s \in Streams |-> Fresh]
     /\ credited = 0
     /\ shrink = None
+    /\ stuckWaiting = FALSE
     /\ pc = [s \in Streams |-> "new"]
     /\ woken = [s \in Streams |-> FALSE]
     /\ charge = [s \in Streams |-> None]
@@ -478,13 +459,12 @@ Init ==
     /\ \A s \in Streams : held[s] \in CASE s \in Plain -> {"gone"}
                                        [] Late -> {"late", "held"}
                                        [] OTHER -> {"held"}
-    /\ idled = [s \in Streams |-> 0]
     /\ refused = FALSE
 
 \* The steps weak fairness covers: all but a reader arriving or leaving, or the window shrinking,
 \* which may never happen.
 SystemOf(s) == Send(s) \/ Transmit(s) \/ Accept(s) \/ Step(s) \/ HandBack(s) \/ Write(s) \/ Take(s)
-               \/ Resume(s) \/ Read(s)
+               \/ Read(s)
 System == \E s \in Streams : SystemOf(s)
 
 Next ==
@@ -537,10 +517,9 @@ Lifecycle(s) ==
     \* An eviction discards the leased units, so it outweighs them.
     + (CASE q[s].rdr = "reading" -> 0 [] q[s].rdr = "evicted" -> Len + 1 [] OTHER -> 2 * Len + 2)
     + (CASE held[s] = "late" -> 0 [] held[s] = "held" -> 1 [] OTHER -> 2)
-    + idled[s]
 
 \* A done stream counts above anything a live one reaches, since `Stop` clears its books.
-Counted == SumTo(LAMBDA s: IF pc[s] = "done" THEN 12 * Len + SW + 8
+Counted == SumTo(LAMBDA s: IF pc[s] = "done" THEN 12 * Len + SW + 6
                            ELSE q[s].arr + q[s].filled + 2 * q[s].taken + q[s].hand + q[s].rel
                                 + wr[s] + q[s].msd + rd[s] + Lifecycle(s), N)
            + (IF shrink = None THEN 0 ELSE 1)
@@ -562,7 +541,6 @@ Enabled(s) ==
     \/ q[s].due
     \/ pc[s] = "new" /\ q[s].arr > 0
     \/ pc[s] \in {"loop", "paused"} /\ woken[s]
-    \/ pc[s] = "idle" /\ IdleDone(s)
     \/ pc[s] \in {"out", "write"}
     \/ pc[s] # "done" /\ held[s] = "held" /\ rd[s] + FrameLen <= wr[s] - (wr[s] % FrameLen)
 
@@ -573,7 +551,7 @@ Ends == Done \/ \E s \in Streams : Enabled(s)
 \* Witnesses, each expected to fail: TLC reaching them shows the model is not vacuous.
 NeverPaused == \A s \in Streams : pc[s] # "paused"
 NeverEvicted == \A s \in Streams : q[s].rdr # "evicted"
-NeverIdle == \A s \in Streams : pc[s] # "idle"
+NeverStuckWaiting == ~stuckWaiting
 NeverPartial == \A s \in Streams : q[s].taken = q[s].rel
 NeverPausedInside == \A s \in Streams : pc[s] = "paused" => wr[s] % FrameLen = 0
 =============================================================================
