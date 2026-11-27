@@ -332,6 +332,17 @@ fn referencing(reference: Option<&str>, identity: Option<&str>) -> MoqRendition 
 	rendition
 }
 
+/// The `audio` rendition, an Opus track in `container`.
+fn audio_rendition(container: MoqContainer) -> MoqRendition {
+	let mut config = sibling_audio("audio");
+	config.broadcast = None;
+	config.container = container;
+	MoqRendition::Audio {
+		id: "audio".into(),
+		config,
+	}
+}
+
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
 fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	use crate::media::{MoqAudio, MoqContainer};
@@ -3130,7 +3141,7 @@ async fn recv_raw_group(track: &MoqTrackConsumer) -> Arc<MoqGroupConsumer> {
 
 async fn recv_media_group(track: &MoqTrackConsumer) -> Arc<MoqMediaGroupConsumer> {
 	let group = recv_raw_group(track).await;
-	MoqMediaGroupConsumer::new(&group, MoqContainer::Legacy).unwrap()
+	MoqMediaGroupConsumer::new(&group, audio_rendition(MoqContainer::Legacy)).unwrap()
 }
 
 async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFrame>, MoqError> {
@@ -3193,7 +3204,7 @@ async fn media_group_takes_over_an_unread_group() {
 	let raw = recv_raw_group(&consumer).await;
 	assert!(raw.read_frame().await.unwrap().is_some());
 	assert!(matches!(
-		MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy),
+		MoqMediaGroupConsumer::new(&raw, audio_rendition(MoqContainer::Legacy)),
 		Err(MoqError::AlreadyCommitted)
 	));
 	assert!(
@@ -3204,7 +3215,7 @@ async fn media_group_takes_over_an_unread_group() {
 	let mut group = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut group, 3, 1_040_000, b"c");
 	let raw = recv_raw_group(&consumer).await;
-	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
+	let media = MoqMediaGroupConsumer::new(&raw, audio_rendition(MoqContainer::Legacy)).unwrap();
 	assert!(matches!(raw.read_frame().await, Err(MoqError::Cancelled)));
 	assert_eq!(
 		next_media(&media).await.unwrap().expect("expected a frame").payload,
@@ -3223,11 +3234,46 @@ async fn media_group_fails_loudly_on_bad_containers() {
 
 	let raw = recv_raw_group(&consumer).await;
 	assert!(matches!(
-		MoqMediaGroupConsumer::new(&raw, MoqContainer::Cmaf { init: Vec::new() }),
+		MoqMediaGroupConsumer::new(&raw, audio_rendition(MoqContainer::Cmaf { init: Vec::new() })),
 		Err(MoqError::Codec { .. })
 	));
-	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
+	let media = MoqMediaGroupConsumer::new(&raw, audio_rendition(MoqContainer::Legacy)).unwrap();
 	assert!(next_media(&media).await.is_err());
+}
+
+/// A group decodes with its rendition's media role, whether wrapped or fetched, so a CTS video
+/// group's offset-only endpoint object ends the group rather than reading as an empty frame.
+#[tokio::test]
+async fn media_group_decodes_endpoints_by_role() {
+	let (broadcast, track, consumer) = legacy_track().await;
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+	// A zero CTS before the payload, then an endpoint object carrying only its CTS.
+	write_raw(&mut group, 0, bytes::Bytes::from_static(&[0x00, b'a']));
+	write_raw(&mut group, 20_000, bytes::Bytes::from_static(&[0x00]));
+	group.finish().unwrap();
+
+	// A video rendition of the track `legacy_track` names `audio`.
+	let video = rendition("audio", MoqContainer::Cts);
+	let raw = recv_raw_group(&consumer).await;
+	let wrapped = MoqMediaGroupConsumer::new(&raw, video.clone()).unwrap();
+	let fetched = MoqMediaGroupConsumer::fetch(
+		&MoqBroadcastConsumer::new(broadcast.consume()),
+		MoqMediaGroupConfig {
+			rendition: video,
+			start: 0,
+			options: None,
+		},
+	)
+	.await
+	.unwrap();
+	for media in [wrapped, fetched] {
+		let frame = next_media(&media).await.unwrap().expect("expected a frame");
+		assert_eq!(frame.payload, b"a");
+		assert!(
+			next_media(&media).await.unwrap().is_none(),
+			"the endpoint is not a frame"
+		);
+	}
 }
 
 #[tokio::test]

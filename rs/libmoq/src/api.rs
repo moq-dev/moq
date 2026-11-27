@@ -26,6 +26,11 @@ pub enum moq_container_kind {
 	/// A container this build does not recognize, so the rendition must be
 	/// ignored. Only ever read out of a catalog: publishing it is an error.
 	MOQ_CONTAINER_KIND_UNKNOWN = 3,
+	/// Zero-byte container header: raw codec payload timed by the MoQ transport timestamp.
+	MOQ_CONTAINER_KIND_RAW = 4,
+	/// QUIC varint composition time offset (in track timescale) followed by the raw codec payload.
+	/// Only ever read out of a catalog for now: publishing it is an error.
+	MOQ_CONTAINER_KIND_CTS = 5,
 }
 
 /// The container of a video or audio rendition, plus whatever that container
@@ -77,6 +82,8 @@ pub(crate) unsafe fn parse_container(container: &moq_container) -> Result<hang::
 			}
 		}
 		v if v == moq_container_kind::MOQ_CONTAINER_KIND_LOC as u32 => Container::Loc,
+		v if v == moq_container_kind::MOQ_CONTAINER_KIND_RAW as u32 => Container::Raw,
+		v if v == moq_container_kind::MOQ_CONTAINER_KIND_CTS as u32 => Container::Cts,
 		// UNKNOWN included: we kept none of the original JSON, so there is nothing to republish.
 		_ => return Err(Error::InvalidCode),
 	})
@@ -91,6 +98,8 @@ pub(crate) fn borrow_container(container: &hang::catalog::Container) -> moq_cont
 		Container::Legacy => (moq_container_kind::MOQ_CONTAINER_KIND_LEGACY, None),
 		Container::Cmaf { init } => (moq_container_kind::MOQ_CONTAINER_KIND_CMAF, Some(init)),
 		Container::Loc => (moq_container_kind::MOQ_CONTAINER_KIND_LOC, None),
+		Container::Raw => (moq_container_kind::MOQ_CONTAINER_KIND_RAW, None),
+		Container::Cts => (moq_container_kind::MOQ_CONTAINER_KIND_CTS, None),
 		Container::Unknown(_) => (moq_container_kind::MOQ_CONTAINER_KIND_UNKNOWN, None),
 	};
 
@@ -3424,8 +3433,9 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// - `coded_width` / `coded_height` may be zero to omit them.
 /// - `container` describes how the frames written to the track are wrapped. A
 ///   zeroed one declares the legacy container, which is what [moq_publish_video]
-///   writes; declare CMAF or LOC for a [moq_publish_track] whose frames you
-///   already encode that way.
+///   writes; declare CMAF, LOC, or raw for a [moq_publish_track] whose frames
+///   you already encode that way (raw needs a timed track). CTS can only be read
+///   for now: declaring it fails with `MOQ_ERROR_UNSUPPORTED_CONFIG`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

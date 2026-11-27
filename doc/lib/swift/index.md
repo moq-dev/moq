@@ -37,7 +37,7 @@ broadcast and does not keep it open. `ContainerProducer` takes chunks split anyw
 so a raw byte stream needs no other importer.
 `.fmp4()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
-`Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
+`Media.GroupConsumer(group:rendition:)`; frames carry container media time as they land.
 
 ```swift ignore
 dependencies: [

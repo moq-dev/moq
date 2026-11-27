@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { audioSpecificConfig, objectType, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
+import { audioSpecificConfig, objectType, parseConfig, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
+import * as Hex from "./hex";
 
 describe("pickRate", () => {
 	// 44.1kHz is in the AAC table, unlike Opus, so it must survive untouched.
@@ -84,5 +85,121 @@ describe("objectType", () => {
 		for (const codec of codecs) {
 			expect(objectType(codec)).toBeUndefined();
 		}
+	});
+});
+
+describe("parseConfig", () => {
+	it("reads AAC-LC", () => {
+		expect(parseConfig(new Uint8Array([0x12, 0x10]))).toEqual({
+			coreSampleRate: 44100,
+			frameSamples: 1024,
+			sampleRate: 44100,
+			numberOfChannels: 2,
+		});
+	});
+
+	it("reads the escape form audioSpecificConfig writes", () => {
+		expect(parseConfig(audioSpecificConfig(44101, 8))).toEqual({
+			coreSampleRate: 44101,
+			frameSamples: 1024,
+			sampleRate: 44101,
+			numberOfChannels: 8,
+		});
+	});
+
+	// A 24 kHz core under explicit SBR or PS plays at the 48 kHz extension rate, PS in stereo.
+	it("reports explicit SBR and PS output", () => {
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
+		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
+		// PS decodes to stereo even when a program config element names a mono core, but a
+		// channelConfiguration of 0 without that element is refused.
+		expect(parseConfig(Hex.toBytes("eb018802c200000000"))).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
+		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toBeUndefined();
+		// A reserved channelConfiguration (8) under PS is refused.
+		expect(parseConfig(new Uint8Array([0xeb, 0x41, 0x88]))).toBeUndefined();
+	});
+
+	// An AAC-LC core followed by a backward-compatible sync extension plays at the signaled output.
+	it("reports sync extension SBR and PS output", () => {
+		// A 24 kHz stereo core with SBR at 48 kHz.
+		const sbr = new Uint8Array([0x13, 0x10, 0x56, 0xe5, 0x98]);
+		expect(parseConfig(sbr)).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
+		// A 24 kHz mono core with SBR at 48 kHz and PS.
+		const ps = new Uint8Array([0x13, 0x08, 0x56, 0xe5, 0x9d, 0x48, 0x80]);
+		expect(parseConfig(ps)).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
+		// sbrPresentFlag clear, or the extension cut short, leaves the core.
+		const absent = new Uint8Array([0x13, 0x10, 0x56, 0xe5, 0x00]);
+		expect(parseConfig(absent)).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 24000,
+			numberOfChannels: 2,
+		});
+		expect(parseConfig(sbr.subarray(0, 4))).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 24000,
+			numberOfChannels: 2,
+		});
+	});
+
+	// frameLengthFlag set: an AAC-LC core codes 960 samples per frame, plain or under explicit SBR.
+	it("reads an AAC-LC core's frame length", () => {
+		expect(parseConfig(new Uint8Array([0x11, 0x94]))?.frameSamples).toBe(960);
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x8a, 0x00]))?.frameSamples).toBe(960);
+		// AAC Main, alone and as an explicit SBR core, codes other frames.
+		expect(parseConfig(new Uint8Array([0x09, 0x90]))?.frameSamples).toBeUndefined();
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x84, 0x00]))?.frameSamples).toBeUndefined();
+	});
+
+	// FFmpeg's quad AAC-LC: a program config element with front and back channel pairs, a comment,
+	// then a sync extension, SBR absent and then present at 96 kHz.
+	it("reads a program config element and the sync extension after it", () => {
+		const quad = "118004c4040021100c4c61766336332e312e31303156e5";
+		expect(parseConfig(Hex.toBytes(`${quad}00`))).toEqual({
+			coreSampleRate: 48000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 4,
+		});
+		expect(parseConfig(Hex.toBytes(`${quad}80`))).toEqual({
+			coreSampleRate: 48000,
+			frameSamples: 1024,
+			sampleRate: 96000,
+			numberOfChannels: 4,
+		});
+		// Cut short inside the element.
+		expect(parseConfig(Hex.toBytes(quad.slice(0, 12)))).toBeUndefined();
+	});
+
+	it("refuses what it can't read", () => {
+		expect(parseConfig(new Uint8Array([0x12]))).toBeUndefined();
+		// A reserved channelConfiguration.
+		expect(parseConfig(new Uint8Array([0x12, 0x40]))).toBeUndefined();
 	});
 });

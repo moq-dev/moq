@@ -42,7 +42,7 @@ so a raw byte stream needs no other importer.
 construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
 follow its broadcast and track themselves. For arrival reads, which take the groups already held in
 the subscription's group order, newest first unless it asks ascending, decode each group from
-`TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., container: ...)`; frames
+`TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., rendition: ...)`; frames
 carry container media time as they land.
 `package:moq/video.dart` and `package:moq/audio.dart` encode raw pixels and PCM inside the
 binding: `video.Producer` / `audio.Producer` take a `CatalogProducer`, and

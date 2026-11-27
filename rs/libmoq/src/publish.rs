@@ -739,6 +739,7 @@ impl Publish {
 	/// or if the config changes the rendition's track identity, which takes a new name. The catalog
 	/// is republished automatically.
 	pub fn video_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::VideoConfig) -> Result<(), Error> {
+		writable(&config.container, moq_mux::container::Kind::Video)?;
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.video.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::VideoConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
@@ -759,6 +760,7 @@ impl Publish {
 	///
 	/// Same rules as [`Self::video_config`].
 	pub fn audio_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::AudioConfig) -> Result<(), Error> {
+		writable(&config.container, moq_mux::container::Kind::Audio)?;
 		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.audio.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::AudioConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
@@ -1900,6 +1902,18 @@ impl Abort for Datagrams {
 struct DatagramRequest {
 	request: moq_net::datagram::Request,
 	children: Children,
+}
+
+/// Refuse a container this build can read but not write, as a catalog does before it advertises a
+/// rendition, so no subscriber is told of frames the library can't produce.
+fn writable(container: &hang::catalog::Container, kind: moq_mux::container::Kind) -> Result<(), Error> {
+	// Every CMAF is writable, and building its wire would parse an init the caller vouches for.
+	if let hang::catalog::Container::Cmaf { .. } = container {
+		return Ok(());
+	}
+	let wire = moq_mux::catalog::hang::Container::new(container, kind)?;
+	moq_mux::container::Container::writable(&wire)
+		.map_err(|err| Error::UnsupportedConfig(format!("{container:?} container: {err}")))
 }
 
 struct DatagramDemand {

@@ -1054,7 +1054,10 @@ pub(crate) fn in_band_dimensions(
 /// carries a description, or that omits dimensions, stays on the path that
 /// waits for parameter sets in the bitstream.
 fn annexb_catalog_record(config: &VideoConfig) -> Option<Bytes> {
-	if !matches!(config.container, Container::Legacy | Container::Loc) {
+	if !matches!(
+		config.container,
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+	) {
 		return None;
 	}
 	if config
