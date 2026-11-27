@@ -315,11 +315,20 @@ interface SubscribeEntry {
 	broadcast?: Path.Valid;
 	consumedId?: number;
 	// Standalone one-shot SUBSCRIBE fetch target (lite-07 fetchGroup with no active subscription).
-	fillGroup?: {
-		producer: netGroup.Producer;
-		taken: boolean;
-		arrived: () => void;
-	};
+	fillGroup?: FetchTarget;
+}
+
+// The group a lite-07 one-shot fetch delivers into.
+interface FetchTarget {
+	producer: netGroup.Producer;
+	taken: boolean;
+	arrived: () => void;
+	// How its stream failed without a code, as Firefox reports a reset that lost one: the drop the
+	// publisher names the group in says why, which a reader needs to ask again after TOO_FAR_BEHIND.
+	lost?: Error;
+	// Why the publisher dropped the group, once it said: a stream for it arriving later is one whose
+	// reset may never land, as Chromium loses one, so it is not taken.
+	dropped?: Error;
 }
 
 // A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
@@ -1908,6 +1917,9 @@ export class Subscriber {
 			}
 		}
 
+		// Before any group of it reaches a reader, its publisher may judge one too old under any
+		// live join it asked.
+		hooks.judgeUnder(producer, entry.staleBudget);
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
 		return entry;
@@ -2194,7 +2206,7 @@ export class Subscriber {
 
 			hooks.bindGroupCompression(group, info.compress);
 			const live = new LiveRanges(this.version, ranges);
-			const target = {
+			const target: FetchTarget = {
 				producer: group,
 				taken: false,
 				arrived: () => arrived.resolve(),
@@ -2258,12 +2270,7 @@ export class Subscriber {
 
 	// Read a standalone lite-07 one-shot SUBSCRIBE's responses until publisher FIN, waiting for any
 	// in-flight uni Group Stream before concluding the group was not delivered.
-	async #readFetchSubscribe(
-		stream: Stream,
-		entry: SubscribeEntry,
-		key: bigint,
-		target: { producer: netGroup.Producer; taken: boolean; arrived: () => void },
-	): Promise<void> {
+	async #readFetchSubscribe(stream: Stream, entry: SubscribeEntry, key: bigint, target: FetchTarget): Promise<void> {
 		let started = false;
 		let ended = false;
 		let refused: Error | undefined;
@@ -2286,6 +2293,10 @@ export class Subscriber {
 							hasSkip(this.version) && resp.drop.error === StreamCode.Skip
 								? new NotFound(`group ${key}`)
 								: resp.drop.cause(this.version);
+						// The publisher gave up the group: a stream it opened ends with this reason,
+						// even where the browser lost its reset. One received whole stays whole.
+						target.dropped ??= refused;
+						if (target.taken) target.producer.abort(refused);
 					}
 				} else if ("end" in resp) {
 					if (ended) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
@@ -2325,6 +2336,7 @@ export class Subscriber {
 			if (!target.taken) {
 				throw refused ?? new NotFound(`group ${key}`);
 			}
+			if (target.lost) target.producer.abort(refused ?? target.lost);
 		} catch (err: unknown) {
 			closeViolation(this.#quic, err);
 			const e = await sessionCause(this.#quic, err);
@@ -3395,6 +3407,8 @@ export class Subscriber {
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
 				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
+				// Before the update reaches the wire, as the SUBSCRIBE did.
+				hooks.judgeUnder(entry.track, entry.staleBudget);
 				if (capOf(entry.live) !== entry.staleCap) entry.staleCap = undefined;
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
@@ -3578,7 +3592,7 @@ export class Subscriber {
 
 		if (entry.fillGroup) {
 			const target = entry.fillGroup;
-			if (group.key !== target.producer.start || target.taken) {
+			if (group.key !== target.producer.start || target.taken || target.dropped) {
 				stream.stop(StreamCode.Cancel);
 				return;
 			}
@@ -3601,7 +3615,9 @@ export class Subscriber {
 					throw err;
 				}
 				const e = await sessionCause(this.#quic, err);
-				target.producer.abort(e);
+				// A failure with no code waits for the subscription's end to say why.
+				if (e instanceof StreamError || e instanceof SessionError) target.producer.abort(e);
+				else target.lost = e;
 				stream.stop(e);
 			} finally {
 				counted.done();
