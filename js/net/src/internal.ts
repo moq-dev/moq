@@ -728,7 +728,7 @@ export interface ResumeSource {
 	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
 	 */
-	untell(start: bigint, end: bigint): void;
+	untell(start: bigint, end: bigint, rescan?: boolean): void;
 	/** Absorb declared skips on the serving copy into the logical reader's `delivered` set. */
 	absorbSkips(delivered: Delivered, key: bigint): void;
 	/** Mark every existing and future copy as drop-reporting (and optionally wired). */
@@ -1316,7 +1316,7 @@ export const hooks: {
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
-	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	untell: (subscriber: Subscriber, start: bigint, end: bigint, rescan?: boolean) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.

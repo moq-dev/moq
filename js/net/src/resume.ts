@@ -643,7 +643,11 @@ class Reader implements ResumeSource {
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
-		// What a former route gave up is no verdict on the one that serves now.
+		// What a former route gave up is no verdict on the one that serves now. Revoke any
+		// unforwarded declared skips on existing copies so a reused subscription replays them.
+		for (const run of this.#drops) {
+			if (run.skip) this.untell(run.start, run.end, true);
+		}
 		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
@@ -1099,6 +1103,7 @@ class Reader implements ResumeSource {
 		if (cursor === this.#bounded) return;
 		const passed = this.#bounded.start;
 		this.#bounded = cursor;
+		this.#evictOutsideSkips(cursor);
 		for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
 		if (cursor.start < passed) this.#backfill(cursor.start, passed);
 		if (this.#ended) this.#letGo(this.#delivered);
@@ -1720,6 +1725,7 @@ class Reader implements ResumeSource {
 		this.#drops = this.#drops.filter((run) =>
 			run.skip ? this.#shell.untold(run.start, run.end).length > 0 : !delivered.covers(run.start, run.end),
 		);
+		this.#evictOutsideSkips(cursor);
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
 			if (copy === serving || !this.#feeds(copy)) continue;
@@ -2253,8 +2259,32 @@ class Reader implements ResumeSource {
 		this.forgetPast(delivered, this.#readerBudget());
 	}
 
-	untell(start: bigint, end: bigint): void {
-		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
+	untell(start: bigint, end: bigint, rescan = false): void {
+		for (const copy of this.#copies) hooks.untell(copy.sub, start, end, rescan);
+	}
+
+	// Evict queued declared skips (or parts of skips) outside `cursor` and untell them on copies
+	// so range hops never accumulate stranded entries in `#drops`.
+	#evictOutsideSkips(cursor: { start: bigint; end?: bigint }): void {
+		const outside: Run[] = [];
+		const kept: DropRun[] = [];
+		for (const run of this.#drops) {
+			if (!run.skip) {
+				kept.push(run);
+				continue;
+			}
+			const from = max(run.start, cursor.start);
+			const end = cursor.end === undefined ? run.end : min(run.end, cursor.end);
+			if (from >= end) {
+				outside.push({ start: run.start, end: run.end });
+				continue;
+			}
+			if (run.start < from) outside.push({ start: run.start, end: from });
+			if (end < run.end) outside.push({ start: end, end: run.end });
+			kept.push(from === run.start && end === run.end ? run : { ...run, start: from, end });
+		}
+		this.#drops = kept;
+		for (const run of outside) this.untell(run.start, run.end);
 	}
 
 	absorbSkips(delivered: Delivered, key: bigint): void {

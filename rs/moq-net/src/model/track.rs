@@ -13365,6 +13365,15 @@ impl Subscriber {
 		self.record().delivered.runs()
 	}
 
+	/// How many drop runs a front subscriber currently holds queued.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn queued_drops(&mut self) -> usize {
+		match &mut self.inner {
+			Inner::Plain(_) => 0,
+			Inner::Resume(resume, _) => resume.queued_drops(),
+		}
+	}
+
 	/// Bill what this reader settled, retire the gaps its ranges left behind, and pay what it
 	/// can of the debt its track left its readers.
 	pub(super) fn settle_record(&mut self, handed: Option<u64>) {

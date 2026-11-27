@@ -4353,9 +4353,9 @@ export class Subscriber {
 		return from < end ? runGaps(this.#reported.overlapping(from, end), from, end) : [];
 	}
 
-	// Forget reports of `[start, end)` that were never sent, lowering `#floor` if needed and
-	// forcing a drop rescan so a later widening can report them again.
-	#untell(start: bigint, end: bigint): void {
+	// Forget reports of `[start, end)` that were never sent, lowering `#floor` if needed.
+	// `rescan` clears `#dropsSeen` when a reused copy must re-emit them without a range change.
+	#untell(start: bigint, end: bigint, rescan = false): void {
 		if (start >= end) return;
 		if (start < this.#floor) {
 			const old = this.#floor;
@@ -4364,7 +4364,8 @@ export class Subscriber {
 		}
 		this.#reported.set(start, end);
 		this.#delivered.remove(start, end);
-		this.#resume?.untell(start, end);
+		if (rescan) this.#dropsSeen = undefined;
+		this.#resume?.untell(start, end, rescan);
 	}
 
 	// The publisher's view of this reader's record.
@@ -5561,7 +5562,7 @@ export class Subscriber {
 		hooks.lowestBuffered = (subscriber, delivered) =>
 			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
-		hooks.untell = (subscriber, start, end) => subscriber.#untell(start, end);
+		hooks.untell = (subscriber, start, end, rescan) => subscriber.#untell(start, end, rescan);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
