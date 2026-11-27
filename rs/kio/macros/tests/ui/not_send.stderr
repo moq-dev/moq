@@ -6,26 +6,20 @@ error[E0277]: `Rc<String>` cannot be sent between threads safely
    |
    = help: within `M`, the trait `Send` is not implemented for `Rc<String>`
 note: required because it appears within the type `MStateB`
-  --> tests/ui/not_send.rs:17:7
-   |
-17 |         let label: std::rc::Rc<String> = std::rc::Rc::new(format!("m-{a}"));
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this field
-18 |         let b: u64 = wait!(B => self.values.poll_pop(waiter))?;
-   |
-note: required because it appears within the type `MState`
   --> tests/ui/not_send.rs:18:22
    |
-13 | #[kio::machine(self.state: MState)]
-...
 18 |         let b: u64 = wait!(B => self.values.poll_pop(waiter))?;
-   |                            ^ required by this field
+   |                            ^
+note: required because it appears within the type `MState`
+  --> tests/ui/not_send.rs:13:28
+   |
+13 | #[kio::machine(self.state: MState)]
+   |                            ^^^^^^
 note: required because it appears within the type `M`
-  --> tests/ui/not_send.rs:10:2
+  --> tests/ui/not_send.rs:7:8
    |
  7 | struct M {
-...
-10 |     state: MState,
-   |     ^^^^^^^^^^^^^ required by this field
+   |        ^
 note: required by a bound in `assert_send`
   --> tests/ui/not_send.rs:23:19
    |
