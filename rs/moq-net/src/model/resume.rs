@@ -12249,6 +12249,52 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [6]);
 	}
 
+	/// As [`a_backfill_waits_for_the_group_holding_a_time_under_its_floor`], with the group
+	/// landing as a later resume point widens the backfill for a gap above its floor alone: it
+	/// still reads that group under its floor, also once the local bounds change.
+	#[kio::test]
+	async fn a_backfill_widened_past_its_time_start_still_reads_the_group_holding_it() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		let b = received_copy();
+		write(&b, 8);
+		routes.serve(a.consume());
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([track::Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(HOUR)
+		};
+		let mut sub = logical.consume().subscribe(from(8)).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		routes.serve(b.consume());
+		write(&b, 9);
+		assert_eq!(drain(&mut sub, false), [9]);
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7)).unwrap();
+		b.skip_groups(7..8);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&b, 10);
+		assert_eq!(drain(&mut sub, false), [10]);
+		// Before the read looks again, 6 lands, the route flaps back past 10, and the range
+		// moves to 6, leaving 7, which no group holds, the lowest key to ask for.
+		write(&b, 6);
+		let c = copy();
+		routes.serve(c.consume());
+		routes.serve(b.consume());
+		sub.update(from(6)).unwrap();
+		write(&b, 11);
+		assert_eq!(recv(&mut sub).start, 11);
+		// A new local cap applies the local bounds to every copy again.
+		let mut sub = sub.with_range(..100);
+		assert_eq!(drain(&mut sub, false), [6]);
+	}
+
 	/// As [`a_time_start_under_the_resume_point_reads_the_group_holding_it`], for ranges
 	/// widened while the serving copy has yet to answer, so its cache places nothing: the
 	/// backfill asked from below its resume point places the start.
@@ -15754,6 +15800,51 @@ mod test {
 		write(&b, 2);
 		assert_eq!(drain(&mut sub, false), [2]);
 		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+	}
+
+	/// A key the local floor keeps out right above a backfill that ends there is asked of the
+	/// serving route from that key: the backfill, with nothing left it was asked for, goes
+	/// rather than being widened from its own lower floor.
+	#[kio::test]
+	async fn a_kept_out_key_above_a_finished_backfill_is_asked_from_itself() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		write(&a, 3);
+		routes.serve(a.consume());
+		// A live join reaching back to the oldest group, so the reader's budget bounds how long
+		// a backfill is waited on.
+		let subscription = Subscription::default().with_ranges([track::Range {
+			start: track::Start::within(HOUR),
+			end: Some(9),
+		}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [3, 0]);
+		let mut sub = sub.with_range(2..);
+		let b = copy();
+		b.skip_groups(1..2);
+		write(&b, 4);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert!(asked_for(&b, 2), "{:?}", b.subscription());
+		// The switch's backfill of 2 goes unanswered past the budget.
+		kio::clock::sleep(2 * HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "2 is owed");
+		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+		// Lowered, the floor asks for 1, which the route skipped; raised before the read looks
+		// again, it keeps 2 out.
+		let sub = sub.with_range(1..);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		let mut sub = sub.with_range(3..);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "2 is owed");
+		assert!(asked_for(&b, 2), "{:?}", b.subscription());
+		assert!(!asked_for(&b, 1), "{:?}", b.subscription());
 	}
 
 	/// An unbounded reader asks the serving route for no key its local floor keeps out, so a
