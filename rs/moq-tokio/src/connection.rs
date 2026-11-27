@@ -2866,7 +2866,7 @@ mod tests {
 	/// The sockets are real but the clock is manual, so the cap passes only when the
 	/// test moves it: a slow host cannot close the drained session before it delivers.
 	/// Over moq-lite-06 the subscription stays on the drained session, since each
-	/// session's announcement serves an instance of its own.
+	/// session's announcement serves an identity of its own.
 	#[tokio::test]
 	async fn a_fleet_drain_redials_through_a_fresh_resolve() {
 		use futures::FutureExt;

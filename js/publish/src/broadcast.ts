@@ -457,7 +457,7 @@ export class Broadcast {
 
 		// Routing into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer. Hidden until the catalog is
-		// served. The route mints one instance, kept across withdraw and announce, so toggling
+		// served. The route mints one identity, kept across withdraw and announce, so toggling
 		// `announce` continues the same stream for viewers; a new route is a new stream.
 		const route = origin.route(name, { hidden: true });
 		const broadcast = route.broadcast;
@@ -471,7 +471,7 @@ export class Broadcast {
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
-		// group sequence under the same instance. The publication keeps rendition tracks by catalog
+		// group sequence under the same identity. The publication keeps rendition tracks by catalog
 		// ID, so registering an ID again finds its track; the catalog's stay out of reach of a
 		// colliding rendition.
 		const publication = new Publication(this.#listed, () => this.#reserved());

@@ -28,7 +28,7 @@ use std::{
 };
 
 use crate::{
-	Error, Instance, Path,
+	Error, Identity, Path,
 	lite::{self, AnnounceBroadcast as Wire, Version, subscriber::route_stream::Writer},
 	origin,
 	route::{
@@ -45,8 +45,8 @@ type Source = u64;
 /// The session's own key, which answers the requested prefixes themselves.
 const MAIN: Source = 0;
 
-/// A claim as the handle names it: its absolute path there, and its instance.
-type Named = (Path, Instance);
+/// A claim as the handle names it: its absolute path there, and its identity.
+type Named = (Path, Identity);
 
 /// A mount beneath what the answer reads, read at its target.
 struct Mount {
@@ -825,10 +825,10 @@ impl Answer {
 				(None, Change::Live(claim)) => {
 					// A routing peer's handle is rooted at the origin's own root.
 					let (announce, suffix) = self.encoder.start(broadcast.0.clone());
-					let instance = broadcast.1.clone();
+					let identity = broadcast.1.clone();
 					writer.buffer(&Wire::Start {
 						suffix,
-						instance,
+						identity,
 						claim,
 					})?;
 					let announce = announce.expect("lite-07 assigns announce ids");
@@ -855,7 +855,7 @@ impl Answer {
 		&mut self,
 		writer: &mut Writer,
 		source: Source,
-		(path, instance): node::Broadcast,
+		(path, identity): node::Broadcast,
 		change: Change,
 	) -> Result<(), Error> {
 		// Named as the handle names it: beneath the mount point for a mount, and never a
@@ -880,7 +880,7 @@ impl Answer {
 			None if self.origin.shadows(&path) => return Ok(()),
 			None => (path, change),
 		};
-		let key = (named, instance);
+		let key = (named, identity);
 		let lost = match change {
 			Change::Live(claim) => {
 				self.told.insert(key.clone(), (source, claim));
@@ -937,7 +937,7 @@ impl Answer {
 				let (announce, suffix) = self.encoder.start(relative);
 				writer.buffer(&Wire::Start {
 					suffix,
-					instance: key.1.clone(),
+					identity: key.1.clone(),
 					claim: claim.clone(),
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");

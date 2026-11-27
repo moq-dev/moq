@@ -58,5 +58,5 @@ Rendition selection, audio, captions, the `visible` gate, latency, and manual ca
 announcement's transit: one reaches a synced viewer in the step that makes it. The
 catalog failing mid-stream, a relay refusing the broadcast itself (`refused-indicator.ts`), and
 broadcasts referenced from another's catalog. In `Failover.tla`, a GOAWAY's replacement keeps the
-handle as a route of the same instance does; a lite-06 session mints a new instance, so the player
+handle as a route of the same identity does; a lite-06 session mints a new identity, so the player
 restarts the catalog there (a spinner rather than continuous playback).

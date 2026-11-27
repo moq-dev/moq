@@ -8,7 +8,7 @@
 \* dials to it (`#redirect`, "an assignment, not a detour") until a dial to it fails, which
 \* drops the pin and returns to the configured URL; one the default `same-host` policy refuses stops the loop. A session that dies retracts its
 \* announcements, so the watch's handle clears and the screen reads CONNECTING until a new session
-\* delivers its initial announcements (`heard`, Watch.tla); a route of the same instance taking
+\* delivers its initial announcements (`heard`, Watch.tla); a route of the same identity taking
 \* over keeps the handle and resumes its tracks (`Following.active`). `path` is whether the relays
 \* reach the origin at all; a serving relay's announcement of it reaches the viewer in the same step.
 EXTENDS Naturals, FiniteSets
@@ -61,7 +61,7 @@ GoawayRefused ==
     /\ Leave
     /\ UNCHANGED <<pin, path>>
 
-\* The replacement connects within the handover: the same instance keeps the handle.
+\* The replacement connects within the handover: the same identity keeps the handle.
 Replaced ==
     /\ loop = "migrating"
     /\ \E t \in Targets : on' = t
@@ -112,7 +112,7 @@ Initial ==
 
 Frames == handle /\ media = "waiting" /\ media' = "playing" /\ UNCHANGED <<up, on, loop, pin, path, heard, handle>>
 
-\* The relays move to another path to the origin: the same instance, so its tracks resume.
+\* The relays move to another path to the origin: the same identity, so its tracks resume.
 Reroute ==
     /\ path = "ok" /\ handle /\ media = "playing"
     /\ media' = "waiting"

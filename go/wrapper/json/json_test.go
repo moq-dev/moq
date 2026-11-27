@@ -278,12 +278,18 @@ func TestDemand(t *testing.T) {
 	}
 }
 
-// TestAbortUnwantedKeepsALateReader ends an idle stream only once a reader that
-// joined after its demand went unwanted has left.
-func TestAbortUnwantedKeepsALateReader(t *testing.T) {
+// TestCloseServesALateReader closes a stream a reader joined after its demand went
+// unwanted, and the broadcast asks for the track again.
+func TestCloseServesALateReader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	broadcast, consumer := newBroadcast(t)
+	defer broadcast.Close()
+	dynamic, err := broadcast.Requests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
 
 	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"))
 	if err != nil {
@@ -301,32 +307,31 @@ func TestAbortUnwantedKeepsALateReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aborted, err := stream.AbortUnwanted(7); err != nil || aborted {
-		t.Fatalf("AbortUnwanted = %v, %v; want false with a reader", aborted, err)
+	defer late.Cancel()
+	stream.Close()
+
+	request, err := dynamic.RequestedTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := stream.Append("still serving", moq.TimestampFromScale(0, 1_000)); err != nil {
+	scale := uint64(1_000)
+	track, err := request.Accept(&moq.TrackInfo{Timescale: &scale})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := moqjson.NewStreamProducer(broadcast, track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Append("served again", moq.TimestampFromScale(0, 1_000)); err != nil {
 		t.Fatal(err)
 	}
 	record, err := late.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record == nil || string(record.Value) != `"still serving"` {
-		t.Fatalf("record = %+v, want \"still serving\"", record)
-	}
-
-	if err := untilWanted(ctx, demand, true); err != nil {
-		t.Fatal(err)
-	}
-	late.Cancel()
-	if err := untilWanted(ctx, demand, false); err != nil {
-		t.Fatal(err)
-	}
-	if aborted, err := stream.AbortUnwanted(7); err != nil || !aborted {
-		t.Fatalf("AbortUnwanted = %v, %v; want true once unwanted", aborted, err)
-	}
-	if _, err := stream.AbortUnwanted(7); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("AbortUnwanted after abort = %v, want ErrClosed", err)
+	if record == nil || string(record.Value) != `"served again"` {
+		t.Fatalf("record = %+v, want \"served again\"", record)
 	}
 }
 

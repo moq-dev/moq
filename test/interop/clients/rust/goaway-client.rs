@@ -1,4 +1,4 @@
-//! Follow a real JS QMux server's redirect, on a wire without instances, through its replacement announcement.
+//! Follow a real JS QMux server's redirect, on a wire without identities, through its replacement announcement.
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 				"wrong marker"
 			);
 			let restarted = following.available().await?.context("went offline before serving")?;
-			ensure!(!restarted.is_clone(&broadcast), "redirect did not restart the instance");
+			ensure!(!restarted.is_clone(&broadcast), "redirect did not restart the identity");
 			track = restarted.track("video")?.subscribe(None).await?.with_range(1..);
 			input.write_all(b"replacement ready\n").await?;
 		}

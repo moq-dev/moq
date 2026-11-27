@@ -236,8 +236,8 @@ export class Decoder {
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
 
-	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
-	#instance?: Moq.Broadcast.Consumer["closed"];
+	// The broadcast identity the ring's timeline belongs to. See #runDecoder.
+	#stream?: Moq.Broadcast.Consumer["closed"];
 
 	#signals = new Effect();
 	#phase = new Signal<Phase>({ kind: "stopped" });
@@ -585,17 +585,17 @@ export class Decoder {
 		const running = effect.get(this.in.enabled) && !effect.get(this.sync.out.instant);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
-		const identity = effect.get(this.#identity);
+		const playback = effect.get(this.#identity);
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast. A stopped decoder resolves it only to
 		// tell whether a failure's source is still selected.
 		const phase = this.#phase.peek();
 		const active =
-			broadcast && track && identity && (running || phase.kind === "failed")
-				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.instance)
+			broadcast && track && playback && (running || phase.kind === "failed")
+				? broadcast.relativeBroadcast(effect, playback.broadcast, playback.identity)
 				: undefined;
-		const key = identity && JSON.stringify(identity);
+		const key = playback && JSON.stringify(playback);
 
 		// A failure belongs to its source: selecting another clears it, even while muted or paused.
 		if (phase.kind === "failed") {
@@ -607,12 +607,12 @@ export class Decoder {
 		}
 
 		// A source that already failed waits for another.
-		if (!running || !broadcast || !track || !identity || !active || !key || this.#phase.peek().kind === "failed") {
+		if (!running || !broadcast || !track || !playback || !active || !key || this.#phase.peek().kind === "failed") {
 			this.#retire();
 			return;
 		}
 
-		const config = identity.decoder;
+		const config = playback.decoder;
 
 		// Closing this effect releases both its container reader and track subscription.
 		const failure = new Signal<Error | undefined>(undefined);
@@ -640,18 +640,18 @@ export class Decoder {
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
 		// clock anchored on the previous one would discard as already played.
-		// Every handle to one instance shares `closed`, so it identifies the instance where the
+		// Every handle to one identity shares `closed`, so it identifies the identity where the
 		// handle itself does not.
-		if (this.#instance !== undefined && this.#instance !== active.closed) {
+		if (this.#stream !== undefined && this.#stream !== active.closed) {
 			this.sync.reset();
 			this.reset();
-		} else if (this.#instance !== undefined && phase.kind === "stopped") {
+		} else if (this.#stream !== undefined && phase.kind === "stopped") {
 			// The picture returns at the live edge. Re-join audio to that clock immediately,
 			// rather than stretching the retained ring's lag back over several seconds. A
 			// running rendition swap keeps its seamless handover.
 			this.reset();
 		}
-		this.#instance = active.closed;
+		this.#stream = active.closed;
 
 		// The ring outlives this effect (it's keyed on the sample rate, channel count, and mode), so a
 		// replacement subscription on the same broadcast (a rendition swap, or a fallback that stays
@@ -666,7 +666,7 @@ export class Decoder {
 			run.cleanup(() => this.#finish.set(undefined));
 			const sub = subscribeMedia(run, {
 				broadcast: active,
-				track: Catalog.track(track, identity),
+				track: Catalog.track(track, playback),
 				priority: this.in.priority,
 				delay: new Derived([this.#subscribeMinDelay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
@@ -674,7 +674,7 @@ export class Decoder {
 			// only feeds the arrival estimate. Both share one upstream request, at the wider budget.
 			const read = subscribeMedia(run, {
 				broadcast: active,
-				track: Catalog.track(track, identity),
+				track: Catalog.track(track, playback),
 				priority: this.in.priority,
 				delay: new Derived([this.#subscribeMinDelay, this.#readMaxDelay], (min, max) => ({ min, max })),
 			});

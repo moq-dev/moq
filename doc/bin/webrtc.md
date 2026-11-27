@@ -39,7 +39,7 @@ the NAT forwards to `--udp-bind`; port 0 advertises the bound port. The listener
 put a TLS-terminating proxy in front for WHIP clients that require HTTPS. A fresh WHEP peer joins at the current group, so it
 starts at a keyframe without waiting for the next one. `DELETE` on the
 resource URL tears a session down per the RFC. Each WHIP session publishes
-under a fresh [instance](/concept/moq-lite#publisher-instances), so a publisher that
+under a fresh [identity](/concept/moq-lite#publisher-identities), so a publisher that
 reconnects while its stale session lingers replaces it at once.
 
 An export stays on the publisher it started with. A replacement publisher never

@@ -3323,7 +3323,7 @@ mod tests {
 		.expect("stats broadcast announced within 5s")
 		.expect("stats broadcast resolves")
 		.unwrap();
-		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
+		assert!(broadcast.info().identity.is_some(), "stats announce under an identity");
 
 		// Several publish intervals (1s each by default) later, the task is still
 		// running and its broadcast still announced: a request refuses a front whose

@@ -273,11 +273,11 @@ impl MoqBroadcastConsumer {
 	}
 
 	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track,
-	/// refusing one proven to serve another stream than `instance`.
+	/// refusing one proven to serve another stream than `identity`.
 	pub(crate) async fn resolve_inner(
 		&self,
 		reference: Option<&str>,
-		instance: Option<&str>,
+		identity: Option<&str>,
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.driver
 			.watch(async {
@@ -286,11 +286,11 @@ impl MoqBroadcastConsumer {
 					.map(moq_net::path::Relative::new)
 					.transpose()
 					.map_err(moq_net::Error::from)?;
-				let instance: Option<moq_net::Instance> = instance.map(str::parse).transpose()?;
+				let identity: Option<moq_net::Identity> = identity.map(str::parse).transpose()?;
 
 				let Some(origin) = self.origin.clone() else {
-					// A standalone broadcast came through no route, so it has no instance to prove:
-					// the instance is best effort. Only its own broadcast resolves.
+					// A standalone broadcast came through no route, so it has no identity to prove:
+					// the identity is best effort. Only its own broadcast resolves.
 					return match reference.filter(|reference| !reference.is_empty()) {
 						None => Ok(self.inner.clone()),
 						Some(reference) => Err(MoqError::UnresolvableBroadcast {
@@ -299,10 +299,10 @@ impl MoqBroadcastConsumer {
 					};
 				};
 
-				// Even an empty reference goes through the source, which checks the instance against the
+				// Even an empty reference goes through the source, which checks the identity against the
 				// catalog's own broadcast.
 				let source = moq_mux::Source::new(origin, self.inner.clone());
-				Ok(source.resolve(reference.as_ref(), instance.as_ref()).await?)
+				Ok(source.resolve(reference.as_ref(), identity.as_ref()).await?)
 			})
 			.await
 	}
@@ -315,9 +315,9 @@ impl MoqBroadcastConsumer {
 	/// Resolve a catalog rendition to the broadcast serving its track.
 	///
 	/// The rendition's `broadcast` reference, absent or empty, names this broadcast; anything
-	/// else names a sibling relative to it (e.g. `./source`). Its `instance` is the stream the
+	/// else names a sibling relative to it (e.g. `./source`). Its `identity` is the stream the
 	/// reference names: a broadcast proven to serve another one fails with `Mux` instead of
-	/// resolving, while a route over a wire that carries no instance cannot prove one, so there
+	/// resolving, while a route over a wire that carries no identity cannot prove one, so there
 	/// it is best effort. Call it on a rendition that carries a reference before [`Self::subscribe_track`] or
 	/// [`Self::fetch_group`], which take the rendition's `track` (or its ID when unset) rather
 	/// than a rendition. The rendition-based consumers (`MoqMediaTrackConsumer::subscribe`,
@@ -328,8 +328,8 @@ impl MoqBroadcastConsumer {
 	/// standalone broadcast has no sibling to name. A sibling nothing announces yet is waited for,
 	/// so a late one resolves once it is announced; cancel the call to give up on it.
 	pub async fn resolve(&self, rendition: MoqRendition) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let (reference, instance, _, _) = rendition.into_parts();
-		let broadcast = self.resolve_inner(reference.as_deref(), instance.as_deref()).await?;
+		let (reference, identity, _, _) = rendition.into_parts();
+		let broadcast = self.resolve_inner(reference.as_deref(), identity.as_deref()).await?;
 		Ok(Arc::new(match self.origin.clone() {
 			Some(origin) => Self::routed(broadcast, origin, self.driver.clone()),
 			None => Self {

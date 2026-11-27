@@ -1,5 +1,6 @@
 /** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
+import * as Identity from "../src/identity.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
@@ -9,7 +10,6 @@ import {
 	SubscribeNamespaceEntryDone,
 } from "../src/ietf/subscribe_namespace";
 import { ALPN, Version } from "../src/ietf/version";
-import * as Instance from "../src/instance.ts";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
@@ -45,10 +45,10 @@ for (const touched of ["watched", "unrelated"])
 						unrelated = next;
 					}
 					await settle();
-					// A follower reads its own consumer of the route's broadcast, so match the instance.
+					// A follower reads its own consumer of the route's broadcast, so match the identity.
 					for (const request of requests)
-						if (request.active.peek()?.instance !== current.instance)
-							throw new Error("wrong publisher instance");
+						if (request.active.peek()?.identity !== current.identity)
+							throw new Error("wrong publisher identity");
 				}
 				if (round > 0) samples.push(((performance.now() - start) * 1000) / 128);
 			}
@@ -121,7 +121,7 @@ for (const pending of [128, 1024, 8192])
 		console.log(`${pending},${landed},${samples[2].toFixed(2)}`);
 	}
 
-// Keep old instances on distinct same-instance failovers, then cancel new demand.
+// Keep old identities on distinct same-identity failovers, then cancel new demand.
 // This exercises ownership checks inside one cleanup, independently of wire sharing.
 console.log("failovers,extra_routes,cancel_us");
 for (const failovers of [0, 1, 16, 128])
@@ -134,12 +134,12 @@ for (const failovers of [0, 1, 16, 128])
 			const entries = [];
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
-				const instance = Instance.random();
-				const primary = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 0n });
+				const identity = Identity.random();
+				const primary = origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: 1n }).requested();
-				// Pinned, or the path's earlier instance would answer it and this claim never hears it.
-				const held = origin.request(path, { instance });
+				const br = origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost: 1n }).requested();
+				// Pinned, or the path's earlier identity would answer it and this claim never hears it.
+				const held = origin.request(path, { identity });
 				const source = new Broadcast();
 				sources.push(source);
 				const answer = (await ar.next()).value;
@@ -147,10 +147,10 @@ for (const failovers of [0, 1, 16, 128])
 				await settle();
 				entries.push({ primary, ar, br, held });
 			}
-			const instance = Instance.random();
-			origin.claim(prefix, { instance: { id: instance, epoch: 0n } });
+			const identity = Identity.random();
+			origin.claim(prefix, { identity: { id: identity, epoch: 0n } });
 			for (let i = 0; i < extraRoutes; i++)
-				origin.claim(prefix, { instance: { id: instance, epoch: 0n }, cost: BigInt(i + 1) });
+				origin.claim(prefix, { identity: { id: identity, epoch: 0n }, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();
@@ -177,7 +177,7 @@ for (const failovers of [0, 1, 16, 128])
 					active += (performance.now() - start) * 1000;
 					await wait;
 				}
-				// An ownership check must preserve every old instance, not just the winning one.
+				// An ownership check must preserve every old identity, not just the winning one.
 				for (let i = 0; i < entries.length; i++) {
 					const source = new Broadcast();
 					sources.push(source);

@@ -26,7 +26,7 @@ use super::Answer;
 use crate::coding::Decode;
 use crate::lite::{self, AnnounceBroadcast, Version, subscriber::route_stream::Writer, test_transport::*};
 use crate::model::ProduceTest;
-use crate::{Hop, Instance, Path, Prefix, Prefixes, origin};
+use crate::{Hop, Identity, Path, Prefix, Prefixes, origin};
 
 /// Where claims are announced: some above what grants and prefixes name, some deeper than a
 /// grant reaches, one hidden, and some beneath the mount target `s`.
@@ -156,8 +156,8 @@ fn case() -> impl Strategy<Value = Case> {
 		})
 }
 
-/// A claim as the peer holds it: its path from the session's root, and its instance.
-type Held = (Path, Instance);
+/// A claim as the peer holds it: its path from the session's root, and its identity.
+type Held = (Path, Identity);
 
 /// The announce stream's bytes, decoded as the peer reads them.
 struct Peer {
@@ -191,13 +191,13 @@ impl Peer {
 		msgs
 	}
 
-	fn start(&mut self, suffix: &lite::PathRef, instance: &Instance) -> Held {
+	fn start(&mut self, suffix: &lite::PathRef, identity: &Identity) -> Held {
 		let path = self
 			.decoder
 			.start(Some(suffix.clone()))
 			.unwrap()
 			.expect("a path the peer holds");
-		let held = (path, instance.clone());
+		let held = (path, identity.clone());
 		self.live.insert(self.decoder.last(), held.clone());
 		held
 	}
@@ -261,8 +261,8 @@ fn shown(consumer: &origin::Consumer, grant: Option<usize>, prefix: &Path, hidde
 	flush(&mut writer);
 	for msg in peer.take() {
 		match msg {
-			AnnounceBroadcast::Start { suffix, instance, .. } => {
-				peer.start(&suffix, &instance);
+			AnnounceBroadcast::Start { suffix, identity, .. } => {
+				peer.start(&suffix, &identity);
 			}
 			AnnounceBroadcast::End { id, .. } => {
 				peer.end(id);
@@ -293,11 +293,11 @@ struct Edit {
 	at: usize,
 }
 
-/// A claim the origin holds: its route, instance, the scope it was announced through, and
+/// A claim the origin holds: its route, identity, the scope it was announced through, and
 /// the step that announced it.
 struct Claimed {
 	route: crate::model::AnnounceProducer,
-	instance: Instance,
+	identity: Identity,
 	scope: usize,
 	at: usize,
 }
@@ -314,7 +314,7 @@ struct Sim {
 	/// The step of each op that is no drain, so a claim's age compares with a read's.
 	step: usize,
 	claims: BTreeMap<usize, Claimed>,
-	next_instance: u64,
+	next_identity: u64,
 	/// The grant the answer started from, then each change it queued, with its step.
 	grants: Vec<(usize, Option<usize>)>,
 	/// The grant last given, queued or not.
@@ -350,7 +350,7 @@ impl Sim {
 			peer,
 			step: 0,
 			claims: BTreeMap::new(),
-			next_instance: 0,
+			next_identity: 0,
 			grants: vec![(0, case.initial)],
 			given: case.initial,
 			prefixes: BTreeMap::new(),
@@ -397,9 +397,9 @@ impl Sim {
 				let Ok(producer) = self.origin.scope("", &prefixes(SCOPES[*scope])) else {
 					return Ok(());
 				};
-				self.next_instance += 1;
-				let instance: Instance = format!("i{}", self.next_instance).parse().unwrap();
-				let info = origin::RouteInfo::new().with_instance(instance.clone(), 0);
+				self.next_identity += 1;
+				let identity: Identity = format!("i{}", self.next_identity).parse().unwrap();
+				let info = origin::RouteInfo::new().with_identity(identity.clone(), 0);
 				if let Ok(route) = producer.announce(PATHS[*index], info) {
 					let at = self.step;
 					let scope = *scope;
@@ -407,7 +407,7 @@ impl Sim {
 						*index,
 						Claimed {
 							route,
-							instance,
+							identity,
 							scope,
 							at,
 						},
@@ -420,7 +420,7 @@ impl Sim {
 			Op::Reprice { path: index, cost } => {
 				if let Some(held) = self.claims.get(index) {
 					let info = origin::RouteInfo::new()
-						.with_instance(held.instance.clone(), 0)
+						.with_identity(held.identity.clone(), 0)
 						.with_cost(*cost);
 					held.route.update(info).unwrap();
 				}
@@ -520,8 +520,8 @@ impl Sim {
 	fn read(&mut self) -> Result<(), TestCaseError> {
 		for msg in self.peer.take() {
 			match msg {
-				AnnounceBroadcast::Start { suffix, instance, .. } => {
-					let (shown, _) = self.peer.start(&suffix, &instance);
+				AnnounceBroadcast::Start { suffix, identity, .. } => {
+					let (shown, _) = self.peer.start(&suffix, &identity);
 					// Where the origin holds it: past the mount it is shown beneath, if any.
 					let held = match &self.mount {
 						Some((at, target)) => match shown.strip_prefix(at) {
@@ -530,10 +530,10 @@ impl Sim {
 						},
 						None => shown.clone(),
 					};
-					if let Some(claimed) = self.claims.values().find(|held| held.instance == instance) {
+					if let Some(claimed) = self.claims.values().find(|held| held.identity == identity) {
 						prop_assert!(
 							prefixes(SCOPES[claimed.scope]).matches(held.as_str()),
-							"{shown} ({instance}) is shown beyond its grant {:?}",
+							"{shown} ({identity}) is shown beyond its grant {:?}",
 							SCOPES[claimed.scope],
 						);
 					}
@@ -542,11 +542,11 @@ impl Sim {
 					prop_assert!(self.peer.live.contains_key(&id), "a change to {id}, which is not live");
 				}
 				AnnounceBroadcast::End { id, lost } => {
-					let (path, instance) = self.peer.end(id);
-					let announced = self.claims.values().any(|held| held.instance == instance);
+					let (path, identity) = self.peer.end(id);
+					let announced = self.claims.values().any(|held| held.identity == identity);
 					prop_assert!(
 						lost || !announced,
-						"{path} ({instance}) ended as withdrawn while its publisher still announces it"
+						"{path} ({identity}) ended as withdrawn while its publisher still announces it"
 					);
 				}
 				AnnounceBroadcast::Ok => {
@@ -602,7 +602,7 @@ impl Sim {
 			if (effect + 1..self.grants.len()).any(|later| !view(later).shown.contains(claim)) {
 				continue;
 			}
-			let (path, instance) = claim;
+			let (path, identity) = claim;
 			// The read that tells it: the one it lies in, or the one it is presented at.
 			let read =
 				|index: usize| (view(index).reads.iter()).find(|read| path.has_prefix(read) || read.has_prefix(path));
@@ -610,10 +610,10 @@ impl Sim {
 				.rev()
 				.find(|index| read(*index).is_none_or(|read| !view(index - 1).reads.contains(read)))
 				.map_or(asked.at, |index| self.grants[index].0);
-			let old = (self.claims.values()).any(|held| held.instance == *instance && held.at < since);
+			let old = (self.claims.values()).any(|held| held.identity == *identity && held.at < since);
 			prop_assert!(
 				!old || held.contains(claim),
-				"SYNCED for {:?} went out before {path} ({instance}) under grant {:?}",
+				"SYNCED for {:?} went out before {path} ({identity}) under grant {:?}",
 				asked.path,
 				self.grants[effect].1.map(|index| GRANTS[index]),
 			);
@@ -714,8 +714,8 @@ fn events(peer: &mut Peer, msgs: &[AnnounceBroadcast]) -> Vec<String> {
 	let mut events = Vec::new();
 	for msg in msgs {
 		match msg {
-			AnnounceBroadcast::Start { suffix, instance, .. } => {
-				events.push(peer.start(suffix, instance).0.to_string());
+			AnnounceBroadcast::Start { suffix, identity, .. } => {
+				events.push(peer.start(suffix, identity).0.to_string());
 			}
 			AnnounceBroadcast::End { id, .. } => {
 				peer.end(*id);
@@ -739,10 +739,10 @@ fn a_change_queued_before_a_revocation_ends_its_claim_as_lost() {
 	let (mut writer, mut peer) = stream();
 	answer.request(false, Vec::new(), vec![(path(""), false)]).unwrap();
 	let first = sent(&mut answer, &mut writer, &mut peer);
-	let AnnounceBroadcast::Start { instance, .. } = first[1].clone() else {
+	let AnnounceBroadcast::Start { identity, .. } = first[1].clone() else {
 		panic!("{first:?}");
 	};
-	ac.update(origin::RouteInfo::new().with_instance(instance, 0).with_cost(5))
+	ac.update(origin::RouteInfo::new().with_identity(identity, 0).with_cost(5))
 		.unwrap();
 	origin.route_node();
 	auth.handle().authorize(&grant(2));
@@ -814,11 +814,11 @@ fn presented(consumer: origin::Consumer, prefix: &str) -> Vec<(String, u64)> {
 	for msg in sent(&mut answer, &mut writer, &mut peer) {
 		if let AnnounceBroadcast::Start {
 			suffix,
-			instance,
+			identity,
 			claim,
 		} = msg
 		{
-			let (path, _) = peer.start(&suffix, &instance);
+			let (path, _) = peer.start(&suffix, &identity);
 			shown.push((path.to_string(), claim.item.above));
 		}
 	}

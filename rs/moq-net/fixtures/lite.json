@@ -210,7 +210,7 @@
 		"expect": "decoded"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START names its instance, epoch, cost, how far above it was claimed, flags, priority, and the relays it crossed",
+		"name": "a lite-07 ANNOUNCE_START names its identity, epoch, cost, how far above it was claimed, flags, priority, and the relays it crossed",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "000f000001780161000103000080020709",
@@ -266,7 +266,7 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a lite-07 ANNOUNCE_START with an invalid instance is refused",
+		"name": "a lite-07 ANNOUNCE_START with an invalid identity is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
 		"hex": "000c000001780000010300008000",

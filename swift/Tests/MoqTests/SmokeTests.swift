@@ -325,10 +325,10 @@ final class SmokeTests: XCTestCase {
         session.cancel(code: 0)
     }
 
-    /// Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back
-    /// pins `request` and `follow`, while its text parsed is another, named instance that nothing
+    /// Over moq-lite-06, whose wire carries no identity, the session mints one: passing it back
+    /// pins `request` and `follow`, while its text parsed is another, named identity that nothing
     /// serves.
-    func testAnnouncedInstancePinsRequestAndFollow() async throws {
+    func testAnnouncedIdentityPinsRequestAndFollow() async throws {
         let version = ["moq-lite-06"]
         let published = OriginProducer()
         let route = try published.route(path: "live")
@@ -355,12 +355,12 @@ final class SmokeTests: XCTestCase {
         guard case .present(let present) = try await nextRoute(try consumer.announced()) else {
             return XCTFail("expected an announcement")
         }
-        let minted = present.route.instance
+        let minted = present.route.identity
         XCTAssertTrue(minted.isMinted())
 
-        _ = try await consumer.request(path: "live", instance: minted)
-        let following = try consumer.follow(path: "live", instance: minted)
-        // Cancelling ends the wait below, so an instance that never resolves fails rather than hangs.
+        _ = try await consumer.request(path: "live", identity: minted)
+        let following = try consumer.follow(path: "live", identity: minted)
+        // Cancelling ends the wait below, so an identity that never resolves fails rather than hangs.
         let watchdog = Task {
             try await Task.sleep(nanoseconds: 10_000_000_000)
             following.cancel()
@@ -370,13 +370,13 @@ final class SmokeTests: XCTestCase {
         XCTAssertNotNil(followed)
         following.cancel()
 
-        let named = try Instance.parse(text: minted.text())
+        let named = try Identity.parse(text: minted.text())
         XCTAssertFalse(named.isMinted())
         XCTAssertEqual(named.description, minted.text())
         XCTAssertNotEqual(named, minted)
         do {
-            _ = try await consumer.request(path: "live", instance: named)
-            XCTFail("the same text, named, is another instance")
+            _ = try await consumer.request(path: "live", identity: named)
+            XCTFail("the same text, named, is another identity")
         } catch {}
     }
 
@@ -417,7 +417,7 @@ final class SmokeTests: XCTestCase {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
-        XCTAssertEqual(first.route.instance, route.instance)
+        XCTAssertEqual(first.route.identity, route.identity)
 
         try route.withdraw()
         guard case .absent(let retracted) = try await nextRoute(announced) else {
@@ -434,7 +434,7 @@ final class SmokeTests: XCTestCase {
         guard case .present(let again) = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
-        XCTAssertEqual(again.route.instance, route.instance)
+        XCTAssertEqual(again.route.identity, route.identity)
         _ = try await consumer.request(path: "live")
         route.cancel()
     }
@@ -501,22 +501,22 @@ final class SmokeTests: XCTestCase {
         chat.cancel()
     }
 
-    func testNewInstanceRestartsFollowersButStaysListed() async throws {
+    func testNewIdentityRestartsFollowersButStaysListed() async throws {
         let origin = OriginProducer()
         let consumer = origin.consume()
         let announced = try consumer.announced(prefix: "")
-        let following = try consumer.follow(path: "instance")
-        let first = try origin.route(path: "instance")
+        let following = try consumer.follow(path: "identity")
+        let first = try origin.route(path: "identity")
         guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(present.route.instance.isMinted())
-        XCTAssertEqual(present.route.instance, first.instance)
+        XCTAssertFalse(present.route.identity.isMinted())
+        XCTAssertEqual(present.route.identity, first.identity)
         let firstBroadcast = try await following.available()
         XCTAssertNotNil(firstBroadcast)
 
-        let camera = try Instance.parse(text: "camera")
-        let second = try origin.route(path: "instance", instance: camera, epoch: 1)
+        let camera = try Identity.parse(text: "camera")
+        let second = try origin.route(path: "identity", identity: camera, epoch: 1)
         let takeover = try await following.available()
         XCTAssertNotNil(takeover)
 
@@ -526,12 +526,12 @@ final class SmokeTests: XCTestCase {
         guard case .absent(let absent) = try await nextRoute(announced) else {
             return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(absent.route.instance, camera)
-        XCTAssertEqual(absent.route.instance.description, "camera")
+        XCTAssertEqual(absent.route.identity, camera)
+        XCTAssertEqual(absent.route.identity.description, "camera")
 
-        XCTAssertThrowsError(try Instance.parse(text: "")) { error in
-            guard case MoqError.InvalidInstance = error else {
-                return XCTFail("expected InvalidInstance, got \(error)")
+        XCTAssertThrowsError(try Identity.parse(text: "")) { error in
+            guard case MoqError.InvalidIdentity = error else {
+                return XCTFail("expected InvalidIdentity, got \(error)")
             }
         }
         first.cancel()
@@ -568,7 +568,7 @@ final class SmokeTests: XCTestCase {
         let request = try XCTUnwrap(requested)
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
-        XCTAssertEqual(served.instance, dynamic.instance)
+        XCTAssertEqual(served.identity, dynamic.identity)
         let broadcast = served.broadcast
         XCTAssertTrue(broadcast === served.broadcast)
         // Only announcing answers the requester.
@@ -816,56 +816,105 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    /// An idle track ends only once a reader that joined after it went unwanted has left.
-    func testAbortUnwantedKeepsALateReader() async throws {
+    /// Released once unwanted, a track ends; a reader that joined since is served by the next
+    /// request for it.
+    func testReleaseEndsAnOnDemandTrack() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status")
-        let demand = try track.demand()
-        while try await demand.wantedChanged() {}
+        let requests = try broadcast.requests()
 
-        let late = try track.consume()
-        XCTAssertFalse(try track.abortUnwanted(errorCode: 7))
-        try track.writeFrame(Data("still serving".utf8), timestamp: .unscaled(0))
+        var idle: TrackProducer? = try broadcast.publishTrack(name: "idle")
+        let idleDemand = try idle!.demand()
+        while try await idleDemand.wantedChanged() {}
+        idle = nil
+        do {
+            _ = try await idleDemand.wantedChanged()
+            XCTFail("the watcher outlived its released track")
+        } catch MoqError.Closed {}
+
+        var track: TrackProducer? = try broadcast.publishTrack(name: "status")
+        let demand = try track!.demand()
+        while try await demand.wantedChanged() {}
+        let late = try await broadcast.consume().subscribeTrack(name: "status")
+        track = nil
+
+        let request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "status")
+        let next = try request.accept()
+        try next.writeFrame(Data("served again".utf8), timestamp: .unscaled(0))
         let frame = try await late.readFrame()
-        XCTAssertEqual(frame?.payload, Data("still serving".utf8))
-
-        while try await !demand.wantedChanged() {}
+        XCTAssertEqual(frame?.payload, Data("served again".utf8))
         late.cancel()
-        while try await demand.wantedChanged() {}
-        XCTAssertTrue(try track.abortUnwanted(errorCode: 7))
-        XCTAssertThrowsError(try track.abortUnwanted(errorCode: 7)) { error in
-            guard case MoqError.Closed = error else {
-                return XCTFail("expected Closed, got \(error)")
-            }
-        }
         try broadcast.close()
     }
 
-    /// A typed producer keeps an idle track for a reader that joined since, like a raw one.
-    func testJsonAbortUnwantedKeepsALateReader() async throws {
+    /// A native encoder serves a track asked for again after its producer was released while
+    /// read, published with the same settings.
+    func testNativeEncodersServeARenewal() async throws {
         let broadcast = try BroadcastProducer()
-        let producer = try Json.StreamProducer<String>(
-            broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: nil, timescale: 1_000_000)))
-        let demand = try producer.demand()
+        let requests = try broadcast.requests()
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+
+        let mic = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
+        let opus = AudioEncoderOutput(codec: AudioCodec.opus())
+        var audio: Audio.Producer? = try Audio.Producer(
+            catalog: catalog, input: mic, output: opus, track: "mic")
+        var late = try await broadcast.consume().subscribeTrack(name: "mic")
+        audio = nil
+        var request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "mic")
+        audio = try Audio.Producer.requested(
+            catalog: catalog, request: request, input: mic, output: opus)
+        for index in 0..<3 {
+            try audio!.write(
+                AudioFrame(timestamp: micros(UInt64(index) * 20_000), data: Data(count: 960 * 4)))
+        }
+        var frame = try await late.readFrame()
+        XCTAssertNotNil(frame)
+        late.cancel()
+
+        let camera = VideoEncoderInput(
+            format: .rgba(), width: 320, height: 240,
+            framerate: Video.FrameRate(numerator: 30, denominator: 1))
+        let h264 = VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software)
+        var video: Video.Producer? = try Video.Producer(
+            catalog: catalog, input: camera, output: h264, track: "camera")
+        late = try await broadcast.consume().subscribeTrack(name: "camera")
+        video = nil
+        request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "camera")
+        video = try Video.Producer.requested(
+            catalog: catalog, request: request, input: camera, output: h264)
+        try video!.write(
+            VideoFrame(timestamp: micros(0), data: Data(repeating: 0x80, count: 320 * 240 * 4)))
+        try video!.finish()
+        frame = try await late.readFrame()
+        XCTAssertNotNil(frame)
+        late.cancel()
+        try broadcast.close()
+    }
+
+    /// A released typed producer hands a reader that joined since to the next request, like a
+    /// raw one.
+    func testJsonReleaseServesALateReader() async throws {
+        let broadcast = try BroadcastProducer()
+        let requests = try broadcast.requests()
+        let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
+        var producer: Json.StreamProducer<String>? = try Json.StreamProducer<String>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events", info: info))
+        let demand = try producer!.demand()
         while try await demand.wantedChanged() {}
 
         let late = try Json.StreamConsumer<String>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
-        XCTAssertFalse(try producer.abortUnwanted(errorCode: 7))
-        try producer.append("still serving", timestamp: micros(0))
-        let record = try await late.next()
-        XCTAssertEqual(record, Json.Timed(value: "still serving", timestamp: micros(0)))
+        producer = nil
 
-        while try await !demand.wantedChanged() {}
+        let request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "events")
+        let next = try Json.StreamProducer<String>(broadcast: broadcast, track: try request.accept(info: info))
+        try next.append("served again", timestamp: micros(0))
+        let record = try await late.next()
+        XCTAssertEqual(record, Json.Timed(value: "served again", timestamp: micros(0)))
         late.cancel()
-        while try await demand.wantedChanged() {}
-        XCTAssertTrue(try producer.abortUnwanted(errorCode: 7))
-        XCTAssertThrowsError(try producer.abortUnwanted(errorCode: 7)) { error in
-            guard case MoqError.Closed = error else {
-                return XCTFail("expected Closed, got \(error)")
-            }
-        }
         try broadcast.close()
     }
 

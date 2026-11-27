@@ -161,7 +161,8 @@ pub enum StreamError {
 	#[error("too far behind")]
 	TooFarBehind,
 
-	/// The track's content could not be parsed.
+	/// The track's content could not be parsed, or a track asked for again was accepted with
+	/// info other than what its readers already hold.
 	#[error("malformed track")]
 	MalformedTrack,
 
@@ -431,8 +432,11 @@ pub enum Error {
 	#[error("unknown ALPN: {0}")]
 	UnknownAlpn(String),
 
-	/// The producer was dropped without finishing or aborting, so the content is incomplete:
-	/// released by its owner, as a binding's garbage collector does, with no cause to report.
+	/// The producer was dropped without finishing or aborting, so the content is incomplete,
+	/// with no cause to report. A track's reader sees it only when no request handler can serve
+	/// the track again, when the producer that served such a request drops too before another
+	/// reader joins, or when the next producer could not continue it (a JSON log or window): a
+	/// track nobody wants ends cleanly when its last producer drops.
 	#[error("dropped without a finish or abort")]
 	Dropped,
 

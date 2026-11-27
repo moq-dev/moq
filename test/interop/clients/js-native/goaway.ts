@@ -29,8 +29,8 @@ async function active(request: (typeof requests)[number]) {
 }
 try {
 	const initial = await active(requests[0]);
-	// moq-transport carries no instance, so the session mints one for each announcement.
-	assert(initial.instance && Moq.Instance.isMinted(initial.instance), "moq-transport carries no instance");
+	// moq-transport carries no identity, so the session mints one for each announcement.
+	assert(initial.identity && Moq.Identity.isMinted(initial.identity), "moq-transport carries no identity");
 	let track = initial.track("video").subscribe({ ranges: [{ start: 0n }] });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
@@ -82,10 +82,10 @@ try {
 					restarted = requests[0].active.peek();
 				}
 				assert(
-					restarted.instance &&
-						Moq.Instance.isMinted(restarted.instance) &&
-						restarted.instance !== initial.instance,
-					"the replacement announcement is another minted instance",
+					restarted.identity &&
+						Moq.Identity.isMinted(restarted.identity) &&
+						restarted.identity !== initial.identity,
+					"the replacement announcement is another minted identity",
 				);
 				const next = restarted.track("video").subscribe({ ranges: [{ start: 2n }] });
 				track.close();

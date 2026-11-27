@@ -226,8 +226,7 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
   method to an existing binding object, which the API diff counts as a
   break once 0.22 is published. Superseded 2026-11-23 (maintainer): it
-  landed, and [abort-unwanted-delete](/quest/m2/abort-unwanted-delete.md)
-  in m2 deletes it before 0.22 publishes it.
+  landed, and m2 deleted it before 0.22 published it.
 - ✅ End-to-end encryption does not publish at this cut
   ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
   so `moq-e2ee` is no longer a retired name, and the paragraph above about
