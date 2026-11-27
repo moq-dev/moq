@@ -8873,6 +8873,12 @@ mod serve_group_test {
 			// 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame at 4.
 			let tail: &[u8] = &[0x81, 0x2d, 4, 1, 2, 6, 2, 0, 1];
 			assert!(bytes.ends_with(tail), "{compression:?}: {bytes:?}");
+			let info = crate::track::Info::timed().with_compression(compression);
+			assert_eq!(
+				ingest_meta_group(&bytes, info),
+				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
+				"{compression:?}: the ingest reads it back"
+			);
 			assert!(
 				!bytes.windows(5).any(|w| w == b"hello"),
 				"{compression:?}: a payload went out"
@@ -8905,9 +8911,65 @@ mod serve_group_test {
 		(header.key, sizes, times, end)
 	}
 
-	/// Metadata subscriptions across the Rust/JS boundary: JS reads a Rust publisher's metadata
-	/// Group Stream, and a JS publisher serves a Rust-encoded metadata SUBSCRIBE with one Rust
-	/// reads, each frame's header alone, compressed or not.
+	/// A metadata Group Stream read through the subscriber's ingest into a metadata copy of a
+	/// track with `info`: the group's key, each frame's declared size and timestamp, and the End
+	/// its GROUP_END names.
+	fn ingest_meta_group(bytes: &[u8], info: crate::track::Info) -> (u64, Vec<u64>, Vec<u64>, Option<u64>) {
+		use crate::coding::Decode;
+
+		/// The rest of the stream in one read, then its FIN.
+		struct Once(Option<bytes::Bytes>);
+		impl crate::transport::poll::Chunks for Once {
+			type Error = Error;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> std::task::Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+				std::task::Poll::Ready(Ok(self.0.take()))
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let version = Version::Lite07;
+		let mut r = crate::coding::Decoder::new(bytes, version.into());
+		assert_eq!(r.varint().unwrap(), 0, "a group stream");
+		let header = lite::Group::decode(&mut r, version).unwrap();
+		let rest = bytes::Bytes::copy_from_slice(r.rest());
+		let mut reader = crate::coding::Reader::new(
+			crate::transport::poll::Buffered::new(Once(Some(rest))),
+			version,
+		);
+		let track = track::Producer::new_meta(Arc::new(broadcast::Info::default()), "test", info.clone());
+		let producer = track.create_group(group::Info { start: header.key }).unwrap();
+		let mut consumer = producer.consume();
+		let mut group = crate::recv::Group::new(producer);
+		let framing = lite::Framing::new(&info, version);
+		let mut ingest = lite::FrameIngest::new(framing, false, header.frame_start, lite::Clock::new(version, header.key));
+		let waiter = kio::Waiter::noop();
+		// The whole stream is ready, so only the ingest's own yields leave it pending.
+		let end = (0..bytes.len() + 64)
+			.find_map(|_| match ingest.poll(&mut reader, &mut group, &waiter) {
+				std::task::Poll::Ready(end) => Some(end.unwrap()),
+				std::task::Poll::Pending => None,
+			})
+			.expect("the ingest stalled on a complete stream");
+		match end {
+			Some(end) => group.finish_at(end).unwrap(),
+			None => group.finish().unwrap(),
+		}
+		let (mut sizes, mut times) = (Vec::new(), Vec::new());
+		while let std::task::Poll::Ready(Ok(Some(object))) = consumer.poll_read_object(&waiter) {
+			assert!(object.frame.payload.is_empty(), "a metadata frame holds no payload");
+			sizes.push(object.inflated.expect("a metadata frame declares its size"));
+			times.push(object.frame.timestamp.as_millis().unwrap() as u64);
+		}
+		(header.key, sizes, times, end)
+	}
+
+	/// Metadata subscriptions across the Rust/JS boundary: each reads the other's metadata Group
+	/// Stream through its own ingest, each frame's header alone, compressed or not: JS a Rust
+	/// publisher's, and Rust a JS publisher's answer to a Rust-encoded metadata SUBSCRIBE.
 	#[kio::test]
 	#[ignore = "requires Bun; run by just test interop"]
 	async fn lite07_meta_interop() {
@@ -8964,6 +9026,7 @@ mod serve_group_test {
 				meta: true,
 			};
 			let bytes = subscribe.encode_bytes(Version::Lite07).unwrap();
+			let info = crate::track::Info::timed().with_compression(compression);
 			let compression = match compression {
 				crate::track::Compression::None => serde_json::Value::Null,
 				crate::track::Compression::Deflate => "deflate".into(),
@@ -8971,7 +9034,7 @@ mod serve_group_test {
 			let input = serde_json::json!({ "mode": "serve", "bytes": bytes.to_vec(), "compression": compression });
 			let served: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("meta", input)).unwrap();
 			assert_eq!(
-				read_meta_group(&served),
+				ingest_meta_group(&served, info),
 				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
 				"{compression}"
 			);

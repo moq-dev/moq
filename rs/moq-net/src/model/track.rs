@@ -5617,9 +5617,17 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
-		let name = name.into();
-		let info = info.into().unwrap_or_default();
-		let state = TrackState::spawn(broadcast.clone(), false);
+		Self::create(broadcast, name.into(), info.into().unwrap_or_default(), false)
+	}
+
+	/// [`Self::new`] for a metadata copy, which a test reads a metadata Group Stream into.
+	#[cfg(test)]
+	pub(crate) fn new_meta(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>, info: Info) -> Self {
+		Self::create(broadcast, name.into(), info, true)
+	}
+
+	fn create(broadcast: Arc<broadcast::Info>, name: Arc<str>, info: Info, meta: bool) -> Self {
+		let state = TrackState::spawn(broadcast.clone(), meta);
 		state.write().ok().expect("a new track is open").publish(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
