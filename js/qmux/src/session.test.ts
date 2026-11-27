@@ -911,6 +911,78 @@ describe("Session integration (scripted peer)", () => {
 		}
 	});
 
+	test("keep-alive turns stale after soft, live on the next frame, and closes after hard", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		try {
+			const { session, peer } = connect();
+			await started(peer);
+			await waitFor(() => peer.has("transport_parameters"));
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+			session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(10) });
+			const stale = session.staleChanged();
+
+			// A silent peer draws a QX_PING at half of soft, then turns stale at soft.
+			await clock.advance(Duration.secs(1));
+			await settle();
+			expect(peer.count("ping_request")).toBe(1);
+			expect(session.stale).toBe(false);
+			await clock.advance(Duration.secs(1));
+			await settle();
+			expect(session.stale).toBe(true);
+			await stale;
+			// Still unheard, it pings every half of soft.
+			expect(peer.count("ping_request")).toBe(2);
+
+			// Its answer turns it live again.
+			const live = session.staleChanged();
+			peer.send({ type: "ping_response", sequence: 1n });
+			await settle();
+			expect(session.stale).toBe(false);
+			await live;
+
+			// Then it goes silent for good: the session closes once hard passes.
+			await clock.advance(Duration.millis(9_900));
+			await settle();
+			expect(session.stale).toBe(true);
+			await clock.advance(Duration.millis(200));
+			const err = await expectSessionFailure(session);
+			expect(err.message).toContain("keep-alive timeout");
+			// A wait started after the end settles at once rather than hanging.
+			let settled = false;
+			void session.staleChanged().then(() => {
+				settled = true;
+			});
+			await settle();
+			expect(settled).toBe(true);
+		} finally {
+			installed.close();
+		}
+	});
+
+	test("keep-alive is refused before ready, out of order, and past the idle timeout", async () => {
+		const { session, peer } = connect({ idleTimeout: Duration.secs(30) });
+		const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+		expect(() => session.keepAlive(keepAlive)).toThrow("await ready");
+		await started(peer);
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		expect(() => session.keepAlive({ soft: Duration.secs(3), hard: Duration.secs(2) })).toThrow(RangeError);
+		expect(() => session.keepAlive({ soft: Duration.nanos(1), hard: Duration.secs(2) })).toThrow(RangeError);
+		expect(() => session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(31) })).toThrow(RangeError);
+		session.keepAlive(keepAlive);
+		session.close();
+	});
+
+	test("keep-alive is refused on qmux-00, which has no QX_PING", async () => {
+		const { session, peer } = accept({ protocol: "qmux-00.moq-lite-04" });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		expect(() => session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(10) })).toThrow("qmux-00");
+		session.close();
+	});
+
 	test("malformed and unsupported config is refused before transport setup", () => {
 		const socket = {
 			opened: new Promise(() => {}),

@@ -68,7 +68,7 @@ Recommended, open to review:
 - `Path` in moq-net is a broadcast's name. Inside moq-quic, `path` keeps
   QUIC's meaning; moq-tokio's public API namespaces the network path so the
   two cannot be confused.
-- With [keep-alive](/quest/m1/keep-alive.md), liveness is per path: a path
+- With [keep-alive](https://github.com/moq-dev/moq/pull/9698), liveness is per path: a path
   with no reply inside `soft` stops carrying traffic, and the session turns
   Stale only when every path has.
 - Every path must reach the relay, and the worker, that holds the

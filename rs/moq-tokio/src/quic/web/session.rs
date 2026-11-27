@@ -1132,6 +1132,22 @@ impl moq_net::transport::poll::Session for Session {
 			.set_limits(quic)
 			.map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
 	}
+	/// The connection's keep-alive, which every WebTransport session on it shares.
+	fn set_keep_alive(
+		&self,
+		keep_alive: moq_net::transport::KeepAlive,
+	) -> Result<(), moq_net::transport::KeepAliveError> {
+		self.conn
+			.set_keep_alive(moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard))
+			.map_err(|err| moq_net::transport::KeepAliveError::Refused(err.to_string()))
+	}
+	fn poll_liveness(&self, waiter: &Waiter, last: moq_net::transport::Liveness) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.conn.poll_stale(waiter, stale).map(|stale| match stale {
+			true => moq_net::transport::Liveness::Stale,
+			false => moq_net::transport::Liveness::Live,
+		})
+	}
 }
 
 #[cfg(test)]

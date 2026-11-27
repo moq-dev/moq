@@ -413,6 +413,36 @@ impl poll::Session for Session {
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
 	}
+
+	/// QX_PING probes the peer, so draft-00, which has none, refuses it.
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), net::KeepAliveError> {
+		let keep_alive = moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard);
+		let mut inner = self.inner.lock();
+		if !inner.conn.version().uses_records() {
+			return Err(net::KeepAliveError::Unsupported);
+		}
+		// moq-quic wakes the driver to read the new deadline.
+		inner
+			.conn
+			.set_keep_alive(keep_alive)
+			.map_err(|err| net::KeepAliveError::Refused(err.to_string()))
+	}
+
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.inner
+			.lock()
+			.conn
+			.poll_stale(waiter, stale)
+			.map(|stale| match stale {
+				true => moq_net::transport::Liveness::Stale,
+				false => moq_net::transport::Liveness::Live,
+			})
+	}
 }
 
 /// A snapshot of the session's metrics; its [`net::Wire`] holds the byte counts.

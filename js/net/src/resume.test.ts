@@ -561,6 +561,47 @@ test("a backfill places a time start its serving copy raised, at the group holdi
 	}
 });
 
+// A time start added under the serving copy's resume point, over history the reader's budget folded
+// before any range held it, reads the groups the route holds there: placed at its time, it owes what
+// the fold took, which the backfill then asks for. Mirrors the Rust
+// `an_added_time_start_over_folded_history_below_the_resume_point_reads_it`.
+test("an added time start over folded history below the resume point reads it", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe(joining(Duration.ZERO));
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(10n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([10n]);
+		ta.write(12n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([12n]);
+		// The replacement resumes from 12, holding nothing yet, so its cache places nothing.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({ ranges: [...(joining(Duration.ZERO).ranges ?? []), { start: 5n, end: 9n }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		for (const key of [7n, 12n, 13n]) tb.write(key);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub).sort()).toEqual([13n, 7n].sort());
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 // An ordered read holding a group for an unplaced time start still runs its cursor, so the serving
 // copy's fatal abort reaches it. Mirrors the Rust `a_fronts_held_group_sees_its_copys_fatal_abort`.
 test("a front's held group sees its serving copy's fatal abort", async () => {
@@ -1305,6 +1346,43 @@ test("a late group on a drained serving copy is read", async () => {
 		front.consumer.close();
 		for (const handle of handles) handle.close();
 		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+// A range added behind a resumed reader caught up at the live edge hands out the older group its
+// route delivers after the update, though the reader's budget folded that gap before any range held
+// it. Mirrors the Rust `a_range_added_behind_a_caught_up_resumed_read_hands_out_what_arrives_later`.
+test("a range added behind a caught-up resumed read hands out what arrives later", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	hooks.receiveTrack(ta.producer);
+	front.serve(handle);
+	const sub = front.consumer.track("seq").subscribe(joining(Duration.ZERO));
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(5n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([5n]);
+		ta.write(6n);
+		ta.write(7n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([7n]);
+		sub.update({ ranges: [...(joining(Duration.ZERO).ranges ?? []), { start: 3n, end: 3n }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		ta.write(3n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([3n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
 		installed.close();
 	}
 });

@@ -101,4 +101,4 @@ beyond [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md).
 
 ## Required
 
-- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - the SUBSCRIBE mode, payload-less FRAME, and the publishers and relays that serve it
+- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - the header-only copy a subscriber reads into, and relays forwarding metadata upstream
