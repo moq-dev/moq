@@ -187,7 +187,7 @@ function createTile(name: string): WatchTile {
 const discovery = new Signals.Effect();
 discovery.run((effect) => {
 	const prefix = prefixPath(effect.get(prefixInput));
-	const announced = connection.announced(Net.Path.Pattern.subtree(prefix));
+	const announced = connection.announced(prefix);
 	effect.cleanup(() => announced.close());
 
 	const live = new Set<string>();

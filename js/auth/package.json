@@ -24,13 +24,12 @@
 	},
 	"dependencies": {
 		"@moq/clock": "workspace:^",
-		"@moq/pattern": "workspace:^",
+		"@moq/net": "workspace:^",
 		"commander": "^15.1.0",
 		"jose": "^6.2.17",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@moq/net": "workspace:*",
 		"@types/bun": "^1.4.4",
 		"@types/node": "^26.6.6",
 		"typescript": "7.0.2"

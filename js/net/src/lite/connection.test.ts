@@ -1291,7 +1291,7 @@ test("an ANNOUNCE_REQUEST the peer stops leaves its reader and the session open"
 		closed = true;
 	});
 	clientAnnounce.stop();
-	const listing = client.announced(Path.Pattern.literal(ROOM));
+	const listing = client.announced(ROOM);
 	let ended: unknown;
 	void listing.closed.then((err) => {
 		ended = err ?? "closed";

@@ -48,9 +48,9 @@ async function chosen(alpn: string, a: Link, b: Link): Promise<"a" | "b"> {
 	const links = { a: await upstream(alpn, edge, identity, a), b: await upstream(alpn, edge, identity, b) };
 	// Both routes land before the request resolves, so it picks between them. Each session hands
 	// its route to the edge before this reader of the same session hears of it.
-	const announced = edge.announced(Path.Pattern.subtree(path));
+	const announced = edge.announced(path);
 	for (const link of Object.values(links)) {
-		const routes = link.client.routes(Path.Pattern.subtree(path));
+		const routes = link.client.routes(path);
 		await routes.next();
 		routes.close();
 	}

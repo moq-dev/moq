@@ -52,7 +52,7 @@ try {
 					await connection.established.changed();
 					replacement = connection.established.peek();
 				}
-				const announcements = replacement.announced(Moq.Path.Pattern.literal("handover"));
+				const announcements = replacement.announced(Moq.Path.from("handover"));
 				try {
 					for (;;) {
 						const event = await announcements.next();

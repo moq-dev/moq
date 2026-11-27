@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { InvalidPrefix, Pattern, Prefix, Prefixes } from "./index.ts";
+import * as Segments from "./prefix.ts";
+import { InvalidPrefix, Prefix, Prefixes, parts } from "./prefix.ts";
 
 function code(fn: () => unknown): InvalidPrefix.Code | "ok" {
 	try {
@@ -41,7 +42,6 @@ describe("Prefix", () => {
 		const all = Prefix.parse("");
 		expect(all.equals(Prefix.all())).toBe(true);
 		for (const path of ["", "a", "a/b/c"]) expect(all.matches(path)).toBe(true);
-		expect(all.pattern().text).toBe("**");
 		expect(all.isEmpty).toBe(true);
 		expect(Prefix.parse("a").isEmpty).toBe(false);
 	});
@@ -53,7 +53,6 @@ describe("Prefix", () => {
 		expect(room.matches("roomy")).toBe(false);
 		expect(room.matches("room-b/alice")).toBe(false);
 		expect(room.matches("")).toBe(false);
-		expect(room.pattern().text).toBe("room/**");
 	});
 
 	test("respects escapes", () => {
@@ -81,7 +80,7 @@ describe("Prefix", () => {
 		expect(Prefix.parse("b").rooted("a").text).toBe("a/b");
 		expect(Prefix.all().rooted("a").text).toBe("a");
 		expect(code(() => Prefix.parse("b").rooted("a/*"))).toBe("wildcard");
-		// A root is normalized like a broadcast path, as a pattern's is.
+		// A root is normalized like a broadcast path.
 		expect(Prefix.parse("b").rooted("/a//c/").text).toBe("a/c/b");
 		expect(Prefix.parse("a/b").rebase("/a//")?.text).toBe("b");
 		// A root ending inside an escape is no segment of a prefix.
@@ -160,7 +159,7 @@ describe("Prefixes", () => {
 		expect(Prefix.parse("a\\/b").overlaps("/a\\/b//")).toBe(true);
 	});
 
-	test("agrees with patterns and each member on any short path", () => {
+	test("agrees with each member on any short path", () => {
 		const pieces = ["", "/", "a", "é", "\\/", "\\\\", "\\"];
 		let paths = [""];
 		for (let i = 0; i < 4; i++) paths = [...paths, ...paths.flatMap((path) => pieces.map((piece) => path + piece))];
@@ -171,9 +170,6 @@ describe("Prefixes", () => {
 			sets.push(new Prefixes(members.filter((_, bit) => mask & (1 << bit))));
 		}
 		for (const path of paths) {
-			for (const member of members) {
-				expect(member.matches(path), `${member.text} ${path}`).toBe(member.pattern().matches(path));
-			}
 			for (const grant of sets) {
 				const all = grant.toArray();
 				expect(grant.matches(path), path).toBe(all.some((member) => member.matches(path)));
@@ -206,13 +202,6 @@ describe("Prefixes", () => {
 		expect(set("b", "c").rooted("a").toJSON()).toEqual(["a/b", "a/c"]);
 	});
 
-	test("patterns are each member's subtree", () => {
-		expect(set("", "x").patterns().toJSON()).toEqual(["**"]);
-		expect(set("a", "b/c").patterns().toJSON()).toEqual(["a/**", "b/c/**"]);
-		expect(set("a").patterns().matches("a/z")).toBe(true);
-		expect(set("a").patterns().contains(Pattern.parse("a/*"))).toBe(true);
-	});
-
 	test("near-linear on a large grant", () => {
 		// A member per path and a query per member: quadratic work would take seconds here.
 		const n = 50_000;
@@ -223,5 +212,38 @@ describe("Prefixes", () => {
 		expect(wider.covers(grant)).toBe(true);
 		expect(grant.covers(wider)).toBe(false);
 		expect(wider.intersect(grant).size).toBe(n);
+	});
+});
+
+describe("parts", () => {
+	test("splits only at an unescaped separator", () => {
+		const cases: [string, string[]][] = [
+			["", []],
+			["a/b/c", ["a", "b", "c"]],
+			["a\\/b", ["a\\/b"]],
+			["a\\\\/b", ["a\\\\", "b"]],
+			["a\\\\\\/b", ["a\\\\\\/b"]],
+			["\\//\\/", ["\\/", "\\/"]],
+			["/a//b/", ["", "a", "", "b", ""]],
+		];
+		for (const [path, want] of cases) expect(parts(path)).toEqual(want);
+		expect(parts("a/b\\/c/d", 2)).toEqual(["a", "b\\/c"]);
+	});
+
+	test("rejoining the parts gives back the path", () => {
+		let texts = [""];
+		for (let n = 0; n < 7; n++) {
+			texts = texts.flatMap((text) => ["a", "/", "\\"].map((c) => text + c));
+			for (const text of texts) expect(parts(text).join("/")).toBe(text);
+		}
+	});
+
+	test("escape and unescape are inverses", () => {
+		for (const content of ["", "plain", "/", "\\", "a/\\b", "\\\\//", "café/"]) {
+			const segment = Segments.escape(content);
+			expect(parts(segment)).toHaveLength(content === "" ? 0 : 1);
+			expect(Segments.unescape(segment)).toBe(content);
+		}
+		expect(Segments.escape("a/b\\c")).toBe("a\\/b\\\\c");
 	});
 });

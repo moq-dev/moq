@@ -20,7 +20,6 @@ small examples. The [API reference](/lib/js/api/) covers every package; source l
 | --- | --- |
 | [@moq/net](/lib/js/net) | The pub/sub layer: connections, broadcasts, tracks, groups, frames, discovery. |
 | [@moq/qmux](https://www.npmjs.com/package/@moq/qmux) | WebTransport over WebSockets fallback with QMux framing, used by `@moq/net`. |
-| [@moq/pattern](/lib/js/api/pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by `@moq/net` and `@moq/auth`. |
 | [@moq/hang](/lib/js/hang) | The media layer: catalog types and containers. |
 | [@moq/libav](/lib/js/api/libav) | libav.js decoding Opus and AAC, which `@moq/hang` loads as its WebCodecs fallback in Node, Bun, and browsers without `AudioDecoder`. LGPL-2.1-or-later. |
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |

@@ -24,7 +24,6 @@ const benchmarks: Record<string, { entry: string; rows: number }> = {
 	replay: { entry: "js/net/bench/replay.ts", rows: 72 },
 	"resume-history": { entry: "js/net/bench/resume-history.ts", rows: 72 },
 	buffered: { entry: "js/hang/bench/buffered.ts", rows: 36 },
-	pattern: { entry: "js/pattern/bench/algebra.ts", rows: 21 },
 };
 const selected = Object.hasOwn(benchmarks, benchmark) ? benchmarks[benchmark] : undefined;
 if (!selected) throw new Error(`--bench must be one of: ${Object.keys(benchmarks).join(", ")}`);

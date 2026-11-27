@@ -5,7 +5,7 @@
  * @module
  */
 
-import { Prefixes } from "@moq/pattern";
+import { Prefixes } from "@moq/net/prefix";
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
 import {

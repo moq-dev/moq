@@ -183,7 +183,7 @@ export const GrantSchema: ZodMiniObject<{
 	tier: ZodMiniOptional<ZodMiniString<string>>;
 }, $strict>;
 
-export { InvalidPrefix } from "@moq/pattern";
+export { InvalidPrefix } from "@moq/net/prefix";
 
 export const Key: {
 	generate: (algorithm: Algorithm, kid?: string) => Promise<Key>;
@@ -700,11 +700,11 @@ export interface Permissions {
 	subscribe: Prefixes;
 }
 
-export { Prefix } from "@moq/pattern";
+export { Prefix } from "@moq/net/prefix";
 
 export const PrefixListSchema: ZodMiniArray<ZodMiniString<string>>;
 
-export { Prefixes } from "@moq/pattern";
+export { Prefixes } from "@moq/net/prefix";
 
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 

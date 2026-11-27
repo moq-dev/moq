@@ -132,7 +132,7 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	expect(entry.kind).toBe("start");
 
 	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
-	const prefixed = client.routes(Path.Pattern.subtree(Path.from("root")));
+	const prefixed = client.routes(Path.from("root"));
 	const prefixedEntry = await prefixed.next();
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
 	expect(prefixedEntry.prefix).toBe("root/child" as Path.Valid);
@@ -862,7 +862,7 @@ for (const [protocol, carriesOptIn] of [
 		else expect(await announcedUntil(opted, "visible")).toEqual(["visible"]);
 
 		if (carriesOptIn) {
-			const named = client.routes(Path.Pattern.parse(".x/**"));
+			const named = client.routes(Path.from(".x"));
 			expect(await announcedUntil(named, ".x/y")).toEqual([".x/y"]);
 			named.close();
 		}
@@ -2335,7 +2335,7 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 
 		// Repeated watch cycles must each give their stream back, not pile up on the peer.
 		for (let i = 1; i <= 3; i++) {
-			const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
+			const announced = client.routes(Path.from("room"));
 			expect((await announced.next())?.kind).toBe("start");
 			announced.close();
 			while (ended < i) await changed.promise;
@@ -2367,7 +2367,7 @@ test("moq-lite-07-wip: closing an announce consumer before ANNOUNCE_OK removes i
 		accept(pair.server, url, { publish: new OriginProducer().consume() }),
 	]);
 
-	const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
+	const announced = client.routes(Path.from("room"));
 	await until(() => edits.length === 1);
 	announced.close();
 	for (let i = 0; i < 20; i++) await yieldNow();
@@ -2398,7 +2398,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 			accept(pair.server, url, { publish: new OriginProducer().consume() }),
 		]);
 
-		const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
+		const announced = client.routes(Path.from("room"));
 		await until(() => started === 1);
 		announced.close();
 		await until(() => ended === 1);
@@ -2456,7 +2456,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 
 			// Browse, then play what the listing found.
 			const reader = clientOrigin.consume();
-			const listing = reader.routes(Path.Pattern.subtree(Path.from("room")));
+			const listing = reader.routes(Path.from("room"));
 			expect((await listing.next())?.kind).toBe("start");
 			const request = reader[method](Path.from("room/cam"));
 			await until(() => request.active.peek() !== undefined);
@@ -2537,7 +2537,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 			accept(pair.server, url, { publish: new OriginProducer().consume() }),
 		]);
 
-		const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
+		const announced = client.routes(Path.from("room"));
 		await until(() => started === 1);
 		announced.close();
 		await until(() => ended === 1);
@@ -2869,7 +2869,7 @@ test.each(["request", "follow"] as const)(
 			connect(url, { transport: pair.client, consume: consumer }),
 			accept(pair.server, url, { publish: origin.consume() }),
 		]);
-		const listing = consumer.announced(Path.Pattern.literal(path));
+		const listing = consumer.announced(path);
 		const requested = method === "request" ? consumer.request(path) : consumer.follow(path);
 		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
 		if (!remote) throw new Error("request did not resolve");

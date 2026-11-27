@@ -58,17 +58,15 @@ export interface Session {
 	readonly peerImplementation: Promise<string | undefined>;
 
 	/**
-	 * Subscribe to broadcast announcements matching `filter`, any pattern (`foo/**`
-	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
-	 * relative to the session; captures report what the filter's wildcards stood for.
-	 * Only routes whose literal name matches are reported unless `options.covering`
-	 * opts in, and hidden routes unless `options.hidden` does. A peer without
+	 * Subscribe to broadcast announcements at or beneath `prefix` (default the session
+	 * root). Paths are relative to the session. Routes above the prefix are reported only
+	 * when `options.covering` opts in, and hidden routes only when `options.hidden` does. A peer without
 	 * discovery refuses or resets the stream.
 	 */
-	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer;
+	announced(prefix?: Path.Valid, options?: announce.Options): announce.Consumer;
 
-	/** Every route change matching `filter`, for code that forwards routes. @internal */
-	routes(filter?: Path.Pattern, options?: RouteOptions): Routes;
+	/** Every route change at or beneath `prefix`, for code that forwards routes. @internal */
+	routes(prefix?: Path.Valid, options?: RouteOptions): Routes;
 
 	/**
 	 * Snapshot the transport's counters, querying it fresh on each call.

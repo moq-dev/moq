@@ -53,7 +53,7 @@ function watchCovered(
 	origin: Moq.Origin.Reader,
 	path: Moq.Path.Valid,
 ): { covered: Getter<boolean>; synced: Getter<boolean>; close: () => void } {
-	const announced = origin.announced(Path.Pattern.literal(path), { hidden: true, covering: true });
+	const announced = origin.announced(path, { hidden: true, covering: true });
 	const covered = new Signal(false);
 	const active = new Set<Moq.Path.Valid>();
 	void (async () => {

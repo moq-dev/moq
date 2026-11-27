@@ -419,14 +419,14 @@ export class Connection implements Session {
 		}
 	}
 
-	/** The paths announced matching `filter`, each present or absent; see {@link Session.announced}. */
-	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return announce.list(this.#subscriber.routes(filter, options));
+	/** The paths announced at or beneath `prefix`, each present or absent; see {@link Session.announced}. */
+	announced(prefix?: Path.Valid, options?: announce.Options): announce.Consumer {
+		return announce.list(this.#subscriber.routes(prefix, options));
 	}
 
-	/** Every route change matching `filter`, for code that forwards routes. @internal */
-	routes(filter?: Path.Pattern, options?: announce.RouteOptions): announce.Routes {
-		return this.#subscriber.routes(filter, options);
+	/** Every route change at or beneath `prefix`, for code that forwards routes. @internal */
+	routes(prefix?: Path.Valid, options?: announce.RouteOptions): announce.Routes {
+		return this.#subscriber.routes(prefix, options);
 	}
 
 	async #runSession() {

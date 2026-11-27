@@ -1147,7 +1147,6 @@ test("closing an announce consumer during upstream teardown does not append retr
 	try {
 		upstream.append({
 			prefix: Path.from("alice/camera.hang"),
-			captures: undefined,
 			kind: "start",
 			route: WireRoute.default,
 		});
@@ -1164,16 +1163,6 @@ test("closing an announce consumer during upstream teardown does not append retr
 		pump.close();
 		producer.close();
 		errors.mockRestore();
-	}
-});
-
-test("announced accepts a non-prefix scope before any session exists", () => {
-	const connection = new Connection({ enabled: false });
-	try {
-		const announced = connection.routes(Path.Pattern.parse("room/*"));
-		announced.close();
-	} finally {
-		connection.close();
 	}
 });
 
@@ -1257,7 +1246,7 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 	const consumer = producer.consume();
 
 	const first = new Announce.Producer();
-	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: WireRoute.default });
+	first.append({ prefix: Path.from("a"), kind: "start", route: WireRoute.default });
 	first.synced();
 	const upstream = new Signal(first);
 	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));
