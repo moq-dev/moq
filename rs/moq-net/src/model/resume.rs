@@ -10350,6 +10350,45 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [4]);
 	}
 
+	/// A group a replaced copy was left to drain and loses is asked of the serving route from its
+	/// own key, though a time start sits at that route's resume point and its cache holds the
+	/// group under where the route's backfill was asked from.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_lost_drain_under_a_backfill_is_asked_with_a_time_start_at_the_resume_point() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let ranges = Subscription::default().with_ranges([
+			track::Range {
+				start: crate::track::Start::Time(0),
+				end: None,
+			},
+			track::Range {
+				start: crate::track::Start::Time(3),
+				end: None,
+			},
+		]);
+		let mut sub = logical.consume().subscribe(ranges).now_or_never().unwrap().unwrap();
+		write(&a, 0);
+		write(&a, 3);
+		assert_eq!(drain(&mut sub, false), [3, 0]);
+		// Group 1 lands late on the copy the switch replaces, which holds no group 2: the switch
+		// leaves it group 1 and asks the serving route from 2, whose cache already holds group 1.
+		write(&a, 1);
+		let b = received_copy();
+		for key in [0, 1, 3, 4] {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		assert_eq!(peek(&mut sub, false).key(), 4);
+		assert!(!asked_for(&b, 1), "{:?}", b.subscription());
+		a.evict(1);
+		assert_eq!(drain(&mut sub, false), [4, 1]);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+	}
+
 	/// A group the switch left to a replaced copy to drain, which that copy's cache then loses,
 	/// is asked of the serving route after all: what the reader gets never depends on what a
 	/// copy happens to hold.
