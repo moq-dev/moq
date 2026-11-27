@@ -12148,29 +12148,39 @@ impl Cursor {
 	}
 
 	fn poll_peek_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		self.sync();
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
-		}
-		self.admit();
+		loop {
+			self.sync();
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			self.admit();
 
-		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.reoffer(&drift.budget);
-		self.probe(self.floor(), &drift, waiter);
-		// A time start's lookup the probe took in may have been refused.
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
+			// One scan for the whole poll, so walking a backlog off stays linear in its size.
+			let drift = ready!(self.poll_drift(&self.servable, waiter))?;
+			self.reoffer(&drift.budget);
+			self.probe(self.floor(), &drift, waiter);
+			// A time start's lookup the probe took in may have been refused.
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			// Or answered, moving the window over groups the walk passed while it read nothing,
+			// which nothing wakes it for once the window settles.
+			self.admit();
+			if let Some(misses) = &mut self.misses {
+				misses.pick_up();
+			}
+			#[cfg(test)]
+			test::after_sync();
+			let res = self.poll_recv_with(drift, waiter);
+			// The walk read the track apart from the sync above: the copy's session, on another
+			// thread, may have answered a live join and then ended the track between the two, and
+			// the window as synced holds none of that join's groups. The poll runs again against
+			// the window as it is now.
+			if matches!(res, Poll::Ready(Ok(None))) && self.sync() {
+				continue;
+			}
+			return res;
 		}
-		// Or answered, moving the window over groups the walk passed while it read nothing,
-		// which nothing wakes it for once the window settles.
-		self.admit();
-		if let Some(misses) = &mut self.misses {
-			misses.pick_up();
-		}
-		#[cfg(test)]
-		test::after_sync();
-		self.poll_recv_with(drift, waiter)
 	}
 
 	/// [`Self::poll_peek_recv`] once synced, judging against `drift`.
@@ -12239,14 +12249,6 @@ impl Cursor {
 						// The feed ended, but a fill still owes a group. Its answer wakes us.
 						if self.awaits_fill() {
 							return Poll::Pending;
-						}
-						// The window was synced before this walk read the track: the session may
-						// have answered a live join and then ended the track since, from another
-						// thread, and the window as synced holds none of that join's groups.
-						if self.sync() {
-							self.admit();
-							drift = ready!(self.poll_drift(&self.servable, waiter))?;
-							continue;
 						}
 						// Nothing reads the kept-out keys now: a read polled again asks anew.
 						self.kept_out = None;
@@ -12577,25 +12579,32 @@ impl Cursor {
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_peek_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		let next = self.next_key;
-		self.sync();
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
+		loop {
+			let next = self.next_key;
+			self.sync();
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			let floor = next.max(self.floor());
+			// One scan for the whole poll, so walking a backlog off stays linear in its size.
+			let drift = ready!(self.poll_drift(&self.servable, waiter))?;
+			self.probe(floor, &drift, waiter);
+			// A time start's lookup the probe took in may have been refused.
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
+			if let Some(misses) = &mut self.misses {
+				misses.pick_up();
+			}
+			#[cfg(test)]
+			test::after_sync();
+			let res = self.poll_next_with(floor, drift, waiter);
+			// As in [`Self::poll_peek_recv`]: an end judged through a window that moved since.
+			if matches!(res, Poll::Ready(Ok(None))) && self.sync() {
+				continue;
+			}
+			return res;
 		}
-		let floor = next.max(self.floor());
-		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.probe(floor, &drift, waiter);
-		// A time start's lookup the probe took in may have been refused.
-		if let Some(err) = &self.filter.refused {
-			return Poll::Ready(Err(err.clone()));
-		}
-		if let Some(misses) = &mut self.misses {
-			misses.pick_up();
-		}
-		#[cfg(test)]
-		test::after_sync();
-		self.poll_next_with(floor, drift, waiter)
 	}
 
 	/// [`Self::poll_peek_next`] once synced, from `floor`, judging against `drift`.
@@ -12635,15 +12644,6 @@ impl Cursor {
 				// The feed ended, but a fill still owes a group. Its answer wakes us.
 				if self.awaits_fill() {
 					return Poll::Pending;
-				}
-				// As in the arrival walk: a join answered since the sync, before the track ended,
-				// places the window over groups this walk read nothing of.
-				if self.sync() {
-					drift = ready!(self.poll_drift(&self.servable, waiter))?;
-					floor = floor.max(self.floor());
-					from = from.max(self.floor());
-					seen = None;
-					continue;
 				}
 				// Nothing reads the kept-out keys now: a read polled again asks anew.
 				self.kept_out = None;
