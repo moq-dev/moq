@@ -23,10 +23,6 @@ Guidance:
 
 Public API: additive (new field(s) on `#[non_exhaustive] transport::Config`). Wire: none (standard RFC 9000 `max_ack_delay` transport parameter and `draft-ietf-quic-ack-frequency`).
 
-## Required
-
-- [ACK, ECN, `ACK_FREQUENCY`, and `ReceiveTimestamps` fixes](/quest/m1/quic-ack-and-ecn-fixes.md) - fixes lost `ACK_FREQUENCY` retransmits and `ReceiveTimestamps` exact-fit drops before changing ACK policy
-
 ## Related
 
 - [Per-stream deadlines and proactive TLP](/quest/m4/quic-deadline.md) - proactive TLP ahead of PTO for deadline-bearing streams

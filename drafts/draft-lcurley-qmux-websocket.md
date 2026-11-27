@@ -4,7 +4,7 @@ abbrev: "qmux-ws"
 category: info
 
 docname: draft-lcurley-qmux-websocket-latest
-submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
+submissiontype: IETF
 number:
 date:
 v: 3
@@ -27,9 +27,8 @@ informative:
 
 --- abstract
 
-QMux [qmux] is a polyfill that runs QUIC applications over an ordered, reliable byte-stream transport such as TCP with TLS.
-This document defines a binding for QMux over WebSocket [RFC6455].
-A WebSocket binding lets QUIC applications reach environments where UDP is blocked and where only an HTTP/WebSocket stack is available, including web browsers that lack WebTransport.
+QMux {{qmux}} runs QUIC applications over an ordered, reliable byte-stream transport such as TCP with TLS.
+This document defines a binding for QMux over WebSocket {{RFC6455}}, enabling QUIC applications to reach environments where UDP is blocked or only an HTTP/WebSocket stack is available, including browsers without WebTransport.
 
 --- note_Note_to_Readers
 
@@ -41,63 +40,40 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
-This document uses the terms QMux Record, QMux Frame, and transport parameter as defined in [qmux], and the terms WebSocket connection, message, frame, and subprotocol as defined in [RFC6455].
+This document uses QMux Record, QMux Frame, and transport parameter as defined in {{qmux}}, and WebSocket connection, message, frame, and subprotocol as defined in {{RFC6455}}.
 
 
 # Introduction
-QMux [qmux] lets an application written against the QUIC stream and datagram API run over an ordered, reliable byte-stream transport.
-It defines a binding over TCP and over TLS, but a WebSocket binding is out of scope for the QUIC working group charter.
+QMux {{qmux}} provides QUIC stream and datagram semantics over an ordered, reliable byte stream (TCP/TLS).
+This document specifies the equivalent binding over WebSocket {{RFC6455}} (HTTP/1.1 upgrade or HTTP/2–3 bootstrapping per {{RFC9220}}) for environments where UDP is blocked, browsers lack WebTransport, or HTTP load balancers sit in front of servers.
 
-A WebSocket binding is nevertheless useful: WebSocket [RFC6455] is available where UDP is blocked, in web browsers that lack WebTransport, and behind HTTP load balancers that cannot route raw TCP or QUIC.
-
-This document specifies how to carry QMux over WebSocket: the message framing, the subprotocol negotiation used in place of TLS ALPN, keep-alive behavior, connection close, and datagrams.
-All other QMux semantics (in-order STREAM frame delivery, stream identifiers, flow control, and transport parameters) apply unchanged from [qmux].
-
-This binding is application agnostic: any QUIC application that can run over QMux can run over QMux over WebSocket.
-Media over QUIC Transport [moqt] is the motivating use case, but nothing in this document is specific to it.
-
-
-# WebSocket Binding Overview
-A QMux-over-WebSocket connection is an ordinary WebSocket connection [RFC6455] whose binary messages carry QMux frames, taking the place of the underlying byte-stream transport in [qmux].
-
-Both the QMux Record layer and the WebSocket message layer provide self-delimiting messages over a reliable, ordered byte stream.
-The two layers are therefore collapsed: instead of prefixing each Record with its `Size`, the binding relies on the WebSocket message boundary to delimit it.
+All QMux semantics (in-order STREAM delivery, stream identifiers, flow control, transport parameters, and datagrams) apply unchanged from {{qmux}}: an endpoint advertises the datagram transport parameter and carries QMux DATAGRAM frames in binary messages like any other frame ({{framing}}).
+The binding is application-agnostic ({{moqt}} is the motivating use case).
 
 
 # Establishing a Connection
-A client establishes a QMux-over-WebSocket connection by opening a WebSocket connection per [RFC6455] (the opening handshake over HTTP/1.1) or per [RFC9220] (the bootstrapping mechanism over HTTP/2 or HTTP/3).
+Deployments SHOULD use `wss` (WebSocket over TLS); an application expecting TLS over native QUIC SHOULD require `wss`.
+Authentication and authorization of the underlying connection are out of scope, as in {{qmux}}.
 
-The `ws` URI scheme is used over an unencrypted transport and the `wss` URI scheme is used over a TLS-encrypted transport.
-Deployments SHOULD use `wss`; an application that expects a TLS transport when running natively over QUIC SHOULD require `wss` here.
-
-How the underlying connection is authenticated and authorized is out of scope for this document, as it is for [qmux].
-
-
-# Subprotocol Negotiation {#negotiation}
-QMux over TCP/TLS uses TLS ALPN [RFC8446] to agree on the application protocol.
-WebSocket has no ALPN exchange, so this binding uses the WebSocket subprotocol negotiation of [RFC6455] Section 1.9 (the `Sec-WebSocket-Protocol` header) in its place.
-Each subprotocol token names the QMux version, optionally followed by the application protocol:
+## Subprotocol Negotiation {#negotiation}
+WebSocket has no TLS ALPN {{RFC8446}} exchange for the application protocol, so this binding uses `Sec-WebSocket-Protocol` ({{RFC6455, Section 1.9}}) instead:
 
 ~~~
 Subprotocol = Version [ "." ALPN ]
 Version     = "qmux-" 2DIGIT
 ~~~
 
-`Version` names the revision of [qmux] whose wire format the connection uses: `qmux-01` is draft-ietf-quic-qmux-01.
-`ALPN` is the identifier the application would use as its ALPN over native QUIC, so `qmux-01.moq-transport-18` runs `moq-transport-18` over draft-ietf-quic-qmux-01.
-A bare `Version` token, such as `qmux-02`, agrees on the QMux version alone and leaves the application protocol to the endpoints, for example implied by the URL.
-An application protocol whose identifier contains a character not permitted in a token [RFC6455] cannot be carried by this binding.
+`Version` identifies the {{qmux}} wire revision (e.g., `qmux-02` for draft-ietf-quic-qmux-02).
+`ALPN` is the application's native QUIC ALPN (e.g., `qmux-02.moq-transport-23`).
+A bare `Version` token agrees on the QMux version alone and leaves the application protocol to the endpoints (e.g., implied by the URL).
+An ALPN containing characters disallowed in a WebSocket subprotocol token {{RFC6455}} cannot use this binding.
 
-A client offers one or more tokens in the `Sec-WebSocket-Protocol` request header, in decreasing order of preference: one per pairing of QMux version and application protocol it is willing to use, optionally followed by bare `Version` tokens.
-A server selects at most one, in its own order of preference, and echoes it in the response header; if it supports none of the offered tokens, it MUST fail the handshake.
-A client MUST treat a response value it did not offer as a failed handshake per [RFC6455], and this binding additionally requires a selection: a client MUST treat the absence of a `Sec-WebSocket-Protocol` response header as a failed handshake too, since without one no QMux version was agreed.
+A client offers one or more tokens in decreasing preference; a server selects at most one and echoes it, or MUST fail the handshake if none is supported.
+A client MUST fail the handshake if the response omits `Sec-WebSocket-Protocol` or echoes an unoffered token.
 
 
 # Record Framing {#framing}
-Each WebSocket binary message carries exactly one QMux Record's `Frames` field: one or more QMux frames concatenated, as defined in [qmux].
-Because the WebSocket framing layer already delimits each message, the QMux Record `Size` field is redundant: it MUST NOT be transmitted and MUST NOT be expected by the receiver.
-
-A QMux-over-WebSocket record is therefore:
+Because WebSocket binary messages are already self-delimiting, the QMux Record `Size` field is omitted: each binary message carries one QMux Record's `Frames` payload directly.
 
 ~~~
 WebSocket Binary Message {
@@ -105,75 +81,49 @@ WebSocket Binary Message {
 }
 ~~~
 
-The frames inside a message are encoded exactly as in [qmux], including the in-order STREAM frame requirement: for each QUIC stream, a sender MUST send that stream's payload in order, so a receiver can deliver payload to the application as it arrives without reassembly.
+`Size` MUST NOT be transmitted or expected.
+An endpoint MAY place multiple frames in one binary message (subject to {{versions}}) and MAY split a sequence of frames across messages while preserving in-order STREAM payload delivery.
+An empty binary message is a legal no-op.
 
-An endpoint MAY place multiple frames in a single binary message, except as {{versions}} restricts, and MAY split a logical sequence of frames across multiple messages, subject to the constraint that each STREAM frame's payload bytes are delivered in order.
-An empty binary message (zero frames) is permitted and carries no frames; a receiver MUST accept it and treat it as a no-op.
+The first QMux frame sent by each endpoint MUST be `QX_TRANSPORT_PARAMETERS`, as required by {{qmux}}.
 
-For a QMux version with the Record layer, the maximum size of a binary message is bounded by the `max_record_size` transport parameter defined in [qmux] and by any WebSocket implementation limits.
-An endpoint MUST NOT send a binary message whose payload exceeds the peer's advertised `max_record_size`, and MAY treat receipt of an oversized message as a connection error.
+For QMux versions with a Record layer, a binary message MUST NOT exceed the peer's advertised `max_record_size` (and any WebSocket implementation limit); a receiver MAY treat an oversized message as a connection error.
 
+## WebSocket Message Types
+- **Binary messages**: carry QMux frames ({{framing}}).
+- **Text messages**: MUST NOT be sent; receipt MUST close the WebSocket connection as a connection error.
+- **Close frames**: terminate the connection ({{close}}).
+- **Ping / Pong frames**: keep-alive ({{keepalive}}); carry no QMux frames.
 
-# WebSocket Message Types
-This binding uses WebSocket message and control frames as follows:
-
-- *Binary messages* carry QMux frames as defined in {{framing}}.
-- *Text messages* MUST NOT be sent. A receiver MUST treat a text message as a connection error and close the WebSocket connection.
-- *Close frames* terminate the connection as defined in {{close}}.
-- *Ping and Pong frames* are used for keep-alive as defined in {{keepalive}} and are otherwise handled by the WebSocket layer; they carry no QMux frames.
-
-The first QMux frame sent by each endpoint MUST be the `QX_TRANSPORT_PARAMETERS` frame, exactly as required by [qmux]; this binding does not change that requirement.
-
-
-# QMux Version {#versions}
-The QMux version is the one named by the negotiated subprotocol ({{negotiation}}); there is no separate QMux version negotiation.
+## QMux Version {#versions}
+The negotiated subprotocol ({{negotiation}}) selects the QMux version; there is no separate version negotiation.
 An application protocol MAY restrict which QMux versions it pairs with.
 
-A QMux version without the Record layer, such as draft-ietf-quic-qmux-00, is framed as in {{framing}} except that each binary message carries exactly one frame, and a PADDING byte counts as a frame.
-A receiver MUST treat a message carrying more than one frame as a connection error of type FRAME_ENCODING_ERROR.
-The message is bounded by the peer's `max_frame_size`, initially 16384 bytes, instead of `max_record_size`: an endpoint MUST NOT send a frame larger than it, and MAY treat receipt of a larger one as a connection error of type FRAME_ENCODING_ERROR.
+For a QMux version without a Record layer (such as draft-ietf-quic-qmux-00), each binary message carries exactly one frame (including a PADDING byte), a message with more than one frame MUST trigger `FRAME_ENCODING_ERROR`, and the size limit is `max_frame_size` (initially 16384 bytes) instead of `max_record_size`, with oversized messages optionally triggering `FRAME_ENCODING_ERROR`.
 
 
 # Keep-Alive and Idle Timeout {#keepalive}
-A WebSocket connection has no built-in idle timeout: if the peer's host crashes without a TCP FIN, the local socket can remain "open" for hours.
-
-To detect a dead peer, an endpoint SHOULD send WebSocket Ping frames [RFC6455] periodically and SHOULD close the connection if no WebSocket frame of any kind is received within a timeout, a small multiple of the ping interval.
-Reasonable defaults are a 5-second ping interval and a 30-second timeout, but the values are a local policy decision.
-Receipt of any WebSocket frame from the peer (binary, Ping, or Pong) resets the idle timer.
-
-This keep-alive operates at the WebSocket layer and is separate from the QMux `max_idle_timeout` transport parameter and `QX_PING` frame, either of which an endpoint MAY also use.
-
-
-# Datagrams {#datagrams}
-QMux datagrams are supported.
-They are negotiated and encoded exactly as in [qmux]: an endpoint advertises the datagram transport parameter and carries QMux DATAGRAM frames inside binary messages, like any other frame ({{framing}}).
+WebSocket has no built-in idle timeout.
+An endpoint SHOULD send periodic WebSocket Ping frames {{RFC6455}} and close the connection if no WebSocket frame (binary, Ping, or Pong) arrives within a local timeout (for example, 5-second pings and a 30-second timeout).
+This operates independently of QMux's `max_idle_timeout` and `QX_PING`, either of which MAY also be used.
 
 
 # Connection Close {#close}
-An endpoint terminates a QMux-over-WebSocket connection by sending a WebSocket Close frame [RFC6455] and then closing the underlying transport.
-
-A QMux `CONNECTION_CLOSE` frame, if sent, conveys the QMux-level error code and reason and SHOULD be sent in a final binary message before the WebSocket Close frame.
-Because the WebSocket layer provides its own connection close, there is no draining period: an endpoint MAY close immediately after sending its Close frame.
-
-Receipt of a WebSocket Close frame, or loss of the underlying transport, terminates the QMux connection and all of its streams.
+An endpoint terminates the connection by sending a WebSocket Close frame {{RFC6455}} and closing the WebSocket stream (or underlying transport for HTTP/1.1); no draining period is required.
+A QMux `CONNECTION_CLOSE` frame, if used, SHOULD be sent in a final binary message beforehand.
+Receipt of a WebSocket Close frame or transport loss terminates the QMux connection and all streams.
 
 
 # Security Considerations
-This binding inherits the security considerations of QMux [qmux], WebSocket [RFC6455], and, when `wss` is used, TLS [RFC8446].
-
-Carrying QMux over WebSocket does not add or remove any QMux-level security property.
-In particular, this binding provides no transport-layer confidentiality or integrity of its own; deployments that require those properties MUST use `wss` (WebSocket over TLS).
-
-The keep-alive mechanism in {{keepalive}} causes an endpoint to send periodic Ping frames.
-An endpoint SHOULD bound the rate at which it sends and responds to Ping/Pong frames to avoid amplification or resource-exhaustion concerns.
-
-Because a server selects the subprotocol from a client-supplied list, a server MUST validate the selected token against its own supported set and MUST NOT echo an arbitrary client-supplied value, as required by [RFC6455].
+This binding inherits the security considerations of {{qmux}}, {{RFC6455}}, and (with `wss`) {{RFC8446}}.
+It adds no confidentiality or integrity of its own; deployments requiring them MUST use `wss`.
+Endpoints SHOULD rate-limit Ping/Pong traffic to prevent amplification or resource exhaustion.
+Servers MUST validate the selected subprotocol against their supported set and MUST NOT echo arbitrary client values {{RFC6455}}.
 
 
 # IANA Considerations
 This document has no IANA actions.
-
-The subprotocol tokens of {{negotiation}} name Internet-Draft revisions of [qmux] and are not registered in the WebSocket Subprotocol Name Registry [RFC6455].
+Subprotocol tokens naming Internet-Draft revisions of {{qmux}} are not registered in the WebSocket Subprotocol Name Registry.
 
 
 --- back

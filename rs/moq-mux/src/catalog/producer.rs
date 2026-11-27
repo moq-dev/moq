@@ -1014,6 +1014,9 @@ impl<E: CatalogExt> Producer<E> {
 		R: super::RenditionConfig<E>,
 		crate::Error: From<C::Error>,
 	{
+		// Refused before the rendition publishes a config, so no consumer is told of a track whose
+		// first write would fail.
+		container.writable()?;
 		// Only video and audio promise the interval: a sparse role (text) groups only as often as it
 		// has something to say.
 		let role = std::any::TypeId::of::<R>();
@@ -1485,6 +1488,8 @@ fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 		hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
 		hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
 		hang::catalog::Container::Legacy => moq_msf::Packaging::Legacy,
+		hang::catalog::Container::Raw => moq_msf::Packaging::Raw,
+		hang::catalog::Container::Cts => moq_msf::Packaging::Cts,
 		hang::catalog::Container::Unknown(unknown) => moq_msf::Packaging::Unknown(unknown.kind().to_string()),
 	}
 }
@@ -1507,12 +1512,12 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	let mut tracks = Vec::new();
 	let reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
-		if let Some(instance) = config.instance() {
-			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
+		if let Some(identity) = config.identity() {
+			// MSF has nowhere to name an identity, so its readers take whichever resolves first.
 			tracing::warn!(
 				rendition = id,
-				?instance,
-				"MSF cannot carry a reference instance; advertising without it"
+				?identity,
+				"MSF cannot carry a reference identity; advertising without it"
 			);
 		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
@@ -2233,6 +2238,32 @@ mod test {
 	/// The audio renditions the catalog holds, by name.
 	fn audio(catalog: &Producer) -> Vec<String> {
 		catalog.snapshot().audio.renditions.into_keys().collect()
+	}
+
+	/// A container this build only decodes is refused before its rendition is advertised, and the
+	/// name stays free for a container it can write.
+	#[test]
+	fn a_decode_only_container_publishes_no_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Cts;
+		let info = catalog.track_info(hang::catalog::PRIORITY.audio);
+
+		let net = broadcast.create_track("audio0", info.clone()).unwrap();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let err = catalog.audio(net, wire, config.clone()).err();
+		assert!(
+			matches!(err, Some(crate::Error::Moq(moq_net::Error::Unsupported))),
+			"{err:?}"
+		);
+		assert!(audio(&catalog).is_empty());
+
+		config.container = Container::Raw;
+		let net = broadcast.create_track("audio0", info).unwrap();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let _audio = catalog.audio(net, wire, config).unwrap();
+		assert_eq!(audio(&catalog), ["audio0"]);
 	}
 
 	#[tokio::test(start_paused = true)]

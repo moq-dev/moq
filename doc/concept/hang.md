@@ -52,14 +52,14 @@ rate, and channel count. Everything else, such as the coded size, `bitrate`,
 `framerate`, and `enabled`, updates in place; the picture resizes in band at a
 keyframe unless a `description` pins it. A publisher that needs a new identity
 publishes a new track name, or restarts the broadcast under a new
-[instance](/concept/moq-lite#publisher-instances); the Rust and `@moq/publish`
+[identity](/concept/moq-lite#publisher-identities); the Rust and `@moq/publish`
 publishers take a new name. A player can configure its decoder once per track.
 
 A few things the catalog can express beyond decoder config:
 
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the rendition's ID, so labels need not be unique and renaming one doesn't rename the track.
-- **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each instance that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `instance` beside the path names the [stream](/concept/moq-lite#publisher-instances) it expects: a route of another instance ends the rendition instead of falling back to it, while a route whose instance a session minted (one that crossed an older version) cannot prove one, so there it is best effort. Omit `instance` for a broadcast produced on demand, which has none until a worker answers; see [identity and recovery](/concept/identity).
-- **Whole includes.** A root `include` map names whole broadcasts, such as transcoded renditions of the source, by the same relative path and optional `instance` as a rendition's reference. They share the listing catalog's PTS timeline and root settings, including its clock and join interval. Listing one opens nothing, so an include produced on demand starts only once a viewer selects it. `@moq/watch` selects every include it lists, as an HLS master does: it reads each include's catalog and offers its video and audio renditions beside the broadcast's own, as `<include>/<id>`, to the same rendition selection, subscribing media only for the rendition it picks. `broadcast.include(effect, id)` reads one include as a broadcast of its own. Its rendition IDs stay its own.
+- **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each identity that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `identity` beside the path names the [stream](/concept/moq-lite#publisher-identities) it expects: a route of another identity ends the rendition instead of falling back to it, while a route whose identity a session minted (one that crossed an older version) cannot prove one, so there it is best effort. Omit `identity` for a broadcast produced on demand, which has none until a worker answers; see [identity and recovery](/concept/identity).
+- **Whole includes.** A root `include` map names whole broadcasts, such as transcoded renditions of the source, by the same relative path and optional `identity` as a rendition's reference. They share the listing catalog's PTS timeline and root settings, including its clock and join interval. Listing one opens nothing, so an include produced on demand starts only once a viewer selects it. `@moq/watch` selects every include it lists, as an HLS master does: it reads each include's catalog and offers its video and audio renditions beside the broadcast's own, as `<include>/<id>`, to the same rendition selection, subscribing media only for the rendition it picks. `broadcast.include(effect, id)` reads one include as a broadcast of its own. Its rendition IDs stay its own.
 - **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts, or a rendition whose media changed and so needs a new name; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
 - **Jitter.** A rendition can say how much media it writes behind a frame's timestamp, in whole milliseconds rounded up: the reorder delay of B-frames and the span of a fragment or batch written together. It is measured from media timestamps alone, never the time a frame was written, so neither a constant encoder delay nor a capture clock counts. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames' timestamps persistently trail those another rendition already wrote, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. The publisher takes the least any frame trails within each window of a second or more and keeps the largest window, so lateness only some frames have, such as B-frame reorder, is left to jitter. A rendition alone measures none. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
@@ -185,12 +185,19 @@ The `container.kind` on each rendition says how frames are framed:
 
 | Kind | Frame layout | Use |
 | --- | --- | --- |
-| `legacy` | varint microsecond timestamp + codec payload | The default. Cheapest. |
+| `legacy` | varint microsecond timestamp + codec payload | The default. Carries its own timestamp on any transport. |
 | `cmaf` | `moof` + `mdat` | fMP4 passthrough for HLS/DASH interop; ~100 bytes per frame. |
 | `loc` | small property block + payload | The IETF [LOC](/concept/standard#loc) container. |
+| `raw` | codec payload; the transport timestamp is the presentation time | No overhead, for streams without B-frames. |
+| `cts` | varint composition offset (track timescale) + codec payload | Reordered video on a decode-ordered track. Decode only for now. |
 
-A consumer skips renditions with a kind it doesn't recognize and carries them
-through when republishing the catalog.
+`raw` and `cts` take the time from each frame's transport timestamp, so they
+need a timed track whose every hop carries per-frame timestamps. moq-lite does;
+a moq-transport hop gives every object its group's time until
+[moq-timestamp](/draft/moq-timestamp) object timestamps land, so use `legacy`
+or `loc` for viewers behind one. Publishers refuse `cts` until they can write it. A consumer skips
+renditions with a kind it doesn't recognize and carries them through when
+republishing the catalog.
 
 A CMAF frame's timestamp is its fragment's earliest presentation time, and the
 broadcast timeline: `tfdt` only places the samples relative to each other. A
@@ -199,15 +206,16 @@ timestamp alone, without rewriting the fragment. An untimed track's frames carry
 no timestamp, so their samples present at `tfdt`. A timed CMAF track declares the
 init segment's `mdhd` timescale, so the frame timestamp lands on a media tick.
 
-A Legacy or LOC video publisher can close the last frame's duration with an empty
+A Legacy, LOC, or raw video publisher can close the last frame's duration with an empty
 codec payload whose timestamp is that frame's exclusive end. Consumers treat it
 as metadata and never pass it to a decoder. This lets a group close immediately
 without waiting for the next frame. Audio has codec-defined durations, and CMAF
 carries sample durations directly, so neither needs per-group duration markers.
 Audio retains its separate terminal marker before codec drain packets, allowing
-consumers to discard encoder padding beyond the source endpoint. Empty payloads
-on data tracks remain data, including empty text cues, so a data track marks a
-discontinuity with a group of one object with no bytes instead.
+consumers to discard encoder padding beyond the source endpoint. On a data
+track, a group of one object with no bytes marks a discontinuity. Every other
+empty payload stays data, such as an empty text cue, except under `raw`, whose
+empty payload is that object: a `raw` data track can't carry one.
 
 ## Groups and keyframes
 

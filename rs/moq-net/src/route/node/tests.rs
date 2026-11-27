@@ -86,10 +86,10 @@ fn confirm(stream: &Stream) -> usize {
 	let serves = serves(stream);
 	for serve in &serves {
 		if let Output::Serve {
-			origin, path, instance, ..
+			origin, path, identity, ..
 		} = serve
 		{
-			stream.serving(*origin, &(path.clone(), instance.clone()), true);
+			stream.serving(*origin, &(path.clone(), identity.clone()), true);
 		}
 	}
 	serves.len()
@@ -253,10 +253,10 @@ fn a_refused_claim_answers_the_request() {
 	announce(&publisher, &room, live(0));
 	for serve in serves(&publisher) {
 		if let Output::Serve {
-			origin, path, instance, ..
+			origin, path, identity, ..
 		} = serve
 		{
-			publisher.serving(origin, &(path, instance), false);
+			publisher.serving(origin, &(path, identity), false);
 		}
 	}
 	assert_eq!(
@@ -459,14 +459,14 @@ fn a_claim_shown_again_is_a_new_showing() {
 			Output::Serve {
 				origin,
 				path,
-				instance,
+				identity,
 				served,
 			},
 		] = serves.as_slice()
 		else {
 			panic!("one claim to serve: {serves:?}");
 		};
-		stream.serving(*origin, &(path.clone(), instance.clone()), true);
+		stream.serving(*origin, &(path.clone(), identity.clone()), true);
 		served.lifecycle
 	};
 	let (node, clock) = node();

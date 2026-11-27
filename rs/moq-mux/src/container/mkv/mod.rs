@@ -67,8 +67,9 @@ pub enum Error {
 	#[error("invalid MKV lacing")]
 	InvalidLacing,
 
-	/// A laced Block's track has no DefaultDuration to time the frames after its first.
-	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
+	/// A laced Block has no BlockDuration before it, nor a track DefaultDuration, to time the frames
+	/// after its first.
+	#[error("MKV lacing requires a positive BlockDuration before the Block, or TrackEntry DefaultDuration")]
 	LacingDuration,
 
 	/// The block timestamp precedes the start of the timeline.

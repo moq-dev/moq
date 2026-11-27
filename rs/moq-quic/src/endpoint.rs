@@ -29,7 +29,7 @@ use crate::{
 	frame,
 	packet::{
 		FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, PacketDecodeError, PacketNumber,
-		PartialDecode, ProtectedInitialHeader,
+		PartialDecode,
 	},
 	server,
 	shared::{
@@ -40,6 +40,48 @@ use crate::{
 	transport,
 	transport_parameters::{PreferredAddress, TransportParameters},
 };
+
+/// Remembers when each source last got a stateless reset, in a table of fixed size
+///
+/// A single timestamp for the whole endpoint would let one spoofed source packet per interval
+/// suppress the resets every real peer needs after a restart. A source only shares its slot with
+/// the others that hash to it, under a key an attacker cannot see, so silencing everyone takes
+/// spoofing from about as many addresses as there are slots, every interval.
+struct ResetLimiter {
+	key: u64,
+	last: Box<[Option<Instant>; Self::SLOTS]>,
+}
+
+impl ResetLimiter {
+	const SLOTS: usize = 256;
+
+	fn new(rng: &mut StdRng) -> Self {
+		Self {
+			key: rng.random(),
+			last: Box::new([None; Self::SLOTS]),
+		}
+	}
+
+	fn slot(&self, source: IpAddr) -> usize {
+		use std::hash::{DefaultHasher, Hash, Hasher};
+
+		// SipHash, since a hash whose low bits ignore an address's last octet would crowd a subnet into one slot.
+		let mut hasher = DefaultHasher::new();
+		hasher.write_u64(self.key);
+		source.hash(&mut hasher);
+		hasher.finish() as usize % Self::SLOTS
+	}
+
+	/// Whether `source` shares a slot with a reset sent less than `interval` ago
+	fn limited(&self, source: IpAddr, now: Instant, interval: crate::Duration) -> bool {
+		self.last[self.slot(source)].is_some_and(|last| last.saturating_add(interval) > now)
+	}
+
+	fn record(&mut self, source: IpAddr, now: Instant) {
+		let slot = self.slot(source);
+		self.last[slot] = Some(now);
+	}
+}
 
 /// The main entry point to the library
 ///
@@ -54,8 +96,8 @@ pub struct Endpoint {
 	server_config: Option<Arc<server::Config>>,
 	/// Whether the underlying UDP socket promises not to fragment packets
 	allow_mtud: bool,
-	/// Time at which a stateless reset was most recently sent
-	last_stateless_reset: Option<Instant>,
+	/// When each source last got a stateless reset
+	resets: ResetLimiter,
 	/// Buffered Initial messages for pending incoming connections
 	incoming_buffers: Slab<IncomingBuffer>,
 	all_incoming_buffers_total_bytes: u64,
@@ -74,20 +116,21 @@ impl Endpoint {
 		use rand::SeedableRng;
 
 		let (resolved, cid_generator) = config.resolve()?;
+		let mut rng = match config.rng_seed {
+			Some(seed) => StdRng::from_seed(seed),
+			None => crate::entropy::std_rng(),
+		};
 		Ok(Self {
-			rng: match config.rng_seed {
-				Some(seed) => StdRng::from_seed(seed),
-				None => crate::entropy::std_rng(),
-			},
 			index: ConnectionIndex::default(),
 			connections: Slab::new(),
 			local_cid_generator: cid_generator,
 			config: resolved,
 			server_config: config.server.map(Arc::new),
 			allow_mtud,
-			last_stateless_reset: None,
+			resets: ResetLimiter::new(&mut rng),
 			incoming_buffers: Slab::new(),
 			all_incoming_buffers_total_bytes: 0,
+			rng,
 		})
 	}
 
@@ -184,6 +227,7 @@ impl Endpoint {
 					return None;
 				}
 				trace!("sending version negotiation");
+				buf.clear();
 				// Negotiate versions
 				Header::VersionNegotiate {
 					random: self.rng.random::<u8>() | 0x40,
@@ -223,19 +267,22 @@ impl Endpoint {
 				RouteDatagramTo::Incoming(incoming_idx) => {
 					let incoming_buffer = &mut self.incoming_buffers[incoming_idx];
 					let config = &incoming_buffer.server_config;
+					let size = buffered_size(datagram_len);
 
 					if incoming_buffer
 						.total_bytes
-						.checked_add(datagram_len as u64)
+						.checked_add(size)
 						.is_some_and(|n| n <= config.incoming_buffer_size)
 						&& self
 							.all_incoming_buffers_total_bytes
-							.checked_add(datagram_len as u64)
+							.checked_add(size)
 							.is_some_and(|n| n <= config.incoming_buffer_size_total)
 					{
+						let mut event = event;
+						event.detach();
 						incoming_buffer.datagrams.push(event);
-						incoming_buffer.total_bytes += datagram_len as u64;
-						self.all_incoming_buffers_total_bytes += datagram_len as u64;
+						incoming_buffer.total_bytes += size;
+						self.all_incoming_buffers_total_bytes += size;
 					}
 
 					None
@@ -275,8 +322,8 @@ impl Endpoint {
 		buf: &mut Vec<u8>,
 	) -> Option<Transmit> {
 		if self
-			.last_stateless_reset
-			.is_some_and(|last| last.saturating_add(self.config.min_reset_interval) > now)
+			.resets
+			.limited(addresses.remote.ip(), now, self.config.min_reset_interval)
 		{
 			debug!("ignoring unexpected packet within minimum stateless reset interval");
 			return None;
@@ -299,7 +346,7 @@ impl Endpoint {
 		};
 
 		debug!("sending stateless reset for {} to {}", dst_cid, addresses.remote);
-		self.last_stateless_reset = Some(now);
+		self.resets.record(addresses.remote.ip(), now);
 		// Resets with at least this much padding can't possibly be distinguished from real packets
 		const IDEAL_MIN_PADDING_LEN: usize = MIN_PADDING_LEN + MAX_CID_SIZE;
 		let padding_len = if max_padding_len <= IDEAL_MIN_PADDING_LEN {
@@ -307,6 +354,7 @@ impl Endpoint {
 		} else {
 			self.rng.random_range(IDEAL_MIN_PADDING_LEN..max_padding_len)
 		};
+		buf.clear();
 		buf.reserve(padding_len + RESET_TOKEN_SIZE);
 		buf.resize(padding_len, 0);
 		self.rng.fill_bytes(&mut buf[0..padding_len]);
@@ -343,7 +391,9 @@ impl Endpoint {
 		trace!(initial_dcid = %remote_id);
 
 		let ch = ConnectionHandle(self.connections.vacant_key());
-		let loc_cid = self.new_cid(RouteDatagramTo::Connection(ch));
+		let Some(loc_cid) = self.new_cid(RouteDatagramTo::Connection(ch)) else {
+			return Err(ConnectError::CidsExhausted);
+		};
 		let params = TransportParameters::new(
 			&config.transport,
 			&self.config,
@@ -382,7 +432,11 @@ impl Endpoint {
 	fn send_new_identifiers(&mut self, now: Instant, ch: ConnectionHandle, num: u64) -> ConnectionEvent {
 		let mut ids = vec![];
 		for _ in 0..num {
-			let id = self.new_cid(RouteDatagramTo::Connection(ch));
+			// Fewer IDs than asked for leave the peer with fewer to migrate to, which beats none left
+			// for the connections still to start.
+			let Some(id) = self.new_cid(RouteDatagramTo::Connection(ch)) else {
+				break;
+			};
 			let meta = &mut self.connections[ch];
 			let sequence = meta.cids_issued;
 			meta.cids_issued += 1;
@@ -396,18 +450,22 @@ impl Endpoint {
 		ConnectionEvent(ConnectionEventInner::NewIdentifiers(ids, now))
 	}
 
-	/// Generate and reserve a local connection ID
-	fn new_cid(&mut self, route_to: RouteDatagramTo) -> ConnectionId {
+	/// Generate and reserve a local connection ID, or `None` once the generator's space is nearly
+	/// held, where finding a free one could take arbitrarily long
+	fn new_cid(&mut self, route_to: RouteDatagramTo) -> Option<ConnectionId> {
+		if self.cids_full() {
+			return None;
+		}
 		loop {
 			let cid = self.local_cid_generator.generate_cid();
 			if cid.is_empty() {
 				// Zero-length CID; nothing to track
 				debug_assert_eq!(self.local_cid_generator.cid_len(), 0);
-				return cid;
+				return Some(cid);
 			}
 			if let hash_map::Entry::Vacant(e) = self.index.connection_ids.entry(cid) {
 				e.insert(route_to);
-				break cid;
+				break Some(cid);
 			}
 		}
 	}
@@ -415,7 +473,7 @@ impl Endpoint {
 	fn handle_first_packet(
 		&mut self,
 		datagram_len: usize,
-		event: DatagramConnectionEvent,
+		mut event: DatagramConnectionEvent,
 		addresses: FourTuple,
 		buf: &mut Vec<u8>,
 	) -> Option<DatagramEvent> {
@@ -436,7 +494,17 @@ impl Endpoint {
 
 		// Saturation only happens under heavy load, where deriving initial keys per Initial just to
 		// reply with CONNECTION_REFUSED would starve packet processing for existing connections.
-		if self.cids_exhausted() || self.incoming_buffers.len() >= server_config.max_incoming {
+		// An attempt holds its first datagram until the application disposes of it, so the byte
+		// budget bounds memory however large the datagrams are, and the count bounds the slots.
+		let size = buffered_size(datagram_len);
+		if self.cids_exhausted()
+			|| self.incoming_buffers.len() >= server_config.max_incoming
+			|| size > server_config.incoming_buffer_size
+			|| self
+				.all_incoming_buffers_total_bytes
+				.checked_add(size)
+				.is_none_or(|n| n > server_config.incoming_buffer_size_total)
+		{
 			debug!("ignoring initial for connection {} due to saturation", dst_cid);
 			return None;
 		}
@@ -449,18 +517,9 @@ impl Endpoint {
 			return None;
 		};
 
-		if let Err(reason) = self.early_validate_first_packet(header) {
-			return Some(DatagramEvent::Response(self.initial_close(
-				version,
-				addresses,
-				&crypto,
-				header.src_cid,
-				reason,
-				buf,
-			)));
-		}
-
-		let packet = match event.first_decode.finish(Some(&*crypto.header.remote)) {
+		// The attempt is charged for this datagram's length, so it must not pin the receive batch.
+		event.detach();
+		let mut packet = match event.first_decode.finish(Some(&*crypto.header.remote)) {
 			Ok(packet) => packet,
 			Err(e) => {
 				trace!("unable to decode initial packet: {}", e);
@@ -476,6 +535,30 @@ impl Endpoint {
 		let Header::Initial(header) = packet.header else {
 			panic!("non-initial packet in handle_first_packet()");
 		};
+
+		// Initial keys derive from the destination CID, so this does not prove who sent it, but it
+		// keeps junk that merely looks like an Initial from holding a slot or earning a reply.
+		let packet_number = header.number.expand(0);
+		if crypto
+			.packet
+			.remote
+			.decrypt(packet_number, &packet.header_data, &mut packet.payload)
+			.is_err()
+		{
+			debug!(packet_number, "dropping initial that fails authentication");
+			return None;
+		}
+
+		if let Err(reason) = self.early_validate_first_packet(&header) {
+			return Some(DatagramEvent::Response(self.initial_close(
+				version,
+				addresses,
+				&crypto,
+				header.src_cid,
+				reason,
+				buf,
+			)));
+		}
 
 		let server_config = self.server_config.as_ref().unwrap().clone();
 
@@ -497,9 +580,11 @@ impl Endpoint {
 		let incoming_idx = self.incoming_buffers.insert(IncomingBuffer {
 			server_config,
 			datagrams: Vec::new(),
-			total_bytes: 0,
+			total_bytes: size,
 		});
-		self.index.insert_initial_incoming(header.dst_cid, incoming_idx);
+		self.all_incoming_buffers_total_bytes += size;
+		self.index
+			.insert_initial_incoming(addresses, header.dst_cid, incoming_idx);
 
 		Some(DatagramEvent::NewConnection(Incoming {
 			received_at: event.now,
@@ -546,15 +631,15 @@ impl Endpoint {
 	/// the connection and delivers the buffered datagrams to it, or releases the reserved state if
 	/// the handshake failed.
 	///
-	/// Until `finish_accept`, the attempt counts toward [`server::Config::max_incoming`], and
-	/// datagrams buffered for it toward [`server::Config::incoming_buffer_size`] and the 100 MiB
+	/// Until `finish_accept`, the attempt counts toward [`server::Config::max_incoming`], and its
+	/// datagrams, the first included, toward [`server::Config::incoming_buffer_size`] and the 100 MiB
 	/// shared by every attempt.
 	///
 	/// On error, no endpoint state remains reserved for the attempt.
 	// box err to avoid clippy::result_large_err
 	pub fn start_accept(
 		&mut self,
-		mut incoming: Incoming,
+		incoming: Incoming,
 		now: Instant,
 		buf: &mut Vec<u8>,
 	) -> Result<Accepting, Box<AcceptError>> {
@@ -580,42 +665,12 @@ impl Endpoint {
 		}
 
 		if self.cids_exhausted() {
-			debug!("refusing connection");
-			let response = self.initial_close(
-				version,
-				incoming.addresses,
-				&incoming.crypto,
-				src_cid,
-				TransportError::CONNECTION_REFUSED(""),
-				buf,
-			);
-			self.ignore(incoming);
-			return Err(Box::new(AcceptError {
-				cause: ConnectionError::CidsExhausted,
-				response: Some(response),
-			}));
+			return Err(self.refuse_cids_exhausted(incoming, buf));
 		}
 
-		if incoming
-			.crypto
-			.packet
-			.remote
-			.decrypt(
-				packet_number,
-				&incoming.packet.header_data,
-				&mut incoming.packet.payload,
-			)
-			.is_err()
-		{
-			debug!(packet_number, "failed to authenticate initial packet");
-			self.ignore(incoming);
-			return Err(Box::new(AcceptError {
-				cause: TransportError::PROTOCOL_VIOLATION("authentication failed").into(),
-				response: None,
-			}));
+		let Some(loc_cid) = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx)) else {
+			return Err(self.refuse_cids_exhausted(incoming, buf));
 		};
-
-		let loc_cid = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx));
 		let mut params = TransportParameters::new(
 			&server_config.transport,
 			&self.config,
@@ -629,7 +684,10 @@ impl Endpoint {
 		params.retry_src_cid = incoming.token.retry_src_cid;
 		let mut pref_addr_cid = None;
 		if server_config.has_preferred_address() {
-			let cid = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx));
+			let Some(cid) = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx)) else {
+				self.index.retire(loc_cid);
+				return Err(self.refuse_cids_exhausted(incoming, buf));
+			};
 			pref_addr_cid = Some(cid);
 			params.preferred_address = Some(PreferredAddress {
 				address_v4: server_config.preferred_address_v4,
@@ -692,6 +750,24 @@ impl Endpoint {
 		})
 	}
 
+	/// Refuse `incoming` for want of connection IDs, releasing everything it held
+	fn refuse_cids_exhausted(&mut self, incoming: Incoming, buf: &mut Vec<u8>) -> Box<AcceptError> {
+		debug!("refusing connection");
+		let response = self.initial_close(
+			incoming.version,
+			incoming.addresses,
+			&incoming.crypto,
+			incoming.packet.header.src_cid,
+			TransportError::CONNECTION_REFUSED(""),
+			buf,
+		);
+		self.ignore(incoming);
+		Box::new(AcceptError {
+			cause: ConnectionError::CidsExhausted,
+			response: Some(response),
+		})
+	}
+
 	/// Complete acceptance of a connection begun by [`start_accept()`](Self::start_accept)
 	///
 	/// Must be called on the same endpoint. On success, the connection is registered with the
@@ -729,7 +805,7 @@ impl Endpoint {
 					_ => None,
 				};
 				// Release the routes and buffer slot reserved by `start_accept`
-				self.index.remove_initial(init_cid);
+				self.index.remove_initial_incoming(&addresses, init_cid);
 				self.index.retire(loc_cid);
 				if let Some(cid) = pref_addr_cid {
 					self.index.retire(cid);
@@ -740,6 +816,9 @@ impl Endpoint {
 		};
 
 		let incoming_buffer = self.remove_incoming_buffer(incoming_idx);
+		if init_cid.is_empty() {
+			self.index.incoming_attempt_remotes.remove(&addresses);
+		}
 		let ch = ConnectionHandle(self.connections.vacant_key());
 		// Re-points the routes reserved by `start_accept` at the connection
 		self.register_connection(ch, init_cid, loc_cid, pref_addr_cid, addresses, Side::Server);
@@ -752,14 +831,14 @@ impl Endpoint {
 		Ok((ch, conn))
 	}
 
-	/// Check if we should refuse a connection attempt regardless of the packet's contents
-	fn early_validate_first_packet(&mut self, header: &ProtectedInitialHeader) -> Result<(), TransportError> {
+	/// Check if we should refuse an authenticated connection attempt by its header alone
+	fn early_validate_first_packet(&mut self, header: &InitialHeader) -> Result<(), TransportError> {
 		// RFC9000 §7.2 dictates that initial (client-chosen) destination CIDs must be at least 8
 		// bytes. If this is a Retry packet, then the length must instead match our usual CID
 		// length. If we ever issue non-Retry address validation tokens via `NEW_TOKEN`, then we'll
 		// also need to validate CID length for those after decoding the token.
 		if header.dst_cid.len() < 8
-			&& (header.token_pos.is_empty() || header.dst_cid.len() != self.local_cid_generator.cid_len())
+			&& (header.token.is_empty() || header.dst_cid.len() != self.local_cid_generator.cid_len())
 		{
 			debug!(
 				"rejecting connection due to invalid DCID length {}",
@@ -820,6 +899,7 @@ impl Endpoint {
 		};
 
 		// A Retry has no Length field
+		buf.clear();
 		let encode = header.encode(buf, 0);
 		buf.put_slice(&token);
 		buf.extend_from_slice(
@@ -849,7 +929,8 @@ impl Endpoint {
 
 	/// Remove endpoint state associated with an `Incoming`.
 	fn remove_incoming_state(&mut self, incoming: &Incoming) {
-		self.index.remove_initial(incoming.packet.header.dst_cid);
+		self.index
+			.remove_initial_incoming(&incoming.addresses, incoming.packet.header.dst_cid);
 		self.remove_incoming_buffer(incoming.incoming_idx);
 	}
 
@@ -981,6 +1062,7 @@ impl Endpoint {
 			version: version.wire(),
 		});
 
+		buf.clear();
 		let partial_encode = header.encode(buf, INITIAL_MTU.into());
 		let max_len = INITIAL_MTU as usize - partial_encode.header_len - crypto.packet.local.tag_len();
 		frame::Close::from(reason).encode(buf, max_len);
@@ -1040,6 +1122,15 @@ impl Endpoint {
 		self.all_incoming_buffers_total_bytes
 	}
 
+	/// Datagrams buffered for pending attempts after their first
+	#[cfg(test)]
+	pub(crate) fn incoming_buffered_datagrams(&self) -> usize {
+		self.incoming_buffers
+			.iter()
+			.map(|(_, buffer)| buffer.datagrams.len())
+			.sum()
+	}
+
 	#[cfg(test)]
 	pub(crate) fn known_connections(&self) -> usize {
 		let x = self.connections.len();
@@ -1059,18 +1150,27 @@ impl Endpoint {
 
 	/// Whether we've used up 3/4 of the available CID space
 	///
-	/// We leave some space unused so that `new_cid` can be relied upon to finish quickly. We don't
-	/// bother to check when CID longer than 4 bytes are used because 2^40 connections is a lot.
+	/// We leave a quarter unused for the IDs that handshakes and established connections still
+	/// ask for, which [`new_cid`](Self::new_cid) draws on until [`cids_full`](Self::cids_full).
 	fn cids_exhausted(&self) -> bool {
-		let cid_len = self.local_cid_generator.cid_len();
-		if cid_len == 0 || cid_len > 4 {
+		self.cid_space_over(2)
+	}
+
+	/// Whether we've used up 7/8 of the available CID space, past which a free one is too costly to find
+	fn cids_full(&self) -> bool {
+		self.cid_space_over(3)
+	}
+
+	/// Whether more than `1 - 2^-shift` of the generator's IDs are held. We don't bother to check
+	/// when the generator has more than 32 random bits because 2^32 connections is a lot.
+	fn cid_space_over(&self, shift: u32) -> bool {
+		let bits = self.local_cid_generator.entropy_bits();
+		if bits == 0 || bits > 32 {
 			return false;
 		}
 
-		// Keep this architecture-independent: on 32-bit targets, 2usize.pow(32) overflows.
-		let bits = (cid_len * 8) as u32;
 		let space = 1u64 << bits;
-		let reserve = 1u64 << (bits - 2);
+		let reserve = space >> shift;
 		let len = self.index.connection_ids.len() as u64;
 
 		len > (space - reserve)
@@ -1098,7 +1198,16 @@ impl fmt::Debug for Endpoint {
 struct IncomingBuffer {
 	server_config: Arc<server::Config>,
 	datagrams: Vec<DatagramConnectionEvent>,
+	/// What [`buffered_size`] charged for every datagram held, the first included
 	total_bytes: u64,
+}
+
+/// What an attempt is charged for holding a datagram: its bytes plus the event that carries them
+///
+/// A datagram can be a single byte, so its length alone would let a byte budget hold millions of
+/// events, each far larger than the bytes it was charged for.
+fn buffered_size(datagram_len: usize) -> u64 {
+	(datagram_len + mem::size_of::<DatagramConnectionEvent>()) as u64
 }
 
 /// Part of protocol state incoming datagrams can be routed to
@@ -1125,6 +1234,11 @@ struct ConnectionIndex {
 	///
 	/// Uses a standard `HashMap` to protect against hash collision attacks.
 	incoming_connection_remotes: HashMap<FourTuple, ConnectionHandle>,
+	/// Identifies connection attempts whose Initial has a zero-length destination CID, which is
+	/// all a retransmit of it has to match on, until they become connections
+	///
+	/// Uses a standard `HashMap` to protect against hash collision attacks.
+	incoming_attempt_remotes: HashMap<FourTuple, usize>,
 	/// Identifies outgoing connections with zero-length CIDs
 	///
 	/// We don't yet support explicit source addresses for client connections, and zero-length CIDs
@@ -1142,13 +1256,24 @@ struct ConnectionIndex {
 }
 
 impl ConnectionIndex {
-	/// Associate an incoming connection with its initial destination CID
-	fn insert_initial_incoming(&mut self, dst_cid: ConnectionId, incoming_key: usize) {
+	/// Associate an incoming connection with its initial destination CID, or its four-tuple when
+	/// that is empty
+	fn insert_initial_incoming(&mut self, addresses: FourTuple, dst_cid: ConnectionId, incoming_key: usize) {
 		if dst_cid.is_empty() {
+			self.incoming_attempt_remotes.insert(addresses, incoming_key);
 			return;
 		}
 		self.connection_ids_initial
 			.insert(dst_cid, RouteDatagramTo::Incoming(incoming_key));
+	}
+
+	/// Remove what [`insert_initial_incoming`](Self::insert_initial_incoming) associated
+	fn remove_initial_incoming(&mut self, addresses: &FourTuple, dst_cid: ConnectionId) {
+		if dst_cid.is_empty() {
+			self.incoming_attempt_remotes.remove(addresses);
+			return;
+		}
+		self.remove_initial(dst_cid);
 	}
 
 	/// Remove an association with an initial destination CID
@@ -1204,6 +1329,9 @@ impl ConnectionIndex {
 		if datagram.dst_cid().is_empty() {
 			if let Some(&ch) = self.incoming_connection_remotes.get(addresses) {
 				return Some(RouteDatagramTo::Connection(ch));
+			}
+			if let Some(&idx) = self.incoming_attempt_remotes.get(addresses) {
+				return Some(RouteDatagramTo::Incoming(idx));
 			}
 			if let Some(&ch) = self.outgoing_connection_remotes.get(&addresses.remote) {
 				return Some(RouteDatagramTo::Connection(ch));

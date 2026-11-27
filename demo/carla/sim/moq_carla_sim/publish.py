@@ -237,7 +237,7 @@ def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
     return tuple(entries.values())
 
 
-def parse_command(driver_id: str, message: Any, instance: str | None = None) -> Command | None:
+def parse_command(driver_id: str, message: Any, identity: str | None = None) -> Command | None:
     """Turn one `control` track message from a driver run into a Command.
 
     Returns None for anything unrecognized. A driver is an untrusted publisher,
@@ -264,7 +264,7 @@ def parse_command(driver_id: str, message: Any, instance: str | None = None) -> 
         return Command(
             kind="drive",
             driver_id=driver_id,
-            instance=instance,
+            identity=identity,
             sequence=sequence,
             state=DriveState(
                 steering=_number(message.get("steering")),
@@ -276,7 +276,7 @@ def parse_command(driver_id: str, message: Any, instance: str | None = None) -> 
         )
 
     if kind in ("estop", "reset_estop", "respawn"):
-        return Command(kind=kind, driver_id=driver_id, instance=instance, sequence=sequence, timestamps=timestamps)
+        return Command(kind=kind, driver_id=driver_id, identity=identity, sequence=sequence, timestamps=timestamps)
 
     return None
 
@@ -307,7 +307,7 @@ def _number_or_none(value: Any) -> float | None:
 CONTROL_DELAY = timedelta(milliseconds=250)
 
 # Names each driver run for the lease. The bindings hand out a run's broadcast
-# without its route instance, and a process-wide count keeps a run's late
+# without its route identity, and a process-wide count keeps a run's late
 # `driver_left` from releasing a later run of the same driver.
 _runs = itertools.count(1)
 
@@ -317,7 +317,7 @@ class Drivers:
     and fans its controls into the command queue.
 
     A driver publishes a broadcast at `{prefix}/{driverId}` whose `control` track
-    holds one JSON control per group. Each publisher instance serving that path
+    holds one JSON control per group. Each publisher identity serving that path
     is a run of the driver, which the lease tells apart from the driver's other
     runs. The truck answers on its shared `status` track.
     """
@@ -329,13 +329,13 @@ class Drivers:
         # Set once the truck shuts down, whose gate no longer reads the queue.
         self._closing = False
 
-    def revoke(self, driver: str, instance: str | None) -> None:
+    def revoke(self, driver: str, identity: str | None) -> None:
         """Drop what a driver run still sends, until it ends.
 
         The player lets go once `status` stops naming it, but heartbeats already
         queued or in flight would otherwise claim the lease straight back.
         """
-        self._revoked.add((driver, instance))
+        self._revoked.add((driver, identity))
 
     def revoked(self, command: Command) -> bool:
         """Whether `command` came from a revoked run, which the gate must ignore.
@@ -343,7 +343,7 @@ class Drivers:
         The run's `driver_left` is the last command it queues, so reading it
         forgets the run.
         """
-        key = (command.driver_id, command.instance)
+        key = (command.driver_id, command.identity)
         if key not in self._revoked:
             return False
         if command.kind == "driver_left":
@@ -397,11 +397,11 @@ class Drivers:
                         await self._end(driver, *run)
                         run = None
                     if broadcast is not None:
-                        instance = str(next(_runs))
+                        identity = str(next(_runs))
                         task = asyncio.create_task(
-                            self._pump(driver, instance, broadcast), name=f"driver:{driver}:{instance}"
+                            self._pump(driver, identity, broadcast), name=f"driver:{driver}:{identity}"
                         )
-                        run = (task, instance)
+                        run = (task, identity)
         # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
         except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
             log.info("driver %s follow ended: %s", driver, err)
@@ -409,7 +409,7 @@ class Drivers:
             if run is not None:
                 await self._end(driver, *run)
 
-    async def _end(self, driver: str, task: asyncio.Task[None], instance: str) -> None:
+    async def _end(self, driver: str, task: asyncio.Task[None], identity: str) -> None:
         """Stop a run, releasing its lease after the last command it queued.
 
         A run that ended on its own already queued its `driver_left`, and a
@@ -418,17 +418,17 @@ class Drivers:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         if task.cancelled() and not self._closing:
-            await self._commands.put(Command(kind="driver_left", driver_id=driver, instance=instance))
+            await self._commands.put(Command(kind="driver_left", driver_id=driver, identity=identity))
 
-    async def _pump(self, driver: str, instance: str, broadcast: moq.BroadcastConsumer) -> None:
+    async def _pump(self, driver: str, identity: str, broadcast: moq.BroadcastConsumer) -> None:
         """Feed one driver run's `control` track into the command queue.
 
         Emits `driver_left` once the run ends on its own, however it ends, so the
         gate releases a lease even when the track fails. A stopped run leaves that
         to `_end`.
         """
-        key = (driver, instance)
-        log.info("driver %s connected (run %s)", driver, instance)
+        key = (driver, identity)
+        log.info("driver %s connected (run %s)", driver, identity)
         try:
             control = await broadcast.subscribe_track(
                 "control", moq.Subscription(delay=moq.Delay(max=CONTROL_DELAY), order=moq.Order.ASCENDING)
@@ -436,14 +436,14 @@ class Drivers:
             while (frame := await control.read_frame()) is not None:
                 if key in self._revoked:
                     break
-                command = parse_command(driver, _decode(frame.payload), instance)
+                command = parse_command(driver, _decode(frame.payload), identity)
                 if command is not None:
                     await self._commands.put(command)
         except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
             log.info("driver %s track ended: %s", driver, err)
         finally:
-            log.info("driver %s disconnected (run %s)", driver, instance)
-        await self._commands.put(Command(kind="driver_left", driver_id=driver, instance=instance))
+            log.info("driver %s disconnected (run %s)", driver, identity)
+        await self._commands.put(Command(kind="driver_left", driver_id=driver, identity=identity))
 
 
 def _decode(payload: bytes) -> Any:

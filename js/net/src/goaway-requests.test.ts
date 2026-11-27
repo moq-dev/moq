@@ -94,8 +94,8 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
 /**
  * After GOAWAY the old session keeps opening subscribe, fetch, and announce-interest streams
  * while it is the only route, at the drain cost. Once a replacement answers, it outranks the
- * old session and new requests open there instead. These wires carry no instance, so the
- * replacement is another instance: the request already open stays on the draining session.
+ * old session and new requests open there instead. These wires carry no identity, so the
+ * replacement is another identity: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
 	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_22;
@@ -349,7 +349,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 			expect(event).toMatchObject({ prefix: Path.from("room"), kind: "restart" });
 		}
 
-		// The old publisher still serves the old instance, so its subscription carries on.
+		// The old publisher still serves the old identity, so its subscription carries on.
 		for (const producer of served) {
 			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two", Timestamp.fromMillis(1)));
 		}

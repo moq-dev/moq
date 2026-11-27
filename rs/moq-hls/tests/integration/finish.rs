@@ -47,7 +47,7 @@ async fn finish(order: Order) {
 			let track = publisher.media.take().expect("open");
 			publisher.finished = Some(track.finish().expect("finish media"));
 			publisher.route.broadcast().close();
-			// The server stops serving the instance once `End` reaches it.
+			// The server stops serving the identity once `End` reaches it.
 			let deadline = kio::clock::now().saturating_add(TIMEOUT);
 			while get(&app, &media).await.status() != StatusCode::NOT_FOUND {
 				assert!(kio::clock::now() < deadline, "End never reached the export");

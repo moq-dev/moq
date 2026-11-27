@@ -19,7 +19,7 @@ pub enum AnnounceEvent {
 
 /// The paths announced in a scope, each reported as it becomes present or absent.
 ///
-/// A path that another instance takes over stays present, and a route's metadata,
+/// A path that another identity takes over stays present, and a route's metadata,
 /// availability included, changing is not reported: hold a
 /// [`follow`](crate::origin::Consumer::follow) to see the broadcast change. Created by
 /// [`Consumer::announced`](crate::origin::Consumer::announced). Drop to unregister.
@@ -132,7 +132,7 @@ mod tests {
 	use super::super::ProduceTest;
 	use super::*;
 	use crate::{
-		Hop, Instance,
+		Hop, Identity,
 		origin::{Cost, RouteInfo, RouteOptions},
 	};
 
@@ -155,19 +155,19 @@ mod tests {
 		}
 	}
 
-	fn route(instance: &Instance) -> RouteOptions {
-		RouteOptions::default().with_instance(instance.clone(), 0)
+	fn route(identity: &Identity) -> RouteOptions {
+		RouteOptions::default().with_identity(identity.clone(), 0)
 	}
 
-	/// A path stays present while another instance takes it over or its route changes, and is
+	/// A path stays present while another identity takes it over or its route changes, and is
 	/// absent only once nothing covers it.
 	#[kio::test]
-	async fn a_path_stays_present_across_instances() {
+	async fn a_path_stays_present_across_identities() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut announced = origin.consume().announced();
 		let mut routes = origin.consume().routes();
 
-		let first = origin.route("live", route(&Instance::random())).unwrap();
+		let first = origin.route("live", route(&Identity::random())).unwrap();
 		assert_eq!(listed(&mut announced).await, "present live");
 		assert!(matches!(
 			routes.next().await,
@@ -180,7 +180,7 @@ mod tests {
 		first
 			.announce_info(
 				RouteInfo::new()
-					.with_instance(Instance::random(), 0)
+					.with_identity(Identity::random(), 0)
 					.with_cost(Cost::new(5)),
 			)
 			.unwrap();
@@ -194,7 +194,7 @@ mod tests {
 			})
 		));
 
-		let second = origin.route("live", route(&Instance::random())).unwrap();
+		let second = origin.route("live", route(&Identity::random())).unwrap();
 		drop(first);
 		quiet(&mut announced).await;
 
@@ -208,9 +208,9 @@ mod tests {
 	async fn availability_is_quiet_and_offline_is_absent() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut announced = origin.consume().announced();
-		let instance = Instance::random();
+		let identity = Identity::random();
 		let held = RouteInfo::new()
-			.with_instance(instance.clone(), 0)
+			.with_identity(identity.clone(), 0)
 			.with_available(false);
 
 		let lost = origin.forward("lost", held.clone()).unwrap();
@@ -230,7 +230,7 @@ mod tests {
 		assert_eq!(listed(&mut announced).await, "absent ended");
 
 		// A route published here ends with its handle.
-		let local = origin.route("local", route(&instance)).unwrap();
+		let local = origin.route("local", route(&identity)).unwrap();
 		assert_eq!(listed(&mut announced).await, "present local");
 		drop(local);
 		assert_eq!(listed(&mut announced).await, "absent local");

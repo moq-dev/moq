@@ -91,15 +91,15 @@ These land with the next breaking release.
   publishers and `@moq/publish` declare it. Neither side reads the other's
   shape, so upgrade HLS exporters and their publishers together.
 
-- **Announce restarts.** On moq-lite 07 another instance at a path starts
+- **Announce restarts.** On moq-lite 07 another identity at a path starts
   before the one it replaces ends, and `ANNOUNCE_UPDATE` carries a higher epoch
   of the same one. lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as
   it always meant. Elsewhere, a restart is still an end then a start.
 
-- **Publisher instances ride the route.** moq-lite 07 carries the instance and
+- **Publisher identities ride the route.** moq-lite 07 carries the identity and
   epoch after the path in `ANNOUNCE_START`, and the
-  pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
-  carry none, so the receiving session mints an instance per announcement:
+  pinned identity in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
+  carry none, so the receiving session mints an identity per announcement:
   default lite-06 sessions, including cluster GOAWAY redials, lose seamless
   cross-route failover until lite-07 is the default.
 

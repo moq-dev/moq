@@ -97,8 +97,7 @@ mid-group counting only the unacknowledged frames as `dropped`, an
 unsupported backend leaving both fields absent, and a far-future timestamp
 clearing at the next group.
 
-Public API: breaking in `moq-net` (`stats::Registry::report` takes the
-drain's instant); additive `Traffic` fields and a new `stats::Histogram`,
+Public API: additive `Traffic` fields and a new `stats::Histogram`,
 re-exported by `moq-stats`. Wire: the stats JSON gains the egress fields.
 Update `doc/concept/stats.md` and the stats section of
 `doc/bin/relay/config.md`.

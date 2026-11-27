@@ -64,7 +64,7 @@ marked identity hangs off the node by one free, marked link at session 0, so its
 route there is the node's marked route, `[marked identity, node]`, whose marked
 hop counts toward the 32.
 
-**Claims.** The destination is a broadcast: one Instance at one path. A claim
+**Claims.** The destination is a broadcast: one Identity at one path. A claim
 filed at a prefix of the path reaches it lowered, its Above counted from the
 path, so the claims of one prefix tie on precedence wherever each is filed and
 rank as one tier, as `Router::tier` gathers them and the draft's Resolution
@@ -95,9 +95,9 @@ where it holds another node's claim.
   tie-break; crossing a session never makes a route preferred; a path naming
   its receiver is invalid and a path grows by exactly the hop it crossed; each
   filter maps a route to invalid; the named drain keeps one order.
-- The route instance with every filter: claimed, the mark's export filter, the
+- The route identity with every filter: claimed, the mark's export filter, the
   hop limit, the metric, the floor, and the named drain (`Route`).
-- The claim instance with precedence leading, the mark and its export filter,
+- The claim identity with precedence leading, the mark and its export filter,
   the chain's limit, the best known precedence, and the claimant and giver order
   (`Claim`). Echoes never beat the claims they echo because every step is
   increasing.
@@ -165,7 +165,7 @@ claim's path in Rust grows by exactly the relay that took it
   [warmth](https://github.com/moq-dev/moq/pull/8903) argues it separately.
 - **Liveness under churn that never stops.** Convergence needs each epoch to
   last long enough.
-- **The chain where a claim stays inside a domain.** The claim instance's path
+- **The chain where a claim stays inside a domain.** The claim identity's path
   names every relay that took the claim, and each refuses a claim naming it.
   Rust's chain names the relays a claim entered or left a routing domain by:
   the announcing relay, then each grant's exporter and adopter, a relay that

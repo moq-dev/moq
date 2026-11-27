@@ -3,17 +3,17 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. Both routes carry `P`'s instance, so `R` may resume
+//! it to the subscribing relay `R`. Both routes carry `P`'s identity, so `R` may resume
 //! a subscription served through one onto the other. The reader on `R` must see
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! Only lite-07 carries the instance. Older lite versions and moq-transport carry none,
+//! Only lite-07 carries the identity. Older lite versions and moq-transport carry none,
 //! so `R` mints one per route and cannot tell the two serve the same bytes: its
 //! subscription stays on its route and ends with it, while a better route restarts the
 //! path for new requests.
 //!
-//! Two publishers sharing one stable instance, a redundant pair, are one source the
+//! Two publishers sharing one stable identity, a redundant pair, are one source the
 //! same way.
 
 use crate::WithMax as _;
@@ -350,10 +350,10 @@ async fn route_flaps(version: &str) {
 	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
 }
 
-/// A wire without instances: the subscription stays on `A` while `B` stands by, and
+/// A wire without identities: the subscription stays on `A` while `B` stands by, and
 /// ends when `A`'s route goes instead of resuming through `B`. A re-request then
 /// lands on `B`.
-async fn route_dies_without_instances(version: &str, trigger: Trigger) {
+async fn route_dies_without_identities(version: &str, trigger: Trigger) {
 	let version: Version = version.parse().unwrap();
 	let (mut topology, sub) = Topology::new(version).await;
 	let mut rx = read(sub);
@@ -398,10 +398,10 @@ async fn route_dies_without_instances(version: &str, trigger: Trigger) {
 }
 
 /// `P1 -> A -> R` serves `live`, while `P2 -> B -> R` stands by under another
-/// instance. A follower on `D`, one wire hop beyond `R`, sees the version's restart
+/// identity. A follower on `D`, one wire hop beyond `R`, sees the version's restart
 /// when `A`'s session dies or it withdraws the route after losing `P1`. Its old
 /// subscription fails, and a fresh request reads `P2`'s own bytes.
-async fn route_dies_across_instances(version: &str, trigger: Trigger) {
+async fn route_dies_across_identities(version: &str, trigger: Trigger) {
 	let version: Version = version.parse().unwrap();
 	let publisher_a = produce_origin(1);
 	let publisher_b = produce_origin(2);
@@ -417,7 +417,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		.unwrap();
 	let track_a = broadcast_a.broadcast().create_track("video", timed()).unwrap();
 	let track_b = broadcast_b.broadcast().create_track("video", timed()).unwrap();
-	assert_ne!(broadcast_a.instance(), broadcast_b.instance());
+	assert_ne!(broadcast_a.identity(), broadcast_b.identity());
 
 	let p_to_a = link(version, &publisher_a, &relay_a).await;
 	let _p_to_b = link(version, &publisher_b, &relay_b).await;
@@ -439,12 +439,12 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		.available()
 		.await
 		.unwrap()
-		.expect("the first change is an instance");
+		.expect("the first change is an identity");
 	let sub = first.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut rx = read(sub);
 
 	// A local preference keeps `B` on standby even on versions that carry no
-	// cost, where equal-length routes of different instances rank by a hash.
+	// cost, where equal-length routes of different identities rank by a hash.
 	let standby = relay.clone().with_priority(origin::Priority::new(-1));
 	let _b_to_r = link(version, &relay_b, &standby).await;
 	settle().await;
@@ -467,7 +467,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	}
 
 	// Inspect the downstream cursor, not R's model: older wires carry end/start,
-	// while lite-07 starts the next instance before ending the last. An in-place
+	// while lite-07 starts the next identity before ending the last. An in-place
 	// update must fail here.
 	if version.alpn() == "moq-lite-07-wip" {
 		match announced.next().await.expect("announced") {
@@ -478,9 +478,9 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			} => {
 				assert_eq!(announce.prefix.as_str(), "live");
 				assert_eq!(
-					announce.route.instance(),
-					&broadcast_b.instance(),
-					"{version} {trigger:?}: restarted onto the wrong instance"
+					announce.route.identity(),
+					&broadcast_b.identity(),
+					"{version} {trigger:?}: restarted onto the wrong identity"
 				);
 			}
 			other => panic!("{version} {trigger:?}: expected a restart, got {other:?}"),
@@ -528,7 +528,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	assert_eq!(next(&mut rx).await, (0, tagged("B", 0, 0)), "{version} {trigger:?}");
 }
 
-/// A wire without instances: a better route is another source. `R` restarts the path, the
+/// A wire without identities: a better route is another source. `R` restarts the path, the
 /// subscription already on `A` stays there, and a re-request lands on the better route.
 async fn better_route_restarts(version: &str) {
 	let version: Version = version.parse().unwrap();
@@ -594,15 +594,15 @@ macro_rules! route_change_tests {
 				}
 
 				#[kio::test]
-				async fn disconnect_restarts_another_instance() {
-					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_instances($version, Trigger::Disconnect))
+				async fn disconnect_restarts_another_identity() {
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_identities($version, Trigger::Disconnect))
 						.await
 						.expect("timed out");
 				}
 
 				#[kio::test]
-				async fn unannounce_restarts_another_instance() {
-					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_instances($version, Trigger::Unannounce))
+				async fn unannounce_restarts_another_identity() {
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_identities($version, Trigger::Unannounce))
 						.await
 						.expect("timed out");
 				}
@@ -654,37 +654,37 @@ macro_rules! pinned_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger) {
-					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_instances($version, trigger))
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_identities($version, trigger))
 						.await
 						.expect("timed out");
 				}
 
 				#[kio::test]
-				async fn disconnect_restarts_another_instance() {
+				async fn disconnect_restarts_another_identity() {
 					run(Trigger::Disconnect).await;
 				}
 
 				#[kio::test]
-				async fn unannounce_restarts_another_instance() {
+				async fn unannounce_restarts_another_identity() {
 					run(Trigger::Unannounce).await;
 				}
 
-				/// Two routes to one publication are still different instances on these wires.
+				/// Two routes to one publication are still different identities on these wires.
 				#[kio::test]
 				async fn disconnect_ends_the_subscription() {
-					kio::clock::timeout(TEST_TIMEOUT, route_dies_without_instances($version, Trigger::Disconnect))
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_without_identities($version, Trigger::Disconnect))
 						.await
 						.expect("timed out");
 				}
 
 				#[kio::test]
 				async fn unannounce_ends_the_subscription() {
-					kio::clock::timeout(TEST_TIMEOUT, route_dies_without_instances($version, Trigger::Unannounce))
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_without_identities($version, Trigger::Unannounce))
 						.await
 						.expect("timed out");
 				}
 
-				/// A better route under another instance wins new requests and announces as a
+				/// A better route under another identity wins new requests and announces as a
 				/// restart, while the incumbent's subscriptions continue.
 				#[kio::test]
 				async fn better_route_keeps_the_incumbent() {
@@ -964,10 +964,10 @@ struct Replica {
 }
 
 /// A redundant pair: `P1` and `P2` publish `live`, each its own stream under its own
-/// instance, priced so `R` starts on `P1`. Each writes frames tagged with its name. When
+/// identity, priced so `R` starts on `P1`. Each writes frames tagged with its name. When
 /// `P1` goes, its broadcast ends rather than stitching `P2`'s groups onto what the reader
 /// already has, and `follow` hands out `P2`'s broadcast next.
-async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
+async fn redundant_pair_follows_the_next_identity(version: &str, loss: Loss) {
 	let version: Version = version.parse().unwrap();
 	let subscriber = produce_origin(4);
 	let mut replicas = Vec::new();
@@ -1033,7 +1033,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 		!second.is_clone(&first),
 		"{version} {loss:?}: handed out the old broadcast"
 	);
-	assert_ne!(second.info().instance, first.info().instance, "{version} {loss:?}");
+	assert_ne!(second.info().identity, first.info().identity, "{version} {loss:?}");
 	// A fresh subscription on `P2`'s own stream, starting from its latest group.
 	let mut next_rx = read(second.track("video").unwrap().subscribe(prefs).await.unwrap());
 	assert_eq!(next(&mut next_rx).await, (0, tagged("P2", 0, 0)), "{version} {loss:?}");
@@ -1054,11 +1054,11 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 }
 
 #[kio::test]
-async fn redundant_pair_follows_the_next_instance_when_unreachable() {
+async fn redundant_pair_follows_the_next_identity_when_unreachable() {
 	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(
 			TEST_TIMEOUT,
-			redundant_pair_follows_the_next_instance(version, Loss::Unreachable),
+			redundant_pair_follows_the_next_identity(version, Loss::Unreachable),
 		)
 		.await
 		.expect("timed out");
@@ -1066,18 +1066,18 @@ async fn redundant_pair_follows_the_next_instance_when_unreachable() {
 }
 
 #[kio::test]
-async fn redundant_pair_follows_the_next_instance_when_the_incumbent_ends() {
+async fn redundant_pair_follows_the_next_identity_when_the_incumbent_ends() {
 	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(
 			TEST_TIMEOUT,
-			redundant_pair_follows_the_next_instance(version, Loss::Ends),
+			redundant_pair_follows_the_next_identity(version, Loss::Ends),
 		)
 		.await
 		.expect("timed out");
 	}
 }
 
-/// `P1` and `P2` both publish `live` to the relay `R`, each under its own instance, `P2`
+/// `P1` and `P2` both publish `live` to the relay `R`, each under its own identity, `P2`
 /// priced to stand by, and `D` reads through `R`. `P1`'s session to `R` dies mid-group.
 /// `D`'s track ends with the error: a re-request through `R` would be answered by `P2`,
 /// another stream, stitched onto what `D` already read.
@@ -1161,21 +1161,21 @@ async fn replaced_behind_a_relay(version: &str) {
 }
 
 #[kio::test]
-async fn replaced_under_another_instance_ends_lite_06() {
+async fn replaced_under_another_identity_ends_lite_06() {
 	kio::clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
 #[kio::test]
-async fn replaced_under_another_instance_ends_lite_07() {
+async fn replaced_under_another_identity_ends_lite_07() {
 	kio::clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }
 
 /// `P1` publishes a compressed `video` to the relay `R`, and so does `P2` under the same
-/// instance, compressed only when `compress` is set. `D` reads through `R` over lite-07,
+/// identity, compressed only when `compress` is set. `D` reads through `R` over lite-07,
 /// which forwards the compressed bytes. `P1`'s session to `R` dies between groups. A copy
 /// that frames the track the same way resumes. One that doesn't is refused: `D` never
 /// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal. `D`
@@ -1183,7 +1183,7 @@ async fn replaced_under_another_instance_ends_lite_07() {
 /// refuses it.
 async fn compression_changes_behind_a_relay(compress: bool) {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
-	let instance = moq_net::Instance::random();
+	let identity = moq_net::Identity::random();
 	let relay = produce_origin(3);
 	let downstream = produce_origin(4);
 	let mut replicas = Vec::new();
@@ -1192,7 +1192,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 		let broadcast = publisher
 			.route(
 				"live",
-				origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+				origin::RouteOptions::hidden().with_identity(identity.clone(), 0),
 			)
 			.unwrap();
 		let track = broadcast
@@ -1290,7 +1290,7 @@ async fn different_compression_is_refused_behind_a_relay() {
 }
 
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
-/// the way a publisher restarts an encoder. The instance lets `P`'s own front resume the
+/// the way a publisher restarts an encoder. The identity lets `P`'s own front resume the
 /// logical track onto the replacement, so `A` and `R` never see the abort. The
 /// replacement continues the track's keys explicitly, so its first group reaches
 /// `R` at once instead of being skipped as one `R` already read.

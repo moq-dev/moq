@@ -112,7 +112,7 @@ struct MkvTrack {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Read {
 	Live,
-	/// The track ended, cleanly or as a sibling instance went.
+	/// The track ended, cleanly or as a sibling identity went.
 	Finished,
 	/// The track itself failed. A spare of its kind may continue it.
 	Lost,
@@ -994,9 +994,9 @@ impl<S: Stream> Export<S> {
 
 fn ensure_legacy(container: &Container, kind: &str, name: &str) -> Result<()> {
 	match container {
-		// MKV emits raw codec payloads, so it accepts both wire formats whose
-		// frames are raw codec bitstreams (Legacy varint, LOC properties).
-		Container::Legacy | Container::Loc => Ok(()),
+		// MKV emits raw codec payloads, so it accepts wire formats whose
+		// frames are raw codec bitstreams (Legacy, LOC, Raw, CTS).
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts => Ok(()),
 		Container::Cmaf { .. } => Err(Error::UnsupportedCmafTrack {
 			kind: kind.to_string(),
 			name: name.to_string(),

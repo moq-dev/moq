@@ -264,7 +264,7 @@ bool MoQOutput::Start()
 
 	// Route the broadcast on an origin of our own, visible at once so subscribers can
 	// discover it. Stop() closes it, so each Start creates a fresh route, under a fresh
-	// instance it mints and keeps across reconnects. The route is held until Reset():
+	// identity it mints and keeps across reconnects. The route is held until Reset():
 	// releasing it would retract the broadcast.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
@@ -321,7 +321,7 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		instance = (*next_route)->instance_id()->text();
+		identity = (*next_route)->identity()->text();
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -463,7 +463,7 @@ void MoQOutput::Reset()
 		session.reset();
 		link = Link::kPending;
 		url.clear();
-		instance.clear();
+		identity.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -528,10 +528,10 @@ void MoQOutput::Reset()
 		SetBitrate(r.encoder, r.key, r.bitrate_bps, r.average_kbps);
 }
 
-std::string MoQOutput::GetInstance()
+std::string MoQOutput::GetIdentity()
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return instance;
+	return identity;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
@@ -703,6 +703,9 @@ void MoQOutput::Data(struct encoder_packet *packet)
 	}
 }
 
+// How much audio a group carries: a new group (one QUIC stream) every 100 ms.
+static constexpr int64_t AUDIO_JOIN_US = 100'000;
+
 // The packet's timestamp on the broadcast clock, or nothing when it falls before zero.
 static std::optional<moq::Timestamp> PacketTimestamp(const struct encoder_packet *packet)
 {
@@ -748,12 +751,24 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 		return;
 	}
 
-	// Audio has no keyframes, so it has no group boundary of its own: without this the whole
-	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
-	// waiting for the next, the right trade for live. Video groups at its own keyframes.
-	if (auto result = track.producer->cut(); !result) {
-		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
-		return;
+	// Audio has no keyframes, so it has no group boundary of its own: without a cut the whole
+	// stream is one group, and a cut per packet spends a QUIC stream per packet. The packet that
+	// brings a group to 100 ms closes it, as moq-mux's `container::Join::DEFAULT` does, so the
+	// relay sees it finish without waiting for the next; packets still forward as written.
+	const int64_t start_us = packet->pts * packet->timebase_num * 1'000'000 / packet->timebase_den;
+	const uint32_t sample_rate = obs_encoder_get_sample_rate(encoder);
+	const int64_t frame_us = sample_rate ? int64_t(obs_encoder_get_frame_size(encoder)) * 1'000'000 / sample_rate
+					     : 0;
+	const int64_t group_start_us = track.group_start_us.value_or(start_us);
+	const int64_t end_us = start_us + frame_us;
+	if (end_us < group_start_us || end_us - group_start_us >= AUDIO_JOIN_US) {
+		track.group_start_us.reset();
+		if (auto result = track.producer->cut(); !result) {
+			LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
+			return;
+		}
+	} else {
+		track.group_start_us = group_start_us;
 	}
 
 	total_bytes_sent.fetch_add(packet->size, std::memory_order_relaxed);

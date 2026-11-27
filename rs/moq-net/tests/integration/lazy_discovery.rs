@@ -450,7 +450,7 @@ async fn serving_the_peer_asks_nothing() {
 
 /// Resolving a path owns the discovery that makes the peer's announcement visible.
 #[kio::test]
-async fn requesting_an_unwatched_path_discovers_its_instance() {
+async fn requesting_an_unwatched_path_discovers_its_identity() {
 	for version in VERSIONS {
 		let lazy = Lazy::new(version).await;
 		assert_eq!(lazy.requests(), 0, "{version}");
@@ -459,7 +459,7 @@ async fn requesting_an_unwatched_path_discovers_its_instance() {
 			.consume()
 			.request("a/x", None)
 			.await
-			.expect("request discovers the announced instance without a separate watcher");
+			.expect("request discovers the announced identity without a separate watcher");
 		assert_eq!(broadcast.info().path.as_str(), "a/x");
 		assert_eq!(lazy.requests(), 1, "{version}");
 	}

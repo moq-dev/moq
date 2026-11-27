@@ -615,7 +615,7 @@ impl Fmp4Track {
 		let init = match &self.config {
 			Rendition::Video(config) => match &config.container {
 				Container::Cmaf { init, .. } => init,
-				Container::Legacy | Container::Loc => {
+				Container::Legacy | Container::Loc | Container::Raw | Container::Cts => {
 					let Some(Subscription { source, .. }) = self.subscription() else {
 						return Ok(None);
 					};
@@ -638,7 +638,7 @@ impl Fmp4Track {
 			},
 			Rendition::Audio(config) => match &config.container {
 				Container::Cmaf { init, .. } => init,
-				Container::Legacy | Container::Loc => {
+				Container::Legacy | Container::Loc | Container::Raw | Container::Cts => {
 					let trak = super::synthesize_audio_trak(self.track_id, self.timescale, config)?;
 					let mut declaration = Declaration::synthesized(trak);
 					declaration.provisional = matches!(config.codec, AudioCodec::Opus) && config.description.is_none();
@@ -1729,7 +1729,9 @@ pub(crate) fn catalog_timescale_video(config: &VideoConfig) -> Result<u64> {
 		Container::Cmaf { init, .. } => {
 			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::default_video_timescale(config))
 		}
-		Container::Loc | Container::Legacy => crate::container::fmp4::default_video_timescale(config),
+		Container::Loc | Container::Legacy | Container::Raw | Container::Cts => {
+			crate::container::fmp4::default_video_timescale(config)
+		}
 		Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 	})
 }
@@ -1737,7 +1739,7 @@ pub(crate) fn catalog_timescale_video(config: &VideoConfig) -> Result<u64> {
 pub(crate) fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> Result<u64> {
 	Ok(match &config.container {
 		Container::Cmaf { init, .. } => parse_timescale_from_init(init).unwrap_or(config.sample_rate as u64),
-		Container::Loc | Container::Legacy => config.sample_rate as u64,
+		Container::Loc | Container::Legacy | Container::Raw | Container::Cts => config.sample_rate as u64,
 		Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 	})
 }

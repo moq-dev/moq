@@ -27,7 +27,7 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 ```
 
 Each connection publishes under a fresh
-[instance](/concept/moq-lite#publisher-instances), so an encoder that reconnects
+[identity](/concept/moq-lite#publisher-identities), so an encoder that reconnects
 while its stale connection is still open replaces it once the new feed has
 declared its tracks: viewers see the broadcast restart, and their next
 subscribe reaches the new feed. A source that steps onto another timeline

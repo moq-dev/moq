@@ -187,7 +187,7 @@ async fn moq_transport_relays_a_cold_finished_group() {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
-		.expect("an instance");
+		.expect("an identity");
 	let mut fetched = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().fetch_group(0, None))
 		.await
 		.expect("fetch timeout")
@@ -244,7 +244,7 @@ async fn chain(version: &str, replay: Replay) {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
-		.expect("an instance");
+		.expect("an identity");
 	let subscription = || {
 		track::Subscription::default()
 			.with_ranges([crate::support::keys(0..)])

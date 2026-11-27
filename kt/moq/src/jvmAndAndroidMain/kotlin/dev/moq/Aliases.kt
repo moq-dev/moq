@@ -95,7 +95,7 @@ typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
  */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 
-/** Follows a specific broadcast path across the publisher instances that serve it. */
+/** Follows a specific broadcast path across the publisher identities that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
 
 /**
@@ -107,7 +107,7 @@ typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
  *
- * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
+ * Another publisher identity taking a path over keeps it present: hold a [Following] to see the
  * broadcast change.
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
@@ -181,20 +181,20 @@ typealias Frame = uniffi.moq.MoqFrame
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
- * Names one continuous stream at a path: `Instance.parse` names one, only a session mints one, and
- * equality also compares `isMinted()`, so pin a reported stream with the instance, not its text.
+ * Names one continuous stream at a path: `Identity.parse` names one, only a session mints one, and
+ * equality also compares `isMinted()`, so pin a reported stream with the identity, not its text.
  */
-typealias Instance = uniffi.moq.MoqInstance
+typealias Identity = uniffi.moq.MoqIdentity
 
 /**
  * How a [Route] advertises itself: `hidden` until `announce`, its static production cost (lower
- * wins), an optional stable [Instance] (null mints a fresh one the route keeps for its lifetime),
- * and the epoch, which only matters with a stable instance.
+ * wins), an optional stable [Identity] (null mints a fresh one the route keeps for its lifetime),
+ * and the epoch, which only matters with a stable identity.
  */
 typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
- * The read-only facts on a received route: the [Instance] of the stream it serves, static
+ * The read-only facts on a received route: the [Identity] of the stream it serves, static
  * production and link cost (lower wins), and whether a usable path reaches it.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo

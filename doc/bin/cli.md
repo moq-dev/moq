@@ -233,7 +233,7 @@ closes. Playback starts when the name is announced. A
 [restarted publisher](#publisher-runs) starts it over on the new run, with a
 fresh catalog, decoders, and clock. When the announcement ends, what is playing
 finishes and the player waits for the name to return. The log names each run's
-instance. A refused broadcast request or a catalog with nothing this build can
+identity. A refused broadcast request or a catalog with nothing this build can
 play ends the player.
 
 Playback is behind the `play` feature, since it pulls in windowing and
@@ -321,7 +321,7 @@ resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
 the `transcode` feature, plus `openh264` on a host without a hardware encoder.
 A restarted source retires the old ladder and publishes a fresh derivative
-instance at the same output path. A clean end waits for the source to return;
+identity at the same output path. A clean end waits for the source to return;
 stop the command to finish following. A refused source request or an encoding
 failure ends the command.
 
@@ -369,26 +369,28 @@ for how, and for storage and serving limits.
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<instance>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<token>
 ```
 
 `export archive` records every broadcast announced at or under `--broadcast`
 with [moq-archive](https://docs.rs/moq-archive), each stream under
-`<broadcast>/@<instance>` in the store, until the connection ends. Like
+`<broadcast>/@<token>` in the store, until the connection ends. The `<token>` is the
+same 16-hex-digit hash of the stream's identity that its [HLS](/bin/hls) URLs carry, and the
+export logs it beside the identity as each recording starts. Like
 `announced`, it leaves out a broadcast whose name starts with `.` unless
 `--broadcast` names it. A broadcast path segment that starts with `@` is
 stored as `%40`, so no recording lands inside another. Every track is stored as its own objects, cut about every 2 s
 of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
 track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
-[instance](/concept/moq-lite#publisher-instances) records under its own key; a route
-over an older wire gets a fresh instance each time it announces, so it never
+[identity](/concept/moq-lite#publisher-identities) records under its own key; a route
+over an older wire gets a fresh identity each time it announces, so it never
 resumes or stitches into an older recording. A broadcast whose recording fails is logged and
 dropped, and every other keeps recording; only the origin failing ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes one recorded broadcast, the `<broadcast>/@<instance>`
-prefix `export archive` wrote, as an ordinary broadcast under a new instance: every
+`import archive` republishes one recorded broadcast, the `<broadcast>/@<token>`
+prefix `export archive` wrote, as an ordinary broadcast under a new identity: every
 track, the catalog included, with its original groups, frames, timescale, and
 priority. Each track is live from its newest stored group and serves older
 groups from the store on request, with no max age, so the whole recording stays
@@ -397,9 +399,9 @@ reachable. A recording still being made is followed, checked every `--refresh`
 stopped early stays live. It refuses a prefix with no recording, or with keys
 `export archive` does not write.
 
-Instances are percent-encoded as one key segment. When passing a stored key in an
-import URL, URL-encode its literal `%` characters too: instance `a/b` records under
-`event/@a%2Fb`, which the import URL names as `s3://recordings/event/@a%252Fb`.
+Broadcast path segments are percent-encoded as one key segment each. When passing a stored
+key in an import URL, URL-encode its literal `%` characters too: broadcast `a\/b` records
+under `a%2Fb/@<token>`, which the import URL names as `s3://recordings/a%252Fb/@<token>`.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
@@ -425,23 +427,23 @@ here needs no network track discovery.
 ## Publisher runs
 
 Each run of `moq` announces under a fresh random
-[instance](/concept/moq-lite#publisher-instances), kept across reconnects.
+[identity](/concept/moq-lite#publisher-identities), kept across reconnects.
 The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
 No importer continues its timeline across a restart, so `moq` has no
-flag to set a stable instance and refuses one. A publisher that does continue
-its timeline sets one on its route in a library, such as `RouteOptions::with_instance` in Rust
-or `origin.route(path, { instance: { id, epoch } })` in JavaScript; see
+flag to set a stable identity and refuses one. A publisher that does continue
+its timeline sets one on its route in a library, such as `RouteOptions::with_identity` in Rust
+or `origin.route(path, { identity: { id, epoch } })` in JavaScript; see
 [identity and recovery](/concept/identity).
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. A relay ranks the route that entered it for exactly the
 path newest first at an equal cost, so the restart wins over the old run's
-lingering session. Instances cross a connection only on moq-lite 07, which is
+lingering session. Identities cross a connection only on moq-lite 07, which is
 opt-in; over other versions the receiving session mints one per announcement.
 
-Each independent importer publishes its own instance, even when two importers
+Each independent importer publishes its own identity, even when two importers
 read one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
 same-path switching, subscriber-controlled selection on separate paths, and
 several routes to one publisher.
@@ -512,7 +514,7 @@ import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
 broadcast at once. A reconnect publishes a new
-[instance](/concept/moq-lite#publisher-instances) at the same path, which takes over
+[identity](/concept/moq-lite#publisher-identities) at the same path, which takes over
 the path while the old broadcast finishes its linger. `import rtsp` redials
 after every session, so it closes each run at once and refuses `--linger`, as
 do `import archive`, `import capture`, and a WHEP pull (`import webrtc --connect`).
@@ -545,30 +547,30 @@ finishing only the media tracks leaves it waiting for catalog updates.
 buffered are out, even while the catalog stays open; only a catalog that ends
 without naming the track ends it first. A publisher that leaves still gets what
 the export buffered of it out on schedule first. `export ts --follow 10s` then
-waits that long for the same publisher instance to come back, and carries on
+waits that long for the same publisher identity to come back, and carries on
 with the same stream. A return that refuses its catalog keeps it waiting for the
 next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
-[instance](/concept/moq-lite#publisher-instances)) exits 1 unless `--stitch` follows
+[identity](/concept/moq-lite#publisher-identities)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
-starting. After the catalog arrives, the old instance keeps feeding for up to
+starting. After the catalog arrives, the old identity keeps feeding for up to
 `--follow` while the replacement acquires its clock and first usable media.
 Its subscriptions take lower priority so the replacement can acquire on a
-congested link. The marked switch drops the old instance's buffered tail, so
+congested link. The marked switch drops the old identity's buffered tail, so
 the replacement plays at `--delay` rather than behind it. An unimpaired switch
-usable within that window adds no gap. Congestion can starve the old instance
+usable within that window adds no gap. Congestion can starve the old identity
 sooner or leave the replacement acquiring past the window, causing a gap. With
 `--passthrough`, `--stitch` instead switches as soon as the replacement's catalog
-subscription is served, with no overlap window: the old instance's buffered tail
+subscription is served, with no overlap window: the old identity's buffered tail
 goes out on its clock, then the replacement's packets verbatim from the first
 group its live subscription delivers, so the seam is each PID's continuity break.
-Timestamps across instances are not aligned. Without `--stitch` the export
+Timestamps across identities are not aligned. Without `--stitch` the export
 stays on the old publisher while it is up. Only lite-07 sessions carry
-instances, so on the default version every return is a replacement. A failure other than the
+identities, so on the default version every return is a replacement. A failure other than the
 publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
 can mark a break, so the other formats refuse `--linger`, the released spelling
 of `--follow`.

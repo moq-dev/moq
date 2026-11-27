@@ -41,9 +41,9 @@ pub struct Origin {
 
 	/// Broadcast requests delivered to a claim's callback, freed after serve/route/reject.
 	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
-	/// Instance handles: parsed by the caller, reported by a route or claim, or owned by an
+	/// Identity handles: parsed by the caller, reported by a route or claim, or owned by an
 	/// announcement record.
-	instances: NonZeroSlab<moq_net::Instance>,
+	identities: NonZeroSlab<moq_net::Identity>,
 }
 
 #[derive(Clone)]
@@ -90,8 +90,8 @@ struct AnnouncedRecord {
 	kind: moq_announce_kind,
 	cost: u64,
 	available: bool,
-	/// The route's instance handle, freed with the record.
-	instance: Id,
+	/// The route's identity handle, freed with the record.
+	identity: Id,
 }
 
 // The raw pointers only borrow immutable String allocations owned by this record.
@@ -102,7 +102,7 @@ impl AnnouncedRecord {
 	/// Buffer an event, or `None` for one this ABI has no kind for.
 	fn new(
 		event: moq_net::announce::Event,
-		instances: &mut NonZeroSlab<moq_net::Instance>,
+		identities: &mut NonZeroSlab<moq_net::Identity>,
 	) -> Result<Option<Self>, Error> {
 		use moq_net::announce::Event;
 		let (update, kind) = match event {
@@ -131,7 +131,7 @@ impl AnnouncedRecord {
 			kind,
 			cost: update.route.cost().value(),
 			available: update.route.available(),
-			instance: instances.insert(update.route.instance().clone())?,
+			identity: identities.insert(update.route.identity().clone())?,
 		}))
 	}
 }
@@ -252,7 +252,7 @@ impl Origin {
 			kind: announced.kind,
 			route: moq_route_info {
 				cost: announced.cost,
-				instance: announced.instance.into(),
+				identity: announced.identity.into(),
 				available: announced.available,
 			},
 		};
@@ -268,34 +268,34 @@ impl Origin {
 	/// the prior one would race a caller still reading it.
 	pub fn announced_free(&mut self, announced: Id) -> Result<(), Error> {
 		let record = self.announced.remove(announced).ok_or(Error::AnnouncementNotFound)?;
-		self.instances.remove(record.instance);
+		self.identities.remove(record.identity);
 		Ok(())
 	}
 
-	/// Buffer a delivered announce event, with a handle for its route's instance.
+	/// Buffer a delivered announce event, with a handle for its route's identity.
 	fn announced_insert(&mut self, event: moq_net::announce::Event) -> Result<Option<Id>, Error> {
-		let Some(record) = AnnouncedRecord::new(event, &mut self.instances)? else {
+		let Some(record) = AnnouncedRecord::new(event, &mut self.identities)? else {
 			return Ok(None);
 		};
-		let instance = record.instance;
+		let identity = record.identity;
 		self.announced.insert(record).map(Some).inspect_err(|_| {
-			self.instances.remove(instance);
+			self.identities.remove(identity);
 		})
 	}
 
-	/// A new instance handle the caller owns.
-	pub fn instance_insert(&mut self, instance: moq_net::Instance) -> Result<Id, Error> {
-		self.instances.insert(instance)
+	/// A new identity handle the caller owns.
+	pub fn identity_insert(&mut self, identity: moq_net::Identity) -> Result<Id, Error> {
+		self.identities.insert(identity)
 	}
 
-	/// The instance a handle names.
-	pub fn instance(&self, instance: Id) -> Result<&moq_net::Instance, Error> {
-		self.instances.get(instance).ok_or(Error::NotFound)
+	/// The identity a handle names.
+	pub fn identity(&self, identity: Id) -> Result<&moq_net::Identity, Error> {
+		self.identities.get(identity).ok_or(Error::NotFound)
 	}
 
-	/// Release an instance handle the caller owns. An announcement's own is released with it.
-	pub fn instance_free(&mut self, instance: Id) -> Result<(), Error> {
-		self.instances.remove(instance).ok_or(Error::NotFound)?;
+	/// Release an identity handle the caller owns. An announcement's own is released with it.
+	pub fn identity_free(&mut self, identity: Id) -> Result<(), Error> {
+		self.identities.remove(identity).ok_or(Error::NotFound)?;
 		Ok(())
 	}
 
@@ -303,16 +303,16 @@ impl Origin {
 		self.announced_task.close(announced, Error::AnnouncementNotFound)
 	}
 
-	/// Follow the broadcast at `path`, delivering each publisher instance's handle via the callback.
+	/// Follow the broadcast at `path`, delivering each publisher identity's handle via the callback.
 	///
-	/// The callback reports each instance serving the path as online with its broadcast handle,
+	/// The callback reports each identity serving the path as online with its broadcast handle,
 	/// the path going offline, and one end with `0` on close or a negative error. Returns a task
 	/// handle for cancellation via [`Self::follow_close`].
 	pub fn follow(
 		&mut self,
 		origin: Id,
 		path: String,
-		instance: Option<moq_net::Instance>,
+		identity: Option<moq_net::Identity>,
 		on_follow: OnFollow,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
@@ -324,7 +324,7 @@ impl Origin {
 			|state| &mut state.origin.follow_task,
 			|close| async move {
 				driver
-					.watch(Self::run_follow(on_follow, consumer, path, instance, close))
+					.watch(Self::run_follow(on_follow, consumer, path, identity, close))
 					.await
 			},
 		)
@@ -338,18 +338,18 @@ impl Origin {
 		callback: OnFollow,
 		consumer: Consumer,
 		path: String,
-		instance: Option<moq_net::Instance>,
+		identity: Option<moq_net::Identity>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
-		let mut announced = match consumer.follow(path.as_str(), instance) {
+		let mut announced = match consumer.follow(path.as_str(), identity) {
 			Ok(announced) => announced,
 			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 			Err(err) => return Err(err.into()),
 		};
 		let mut delivered = false;
 
-		// Deliver each publisher instance serving the path: the first, then each one that takes
+		// Deliver each publisher identity serving the path: the first, then each one that takes
 		// over or returns. `biased` so a pending close always wins.
 		loop {
 			let broadcast = tokio::select! {
@@ -377,15 +377,15 @@ impl Origin {
 
 	/// Request the broadcast at `path`, delivering its handle once it can be served.
 	///
-	/// Unlike [`Self::follow`] (waits indefinitely, delivering each publisher instance), this
-	/// resolves one instance: the callback fires the broadcast handle (> 0) once served, then a
+	/// Unlike [`Self::follow`] (waits indefinitely, delivering each publisher identity), this
+	/// resolves one identity: the callback fires the broadcast handle (> 0) once served, then a
 	/// terminal `0`; or a single terminal code (`0` on close, negative on error) if it can't be
 	/// served. Returns a task handle for cancellation.
 	pub fn request(
 		&mut self,
 		origin: Id,
 		path: String,
-		instance: Option<moq_net::Instance>,
+		identity: Option<moq_net::Identity>,
 		on_broadcast: OnStatus,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
@@ -397,7 +397,7 @@ impl Origin {
 			|state| &mut state.origin.consume_task,
 			|close| async move {
 				driver
-					.watch(Self::run_request(on_broadcast, consumer, path, instance, close))
+					.watch(Self::run_request(on_broadcast, consumer, path, identity, close))
 					.await
 			},
 		)
@@ -407,11 +407,11 @@ impl Origin {
 		callback: OnStatus,
 		consumer: Consumer,
 		path: String,
-		instance: Option<moq_net::Instance>,
+		identity: Option<moq_net::Identity>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request(path.as_str(), instance);
+		let pending = consumer.request(path.as_str(), identity);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {
@@ -453,7 +453,7 @@ impl Origin {
 		broadcast: Id,
 		family: Children,
 	) -> Result<Id, Error> {
-		// Read only on request: reading a hidden job's instance binds it.
+		// Read only on request: reading a hidden job's identity binds it.
 		self.routes.insert(RouteEntry {
 			inner: route,
 			driver,
@@ -563,12 +563,12 @@ impl Origin {
 		}
 	}
 
-	/// A new handle, the caller's, for the instance the route serves.
-	pub fn route_instance(&mut self, route: Id) -> Result<Id, Error> {
+	/// A new handle, the caller's, for the identity the route serves.
+	pub fn route_identity(&mut self, route: Id) -> Result<Id, Error> {
 		let entry = self.routes.get(route).ok_or(Error::NotFound)?;
 		entry.driver.check()?;
-		let instance = entry.inner.instance().clone();
-		self.instances.insert(instance)
+		let identity = entry.inner.identity().clone();
+		self.identities.insert(identity)
 	}
 
 	/// Release a route handle, returning the route for the caller to retract by dropping it.
@@ -589,12 +589,12 @@ impl Origin {
 		Ok(result?)
 	}
 
-	/// A new handle, the caller's, for the instance the claim serves.
-	pub fn claim_instance(&mut self, claim: Id) -> Result<Id, Error> {
+	/// A new handle, the caller's, for the identity the claim serves.
+	pub fn claim_identity(&mut self, claim: Id) -> Result<Id, Error> {
 		let entry = self.claims.get(claim).ok_or(Error::NotFound)?;
 		entry.driver.check()?;
-		let instance = entry.inner.instance().clone();
-		self.instances.insert(instance)
+		let identity = entry.inner.identity().clone();
+		self.identities.insert(identity)
 	}
 
 	/// Release a claim handle and stop its request delivery, returning the claim for the

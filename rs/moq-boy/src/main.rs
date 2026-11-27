@@ -271,7 +271,7 @@ async fn run(config: &Config) -> Result<()> {
 	let route = publish_origin
 		.route(&broadcast_path, moq_net::origin::RouteOptions::default())
 		.context("failed to announce broadcast")?;
-	tracing::info!(broadcast = %broadcast_path, instance = %route.instance(), "announced");
+	tracing::info!(broadcast = %broadcast_path, identity = %route.identity(), "announced");
 
 	// Consume origin, kept apart so nothing received is published back: each viewer publishes
 	// a broadcast at "{viewer_path}/{viewer}".

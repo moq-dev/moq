@@ -3,17 +3,17 @@
 //! One session to one relay that publishes named broadcasts, follows named paths, or both,
 //! for a harness grading a relay mesh under faults (`test/mesh-replay`). The load generator
 //! reads random broadcasts and gives up on one that ends; a reader here follows its path
-//! across every instance that serves it, as a viewer waiting on a stream would, and reports
+//! across every identity that serves it, as a viewer waiting on a stream would, and reports
 //! when its groups stopped arriving and for how long.
 //!
 //! Every line on the output is one JSON object stamped with `ms`, Unix milliseconds:
 //!
-//! - `online` / `offline`: an instance took over the path, or the path went offline.
-//! - `ended`: the subscription to the instance handed out ended while it still served.
-//! - `gap`: a group arrived more than `--gap` after the one before it, on any instance, or
-//!   skipped groups of the instance it came from. `from` is when the one before it
+//! - `online` / `offline`: an identity took over the path, or the path went offline.
+//! - `ended`: the subscription to the identity handed out ended while it still served.
+//! - `gap`: a group arrived more than `--gap` after the one before it, on any identity, or
+//!   skipped groups of the identity it came from. `from` is when the one before it
 //!   arrived, `missed` how many groups the publisher wrote in between when both came from
-//!   one instance, counted across resubscribes to that instance.
+//!   one identity, counted across resubscribes to that identity.
 //! - `status`: every `--report`, each path's state, groups read, and last arrival.
 
 use std::collections::BTreeMap;
@@ -38,7 +38,7 @@ pub struct Args {
 	#[usage(long)]
 	publish: Vec<String>,
 
-	/// Follow the broadcast at this path across the instances that serve it.
+	/// Follow the broadcast at this path across the identities that serve it.
 	#[usage(long)]
 	follow: Vec<String>,
 
@@ -239,7 +239,7 @@ async fn produce(track: track::Producer, interval: Duration) -> anyhow::Result<(
 	Ok(())
 }
 
-/// Read every instance that serves `path`, recording each arrival and reporting gaps.
+/// Read every identity that serves `path`, recording each arrival and reporting gaps.
 async fn follow(
 	mut following: moq_net::origin::Following,
 	path: String,
@@ -249,23 +249,23 @@ async fn follow(
 ) -> anyhow::Result<()> {
 	let gap = u64::try_from(gap.as_millis()).unwrap_or(u64::MAX);
 	let mut serving: Option<broadcast::Consumer> = None;
-	// The newest group read from each instance, so a resubscribe to one counts what it skipped.
-	let mut newest: Option<(moq_net::Instance, u64)> = None;
+	// The newest group read from each identity, so a resubscribe to one counts what it skipped.
+	let mut newest: Option<(moq_net::Identity, u64)> = None;
 	loop {
 		let change = match &serving {
 			None => next(&mut following, &path, &out).await?,
 			Some(broadcast) => {
-				let instance = broadcast.info().instance.clone();
+				let identity = broadcast.info().identity.clone();
 				let mut seen = newest
 					.as_ref()
-					.filter(|(was, _)| Some(was) == instance.as_ref())
+					.filter(|(was, _)| Some(was) == identity.as_ref())
 					.map(|(_, group)| *group);
 				let result = tokio::select! {
 					change = following.available() => change.map_err(anyhow::Error::from),
 					err = read(broadcast, &path, &reader, &out, gap, &mut seen) => Err(err),
 				};
-				if let (Some(instance), Some(group)) = (instance, seen) {
-					newest = Some((instance, group));
+				if let (Some(identity), Some(group)) = (identity, seen) {
+					newest = Some((identity, group));
 				}
 				match result {
 					Ok(change) => change,
@@ -308,8 +308,8 @@ async fn next(
 	}
 }
 
-/// Read groups from one instance until its track ends, returning why it ended. `newest` is the
-/// newest group read from this instance, kept across resubscribes to it.
+/// Read groups from one identity until its track ends, returning why it ended. `newest` is the
+/// newest group read from this identity, kept across resubscribes to it.
 async fn read(
 	broadcast: &broadcast::Consumer,
 	path: &str,
@@ -346,7 +346,7 @@ async fn read(
 						.map(u64::from_be_bytes)
 						.map_err(|_| anyhow::anyhow!("a replay frame carries an 8-byte group number"))?;
 					let now = millis_wall();
-					// Each instance numbers its groups from its own start, so `missed` compares within one,
+					// Each identity numbers its groups from its own start, so `missed` compares within one,
 					// and only a group past the newest shows what the publisher wrote in between.
 					let missed = newest
 						.filter(|&newest| sequence > newest)
@@ -373,9 +373,9 @@ async fn read(
 /// What one followed path has seen so far.
 #[derive(Clone, Default, Serialize)]
 struct Reader {
-	/// Whether an instance serves the path now.
+	/// Whether an identity serves the path now.
 	online: bool,
-	/// Groups read, over every instance.
+	/// Groups read, over every identity.
 	groups: u64,
 	/// When the newest group arrived, in Unix milliseconds.
 	last: Option<u64>,

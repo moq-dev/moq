@@ -19,8 +19,10 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 # race until proven otherwise (see Root Cause First in AGENTS.md).
 retries = 0
 
-# The PR gate compiles benches to lint them, but never runs them here; Nightly
-# executes them through cargo bench smokes.
+# The PR gate lints benches in check mode separately (`just rs lint-targets`)
+# rather than compiling them through nextest; this filter still skips bench
+# targets on invocations that select them (such as `--all-targets` runs), while
+# Nightly executes them through cargo bench smokes.
 default-filter = "not kind(bench)"
 
 # Each socket axis occupies the whole ring budget, keeping it exclusive with

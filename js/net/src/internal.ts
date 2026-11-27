@@ -1,6 +1,6 @@
 /**
  * Package-internal constructor hooks. Classes keep their constructors private so consumers
- * can't mint detached handles; sibling modules create instances through these hooks instead.
+ * can't mint detached handles; sibling modules create identities through these hooks instead.
  * Not exported from the package entrypoint.
  *
  * @module
@@ -16,7 +16,7 @@ import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
-import * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
@@ -140,7 +140,7 @@ export function presented(
 					prefix: candidate.filed ?? Path.join(root, covered),
 					depth,
 					order: candidate.order ?? order,
-					arrival: arrival(candidate.identity),
+					arrival: arrival(candidate.ref),
 					candidate,
 					route: candidate.route,
 				});
@@ -181,25 +181,25 @@ export interface Filed<T> {
 	readonly route: WireRoute;
 }
 
-// When each advertisement's identity was first received, across every filing.
+// When each advertisement's ref was first received, across every filing.
 const receipts = new WeakMap<object, number>();
 let nextReceipt = 0;
 
-/** Records `identity` as received now, as each announce of a claim is: it ranks as the newest. */
-export function receive(identity: object): void {
-	receipts.set(identity, nextReceipt++);
+/** Records `ref` as received now, as each announce of a claim is: it ranks as the newest. */
+export function receive(ref: object): void {
+	receipts.set(ref, nextReceipt++);
 }
 
 /**
- * The order `identity` was last {@link receive}d in, stamped now if it never was: a later one is
+ * The order `ref` was last {@link receive}d in, stamped now if it never was: a later one is
  * larger, so a full tie across filings goes to the most recently received claim, as Rust's newest
- * route entry. An update keeps its identity's place.
+ * route entry. An update keeps its ref's place.
  */
-export function arrival(identity: object): number {
-	let order = receipts.get(identity);
+export function arrival(ref: object): number {
+	let order = receipts.get(ref);
 	if (order === undefined) {
 		order = nextReceipt++;
-		receipts.set(identity, order);
+		receipts.set(ref, order);
 	}
 	return order;
 }
@@ -207,7 +207,7 @@ export function arrival(identity: object): number {
 /**
  * The best of the most specific claims among `filed`, which all cover `path`: a claim shown above
  * its own prefix counts for the shallower prefix it is really at, and claims of one prefix rank
- * against each other wherever each is filed. Only an instance's highest epoch among them (and
+ * against each other wherever each is filed. Only an identity's highest epoch among them (and
  * `others`, of the same claim when `exact`) is eligible; one that `serves` `path` ranks ahead, then
  * {@link compareTier}, then {@link compareTie}. Mirrors `RouteTable::best_route` in rs/moq-net,
  * and with `serves`, `TableCursor::best`.
@@ -226,7 +226,7 @@ export function bestOfTier<T>(
 	let most = Number.NEGATIVE_INFINITY;
 	for (const entry of filed) most = Math.max(most, specificity(entry));
 	const tier = filed.filter((entry) => specificity(entry) === most);
-	// One claim prefix: an instance's epochs compare across the whole tier.
+	// One claim prefix: an identity's epochs compare across the whole tier.
 	const epochs = new Epochs([...tier.map((entry) => entry.route), ...others(most)], () => 0n);
 	let best: Filed<T> | undefined;
 	for (const entry of tier) {
@@ -244,7 +244,7 @@ export function bestOfTier<T>(
 /**
  * How a full tie between two claims of one tier resolving `path` breaks: to the newest, by each
  * prefix's own order and across prefixes the most recently {@link arrival}, as Rust's final
- * `Reverse(entry.id)`, so a publisher that restarts under a new instance takes over at once. Filed
+ * `Reverse(entry.id)`, so a publisher that restarts under a new identity takes over at once. Filed
  * beneath `path` where neither is a lite-07 claim, it goes to the oldest instead, as Rust's
  * `RouteEntry::since`: switching there would restart the route at every relay downstream that
  * ranks it alike. Rust also renews `since` when a re-price changes the rank; this origin forwards
@@ -1544,8 +1544,8 @@ export const hooks: {
 	watchSubscriberError: (subscriber: Subscriber, fn: (error: Error) => void) => Dispose;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
-	/** Name the instance of the route an origin resolved a broadcast handle through. */
-	stampInstance: (target: BroadcastConsumer, instance: Instance.Valid | undefined) => void;
+	/** Name the identity of the route an origin resolved a broadcast handle through. */
+	stampIdentity: (target: BroadcastConsumer, identity: Identity.Valid | undefined) => void;
 	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
 	stampUnlisted: (target: BroadcastConsumer) => void;
 	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
@@ -2070,7 +2070,7 @@ export const hooks: {
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
-	stampInstance: () => {
+	stampIdentity: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampUnlisted: () => {
@@ -2101,33 +2101,33 @@ function fnv(path: string, bytes: Iterable<number>, basis = SPREAD_BASIS): bigin
 }
 
 /**
- * Spreads a pool's instances across paths: FNV-1a 64 of `path` then the instance's UTF-8.
+ * Spreads a pool's identities across paths: FNV-1a 64 of `path` then the identity's UTF-8.
  * Keyed on the requested path so a pool advertising one prefix shares its paths, and every
- * node agrees, since the instance reads the same everywhere. Mirrors `instance_key` in
+ * node agrees, since the identity reads the same everywhere. Mirrors `identity_key` in
  * `rs/moq-net`.
  */
-export function spreadHash(path: string, instance: string): bigint {
-	return fnv(path, new TextEncoder().encode(instance));
+export function spreadHash(path: string, identity: string): bigint {
+	return fnv(path, new TextEncoder().encode(identity));
 }
 
 /**
- * The draft's Rendezvous Hash: standard FNV-1a 64 of `path` then the instance's UTF-8, which
+ * The draft's Rendezvous Hash: standard FNV-1a 64 of `path` then the identity's UTF-8, which
  * spreads a pool's lite-07 claims across paths the same on every node. Mirrors `rendezvous` in
  * `rs/moq-net`.
  */
-function rendezvousHash(path: string, instance: string): bigint {
-	return fnv(path, new TextEncoder().encode(instance), 0xcbf29ce484222325n);
+function rendezvousHash(path: string, identity: string): bigint {
+	return fnv(path, new TextEncoder().encode(identity), 0xcbf29ce484222325n);
 }
 
 /**
  * The best claim covering `path`, as `RouteTable::best_route` in rs/moq-net picks it: only the
  * most specific claims compete, a claim shown above its own prefix counting for the shallower
  * prefix it is really at, and they rank against each other wherever each is filed. Of those, only
- * an instance's highest epoch is eligible, an exact claim's `others` (which never win) included,
+ * an identity's highest epoch is eligible, an exact claim's `others` (which never win) included,
  * and the rest order by {@link compareTier}, then {@link compareTie}: a claim is new when it
- * starts or restarts (another instance or epoch), and keeps its place through a re-price.
+ * starts or restarts (another identity or epoch), and keeps its place through a re-price.
  * `candidates` lists each
- * covering prefix's, newest first, and `advertised` names each one's identity and route. Every
+ * covering prefix's, newest first, and `advertised` names each one's ref and route. Every
  * selector ranks through this, so the announcements and the consumes of one session never pick
  * apart.
  */
@@ -2143,8 +2143,8 @@ export function mostSpecific<T>(
 	for (const prefix of coveringPrefixes(path)) {
 		let order = 0;
 		for (const candidate of candidates(prefix)) {
-			const { identity, route } = advertised(candidate);
-			filed.push({ prefix, depth, order: order++, arrival: arrival(identity), candidate, route });
+			const { ref, route } = advertised(candidate);
+			filed.push({ prefix, depth, order: order++, arrival: arrival(ref), candidate, route });
 		}
 		depth--;
 	}
@@ -2164,8 +2164,8 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
 }
 
 /**
- * Whether `route` at `prefix` is superseded among `others`: one of them carries its instance at
- * a higher epoch at the same prefix. An older incarnation of an instance is never eligible,
+ * Whether `route` at `prefix` is superseded among `others`: one of them carries its identity at
+ * a higher epoch at the same prefix. An older incarnation of an identity is never eligible,
  * however cheap, since its publisher was replaced.
  */
 export function superseded(route: WireRoute, others: Iterable<WireRoute>): boolean {
@@ -2173,15 +2173,15 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
 }
 
 /**
- * The highest epoch each instance reaches among a set of routes, per claim: a claim is its prefix
+ * The highest epoch each identity reaches among a set of routes, per claim: a claim is its prefix
  * and how far above it was shown, so a broader claim shown at a prefix is another claim than the
  * one made there, and its epoch supersedes nothing of it. Built in one pass so ranking N routes
  * stays linear. Only epochs above 0 are kept, since nothing is below 0: the common case, where
- * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
+ * every identity announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
  * are all of one prefix here.
  */
 class Epochs {
-	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
+	readonly #highest = new Map<Identity.Valid | undefined, Map<bigint, bigint>>();
 	readonly #claim: (route: WireRoute) => bigint;
 
 	/** `claim` names each route's claim among `routes`: its Above, for routes all of one prefix. */
@@ -2190,19 +2190,19 @@ class Epochs {
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			let claims = this.#highest.get(route.instance);
+			let claims = this.#highest.get(route.identity);
 			if (!claims) {
 				claims = new Map();
-				this.#highest.set(route.instance, claims);
+				this.#highest.set(route.identity, claims);
 			}
 			const highest = claims.get(claim(route));
 			if (highest === undefined || epoch > highest) claims.set(claim(route), epoch);
 		}
 	}
 
-	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
+	/** Whether a route carries `route`'s identity at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance)?.get(this.#claim(route));
+		const highest = this.#highest.get(route.identity)?.get(this.#claim(route));
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
@@ -2227,7 +2227,7 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 /**
  * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
  * count, then one filed at `path` itself, then, keyed on `path` whatever each claim's filing, the
- * rendezvous hash of a lite-07 claim's instance or the spread hash of a named one. The hashes only
+ * rendezvous hash of a lite-07 claim's identity or the spread hash of a named one. The hashes only
  * spread a pool over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie breaks by
  * {@link compareTie}.
  */
@@ -2252,11 +2252,11 @@ export function routeHops(route: WireRoute): number {
 }
 
 /** The hash a route ranks by beneath its prefix, each route keyed on its own: a lite-07 claim by
- * the rendezvous hash of its instance, a named instance by its spread hash, and one a session
+ * the rendezvous hash of its identity, a named identity by its spread hash, and one a session
  * minted by none, since no other node shares it. As `route_order` in rs/moq-net. */
 function routeKey(path: Path.Valid, route: WireRoute): bigint {
-	const instance = route.instance;
-	if (route.claimed) return rendezvousHash(path, instance ? Instance.text(instance) : "");
-	if (instance !== undefined && Instance.isMinted(instance)) return 0n;
-	return spreadHash(path, instance ? Instance.text(instance) : "");
+	const identity = route.identity;
+	if (route.claimed) return rendezvousHash(path, identity ? Identity.text(identity) : "");
+	if (identity !== undefined && Identity.isMinted(identity)) return 0n;
+	return spreadHash(path, identity ? Identity.text(identity) : "");
 }

@@ -7,38 +7,38 @@ use super::{Ext, Import, Step, stats};
 use crate::catalog;
 
 /// Imports one program of a multiplex as a broadcast on `origin`, republishing the path under a
-/// new instance each time the source changes.
+/// new identity each time the source changes.
 ///
-/// The single-program sibling of [`Programs`](super::Programs). Each instance is created hidden
+/// The single-program sibling of [`Programs`](super::Programs). Each identity is created hidden
 /// and announced once its catalog first goes out: a relay queries a broadcast's tracks the moment
 /// it is announced, so one announced any sooner would be asked for tracks it cannot serve yet.
 ///
 /// A change of source is a [`Step`]: the source's clock moving onto another timeline, or its PAT
 /// naming another program, as [`Import::decode`] judges it. [`decode`](Self::decode) then
-/// finishes the instance before the step, withdrawing it, and opens the next under a new
-/// instance, returning the step as [`Republished`]. Nothing crosses it but the measured mux rate:
+/// finishes the identity before the step, withdrawing it, and opens the next under a new
+/// identity, returning the step as [`Republished`]. Nothing crosses it but the measured mux rate:
 /// the new catalog records it from its first media rather than holding for a fresh measurement
-/// window, since the multiplex is the same. The new instance waits for the source's own PAT, PMT
+/// window, since the multiplex is the same. The new identity waits for the source's own PAT, PMT
 /// and next keyframe.
 pub struct Republish {
 	target: Target,
-	instance: Instance,
-	/// The input after the last step, which the current instance has not read yet.
+	identity: Identity,
+	/// The input after the last step, which the current identity has not read yet.
 	held: Bytes,
 }
 
-/// The source changed, so [`Republish`] finished the instance before the change and opened the
+/// The source changed, so [`Republish`] finished the identity before the change and opened the
 /// next one, hidden until its catalog goes out.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Republished {
 	/// How the source changed.
 	pub step: Step,
-	/// What the finished instance's elementary streams delivered; see [`Import::stats`].
+	/// What the finished identity's elementary streams delivered; see [`Import::stats`].
 	pub stats: stats::Snapshot,
 }
 
-/// Where and how each instance publishes.
+/// Where and how each identity publishes.
 struct Target {
 	origin: moq_net::origin::Producer,
 	name: moq_net::Path,
@@ -47,9 +47,9 @@ struct Target {
 }
 
 impl Target {
-	/// Open an instance with `options`, its catalog recording `mux_rate` when the multiplex was
+	/// Open an identity with `options`, its catalog recording `mux_rate` when the multiplex was
 	/// measured already.
-	fn open(&self, options: moq_net::origin::RouteOptions, mux_rate: Option<u64>) -> Result<Instance> {
+	fn open(&self, options: moq_net::origin::RouteOptions, mux_rate: Option<u64>) -> Result<Identity> {
 		let route = self.origin.route(self.name.as_str(), options)?;
 		// TS carries undecoded elementary streams verbatim, so the catalog carries the `mpegts`
 		// extension.
@@ -62,7 +62,7 @@ impl Target {
 			import = import.with_program(program);
 		}
 		let pending = Some(route.broadcast().consume().track(hang::Catalog::DEFAULT_NAME)?);
-		Ok(Instance {
+		Ok(Identity {
 			route,
 			import,
 			catalog,
@@ -71,8 +71,8 @@ impl Target {
 	}
 }
 
-/// One instance of the broadcast.
-struct Instance {
+/// One identity of the broadcast.
+struct Identity {
 	/// Created hidden: dropping it retracts the broadcast the importer fills.
 	route: moq_net::origin::Route,
 	import: Import<Ext>,
@@ -81,7 +81,7 @@ struct Instance {
 	pending: Option<moq_net::track::Consumer>,
 }
 
-impl Instance {
+impl Identity {
 	/// Announce the broadcast once its catalog has gone out, returning whether it has.
 	fn announce_if_listed(&mut self) -> Result<bool> {
 		listed(&mut self.pending, &self.route)
@@ -90,7 +90,7 @@ impl Instance {
 	/// Finish the media tracks, then the catalog while it still lists them, aborting both with the
 	/// cause of a failure.
 	///
-	/// The `last` instance announces if its drain released the first catalog, and fails when the
+	/// The `last` identity announces if its drain released the first catalog, and fails when the
 	/// input declared no track. One a step ended is withdrawn as it drops, so it does neither: a
 	/// source can step before its first catalog goes out, such as within the mux rate's window.
 	fn finish(mut self, last: bool) -> Result<Finished> {
@@ -127,15 +127,15 @@ impl Instance {
 
 impl Republish {
 	/// Import the multiplex onto `name`, its catalogs built from `config`, publishing the first
-	/// instance as `instance` and each after it under a fresh one. The first is created now, so
+	/// identity as `identity` and each after it under a fresh one. The first is created now, so
 	/// its [`catalog`](Self::catalog) can be filled before any input.
 	///
-	/// Pass [`Instance::random`](moq_net::Instance::random) unless the instance is shared, such as
-	/// across a run's broadcasts; see [`RouteOptions::with_instance`](moq_net::origin::RouteOptions::with_instance).
+	/// Pass [`Identity::random`](moq_net::Identity::random) unless the identity is shared, such as
+	/// across a run's broadcasts; see [`RouteOptions::with_identity`](moq_net::origin::RouteOptions::with_identity).
 	pub fn new(
 		origin: moq_net::origin::Producer,
 		name: impl Into<moq_net::Path>,
-		instance: moq_net::Instance,
+		identity: moq_net::Identity,
 		config: catalog::Config,
 	) -> Result<Self> {
 		let target = Target {
@@ -144,11 +144,11 @@ impl Republish {
 			config,
 			program: None,
 		};
-		let options = moq_net::origin::RouteOptions::hidden().with_instance(instance, 0);
-		let instance = target.open(options, None)?;
+		let options = moq_net::origin::RouteOptions::hidden().with_identity(identity, 0);
+		let identity = target.open(options, None)?;
 		Ok(Self {
 			target,
-			instance,
+			identity,
 			held: Bytes::new(),
 		})
 	}
@@ -156,34 +156,34 @@ impl Republish {
 	/// Import only the program with this PAT program number; see [`Import::with_program`].
 	pub fn with_program(mut self, program: u16) -> Self {
 		self.target.program = Some(program);
-		self.instance.import = self.instance.import.with_program(program);
+		self.identity.import = self.identity.import.with_program(program);
 		self
 	}
 
-	/// The current instance's broadcast, such as for a track of the caller's own.
+	/// The current identity's broadcast, such as for a track of the caller's own.
 	pub fn broadcast(&self) -> &moq_net::broadcast::Producer {
-		self.instance.route.broadcast()
+		self.identity.route.broadcast()
 	}
 
-	/// The current instance's catalog. Sections set before the importer declares a track ride
-	/// the first catalog; set them again on each new instance after [`Republished`].
+	/// The current identity's catalog. Sections set before the importer declares a track ride
+	/// the first catalog; set them again on each new identity after [`Republished`].
 	pub fn catalog(&self) -> &catalog::Producer<Ext> {
-		&self.instance.catalog
+		&self.identity.catalog
 	}
 
-	/// The current instance's publisher instance.
-	pub fn instance(&self) -> moq_net::Instance {
-		self.instance.route.instance()
+	/// The current identity's publisher identity.
+	pub fn identity(&self) -> moq_net::Identity {
+		self.identity.route.identity()
 	}
 
-	/// Demux a chunk of the multiplex into the current instance, announcing it once its catalog
+	/// Demux a chunk of the multiplex into the current identity, announcing it once its catalog
 	/// goes out. A trailing partial packet is retained for the next call.
 	///
-	/// A change of source finishes the instance there and opens the next, returning
+	/// A change of source finishes the identity there and opens the next, returning
 	/// [`Republished`] before the next reads anything: the rest of `data` is held for it, read at
 	/// the start of the next call. Call again, with no data if there is none, until it returns
-	/// `None`. A failure to finish the instance before the step returns that failure, with the
-	/// next instance current.
+	/// `None`. A failure to finish the identity before the step returns that failure, with the
+	/// next identity current.
 	pub fn decode(&mut self, data: &[u8]) -> Result<Option<Republished>> {
 		if !self.held.is_empty() {
 			let held = std::mem::take(&mut self.held);
@@ -199,48 +199,48 @@ impl Republish {
 		self.feed(data)
 	}
 
-	/// Demux `data` into the current instance, or republish at the step it reaches.
+	/// Demux `data` into the current identity, or republish at the step it reaches.
 	fn feed(&mut self, data: &[u8]) -> Result<Option<Republished>> {
-		let Some(restart) = self.instance.import.decode_or_restart(data)? else {
-			self.instance.announce_if_listed()?;
+		let Some(restart) = self.identity.import.decode_or_restart(data)? else {
+			self.identity.announce_if_listed()?;
 			return Ok(None);
 		};
 		self.republish(restart).map(Some)
 	}
 
-	/// No input follows: read what the current instance held while judging a step, and
+	/// No input follows: read what the current identity held while judging a step, and
 	/// republish at a step it reaches.
 	fn settle(&mut self) -> Result<Option<Republished>> {
-		match self.instance.import.settle()? {
+		match self.identity.import.settle()? {
 			Some(restart) => self.republish(restart).map(Some),
 			None => Ok(None),
 		}
 	}
 
-	/// Finish the current instance before `restart`'s step and open the next, holding the input
+	/// Finish the current identity before `restart`'s step and open the next, holding the input
 	/// from the step on for it.
 	fn republish(&mut self, restart: super::Restart) -> Result<Republished> {
-		let mux_rate = self.instance.catalog.snapshot().ext.mpegts.mux_rate;
+		let mux_rate = self.identity.catalog.snapshot().ext.mpegts.mux_rate;
 		let next = self.target.open(moq_net::origin::RouteOptions::hidden(), mux_rate)?;
 		self.held = restart.remainder;
-		// The finished instance ends as it drops, withdrawing its announcement.
-		let finished = std::mem::replace(&mut self.instance, next).finish(false)?;
+		// The finished identity ends as it drops, withdrawing its announcement.
+		let finished = std::mem::replace(&mut self.identity, next).finish(false)?;
 		Ok(Republished {
 			step: restart.step,
 			stats: finished.stats(),
 		})
 	}
 
-	/// What every elementary stream of the current instance has delivered; see [`Import::stats`].
+	/// What every elementary stream of the current identity has delivered; see [`Import::stats`].
 	pub fn stats(&self) -> stats::Snapshot {
-		self.instance.import.stats()
+		self.identity.import.stats()
 	}
 
-	/// Finish the current instance's media tracks, then its catalog while it still lists them,
+	/// Finish the current identity's media tracks, then its catalog while it still lists them,
 	/// and return the [`Finished`] broadcast.
 	///
 	/// Input still held after a [`Republished`], or while a step was judged, is read first,
-	/// republishing again at any step in it. Fails when the input ended before the instance
+	/// republishing again at any step in it. Fails when the input ended before the identity
 	/// declared a track, so nothing was announced. A finish that fails aborts every track with
 	/// the cause.
 	pub fn finish(mut self) -> Result<Finished> {
@@ -253,7 +253,7 @@ impl Republish {
 				Ok(Some(republished)) => {
 					tracing::warn!(step = %republished.step, "the source changed at end of input; republishing")
 				}
-				Ok(None) => return self.instance.finish(true),
+				Ok(None) => return self.identity.finish(true),
 				Err(err) => {
 					self.abort(moq_net::Error::Transport(format!("{err:#}")));
 					return Err(err);
@@ -262,9 +262,9 @@ impl Republish {
 		}
 	}
 
-	/// Abort the current instance's catalog and media tracks with `err`. Consumes the importer.
+	/// Abort the current identity's catalog and media tracks with `err`. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
-		let Instance { import, catalog, .. } = self.instance;
+		let Identity { import, catalog, .. } = self.identity;
 		catalog.abort(err.clone());
 		import.abort(err);
 	}
@@ -286,7 +286,7 @@ pub(super) fn listed(pending: &mut Option<moq_net::track::Consumer>, route: &moq
 	Ok(true)
 }
 
-/// A [`Republish`] [finished](Republish::finish): every track of its last instance has ended,
+/// A [`Republish`] [finished](Republish::finish): every track of its last identity has ended,
 /// and they stay servable while it is held.
 #[must_use = "dropping it releases the tracks and withdraws the broadcast"]
 pub struct Finished {
@@ -318,7 +318,7 @@ mod tests {
 	use super::super::step_test::{SWITCH, flagged_switch, shift};
 	use super::*;
 
-	/// 5 s of H.264 and AAC at a constant 400 kb/s, so the first instance measures a rate.
+	/// 5 s of H.264 and AAC at a constant 400 kb/s, so the first identity measures a rate.
 	const CLIP: &[u8] = include_bytes!("test_data/bbb5s_cbr.ts");
 
 	/// Whether `stats` counts a delivered unit.
@@ -327,17 +327,17 @@ mod tests {
 	}
 
 	/// A switch to an encoder whose clock started hours earlier comes back from `decode` as a
-	/// value. The instance before it finishes, and the next opens under a new instance, its
+	/// value. The identity before it finishes, and the next opens under a new identity, its
 	/// catalog carrying the measured mux rate, hidden until that catalog goes out. However the
-	/// input is split, the next instance reads it from the step on.
+	/// input is split, the next identity reads it from the step on.
 	#[test]
-	fn a_switch_republishes_under_a_new_instance_with_the_rate() {
+	fn a_switch_republishes_under_a_new_identity_with_the_rate() {
 		let open = || {
 			let origin = crate::source::produce_origin();
 			Republish::new(
 				origin,
 				moq_net::Path::from_static("demo"),
-				moq_net::Instance::random(),
+				moq_net::Identity::random(),
 				catalog::Config::default(),
 			)
 			.unwrap()
@@ -351,13 +351,13 @@ mod tests {
 		data.extend(shift(CLIP, |_| -SWITCH));
 		for chunk in [data.len(), 188 * 7, 1_000] {
 			let mut republish = open();
-			let first = republish.instance();
+			let first = republish.identity();
 			let mut republished = Vec::new();
 			for piece in data.chunks(chunk) {
 				let mut next = republish.decode(piece).unwrap();
 				while let Some(step) = next {
 					assert!(
-						!republish.instance.route.is_announced(),
+						!republish.identity.route.is_announced(),
 						"{chunk}: announced before its catalog"
 					);
 					assert_eq!(
@@ -376,22 +376,22 @@ mod tests {
 				matches!(step.step, Step::Rewind { flagged: false, .. }),
 				"{chunk}: {step:?}"
 			);
-			assert!(delivered(&step.stats), "{chunk}: the first instance's counts");
-			assert_ne!(republish.instance(), first, "{chunk}: a new instance");
+			assert!(delivered(&step.stats), "{chunk}: the first identity's counts");
+			assert_ne!(republish.identity(), first, "{chunk}: a new identity");
 			assert!(
-				republish.instance.route.is_announced(),
-				"{chunk}: the next instance announced with its catalog"
+				republish.identity.route.is_announced(),
+				"{chunk}: the next identity announced with its catalog"
 			);
 			let finished = republish.finish().unwrap();
 			assert!(
 				delivered(&finished.stats()),
-				"{chunk}: the next instance read the input after the step"
+				"{chunk}: the next identity read the input after the step"
 			);
 		}
 	}
 
 	/// A source that steps in the same chunk as its first media, before its first catalog went
-	/// out, republishes rather than failing: only the last instance has to declare a track.
+	/// out, republishes rather than failing: only the last identity has to declare a track.
 	#[test]
 	fn a_switch_before_the_first_catalog_republishes() {
 		// 1.5 s of input, then the step, all in one chunk.
@@ -401,14 +401,14 @@ mod tests {
 		let mut republish = Republish::new(
 			origin,
 			moq_net::Path::from_static("demo"),
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			catalog::Config::default(),
 		)
 		.unwrap();
-		let first = republish.instance.route.clone();
+		let first = republish.identity.route.clone();
 		let step = republish.decode(&data).unwrap().expect("a switch");
 		assert!(matches!(step.step, Step::Rewind { .. }), "{step:?}");
-		assert!(!first.is_announced(), "the first instance never went out");
+		assert!(!first.is_announced(), "the first identity never went out");
 		assert!(republish.decode(&[]).unwrap().is_none());
 		let finished = republish.finish().unwrap();
 		assert!(delivered(&finished.stats()));
@@ -422,25 +422,25 @@ mod tests {
 		let mut republish = Republish::new(
 			origin,
 			moq_net::Path::from_static("demo"),
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			catalog::Config::default(),
 		)
 		.unwrap();
-		let first = republish.instance();
+		let first = republish.identity();
 		let decoded = republish.decode(&flagged_switch()).unwrap();
 		assert!(decoded.is_none(), "the switch is still judged: {decoded:?}");
 		let finished = republish.finish().unwrap();
-		assert_ne!(finished.route.instance(), first, "the finish republished");
+		assert_ne!(finished.route.identity(), first, "the finish republished");
 		assert!(
 			delivered(&finished.stats()),
-			"the next instance read the input after the step"
+			"the next identity read the input after the step"
 		);
 	}
 
-	/// Held input that fails to decode at the finish aborts the instance reading it, so its
+	/// Held input that fails to decode at the finish aborts the identity reading it, so its
 	/// readers get the cause rather than a clean end.
 	#[tokio::test(start_paused = true)]
-	async fn a_failure_in_held_input_aborts_the_instance() {
+	async fn a_failure_in_held_input_aborts_the_identity() {
 		let mut data = CLIP.to_vec();
 		data.extend(shift(CLIP, |_| -SWITCH));
 		// A second program appearing mid-stream ends an import that picked none.
@@ -453,12 +453,12 @@ mod tests {
 		let mut republish = Republish::new(
 			origin,
 			moq_net::Path::from_static("demo"),
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			catalog::Config::default(),
 		)
 		.unwrap();
 		republish.decode(&data).unwrap().expect("a switch");
-		// The next instance's media tracks only exist within the finish, so read its catalog, which
+		// The next identity's media tracks only exist within the finish, so read its catalog, which
 		// is aborted with them. A held copy keeps a mere drop from ending it.
 		let _copy = republish.catalog().clone();
 		let mut catalog = republish
@@ -490,11 +490,11 @@ mod tests {
 		let republish = Republish::new(
 			origin,
 			moq_net::Path::from_static("demo"),
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			catalog::Config::default(),
 		)
 		.unwrap();
-		let route = republish.instance.route.clone();
+		let route = republish.identity.route.clone();
 		let err = republish.finish().err().expect("nothing was declared");
 		assert!(matches!(err, Error::Empty("it declared a track")), "{err}");
 		assert!(!route.is_announced());

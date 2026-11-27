@@ -6,6 +6,7 @@ export type { BufferedRange, BufferedRanges, Frame } from "./types.ts";
 import { Duration } from "@moq/clock";
 import type { AudioConfig, VideoConfig } from "../catalog/index.ts";
 import * as Aac from "../util/aac.ts";
+import * as Hex from "../util/hex.ts";
 import * as Opus from "../util/opus.ts";
 import type { Format as ContainerFormat } from "./format.ts";
 import type { Frame } from "./types.ts";
@@ -25,10 +26,18 @@ export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => D
 			return samples === undefined ? undefined : Duration.micros((samples * 1_000_000) / 48_000);
 		};
 	}
-	// AAC-LC codes 1024 samples per packet. SBR and PS packets decode to twice that, at a rate the
-	// catalog may or may not double, so they state nothing here.
-	if (Aac.objectType(config.codec) === 2) {
-		const duration = Duration.micros((1024 * 1_000_000) / rate);
+	// AAC codes 960 or 1024 samples per packet at its core's rate, which SBR and PS may double on
+	// output. The AudioSpecificConfig names both; without one, only AAC-LC's rate is the catalog's,
+	// at the usual 1024.
+	const aac = Aac.objectType(config.codec);
+	if (aac !== undefined) {
+		const asc = config.description
+			? Aac.parseConfig(Hex.toBytes(config.description))
+			: aac === 2
+				? { frameSamples: 1024, coreSampleRate: rate }
+				: undefined;
+		if (asc?.frameSamples === undefined) return undefined;
+		const duration = Duration.micros((asc.frameSamples * 1_000_000) / asc.coreSampleRate);
 		return (payload) => (payload.byteLength > 0 ? duration : undefined);
 	}
 	// Layer II codes 1152 samples per frame.
@@ -168,6 +177,8 @@ export class Producer {
 	// start moved it past a marker. A frame at that source timestamp, such as the picture its
 	// parameter sets precede, is written with it.
 	#moved?: [number, number];
+	// The newest source timestamp in the current group, which a source end must reach.
+	#sourceEnd?: number;
 	#floor?: number;
 	// The newest frame of every group before the current one: every frame of the current group
 	// presents after it.
@@ -268,6 +279,7 @@ export class Producer {
 			this.#skipping = false;
 			this.#start = source;
 			this.#moved = timestamp === source ? undefined : [source, timestamp];
+			this.#sourceEnd = undefined;
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}
@@ -290,6 +302,7 @@ export class Producer {
 		this.#previous = source;
 		this.#previousWritten = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
+		if (this.#sourceEnd === undefined || source > this.#sourceEnd) this.#sourceEnd = source;
 		if (this.#newest === undefined || timestamp > this.#newest) this.#newest = timestamp;
 	}
 
@@ -306,7 +319,8 @@ export class Producer {
 	 * its successor's first frame, so the group before a pause reads as live until whatever resumes
 	 * it, and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it
 	 * is the latest group a joiner lands on. The marker never starts below a frame the closing group
-	 * holds, a video track's end marker at `end` included, so on a video track a keyframe resuming at
+	 * holds, a video track's end marker at `end` included, nor inside the span of a group a cut ended
+	 * whole, so on a video track a keyframe resuming at
 	 * `end` is stamped one unit of the track's timescale later. An empty payload is data on a data track, so its marker is one object with no bytes
 	 * at all. No marker is written until a frame follows the last one. Throws if `end` precedes a
 	 * frame of the open group.
@@ -357,15 +371,20 @@ export class Producer {
 	}
 
 	/**
-	 * Close the current group without breaking the timeline, mirroring the Rust `container::Producer::cut`.
-	 * Call it when no more frames are coming for a while but the media that follows continues this
-	 * one, so a reader of the group, such as a fetch, finishes now rather than at the next keyframe.
-	 * `end` is where the group's content stops, else it is estimated from the frame cadence; the group
-	 * ends whole there, so a group starting at it reads as continuing this one. No marker is written.
-	 * Throws if `end` precedes a frame of the open group.
+	 * Close the current group without breaking the timeline, so the next frame must be a keyframe.
+	 * `end` is where its content stops, which the group ends whole at, so a reader can tell the group
+	 * starting there continues it; without one it is estimated from the frame cadence. Mirrors the
+	 * Rust `container::Producer::cut`. Throws if `end` precedes a frame of the group. An `end` at or
+	 * past the source timestamp of a keyframe moved past an earlier group's end is the source's: the
+	 * group ends at the moved keyframe instead.
 	 */
 	cut(end?: Duration) {
-		this.#close(end === undefined ? undefined : micros(end));
+		let at = end === undefined ? undefined : micros(end);
+		// Only the moved keyframe presents past a source end that covers the source frames.
+		const moved = this.#group ? this.#moved : undefined;
+		const covered = this.#sourceEnd !== undefined && at !== undefined && at >= this.#sourceEnd;
+		if (at !== undefined && moved && this.#end === moved[1] && at < moved[1] && covered) at = moved[1];
+		this.#close(at);
 	}
 
 	// Flush and close the current group at the supplied or estimated end timestamp, whole at the

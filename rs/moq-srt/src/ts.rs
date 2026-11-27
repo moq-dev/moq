@@ -40,7 +40,7 @@ pub enum Program {
 ///
 /// A change of source ([`ts::Republished`]), such as a changeover between two encoders whose
 /// clocks were never locked, finishes the broadcast and republishes the rest of the input on
-/// the same path under a new instance, on the same connection. [`Program::All`] still ends the
+/// the same path under a new identity, on the same connection. [`Program::All`] still ends the
 /// ingest there.
 pub struct Publisher {
 	importer: Importer,
@@ -79,21 +79,21 @@ impl Publisher {
 	) -> Result<Self> {
 		let name = moq_net::Path::new(path).map_err(moq_net::Error::from)?;
 		let importer = match program {
-			// `ts::Programs` mints an instance per program.
+			// `ts::Programs` mints an identity per program.
 			Some(Program::All) => {
 				tracing::info!(%path, ?program, "publishing ingest broadcasts");
 				Importer::All(Box::new(ts::Programs::new(origin.clone(), name, config)))
 			}
 			Some(Program::One(_)) | None => {
-				// Each instance is its own publisher, so an encoder reconnecting under the same
+				// Each identity is its own publisher, so an encoder reconnecting under the same
 				// stream id, or a source whose clock stepped, replaces the stale broadcast instead
 				// of resuming into it.
-				let mut republish = ts::Republish::new(origin.clone(), name, moq_net::Instance::random(), config)
+				let mut republish = ts::Republish::new(origin.clone(), name, moq_net::Identity::random(), config)
 					.map_err(moq_mux::Error::from)?;
 				if let Some(Program::One(program)) = program {
 					republish = republish.with_program(program);
 				}
-				tracing::info!(%path, ?program, instance = %republish.instance(), "publishing ingest broadcast");
+				tracing::info!(%path, ?program, identity = %republish.identity(), "publishing ingest broadcast");
 				Importer::One(Box::new(republish))
 			}
 		};
@@ -117,10 +117,10 @@ impl Publisher {
 			Importer::One(republish) => {
 				let mut data = &data[..];
 				while let Some(republished) = republish.decode(data).map_err(moq_mux::Error::from)? {
-					let instance = republish.instance();
+					let identity = republish.identity();
 					self.span.in_scope(|| {
 						self.log.finish(&republished.stats);
-						tracing::warn!(step = %republished.step, %instance, "the source changed; republishing");
+						tracing::warn!(step = %republished.step, %identity, "the source changed; republishing");
 					});
 					self.log = ts::stats::Log::default();
 					data = &[];
@@ -202,7 +202,7 @@ pub(crate) struct Options {
 	pub latency: Duration,
 	/// How long to wait for the broadcast to come back once it ends.
 	pub follow: Duration,
-	/// Follow another instance replacing the broadcast, as a full program switch.
+	/// Follow another identity replacing the broadcast, as a full program switch.
 	pub stitch: bool,
 }
 
@@ -214,7 +214,7 @@ pub(crate) struct Options {
 /// the TS bytes plus the media timestamp used to pace delivery.
 ///
 /// The path's announcements drive it through [`ts::Follower`], as they drive a player: the same
-/// publisher instance returning within the follow window continues the stream, and a replacement either
+/// publisher identity returning within the follow window continues the stream, and a replacement either
 /// ends it with [`moq_mux::Error::Replaced`] or, with `stitch`, switches the program.
 pub struct Subscriber {
 	follower: ts::Follower<ts::Export<moq_mux::catalog::Consumer<ts::Ext>>>,
@@ -243,7 +243,7 @@ impl Subscriber {
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = match following.available().await {
 			Ok(Some(broadcast)) => broadcast,
-			// The first change is always an instance.
+			// The first change is always an identity.
 			Ok(None) => return Ok(None),
 			Err(moq_net::Error::Closed) => return Ok(None),
 			Err(err) => return Err(err.into()),
@@ -266,7 +266,7 @@ impl Subscriber {
 
 	/// The muxer's generation counter for the frame [`next`](Self::next) just
 	/// returned, which increments each time the program clock restarts: a marker that
-	/// breaks the publisher's timeline, or a switch to another instance.
+	/// breaks the publisher's timeline, or a switch to another identity.
 	///
 	/// A caller pacing on the media timestamps has to drop its own anchor with it: sample
 	/// this after every frame and re-anchor when it changes, or the new clock maps
@@ -440,10 +440,10 @@ mod tests {
 	}
 
 	/// A source switched between two encoders whose clocks started hours apart, without a
-	/// `discontinuity_indicator`, either way: the ingest republishes under a new instance on the
+	/// `discontinuity_indicator`, either way: the ingest republishes under a new identity on the
 	/// same connection, and an egress that stitches replacements carries on into it.
 	#[tokio::test(start_paused = true)]
-	async fn a_clock_step_republishes_under_a_new_instance() {
+	async fn a_clock_step_republishes_under_a_new_identity() {
 		// The issue's step: two encoders started about 4 h 40 m apart.
 		const SWITCH: i64 = 16_844 * 90_000 + 45_000;
 		for step in [-SWITCH, SWITCH] {
@@ -611,7 +611,7 @@ mod tests {
 
 	/// A caller reconnecting under the same stream id while its stale connection is
 	/// still open restarts the broadcast once the reconnect's catalog is out: each connection
-	/// is its own instance, so a fresh request reaches the reconnect, while the stale viewer
+	/// is its own identity, so a fresh request reaches the reconnect, while the stale viewer
 	/// stays on the old one until it leaves.
 	#[tokio::test(start_paused = true)]
 	async fn a_reconnect_replaces_the_stale_connection() {

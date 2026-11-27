@@ -327,7 +327,7 @@ impl OnFollow {
 		})
 	}
 
-	/// Deliver a broadcast handle for an instance now serving the path.
+	/// Deliver a broadcast handle for an identity now serving the path.
 	pub fn online(&self, broadcast: crate::Id) {
 		(self.on_follow)(
 			self.user_data,
