@@ -2374,8 +2374,161 @@ test("lite draft-07: a range added before the start is answered once placed", as
 	}
 });
 
+// Reads the subscribe stream's next response in the background: `read.msg` once it arrived.
+function readResponse(sub: Awaited<ReturnType<typeof servedSubscription>>, version: Version) {
+	const read: { msg?: Awaited<ReturnType<typeof decodeSubscribeResponse>> } = {};
+	const done = decodeSubscribeResponse(sub.client.reader, version).then((msg) => {
+		read.msg = msg;
+		return msg;
+	});
+	return { read, done };
+}
+
+// Collects the key of each group stream the publisher opens, in the background.
+function collectServed(sub: Awaited<ReturnType<typeof servedSubscription>>): bigint[] {
+	const served: bigint[] = [];
+	void (async () => {
+		for (let key = await sub.servedSequence(); key !== undefined; key = await sub.servedSequence())
+			served.push(key);
+	})().catch(() => {});
+	return served;
+}
+
+// Runs everything pending, a few times over, so whatever the publisher would send now has gone out.
+async function settle() {
+	for (let i = 0; i < 20; i++) await flush();
+}
+
+// A copy whose source has yet to say where its feed starts serves each lite-07 group as it lands,
+// rather than hold the first one and the cursor behind it until the source answers. Mirrors the
+// Rust `lite07_serves_groups_before_the_source_says_where_its_feed_starts`.
+test("lite draft-07: serves groups before the source says where its feed starts", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, ranges: [{}] });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, {});
+		const served = collectServed(sub);
+		const next = readResponse(sub, version);
+		sub.serve(5n);
+		await settle();
+		sub.serve(6n);
+		await settle();
+		expect(served).toEqual([5n, 6n]);
+		expect(next.read.msg).toBeUndefined();
+
+		hooks.startTrack(sub.track, { start: 5n });
+		hooks.answerEdge(sub.track);
+		const start = await next.done;
+		if (!("start" in start)) throw new Error("expected SUBSCRIBE_START");
+		expect([start.start.id, start.start.start]).toEqual([0n, 5n]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A time start a relay's copy has yet to place, added by an update beside a range starting later,
+// is served from the group its upstream places it in, though that group starts below the time.
+// Mirrors the Rust `lite07_an_unplaced_time_start_serves_the_group_below_its_time`.
+test("lite draft-07: an unplaced time start serves the group below its time", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { time: 2000n } }],
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.answerEdge(sub.track);
+		hooks.startTrack(sub.track, { start: 0n });
+		hooks.timeStarts(sub.track, [[2000n, 2000n]]);
+		const served = collectServed(sub);
+		sub.serve(1000n);
+		sub.serve(2000n);
+		await settle();
+		expect(served).toEqual([2000n]);
+
+		await replayUpdate({ priority: 0, ranges: [{ start: { time: 5000n } }] }).encode(sub.client.writer, version);
+		await settle();
+		await replayUpdate({ priority: 0, ranges: [{ start: { time: 1500n } }] }).encode(sub.client.writer, version);
+		await settle();
+		hooks.timeStarts(sub.track, [
+			[2000n, 2000n],
+			[1500n, 1000n],
+		]);
+		await settle();
+		expect(served).toEqual([2000n, 1000n]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A track that ends before its first group answers every range with its SUBSCRIBE_END at group 0,
+// so none is left waiting on a start no group will resolve, and a later FIN closes the
+// subscription, on a relay's copy whose source answered too. Mirrors the Rust
+// `lite07_an_empty_finished_track_leaves_no_range_waiting`.
+for (const copy of [false, true]) {
+	test(`lite draft-07: an empty finished ${copy ? "copy" : "track"} leaves no range waiting`, async () => {
+		const version = Version.DRAFT_07;
+		const sub = await servedSubscription({ version, ranges: [{ start: { time: 1000n } }] });
+		try {
+			if (copy) {
+				hooks.receiveTrack(sub.track);
+				hooks.startTrack(sub.track, { start: 0n });
+			}
+			await settle();
+			const next = readResponse(sub, version);
+			sub.track.finish();
+			await settle();
+			const end = next.read.msg;
+			if (!end || !("end" in end)) throw new Error(`expected SUBSCRIBE_END, got ${end && Object.keys(end)}`);
+			expect(end.end.group).toBe(0n);
+
+			sub.client.writer.close();
+			let fin = false;
+			void decodeSubscribeResponseMaybe(sub.client.reader, version).then((msg) => {
+				fin = msg === undefined;
+			});
+			await settle();
+			expect(fin).toBe(true);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
+// A range following the live edge on a copy that ended before this hop learned the edge is still
+// answered once the track finishes, and the drop withheld for that first answer goes out after it.
+// Mirrors the Rust `lite07_a_finished_track_answers_a_live_range_and_its_withheld_drops`.
+test("lite draft-07: a finished track answers a live range and its withheld drops", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, ranges: [{}] });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 0n });
+		const served = collectServed(sub);
+		const next = readResponse(sub, version);
+		sub.serve(0n);
+		hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode.Old) });
+		await settle();
+		expect(served).toEqual([0n]);
+		expect(next.read.msg).toBeUndefined();
+
+		sub.track.finishAt({ group: 2n, frame: 0 });
+		const start = await next.done;
+		if (!("start" in start)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(start)}`);
+		expect([start.start.id, start.start.start]).toEqual([0n, 0n]);
+		const drop = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("drop" in drop)) throw new Error(`expected SUBSCRIBE_DROP, got ${Object.keys(drop)}`);
+		expect([drop.drop.start, drop.drop.end]).toEqual([1n, 2n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
-// group would give up the backlog the START still promises, so the first group waits for it.
+// group would give up the backlog the START still promises, so the START waits for it, holding the
+// first group before lite-07.
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2n });
@@ -2392,33 +2545,6 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(response.start.start).toBe(3n);
 			expect(await sub.servedSequence()).toBe(6n);
 		} finally {
-			await sub.close();
-		}
-	});
-
-	// A subscription that ends while a group waits for the START has no one to read it, so the
-	// held group is closed, not left for a relay to keep reading upstream.
-	test(`lite ${version}: a subscription ending before the upstream START closes the group it held`, async () => {
-		const sub = await servedSubscription({ version, startGroup: 2n });
-		const closed: bigint[] = [];
-		const close = GroupConsumer.prototype.close;
-		const spy = spyOn(GroupConsumer.prototype, "close").mockImplementation(function (this: GroupConsumer) {
-			closed.push(this.start);
-			close.call(this);
-		});
-		try {
-			hooks.receiveTrack(sub.track);
-			hooks.startTrack(sub.track, { requested: 2n });
-			sub.serve(6n);
-			await flush();
-			expect(closed).not.toContain(6n);
-
-			if (version === Version.DRAFT_07) sub.client.abort(new StreamError(StreamCode.Cancel));
-			else sub.client.close();
-			await sub.serving;
-			expect(closed).toContain(6n);
-		} finally {
-			spy.mockRestore();
 			await sub.close();
 		}
 	});
@@ -2441,6 +2567,34 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
+
+// A subscription that ends while a group waits for the START has no one to read it, so the
+// held group is closed, not left for a relay to keep reading upstream. Lite-07 holds none: it serves
+// each group as it lands.
+test("lite draft-06: a subscription ending before the upstream START closes the group it held", async () => {
+	const version = Version.DRAFT_06;
+	const sub = await servedSubscription({ version, startGroup: 2n });
+	const closed: bigint[] = [];
+	const close = GroupConsumer.prototype.close;
+	const spy = spyOn(GroupConsumer.prototype, "close").mockImplementation(function (this: GroupConsumer) {
+		closed.push(this.start);
+		close.call(this);
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { requested: 2n });
+		sub.serve(6n);
+		await flush();
+		expect(closed).not.toContain(6n);
+
+		sub.client.close();
+		await sub.serving;
+		expect(closed).toContain(6n);
+	} finally {
+		spy.mockRestore();
+		await sub.close();
+	}
+});
 
 for (const skipped of ["failed", "stale"] as const) {
 	test(`lite draft-06: START advances past a ${skipped} group from the source`, async () => {
