@@ -3007,11 +3007,14 @@ impl Reader {
 		&mut self,
 		ordered: bool,
 		parks: bool,
-		delivered: &Delivered,
+		delivered: &mut Delivered,
 		waiter: &kio::Waiter,
 	) -> Option<Poll<std::result::Result<Option<Candidate>, Failure>>> {
 		self.sync(waiter);
 		self.groups_read = true;
+		// Before any copy's group is judged against it, not when the read settles: one may have
+		// landed under an update another handle made since the last read.
+		let mut reopened = self.reopen_folded(delivered);
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
 		let widest = self.mirrored.widest();
@@ -3065,6 +3068,10 @@ impl Reader {
 						if held_back {
 							held = true;
 							break;
+						}
+						// A copy placing the window this pass placed what it owes too.
+						if !reopened {
+							reopened = self.reopen_folded(delivered);
 						}
 						// A copy resolves a time start against the groups it holds, which may place
 						// it below where the reader's window did: the window decides.
@@ -3674,6 +3681,16 @@ impl Reader {
 	/// for again below it. A gap past the reader's budget was already forgotten as handed out.
 	/// A time start the resume point raised is asked from its time, so the backfill places it
 	/// at the group holding it, as the route would for a plain reader.
+	/// Take back what a fold of the logical record `delivered` counted as handed out before any
+	/// range held it, which the placed window now owes. Returns whether the window is placed.
+	fn reopen_folded(&mut self, delivered: &mut Delivered) -> bool {
+		let Some(groups) = self.window().groups() else {
+			return false;
+		};
+		delivered.reopen(groups);
+		true
+	}
+
 	fn backfill_gaps(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
 		if self.resumed.is_none() {
 			return;
@@ -11255,6 +11272,16 @@ mod test {
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing held there yet");
 		write(&a, 3);
 		assert_eq!(drain(&mut sub, false), [3]);
+
+		// Nor when another handle updates the ranges and the group lands before the reader
+		// reads again.
+		let ranges = [
+			track::Range::from(crate::track::Start::LATEST),
+			track::Range::groups(3..=4),
+		];
+		sub.control().update(sub.subscription().with_ranges(ranges)).unwrap();
+		write(&a, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
 	}
 
 	/// Across route changes, an endless track with groups missing remembers only the gaps

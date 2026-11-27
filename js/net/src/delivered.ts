@@ -25,8 +25,8 @@ export class Delivered {
 	// First and last key of each run, inclusive, sorted and never adjacent to each other.
 	#runs: [bigint, bigint][] = [];
 	// The keys a fold counted as handed out that no range held then, so no budget judged them: a
-	// range added later owes each it holds (see {@link reopen}). Always within `#runs`. Mirrors the
-	// Rust `Delivered::unjudged`.
+	// range added later owes each it holds (see {@link reopen}). Always within `#runs`, and never
+	// more runs than {@link foldBelow} leaves. Mirrors the Rust `Delivered::unjudged`.
 	#unjudged: Delivered | undefined;
 
 	// The index of the run containing or preceding `key`, or -1 when none starts at or below it.
@@ -115,9 +115,15 @@ export class Delivered {
 	 * Count every key below `floor` as handed out, as a fold past the reader's budget does: each gap
 	 * it closes that `judged` doesn't hold, or every one while the ranges are still being placed, a
 	 * range added later that holds it owes again. Mirrors the Rust `Delivered::fold_below`.
+	 *
+	 * So that ranges moving to disjoint groups leave no more runs than they hold, what lies between
+	 * two runs it remembers that `judged` doesn't hold joins them: what ranges added over it later
+	 * hand out may then include a group handed out before, which the same identity makes harmless,
+	 * rather than miss one never handed out.
 	 */
 	foldBelow(floor: bigint, judged: Judged | undefined): void {
-		for (const gap of [...this.gaps(this.runEnd(0n) ?? 0n, floor)]) {
+		const gaps = [...this.gaps(this.runEnd(0n) ?? 0n, floor)];
+		for (const gap of gaps) {
 			let from = gap.start;
 			for (const held of judged?.placed(gap.start, gap.end) ?? []) {
 				if (held.start > from) this.#unjudge(from, held.start);
@@ -126,6 +132,19 @@ export class Delivered {
 			if (from < gap.end) this.#unjudge(from, gap.end);
 		}
 		this.forgetBelow(floor);
+		// Placed ranges say what joins; a fold while they're placed is followed by one that is.
+		const unjudged = this.#unjudged;
+		if (!judged || gaps.length === 0 || !unjudged || unjudged.#runs.length < 2) return;
+		const [start, end] = [unjudged.#runs[0][0], unjudged.#runs[unjudged.#runs.length - 1][1] + 1n];
+		let from = start;
+		for (const held of [...judged.placed(start, end), { start: end, end }]) {
+			if (held.start > from) {
+				unjudged.addRun(from, held.start);
+				// Not what a reopen gave back since, which is owed rather than counted handed out.
+				for (const gap of [...this.gaps(from, held.start)]) unjudged.remove(gap.start, gap.end);
+			}
+			from = max(from, held.end);
+		}
 	}
 
 	// Remember `[start, end)` as folded unjudged.

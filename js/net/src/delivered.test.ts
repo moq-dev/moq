@@ -91,8 +91,8 @@ function judged(...runs: [bigint, bigint][]): Judged {
 test("a fold reopens only the gaps no range judged", () => {
 	const delivered = new Delivered();
 	for (const key of [4n, 9n]) delivered.add(key);
-	// Ranges hold 2..4 and 6..8 as the fold closes every gap below 9.
-	delivered.foldBelow(9n, judged([2n, 4n], [6n, 8n]));
+	// Ranges hold 2..5 and 6..8 as the fold closes every gap below 9.
+	delivered.foldBelow(9n, judged([2n, 5n], [6n, 8n]));
 	expect([...delivered.gaps(0n, 10n)]).toEqual([]);
 	expect(delivered.runs).toBe(4);
 	// A range added over 0..9 owes the gaps folded unjudged, never a hand-out nor what the budget judged.
@@ -111,6 +111,30 @@ test("a fold reopens only the gaps no range judged", () => {
 		{ start: 1n, end: 2n },
 		{ start: 5n, end: 6n },
 		{ start: 8n, end: 9n },
+	]);
+});
+
+test("a fold keeps no more unjudged runs than the ranges hold", () => {
+	const delivered = new Delivered();
+	// Ranges moving to a fresh group each time, each handed out and folded past by ranges then
+	// holding only the live edge, would leave a run no range held between each pair.
+	for (let key = 10n; key < 100n; key += 10n) {
+		delivered.add(key);
+		delivered.foldBelow(key + 5n, judged([key + 5n, 1000n]));
+	}
+	expect(delivered.runs).toBe(2);
+	// A range added over a group handed out before owes it again, and while it holds it, splits
+	// the runs around it; one no longer held, as 97 next, joins them.
+	delivered.reopen(judged([40n, 41n], [95n, 1000n]));
+	expect(delivered.has(40n)).toBe(false);
+	delivered.add(40n);
+	delivered.add(97n);
+	delivered.foldBelow(99n, judged([40n, 41n], [99n, 1000n]));
+	expect(delivered.runs).toBe(3);
+	delivered.reopen(judged([0n, 99n]));
+	expect([...delivered.gaps(0n, 100n)]).toEqual([
+		{ start: 0n, end: 40n },
+		{ start: 41n, end: 100n },
 	]);
 });
 

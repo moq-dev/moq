@@ -10934,14 +10934,19 @@ impl Cursor {
 		};
 		drop(state);
 		if moved {
-			// What a fold counted as handed out before any range held it, the ranges now owe.
-			if let Some(groups) = self.filter.window.groups() {
-				self.record.delivered.reopen(groups);
-			}
-			self.filter.revision += 1;
-			self.update_servable();
+			self.window_moved();
 		}
 		moved
+	}
+
+	/// Take in a window that moved: what a fold counted as handed out before any range held it,
+	/// the ranges now owe, and the reads resolve against the new ranges.
+	fn window_moved(&mut self) {
+		if let Some(groups) = self.filter.window.groups() {
+			self.record.delivered.reopen(groups);
+		}
+		self.filter.revision += 1;
+		self.update_servable();
 	}
 
 	/// Settle a parked read's window on the groups that arrived since: a window waiting on a
@@ -11729,8 +11734,7 @@ impl Cursor {
 		// An answer the window takes in may look its time up again from lower down.
 		while self.look_up_pass(waiter, &mut moved) {}
 		if moved {
-			self.filter.revision += 1;
-			self.update_servable();
+			self.window_moved();
 		}
 	}
 
@@ -34911,6 +34915,52 @@ mod test {
 		);
 		framed(&producer, 3, 1).finish().unwrap();
 		assert_eq!(drain_groups(&mut subscriber), [3]);
+	}
+
+	/// A time range added behind a reader caught up at the live edge hands out the group its
+	/// lookup finds, though the reader's budget folded that gap before any range held it: the
+	/// window moves when the answer lands, not when the ranges change.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_range_added_behind_a_caught_up_read_hands_out_the_group_it_looks_up() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::LATEST)]));
+		assert_eq!(drain_groups(&mut subscriber), [10]);
+		write_group(&producer, 11);
+		write_group(&producer, 12);
+		assert_eq!(drain_groups(&mut subscriber), [12]);
+		assert!(subscriber.record().delivered.contains(5), "the budget folded the gap");
+		subscriber
+			.edit(Edit {
+				placed: Default::default(),
+				retire: Vec::new(),
+				add: vec![(
+					1,
+					Range {
+						start: Start::Time(5),
+						end: Some(5),
+					},
+				)],
+				priority: 0,
+				order: Order::default(),
+			})
+			.unwrap();
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			Vec::<u64>::new(),
+			"nothing until it is found"
+		);
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!(start.start().group, 5);
+		write_filled(start.accept(5, None), 5);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), [5]);
 	}
 
 	/// A reader at the live edge of a relay's copy, adding and retiring history ranges behind
