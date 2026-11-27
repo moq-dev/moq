@@ -53,7 +53,7 @@ import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import { isEmpty, type Resolved, rangeKey } from "../window.ts";
-import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameIdentity, trackMetaOf, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
@@ -120,6 +120,12 @@ const datagramBudget = new Budget();
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+// The track a SUBSCRIBE reads: a metadata subscription reads the copy kept apart for it where the
+// broadcast keeps one, so no payload crosses a hop for it.
+function subscribed(front: broadcast.Consumer, msg: Subscribe): track.Consumer {
+	return msg.meta ? trackMetaOf(msg.track, front) : front.track(msg.track);
 }
 
 /**
@@ -258,6 +264,11 @@ interface RunGroup {
 	stamp: Stamp | undefined;
 	/** Whether to serve stored slices with their declared plain sizes. */
 	compress: boolean;
+	/**
+	 * Whether the subscriber asked for each frame's header alone (lite-07 `Meta`): its FRAME names
+	 * the plain size, and no payload follows it, so a compressed frame is never inflated to send it.
+	 */
+	meta: boolean;
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
 	priority: Pick<Priority, "reserve" | "add" | "remove">;
@@ -1288,7 +1299,7 @@ export class Publisher {
 			}
 		}
 
-		const consumer = front.track(msg.track);
+		const consumer = subscribed(front, msg);
 		// The live joins already placed, which start where they were placed.
 		const absent = legacyStart(this.version, msg.maxDelay);
 		const placed = requestedPlaced(msg, absent);
@@ -1561,6 +1572,7 @@ export class Publisher {
 				stamp,
 				publisher,
 				compress,
+				meta: msg.meta,
 				named,
 				floor,
 				bounds,
@@ -1639,7 +1651,7 @@ export class Publisher {
 				frameStart: req.startFrame,
 				held: true,
 			};
-			const groupPromise = front.track(msg.track).fetchGroup(req.group, options);
+			const groupPromise = subscribed(front, msg).fetchGroup(req.group, options);
 			// Track the resolved group immediately so a failure, revoke, or abort before
 			// `await groupPromise` still releases it without unhandled rejections.
 			groupPromise.then(
@@ -1713,6 +1725,7 @@ export class Publisher {
 				givenUp,
 				stamp: stamping(this.version, info),
 				compress: info.compress,
+				meta: msg.meta,
 				priority,
 				unsubscribed,
 				start: req.startFrame,
@@ -1910,6 +1923,8 @@ export class Publisher {
 			/** The track's publisher priority, breaking ties between subscriptions. */
 			publisher: number;
 			compress: boolean;
+			/** Whether each frame goes out as its header alone (lite-07 `Meta`). */
+			meta: boolean;
 			// Whether the wire names what it never served (lite-05 and later), recording what it
 			// told in the reader's own record.
 			named: boolean;
@@ -1925,7 +1940,7 @@ export class Publisher {
 			oneShot?: boolean;
 		},
 	): Promise<boolean | "one-shot"> {
-		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial, requested } = serving;
+		const { sub, broadcast, stamp, publisher, compress, meta, named, bounds, initial, requested } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -2635,6 +2650,7 @@ export class Publisher {
 					givenUp: new GivenUp(group),
 					stamp,
 					compress,
+					meta,
 					priority,
 					unsubscribed,
 					start: range.start,
@@ -3234,7 +3250,7 @@ export class Publisher {
 					closed?.catch(() => {});
 					break;
 				}
-				pendingRead ??= hooks.readGroupFrame(group, compress);
+				pendingRead ??= hooks.readGroupFrame(group, compress, 0, options.meta);
 				closed ??= stream.closed.then(() => undefined);
 				let disposeStop: Dispose | undefined;
 				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;
@@ -3286,15 +3302,12 @@ export class Publisher {
 					highest = max(highest ?? ts, ts);
 				}
 
-				const header = frameHeader(
-					stream.version,
-					delta,
-					read.inflated,
-					readSize(read),
-					hasLengthFirst(this.version),
-				);
-				const chunks = read.chunks;
-				const payload = chunks ? undefined : read.frame.payload;
+				const header = options.meta
+					? frameHeader(stream.version, delta, undefined, read.inflated ?? readSize(read), true)
+					: frameHeader(stream.version, delta, read.inflated, readSize(read), hasLengthFirst(this.version));
+				// A metadata FRAME is its header: the frame's bytes are never read, so nothing waits for them.
+				const chunks = options.meta ? undefined : read.chunks;
+				const payload = options.meta || chunks ? undefined : read.frame.payload;
 				// One budget race covers the frame's header and payload.
 				await write(async () => {
 					await stream.write(header);

@@ -129,6 +129,7 @@ import {
 	hasIdentity,
 	hasLengthFirst,
 	hasMediaTime,
+	hasMeta,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
@@ -231,6 +232,9 @@ interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
 	track: track.Producer;
+	// Whether it fills the track's metadata copy, asking with a metadata subscription for each
+	// frame's header alone.
+	meta: boolean;
 	compress: boolean;
 	// Per-frame timestamp scale (0 = none), resolved before this entry is registered.
 	timescale: number;
@@ -255,7 +259,7 @@ interface SubscribeEntry {
 	// The tick the copy recorded each live join range's answer at, by Range ID (see
 	// `hooks.answerJoin`): one with none is still unanswered.
 	joinTicks: Map<bigint, number>;
-	// The narrowest max in milliseconds each live join range was asked under before its answer, or
+	// The narrowest max in milliseconds each live join range was asked under up to its answer, or
 	// each placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups that max
 	// expired, so the answer places only readers within it.
 	joinBudgets: Map<bigint, number>;
@@ -301,11 +305,12 @@ interface SubscribeEntry {
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
-	// Lite-07: the hold each stream reading a group has on the subscription's end, by key, one
-	// per stream, so stream credit bounds them. A browser can lose the reset of a stream the publisher
-	// gave up on (Chromium drops one that reaches a stream before the page took it), so a drop naming
-	// the group excuses it, and the end waits for the stream at most the grace.
-	reading?: Map<bigint, Counted>;
+	// Lite-07: the hold each stream reading a group has on the subscription's end, with the group it
+	// reads, one per stream, so stream credit bounds them. A browser can lose the reset of a stream
+	// the publisher gave up on (Chromium drops one that reaches a stream before the page took it), and
+	// the publisher names any group whose reset could lose its header in a drop, so the drop lets go
+	// of the hold at once.
+	reading?: Map<Counted, bigint>;
 	// Active subscription identity for D2 fetchGroup deduplication.
 	broadcast?: Path.Valid;
 	consumedId?: number;
@@ -1451,7 +1456,7 @@ export class Subscriber {
 	) {
 		const { valid } = consumed;
 		const { ranges, placed } = wireHeld(request.subscription);
-		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges, placed);
+		const msg = this.#subscribeMessage(id, broadcast, consumed, request, request.subscription, ranges, placed);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
@@ -1519,14 +1524,15 @@ export class Subscriber {
 		await this.#serveStream(id, broadcast, consumed, state, stream, entry, msg);
 	}
 
-	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model, each live
-	// join `placed` at a group by index starting there. Its own wire ranges wait for the track's
-	// timescale when they name a time (see `#withRanges`).
+	// The SUBSCRIBE of `target` (a metadata subscription for its metadata copy) for `subscription`,
+	// asking for `ranges`, its wire ranges in the model, each live join `placed` at a group by index
+	// starting there. Its own wire ranges wait for the track's timescale when they name a time (see
+	// `#withRanges`).
 	#subscribeMessage(
 		id: bigint,
 		broadcast: Path.Valid,
 		consumed: Consumed,
-		name: string,
+		target: { name: string; meta: boolean },
 		subscription: Readonly<track.Subscription>,
 		ranges: readonly track.Range[],
 		placed: ReadonlyMap<number, bigint> = new Map(),
@@ -1536,12 +1542,13 @@ export class Subscriber {
 			id,
 			broadcast,
 			identity: consumed.identity,
-			track: name,
+			track: target.name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
 			maxDelay: maxAge(ranges),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
+			meta: target.meta,
 		});
 	}
 
@@ -1841,6 +1848,7 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
+			meta: msg.meta,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			...framing,
@@ -2026,6 +2034,8 @@ export class Subscriber {
 			if (
 				!entry.filling &&
 				!entry.fillGroup &&
+				// A metadata copy holds no payload a payload fetch could take.
+				!entry.meta &&
 				entry.broadcast === broadcast &&
 				entry.consumedId === consumed.id &&
 				entry.track.name === track
@@ -2192,6 +2202,7 @@ export class Subscriber {
 			const entry: SubscribeEntry = {
 				// Unused for fillGroup entries; satisfies the shared SubscribeEntry shape.
 				track: undefined as unknown as track.Producer,
+				meta: false,
 				staleBudget: NO_MAX_DELAY,
 				staleCap: key + 1n,
 				compress: info.compress,
@@ -2575,8 +2586,10 @@ export class Subscriber {
 		const oneStart = !hasGroupEnd(this.version);
 		const oneShot = keepsSubscribeOpen(this.version);
 		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
+		// A metadata copy's fill asks for headers alone too.
+		const target = { name: producer.name, meta: copy.meta };
 		const msg = this.#withRanges(
-			this.#subscribeMessage(id, broadcast, consumed, producer.name, { priority, order: "ascending" }, ranges),
+			this.#subscribeMessage(id, broadcast, consumed, target, { priority, order: "ascending" }, ranges),
 			ranges,
 		);
 		// Lite-07 recovery asks for exact group bounds [Position(start, 0), Position(end, 0))
@@ -2592,6 +2605,7 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
+			meta: copy.meta,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			compress: copy.compress,
@@ -2721,8 +2735,7 @@ export class Subscriber {
 						ended = true;
 					},
 				);
-				// An excused stream is waited for at most the grace, as at a subscription's end: a browser
-				// can lose its reset.
+				// Ends a settle still waiting once this loop leaves it.
 				const stopped = new Once<null>();
 				const covered = () => entry.tail.covers(groups.start, groups.end);
 				try {
@@ -2769,14 +2782,12 @@ export class Subscriber {
 					await responses;
 					// The publisher FINs once done (unprompted before lite-07, or in reply to our
 					// one-shot FIN on lite-07), before every uni Group Stream it opened may have
-					// landed: wait for those before refusing what is left (no grace timer on lite-07).
+					// landed: wait for those before refusing what is left, at most the grace before
+					// lite-07, whose tail has none.
 					if (!covered() || entry.tail.reading) {
 						const drained = new Once<null>();
 						try {
-							await race([
-								entry.tail.settle(covered, drained, hasSkip(this.version) ? undefined : GRACE),
-								leaving,
-							]);
+							await race([entry.tail.settle(covered, drained, GRACE), leaving]);
 						} finally {
 							drained.set(null);
 						}
@@ -3470,6 +3481,8 @@ export class Subscriber {
 				if (!entry.joinTicks.has(id)) {
 					const { min, max } = range.start.live;
 					const budget = Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max));
+					// Kept with it, so a retune wider after it lands still finds the answer narrower.
+					entry.joinBudgets.set(id, budget);
 					entry.joinTicks.set(id, hooks.answerJoin(entry.track, min, through(range.end), at, budget));
 				}
 				continue;
@@ -3597,14 +3610,10 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
-		// Asked before this stream accounts for the group: a drop that overtook it named it.
-		let owed = !tail.covers(group.key, group.key + 1n);
-		// A drop that overtook this stream, rather than a gap the grace gave up on.
-		const dropped = !owed && tail.dropped(group.key);
+		// Lite-07: a drop that overtook the header, rather than a gap the grace gave up on.
+		const overtaken = hasSkip(this.version) && tail.dropped(group.key);
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
-		// Lite-07: this stream's entry in `SubscribeEntry.reading`.
-		let reading = false;
 		const counted = tail.open(group.key);
 
 		try {
@@ -3621,8 +3630,7 @@ export class Subscriber {
 			// Registered before any duplicate wait below, so a drop that lands during it finds the read.
 			if (hasSkip(this.version)) {
 				entry.reading ??= new Map();
-				entry.reading.set(group.key, counted);
-				reading = true;
+				entry.reading.set(counted, group.key);
 			}
 			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
 			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
@@ -3636,13 +3644,15 @@ export class Subscriber {
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
-				// Served again once that copy fails, so owed again.
-				owed = true;
 				counted.park();
 				const settled = arriving.settled;
 				await race([settled, stream.closed.then(() => settled)]);
 			}
 			counted.resume();
+			// The drop already named this stream's group on the wire, so the stream holds no end, even
+			// once it takes the group from a copy that failed: its reset, which a browser can lose, may
+			// be all that is left of it. It reads on until its own end, or the track's release cuts it.
+			if (overtaken) counted.done();
 			producer ??= hooks.receiveGroup(track, {
 				start: group.key,
 				offset: group.frameStart,
@@ -3653,9 +3663,6 @@ export class Subscriber {
 			if (!hasRanges(this.version) && !entry.filling) hooks.answerEdge(track);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
-			// A drop that overtook the header already accounts for the group; a copy served again is
-			// owed whatever dropped the earlier one.
-			if (reading && !owed && dropped) counted.excuse();
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
@@ -3685,16 +3692,19 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			arriving?.release();
-			if (reading && entry.reading?.get(group.key) === counted) entry.reading.delete(group.key);
+			entry.reading?.delete(counted);
 			counted.done();
 		}
 	}
 
 	// A SUBSCRIBE_DROP named `[start, end)`: a stream still reading a group it names holds the
-	// subscription's end at most the grace, since a browser can lose that stream's reset.
+	// subscription's end no longer, since the drop accounts for the group and a browser can lose
+	// that stream's reset. A final drop ends the read through the track, which aborts the group. A
+	// stale one leaves it reading until its own end or the track's release, which cuts a group still
+	// arriving: lite-07 waits out no timer for a group the publisher already gave up.
 	#dropped(entry: SubscribeEntry, start: bigint, end: bigint): void {
-		for (const [key, counted] of entry.reading ?? []) {
-			if (key >= start && key < end) counted.excuse();
+		for (const [counted, key] of entry.reading ?? []) {
+			if (key >= start && key < end) counted.done();
 		}
 	}
 
@@ -4041,6 +4051,8 @@ class ConsumeBroadcast extends broadcast.Consumer {
 
 	constructor(subscriber: Subscriber, path: Path.Valid, consumed: Consumed, state?: never) {
 		super(state);
+		// A metadata reader gets a copy of its own, filled by a metadata subscription.
+		if (hasMeta(subscriber.version)) hooks.serveMeta(this);
 		const baseFetchGroup = wireOf(this).fetchGroup;
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: async (name, hold) => {

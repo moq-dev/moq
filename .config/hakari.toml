@@ -36,4 +36,15 @@ workspace-members = [
 [final-excludes]
 # Keep native media dependencies out of unrelated test builds. Final excludes
 # preserve feature unification for their other dependencies.
-third-party = [{ name = "pipewire" }, { name = "libspa" }, { name = "clang-sys" }, { name = "gstreamer" }, { name = "gstreamer-sys" }]
+#
+# kio's test-only features (`sim`, `manual`) instrument every poll, so unifying them
+# would make every bench measure a kio that no release build ships. Its rev matches
+# the workspace's kio dependency; `cargo hakari generate` refuses a stale one.
+third-party = [
+    { name = "pipewire" },
+    { name = "libspa" },
+    { name = "clang-sys" },
+    { name = "gstreamer" },
+    { name = "gstreamer-sys" },
+    { name = "kio", git = "https://github.com/kixel-ai/kio", rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671" },
+]

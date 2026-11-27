@@ -854,6 +854,7 @@ export namespace Track {
 		finished(): Promise<Track.Position>;
 		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
+		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		ordered(): Track.Ordered;

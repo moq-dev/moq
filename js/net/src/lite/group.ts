@@ -86,6 +86,8 @@ function unzigzag(v: bigint): bigint {
 export interface WireFrame extends WirePayload {
 	/** The declared plain size on a compressed track. */
 	inflated?: number;
+	/** A metadata FRAME: its header alone, `size` being the plain size, with no payload. */
+	header?: boolean;
 }
 
 /** Lite-07 GROUP_END: the group is whole, ending at `end` in the track's timescale. */
@@ -110,6 +112,12 @@ export interface FrameFormat {
 	 * rather than ending its header with the size.
 	 */
 	lengthFirst?: boolean;
+	/**
+	 * Whether every frame is its header alone, as a metadata subscription delivers it (lite-07): its
+	 * `Payload Length` is the plain size plus one, with no Inflated Size and no payload, compressed
+	 * track or not. {@link readFrames} takes it from the group it writes.
+	 */
+	meta?: boolean;
 }
 
 /**
@@ -127,7 +135,9 @@ export function frameDecoder({
 	start = 0n,
 	compress = false,
 	lengthFirst = false,
+	meta = false,
 }: FrameFormat): (c: Cursor) => WireFrame | GroupEnd {
+	if (meta && !lengthFirst) throw new Error("a metadata Group Stream needs moq-lite-07");
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = lengthFirst ? start : 0n;
 	// The highest timestamp decoded so far, which a GROUP_END's End counts from.
@@ -144,17 +154,19 @@ export function frameDecoder({
 			size = length - 1;
 		}
 		const delta = timescale !== undefined ? unzigzag(c.u62()) : 0n;
-		const inflated = compress ? c.u53() : undefined;
+		const inflated = compress && !meta ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,
-		// and `decodePayload` caps its size.
-		if (compress && (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES)) throw new FrameTooLarge();
-		const payload = compress ? c.read(size) : decodePayload(c, size);
+		// and `decodePayload` caps its size. A metadata FRAME has no payload to read.
+		if (compress && !meta && (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES))
+			throw new FrameTooLarge();
+		const payload = meta ? undefined : compress ? c.read(size) : decodePayload(c, size);
+		const header = meta || undefined;
 		// Commit the delta only after the last read: an incomplete decode gets retried.
-		if (timescale === undefined) return { size, payload, inflated };
+		if (timescale === undefined) return { size, payload, inflated, header };
 		prevTs += delta;
 		if (highest === undefined || prevTs > highest) highest = prevTs;
-		return { size, payload, inflated, timestamp: new Time.Timestamp(toNumber(prevTs), timescale) };
+		return { size, payload, inflated, header, timestamp: new Time.Timestamp(toNumber(prevTs), timescale) };
 	};
 }
 
@@ -169,7 +181,7 @@ export async function readFrames(
 	producer: netGroup.Producer,
 	format: FrameFormat,
 ): Promise<bigint | undefined> {
-	const decode = frameDecoder({ ...format, start: producer.start });
+	const decode = frameDecoder({ ...format, start: producer.start, meta: hooks.groupMeta(producer) });
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once
@@ -185,7 +197,8 @@ export async function readFrames(
 			if (done !== true) return undefined;
 			return frame.end;
 		}
-		if (frame.payload)
+		if (frame.header) hooks.writeGroupHeader(producer, Time.received(frame.timestamp, producer.start), frame.size);
+		else if (frame.payload)
 			hooks.writeGroupFrame(
 				producer,
 				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.start) },

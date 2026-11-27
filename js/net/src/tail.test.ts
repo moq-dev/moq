@@ -192,26 +192,6 @@ describe("Tail", () => {
 		await settling;
 	});
 
-	test("an excused stream is waited for at most the grace", async () => {
-		const { clock, tail: t } = tail(Duration.millis(10));
-		const stream = t.open(0n);
-		stream.excuse();
-		let settled = false;
-		const settling = t
-			.settle(() => true, new Once<unknown>())
-			.then(() => {
-				settled = true;
-			});
-
-		await clock.advance(Duration.millis(5));
-		expect(settled).toBe(false);
-		await clock.advance(Duration.millis(10));
-		await settling;
-		// Read to its end after all, it is let go once.
-		stream.done();
-		stream.done();
-	});
-
 	test("with no grace, a gap is owed until it is accounted for", async () => {
 		const { at, clock, tail: t } = tail(null);
 		t.account(0n, 1n);
@@ -233,10 +213,10 @@ describe("Tail", () => {
 		await settling;
 	});
 
-	test("with no grace, an excused stream is still given up", async () => {
+	// Lite-07 times nothing: a limit caps only a grace, so a stream is waited for until its read ends.
+	test("with no grace, a stream being read holds the end past any limit", async () => {
 		const { clock, tail: t } = tail(null);
 		const stream = t.open(0n);
-		stream.excuse();
 		let settled = false;
 		const settling = t
 			.settle(() => true, new Once<unknown>(), Duration.millis(10))
@@ -244,20 +224,17 @@ describe("Tail", () => {
 				settled = true;
 			});
 
-		await clock.advance(Duration.millis(5));
+		await clock.advance(GRACE.mul(100));
 		expect(settled).toBe(false);
-		await clock.advance(Duration.millis(10));
-		await settling;
 		stream.done();
+		await settling;
 	});
 
-	test("a parked stream holds nothing, and an excuse while parked applies once it resumes", () => {
+	test("a parked stream holds nothing until it resumes", () => {
 		const { tail: t } = tail(Duration.millis(10));
 		const stream = t.open(0n);
 		stream.park();
 		stream.park();
-		expect(t.reading).toBe(false);
-		stream.excuse();
 		expect(t.reading).toBe(false);
 		stream.resume();
 		stream.resume();

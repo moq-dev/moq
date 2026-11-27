@@ -77,6 +77,82 @@ export namespace Echo {
 	export function isEcho(path: Net.Path.Valid): boolean;
 }
 
+export namespace Health {
+	export interface Connection {
+		evidence: Health.Evidence[];
+		lostBytes?: number;
+		lostPackets?: number;
+		stale?: true;
+		verdict: Health.Verdict;
+	}
+	export interface Evidence {
+		input: Health.Input;
+		value?: number;
+		verdict: Health.Verdict;
+	}
+	export interface Health {
+		interval?: number;
+		observer: Health.Observer;
+		renditions: Record<string, Health.Rendition>;
+		reset?: Health.Reset;
+		role: Health.Role;
+		stale?: true;
+		transport: Health.Connection;
+		verdict: Health.Verdict;
+	}
+	export type Input = "rtt" | "loss" | "headroom" | "skipped" | "late" | "errors" | "stalled";
+	export interface Limits<T = number> {
+		degraded: T;
+		unhealthy: T;
+	}
+	export interface Observer {
+		identity?: Net.Identity.Valid;
+		path: Net.Path.Valid;
+	}
+	export interface PublisherThresholds {
+		skipped: Health.Limits;
+	}
+	export interface Rendition {
+		bitrate?: number;
+		bytes?: number;
+		evidence: Health.Evidence[];
+		frames?: number;
+		verdict: Health.Verdict;
+	}
+	export interface Report<S> {
+		observer: Health.Observer;
+		snapshot: S;
+	}
+	export type Reset = "decrease" | "replaced";
+	export type Role = "publisher" | "viewer";
+	export interface Sample<S> {
+		age: Net.Clock.Duration;
+		current: Health.Report<S>;
+		interval: Net.Clock.Duration;
+		previous?: Health.Report<S>;
+	}
+	export interface Thresholds {
+		publisher: Health.PublisherThresholds;
+		stale: Net.Clock.Duration;
+		transport: Health.TransportThresholds;
+		viewer: Health.ViewerThresholds;
+	}
+	export interface TransportThresholds {
+		headroom: Health.Limits;
+		loss: Health.Limits;
+		rtt: Health.Limits<Net.Clock.Duration>;
+	}
+	export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
+	export interface ViewerThresholds {
+		errors: Health.Limits;
+		late: Health.Limits;
+		stalled: Health.Limits;
+	}
+	export function defaultThresholds(): Health.Thresholds;
+	export function publisher(sample: Health.Sample<Stats.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
+	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
+}
+
 export * as Net from "@moq/net";
 
 export namespace Report {

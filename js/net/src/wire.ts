@@ -41,6 +41,11 @@ export interface Broadcast {
 	tracks(owner?: object): Tracks;
 	/** Answer the broadcast's listings, as a session does with its peer's; throws while another answers. */
 	lister(): Lister;
+	/**
+	 * The operations a metadata reader resolves names through, each name's metadata copy, where the
+	 * handle keeps those apart from the payload copies; undefined elsewhere. See {@link metaWireOf}.
+	 */
+	meta?(): Broadcast | undefined;
 }
 
 /** Receives one change to the watched prefixes: `prefix` is now (or no longer) wanted. */
@@ -223,4 +228,21 @@ export function trackOf(name: string, source: broadcast.Producer | broadcast.Con
 	if (!makeTrack) throw new Error("track module is not loaded");
 	checkName(name);
 	return makeTrack(name, wireOf(source));
+}
+
+/**
+ * The view a metadata reader resolves names through: the metadata copies where the handle keeps
+ * them apart (a lite-07 session's broadcast, or an origin front), and otherwise the payload
+ * copies, whose headers it takes. Mirrors the Rust `broadcast::Consumer::track_meta`.
+ */
+export function metaWireOf(source: broadcast.Producer | broadcast.Consumer): Broadcast {
+	const view = wireOf(source);
+	return view.meta?.() ?? view;
+}
+
+/** {@link trackOf} for a metadata reader, resolving the copy {@link metaWireOf} picks. */
+export function trackMetaOf(name: string, source: broadcast.Producer | broadcast.Consumer): track.Consumer {
+	if (!makeTrack) throw new Error("track module is not loaded");
+	checkName(name);
+	return makeTrack(name, metaWireOf(source));
 }

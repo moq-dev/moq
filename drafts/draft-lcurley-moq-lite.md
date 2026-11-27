@@ -288,11 +288,12 @@ Each endpoint MAY open one unidirectional Announce Stream (`0x3`) carrying all d
 Opened by a publisher per Group served to a Subscribe Stream: `GROUP`, zero or more `FRAME`s, and `GROUP_END` + `FIN` if finished (or `FIN` alone if closed, or reset if aborted).
 A publisher MUST NOT send `GROUP_END` for an unfinished Group, MUST NOT send two Group Streams for the same Group Start on one subscription, and a subscriber treats bytes after `GROUP_END` as a malformed Track.
 
-A publisher that resets a Group Stream after sending its `GROUP` message, toward a peer that negotiated `RESET_STREAM_AT` {{reliable-reset}}, SHOULD send it with a Reliable Size at the end of the `GROUP` message.
+A publisher that resets a Group Stream after sending its `GROUP` message, toward a peer that negotiated `RESET_STREAM_AT` {{reliable-reset}} over QUIC or QMux, SHOULD send it with a Reliable Size at the end of the `GROUP` message.
 The `GROUP` message then accounts for the Group and the reset ends its readers with its error, so the publisher names it in no `SUBSCRIBE_DROP`.
 A reset after a `GROUP_END` may cut the `GROUP_END`, so the publisher names the starts it accounted for again in `SUBSCRIBE_DROP(SKIP)`.
 Any other reset may lose the `GROUP` message, since a `RESET_STREAM` lets the peer's transport discard data it has not delivered, even data it acknowledged.
-So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT` or over a browser's WebTransport, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
+So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT`, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
+Over WebTransport it names every Group whose stream it resets after the `GROUP` message, Reliable Size or not: a browser's WebTransport API may discard a reset stream's data unread even when its QUIC connection negotiated `RESET_STREAM_AT`, and the publisher cannot tell a browser from any other peer.
 A subscriber that read the `GROUP` message first already accounted for the Group, and the drop ends its readers with the reset's error.
 
 A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder subscribe again from the first Position they lack).
@@ -426,6 +427,19 @@ A superseded Group expires when either age `>= Max Age`:
 
 When a Group expires, the publisher resets its [Group Stream](#group-stream) with `OLD` (even after sending an unacknowledged `GROUP_END` to free flow control), or names a Group it sent no `GROUP` message for in `SUBSCRIBE_DROP(OLD)`.
 A subscriber that already read the complete Group through `GROUP_END` + `FIN` keeps it unaffected: the reset arrives too late to cut it.
+
+## Metadata {#metadata}
+A metadata subscription (`SUBSCRIBE.Meta = 0x1`) asks for a Track's progress without its payloads, e.g., a standby watching a feed it may take over, or an index of a recording.
+Its mode is fixed when the `SUBSCRIBE` opens: `SUBSCRIBE_UPDATE`, `GROUP`, and `DATAGRAMS` carry none.
+
+The publisher serves it with the same Ranges, priority, `Group Order`, Group Streams, `GROUP_END`, and `SUBSCRIBE_DROP` (including `SKIP`) as a payload one, but each [FRAME](#frame-message) is its header alone; a compressed frame names its inflated size from its stored header, without inflating.
+
+A metadata frame is not the frame: it never satisfies a payload reader, never fills a cache as a complete frame, and never advances where a subscriber resumes the payload.
+A subscriber moving to the payload opens its own payload subscription from its first missing frame with a `Position` or `Joined` Start, so it is sent no frame it holds.
+
+A relay asks upstream for what a metadata subscription needs with a metadata subscription, so payload crosses no hop no reader needs it on; it MAY instead serve any part from a payload copy that proves upstream would answer it the same way.
+Only where its upstream session cannot carry the mode (e.g., an earlier version) does it serve its metadata readers from the Track's payload subscription and copy, dropping the payloads for them; it MUST NOT open a second payload subscription upstream for them.
+A relay never serves a payload reader from what a metadata subscription delivered.
 
 
 # Wire Format
@@ -765,6 +779,7 @@ SUBSCRIBE Message {
   Group Order (8),        ; 0x0 = descending, 0x1 = ascending
   Range Count (i),        ; >= 1 (0 -> PROTOCOL_VIOLATION)
   Range (..) ...,
+  Meta (8),               ; 0x0 = payload, 0x1 = metadata (other -> PROTOCOL_VIOLATION)
 }
 
 Range {
@@ -783,6 +798,7 @@ Anchor {
 
 Each Range implicitly takes the next 0-based `Range ID` on the stream; the subscription is the union of its Ranges (delivering each Group once; relays whose merged Ranges exceed message size SHOULD coalesce across the narrowest gaps).
 A Time `End` includes the Group containing it; a Position `End` is exclusive, stopping before `(Timestamp, Frame)`.
+`Meta = 0x1` makes it a [metadata subscription](#metadata), fixed for its life.
 
 `Anchor Type` values (any other -> `PROTOCOL_VIOLATION`):
 
@@ -866,7 +882,7 @@ SUBSCRIBE_DROP Message {
 }
 ~~~
 
-Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up before their `GROUP` message was sent ([Group Stream](#group-stream)) as aborted, evicted, or expired `OLD`, starts it declared it will never produce as `SKIP` ({{subscribe-skip}}), and `NOT_FOUND` for undeclared gaps.
+Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up as aborted, evicted, or expired `OLD`, before their `GROUP` message was sent or with a reset that may lose it ([Group Stream](#group-stream)), starts it declared it will never produce as `SKIP` ({{subscribe-skip}}), and `NOT_FOUND` for undeclared gaps.
 For every start in range, a publisher MUST send a Group Stream, cover it inside a `GROUP_END` span, or name it in `SUBSCRIBE_DROP`, and SHOULD name a start as soon as it gives it up or skips it.
 A Group Stream the subscriber stopped (`STOP_SENDING`) with `EVICTED` before the publisher's transport acknowledged its `GROUP` message, which the subscriber may have discarded unread, is named in a drop with `EVICTED`; no other stop is, since the subscriber sent it knowing the Group or wanting none of it.
 Dropping a whole held Group names `[start, max(End, start + 1))`.
@@ -985,15 +1001,16 @@ GROUP Message {
 ### FRAME {#frame-message}
 ~~~
 FRAME Message {
-  Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END)
+  Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END); metadata: inflated size + 1
   [Timestamp Delta (i)],  ; zigzag-encoded signed delta; omitted if Timescale == 0
-  [Inflated Size (i)],    ; present iff Track Compression != none
-  Payload (..),
+  [Inflated Size (i)],    ; present iff Track Compression != none and not metadata
+  [Payload (..)],         ; absent on a metadata subscription
 }
 ~~~
 `Timestamp Delta` is a signed delta in `Timescale` ticks from the prior `FRAME`'s timestamp on this stream; the first `FRAME` of a stream counts from the `GROUP`'s Group Start, so frame 0's delta is `0`.
 It is zigzag-mapped so small magnitudes of either sign fit in a 1-byte varint: encode `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift), decode `signed = (unsigned >> 1) ^ -(unsigned & 1)`.
 When compressed, receivers MUST check `Inflated Size` against resource limits before inflating and treat any mismatching inflated length as malformed.
+On a [metadata subscription](#metadata)'s Group Stream, a `FRAME` carries no `Inflated Size` and no `Payload`, and its `Payload Length` is the inflated size + 1, so an empty frame still reads `1` and `GROUP_END` keeps `0`.
 
 ### GROUP_END {#group-end}
 Shares `FRAME`'s leading varint using the reserved value `0`:
@@ -1079,7 +1096,8 @@ This document has no IANA actions.
 - A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - Added stream error code `SKIP` (`0x3A`) on `SUBSCRIBE_DROP` for starts the publisher declared it will never produce: final, ends no reader, and cached by relays. A start nothing accounts for is still owed, so a subscriber waits out no grace period.
-- A publisher that resets a Group Stream with `RESET_STREAM_AT` whose Reliable Size covers the `GROUP` message names no such Group in `SUBSCRIBE_DROP`; any other reset may lose the `GROUP` message, so the publisher names the Group with the reset's error, and a reset that may cut a `GROUP_END` names its inner starts again with `SKIP`. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
+- Added `SUBSCRIBE.Meta` for a metadata subscription (`0x1`), fixed for its life, whose `FRAME`s carry no `Inflated Size` or payload, `Payload Length` being the inflated size + 1. A relay serves one from a payload copy or a metadata subscription upstream, from the Track's one payload subscription only where its upstream cannot carry the mode, and never serves a payload reader from metadata.
+- A publisher that resets a Group Stream with `RESET_STREAM_AT` whose Reliable Size covers the `GROUP` message, over QUIC or QMux, names no such Group in `SUBSCRIBE_DROP`; any other reset, including every reset over WebTransport, may lose the `GROUP` message, so the publisher names the Group with the reset's error, and a reset that may cut a `GROUP_END` names its inner starts again with `SKIP`. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
 - A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.
 
 ## moq-lite-06

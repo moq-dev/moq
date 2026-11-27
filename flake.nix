@@ -22,7 +22,9 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # quest's nixpkgs, so every repository's dev shell gets the same C compiler and mbx
+    # shares build scripts, proc-macros, and the crates built on them across repositories.
+    nixpkgs.follows = "quest/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -32,12 +34,12 @@
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
       url = "github:kixel-ai/quest";
-      inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
     # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
-    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind starts new
-    # Kixel Quest series, since another Valgrind can count differently.
+    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind, or the library
+    # rust2-bench preloads into each counted process, starts new Kixel Quest series, since
+    # either can count differently.
     rust2 = {
       url = "github:kixel-ai/rust2";
       inputs.flake-utils.follows = "flake-utils";

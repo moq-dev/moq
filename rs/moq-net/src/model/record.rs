@@ -270,6 +270,10 @@ impl Record {
 		let moved = reader.ranges.is_some() && reader.ranges != self.retired;
 		if moved {
 			self.retired = reader.ranges.clone();
+			// What a fold counted as handed out before any range held it, the ranges now owe.
+			if let Some(ranges) = &reader.ranges {
+				self.delivered.reopen(ranges);
+			}
 		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
@@ -419,7 +423,7 @@ impl Record {
 	/// Settle everything below `floor` for good.
 	fn raise(&mut self, floor: u64) {
 		self.floor = floor;
-		self.delivered.forget_below(floor);
+		self.delivered.settle_below(floor);
 		self.skipped.forget(0..floor);
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);
