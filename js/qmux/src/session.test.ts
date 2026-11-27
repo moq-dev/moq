@@ -949,6 +949,13 @@ describe("Session integration (scripted peer)", () => {
 			await clock.advance(Duration.millis(200));
 			const err = await expectSessionFailure(session);
 			expect(err.message).toContain("keep-alive timeout");
+			// A wait started after the end settles at once rather than hanging.
+			let settled = false;
+			void session.staleChanged().then(() => {
+				settled = true;
+			});
+			await settle();
+			expect(settled).toBe(true);
 		} finally {
 			installed.close();
 		}

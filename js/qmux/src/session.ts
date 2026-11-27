@@ -1272,6 +1272,7 @@ export class Session implements WebTransport {
 
 	/** Settles once {@link stale} changes, or the session ends. */
 	staleChanged(): Promise<void> {
+		if (this.#closed) return Promise.resolve();
 		return this.#staleChanged.promise;
 	}
 

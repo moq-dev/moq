@@ -249,6 +249,95 @@ fn full_window_still_probes_after_healing() {
 	}
 }
 
+/// Bytes a backlogged client holds in flight past its congestion window after `secs` of a peer
+/// that pings it every `3/4 soft` but, hearing nothing, acknowledges nothing
+fn unacknowledged_excess(keep_alive: bool, secs: u64) -> u64 {
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	if keep_alive {
+		pair.client_conn_mut(client_ch)
+			.set_keep_alive(KeepAlive::new(SOFT, HARD))
+			.unwrap();
+	}
+	pair.drive();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	let chunk = [0u8; 1000];
+	pair.to_server = collapsed();
+	let start = pair.time;
+	let mut next = start;
+	run(
+		&mut pair,
+		start.saturating_add(Duration::from_secs(secs)),
+		|pair, at| {
+			let _ = pair.client_send(client_ch, s).try_write(&mut &chunk[..]);
+			if at >= next {
+				pair.server_conn_mut(server_ch).ping();
+				next = at.saturating_add(SOFT * 3 / 4);
+			}
+		},
+	);
+	assert!(!pair.client_conn_mut(client_ch).is_closed());
+	let (in_flight, window) = pair.client_conn_mut(client_ch).in_flight_and_window();
+	in_flight.saturating_sub(window)
+}
+
+/// A peer that keeps talking but never acknowledges gets the keep-alive one probe past the
+/// congestion window, not one per half `soft`, so it cannot grow the sent history without bound
+#[test]
+fn unacknowledging_peer_keeps_probes_within_the_window() {
+	let _guard = subscribe();
+	// Over these 10 s an unbounded keep-alive adds about six full-size probes past the window.
+	let (early, late) = (unacknowledged_excess(true, 18), unacknowledged_excess(true, 28));
+	assert!(late < early + 1200, "{early} then {late} bytes past the window");
+}
+
+/// Anyone on the path can send a Version Negotiation packet, so one says nothing of the peer and
+/// leaves a stale session stale
+#[test]
+fn unprotected_packet_leaves_the_peer_stale() {
+	let _guard = subscribe();
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config()),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	// Empty client CIDs, so a hardcoded Version Negotiation packet reaches the connection.
+	let cid_generator: fn() -> Box<dyn ConnectionIdGenerator> = || Box::new(RandomConnectionIdGenerator::new(0));
+	let client = Endpoint::new(
+		endpoint::Config {
+			cid_generator: Some(Arc::new(cid_generator)),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	let (client_ch, _) = pair.connect();
+	pair.client_conn_mut(client_ch)
+		.set_keep_alive(KeepAlive::new(SOFT, HARD))
+		.unwrap();
+	pair.drive();
+
+	pair.to_server = collapsed();
+	pair.to_client = collapsed();
+	let stale = pair.time.saturating_add(SOFT + Duration::from_millis(100));
+	run(&mut pair, stale, |_, _| {});
+	assert!(pair.client_conn_mut(client_ch).is_stale());
+
+	let forged = hex!("80 00000000 00 04 00000000 0a1a2a3a");
+	pair.client.inbound.push_back((pair.time, None, forged[..].into()));
+	let after = pair.time.saturating_add(Duration::from_millis(10));
+	run(&mut pair, after, |_, _| {});
+	assert!(pair.client_conn_mut(client_ch).is_stale());
+	assert!(!pair.client_conn_mut(client_ch).is_closed());
+}
+
 /// A `hard` past the negotiated idle timeout would never be reached, so it is refused
 #[test]
 fn refuses_hard_past_the_idle_timeout() {

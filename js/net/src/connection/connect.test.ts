@@ -577,6 +577,34 @@ test("a supplied transport that refuses the keep-alive is closed", async () => {
 	expect(closed).toBe(true);
 });
 
+test("accept reads a qmux session's protocol once the keep-alive waits for its parameters", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	// The server side as a qmux session whose parameters have not arrived: no protocol yet, and
+	// a keep-alive refused until they do.
+	let ready = false;
+	const params = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server, "protocol", { get: () => (ready ? ALPN_06 : "") });
+	Object.defineProperty(pair.server, "ready", { value: params.promise });
+	Object.assign(pair.server, {
+		stale: false,
+		keepAlive() {
+			if (!ready) throw new Error("keep-alive needs the peer's transport parameters; await ready");
+		},
+		staleChanged: () => new Promise(() => {}),
+	});
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	const accepting = accept({ url, transport: pair.server, keepAlive });
+	const connecting = connect(url, { transport: pair.client });
+	await settle();
+	ready = true;
+	params.resolve();
+	const [server, client] = await Promise.all([accepting, connecting]);
+	expect(server.version).toBe(client.version);
+	expect(server.liveness?.peek()).toBe("live");
+	client.abort();
+	server.abort();
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);

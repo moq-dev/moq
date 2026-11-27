@@ -114,6 +114,8 @@ async function acceptInner(
 	url: URL,
 	props: Omit<AcceptProps, "transport" | "url">,
 ): Promise<Session> {
+	// Before reading the protocol, which a qmux session settles by the time its parameters arrive.
+	const liveness = props.keepAlive && (await KeepAlive.start(transport, props.keepAlive));
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol = (transport as { protocol?: string }).protocol;
@@ -122,7 +124,7 @@ async function acceptInner(
 		publish: props.publish,
 		client: false,
 		implementation: props.implementation ?? IMPLEMENTATION,
-		liveness: props.keepAlive && (await KeepAlive.start(transport, props.keepAlive)),
+		liveness,
 		...link(props),
 	};
 

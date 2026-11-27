@@ -221,6 +221,8 @@ pub struct Connection {
 	liveness: Option<Liveness>,
 	/// When the peer was last heard: the latest authenticated packet
 	heard: Instant,
+	/// When the keep-alive last sent a probe past the congestion window
+	exempt_probe: Option<Instant>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -378,6 +380,7 @@ impl Connection {
 			keep_alive: None,
 			liveness: None,
 			heard: now,
+			exempt_probe: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -2736,14 +2739,18 @@ impl Connection {
 		packet: Option<u64>,
 		spin: bool,
 	) {
-		self.heard = self.heard.max(now);
-		if let Some(liveness) = &mut self.liveness
-			&& liveness.heard(now)
-		{
-			debug!("peer is live again");
-			self.streams.waits.wake_stale();
+		// Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+		// Version Negotiation packet.
+		if packet.is_some() {
+			self.heard = self.heard.max(now);
+			if let Some(liveness) = &mut self.liveness
+				&& liveness.heard(now)
+			{
+				debug!("peer is live again");
+				self.streams.waits.wake_stale();
+			}
+			self.arm_liveness();
 		}
-		self.arm_liveness();
 		self.reset_keep_alive(now);
 		self.reset_idle_timeout(now, space_id);
 		self.permit_idle_reset = true;
@@ -2830,8 +2837,18 @@ impl Connection {
 				self.ping();
 				// Exempt from congestion control, as a PTO's probe is: a dead path leaves the window
 				// full of packets nothing acknowledges, and the backed-off PTO can fall past `hard`.
-				let space = &mut self.spaces[self.highest_space];
-				space.loss_probes = space.loss_probes.max(1);
+				// A peer heard since the last exempt probe that acknowledged nothing sent after it
+				// is not a dead path, and gets no more, or it could grow the sent history by one
+				// probe per half `soft`.
+				let space = self.highest_space;
+				let exempt = self
+					.exempt_probe
+					.is_none_or(|at| self.heard <= at || self.spaces[space].largest_acked_packet_sent >= at);
+				if exempt {
+					self.exempt_probe = Some(now);
+					let space = &mut self.spaces[space];
+					space.loss_probes = space.loss_probes.max(1);
+				}
 				self.timers.set(Timer::KeepAlive, now.saturating_add(after));
 			}
 		}
@@ -4629,6 +4646,12 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn has_prev_path(&self) -> bool {
 		self.prev_path.is_some()
+	}
+
+	/// Bytes in flight on the current path, and its congestion window
+	#[cfg(test)]
+	pub(crate) fn in_flight_and_window(&self) -> (u64, u64) {
+		(self.path.in_flight.bytes, self.path.congestion.window())
 	}
 
 	/// When the pacer's bucket is full again, or `None` if it is now
