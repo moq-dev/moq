@@ -333,8 +333,10 @@ impl Audio {
 				_ = &mut close => return Ok(()),
 				read = consumer.read() => match read {
 					Ok(Some(moq_audio::decode::Read::Frame(frame))) => Read::Frame(frame),
-					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration })) => Read::gap(timestamp, duration)?,
-					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end),
+					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration, .. })) => Read::gap(timestamp, duration)?,
+					Ok(Some(moq_audio::decode::Read::End { end, .. })) => Read::end(end),
+					// A read this binding predates carries nothing its callback can report.
+					Ok(Some(_)) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
