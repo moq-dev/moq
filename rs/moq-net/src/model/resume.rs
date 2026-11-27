@@ -3981,11 +3981,32 @@ impl Recover {
 	/// holds it. Too old and evicted judge a subscription's delivery, not whether the group
 	/// exists, so neither is a verdict on a fetch: one answered from a group still arriving
 	/// over a subscription asks the route again for the rest when that delivery gives up on it.
+	/// Nor is too old one on a reader wider than the copy's upstream may have judged it under.
 	fn undelivered(&self, err: &Error) -> bool {
+		let code = StreamError::from(err);
 		err.retryable()
 			|| copy_failed(&self.copy)
 			|| matches!(err, Error::Lagged)
-			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
+			|| (self.reader.is_none() && matches!(code, StreamError::Old | StreamError::Evicted))
+			|| (code == StreamError::Old && self.outgrows_judging())
+	}
+
+	/// Whether the reader is wider than the narrowest budget the copy's upstream asked, which
+	/// a group it reset as too old may have been judged under: that verdict settles a reader
+	/// only as a stale drop does (see [`track::settles`]), and the route still delivers the
+	/// group to a request under the reader's own terms. A cache only makes things faster.
+	fn outgrows_judging(&self) -> bool {
+		let Some(judged) = self.copy.judged_under() else {
+			return false;
+		};
+		let Some(reader) = self.reader.as_ref().and_then(Weak::upgrade) else {
+			return false;
+		};
+		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		let budget = reader.budget();
+		let cap = reader.groups.1;
+		let coverage = reader.window().groups().cloned().map(|groups| (groups, cap));
+		!track::settles(&budget, &coverage, self.key, &track::Hole::stale(judged))
 	}
 
 	/// Whether the route would answer `err`, a failure of the copy being read, with `err`
@@ -14765,6 +14786,59 @@ mod test {
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
+	}
+
+	/// A copy's upstream resetting a group's stream as too old judged that copy's subscription,
+	/// not whether the group exists. A reader wider than the budget the copy asked, such as a
+	/// relay's one-shot SUBSCRIBE for the group or a reader with a longer budget, asks the route
+	/// for the rest, as the route would answer that reader's own request; a reader no wider
+	/// takes the verdict without asking.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_copys_stale_reset_stands_only_for_a_reader_no_wider() {
+		for reader in ["bounded", "longer", "edge"] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			let dynamic = a.requests();
+			routes.serve(a.consume());
+			// The copy's upstream subscription asked a live join at the live edge, which its
+			// publisher may judge the group under.
+			a.judge_under(Duration::ZERO);
+
+			let mut arriving = a.create_group(group::Info { start: 0 }).unwrap();
+			arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut sub = match reader {
+				"bounded" => {
+					let one = Subscription::default().with_ranges([track::Range {
+						start: track::Start::Time(0),
+						end: Some(0),
+					}]);
+					logical.consume().subscribe(one).now_or_never().unwrap().unwrap()
+				}
+				"longer" => subscribe(&logical, Duration::from_secs(10)),
+				_ => subscribe(&logical, Duration::ZERO),
+			};
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()), "{reader}");
+
+			arriving.abort(Error::Stream(StreamError::Old)).unwrap();
+			let _next = a.create_group(group::Info { start: 1 }).unwrap();
+			let res = reading.read_frame().now_or_never();
+			if reader == "edge" {
+				assert!(matches!(res, Some(Err(_))), "{reader}: {res:?}");
+				assert!(dynamic.requested_fill_group().now_or_never().is_none(), "nothing asked");
+				continue;
+			}
+			assert!(res.is_none(), "{reader}: {res:?}");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!((request.key(), request.frame_start()), (0, 1), "{reader}");
+			let mut rest = request.accept(None).unwrap().expect("a fresh group");
+			rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+			rest.finish().unwrap();
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "{reader}");
+			assert_eq!(read(&mut reading), None, "{reader}");
+		}
 	}
 
 	/// Mirrors `routeFailed` in `js/net/src/resume.test.ts`: only these stream codes are a
