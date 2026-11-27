@@ -180,7 +180,7 @@ seeded() {
 platform_crates() {
     local files rc=0
     files=$(git grep --untracked -lE \
-        'target_(os|family|env|vendor|arch)([^a-z_]|$)|cfg(_attr)?!?\(.*[^a-z_:](unix|windows)([^a-z_]|$)|^[[:space:]]*(unix|windows)[[:space:]]*[,)]|std::os::|CARGO_CFG_TARGET_|^\[target\.([^.]*-|.*(unix|windows|target_))' \
+        'target_(os|family|env|vendor|arch)([^a-z_]|$)|cfg(_attr)?!?\((.*[^a-z_:])?(unix|windows)([^a-z_]|$)|^[[:space:]]*(unix|windows)[[:space:]]*[,)]|std::os::|CARGO_CFG_TARGET_|^\[target\.([^.]*-|.*(unix|windows|target_))' \
         -- 'rs/*.rs' 'rs/*/Cargo.toml' ':!rs/*/fuzz/**') || rc=$?
     ((rc <= 1)) || return "$rc"
     cut -d/ -f2 <<<"$files" | sort -u
