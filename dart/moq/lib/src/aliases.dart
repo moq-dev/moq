@@ -136,11 +136,20 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
+/// The read side of a metadata subscription: yields a track's groups in arrival order, each frame as its header alone.
+typedef MetaConsumer = MoqMetaConsumer;
+
+/// One group of a metadata subscription: yields its frames' headers, without their payloads.
+typedef MetaGroup = MoqMetaGroup;
+
 /// A datagram payload with its own sequence and timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
+
+/// A frame's header without its payload: its declared size in bytes (0 for an empty frame) and timestamp.
+typedef FrameHeader = MoqFrameHeader;
 
 /// An exact media time: `value` units at `scale` units per second.
 ///
