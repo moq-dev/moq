@@ -15,7 +15,7 @@ Work items (report before/after `js/qmux/bench/` numbers):
 1. **Multi-frame record batching (`scheduler.ts:383-433`, `frame.ts`)**: Pack queued control (`MAX_DATA`, `MAX_STREAM_DATA`, `FIN`) and small `STREAM` frames into one QMux record up to the peer's `max_record_size` on `qmux-01/02`, avoiding a separate WebSocket frame, 4-byte browser mask, and TLS record per frame.
 2. **Cut per-frame allocations and copies (`frame.ts:305-493, 698`)**: Reuse a scratch encode buffer instead of allocating a fresh `ArrayBuffer` + 4 `DataView`s per `STREAM` frame, and skip unconditional `own()` payload copies on inbound frames when a slice does not pin a large backing buffer.
 3. **O(1) scheduling and datagrams (`scheduler.ts`)**: Replace the O(N) ready-stream scan in `#pickStream` and `Array.shift()` on `#datagrams` with O(1) structures (priority bucket/heap or queue + ring buffer).
-4. **Drop redundant native `WebSocketStream` receive `TransformStream`**: Remove the `event.readable.pipeThrough(new TransformStream(...))` wrapper in `web-socket-stream.ts:365-371` and rely on the `ArrayBuffer` normalization already performed in `js/qmux/src/session.ts` (noted in `audit-perf.md:113`).
+4. **Drop redundant native `WebSocketStream` receive `TransformStream`**: Remove the `event.readable.pipeThrough(new TransformStream(...))` wrapper in `web-socket-stream.ts:365-371` by using an internal transport type for `Session` (keeping exported `WebSocketStreamLike` / `WebSocketStreamOpenEvent` types unchanged) and relying on the `ArrayBuffer` normalization already performed in `js/qmux/src/session.ts` (noted in `audit-perf.md:113`).
 
 Public API: none. Wire: none (multi-frame records are standard `qmux-01/02`).
 
