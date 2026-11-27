@@ -1,4 +1,4 @@
-# [XS] Interop and Video pass on main
+# Interop and Video pass on main
 
 ## Goal
 
