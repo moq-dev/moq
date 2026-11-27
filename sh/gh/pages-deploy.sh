@@ -25,15 +25,20 @@ deployment=$(
         '{artifact_id: $artifact, pages_build_version: $version, oidc_token: $oidc}' |
         gh api -X POST "repos/$GITHUB_REPOSITORY/pages/deployments" --input -
 )
-status_url=$(jq -er .status_url <<<"$deployment")
+id=$(jq -er .id <<<"$deployment")
 page_url=$(jq -er .page_url <<<"$deployment")
 echo "page_url=$page_url" >>"$GITHUB_OUTPUT"
 echo "Deploying artifact $1 to $page_url"
+deployment_path="repos/$GITHUB_REPOSITORY/pages/deployments/$id"
+
+# A cancelled or timed-out job stops its deployment rather than leave it pending.
+trap 'gh api -X POST "$deployment_path/cancel" >/dev/null; exit 1' INT TERM
 
 # Pages offers no completion event, so poll as deploy-pages does; the job's timeout bounds it.
+# A failed read is not a result: the deployment exists and may still be settling.
 while :; do
     sleep 5
-    status=$(gh api "repos/$GITHUB_REPOSITORY/pages/deployments/${status_url##*/}" --jq .status)
+    status=$(gh api "$deployment_path" --jq .status) || status=unavailable
     case $status in
         succeed) exit 0 ;;
         deployment_failed | deployment_content_failed | deployment_cancelled | deployment_lost)
