@@ -29,7 +29,7 @@ exclude_re = [
     # live session ties it.
     'replace < with <= in Router<N, I, A>::disconnect$',
     # A pick's key ends in its next hop or its claimant, so no two keys tie.
-    'replace < with <= in Router<N, I, A>::(reselect|closest)$',
+    'replace < with <= in Router<N, I, A>::(reselect|closest|closest_of)$',
     # A session closed at a floor already recorded touches routes that stay as they
     # were, and reselecting an unchanged route does nothing.
     'replace > with >= in Router<N, I, A>::closed$',
