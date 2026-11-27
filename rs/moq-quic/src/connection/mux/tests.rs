@@ -571,7 +571,7 @@ fn resets_are_acknowledged_once_the_transport_takes_them() {
 		let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
 		pair.client.send_stream(id).reset(VarInt::from_u32(1)).unwrap();
 		let mut records = 0;
-		while let Poll::Ready(_) = pair.client.poll_transmit(&kio::Waiter::noop(), pair.now) {
+		while pair.client.poll_transmit(&kio::Waiter::noop(), pair.now).is_ready() {
 			records += 1;
 		}
 		assert!(records > 0, "{version:?}");

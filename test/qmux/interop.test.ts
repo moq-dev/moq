@@ -123,7 +123,12 @@ async function expectResetAt(session: Session, version: Version): Promise<void> 
 	);
 	expect(reset).toBeInstanceOf(StreamError);
 	expect((reset as StreamError).streamErrorCode).toBe(RESET_CODE);
-	const prefix = new Uint8Array(await new Blob(chunks).arrayBuffer());
+	const prefix = new Uint8Array(chunks.reduce((len, chunk) => len + chunk.byteLength, 0));
+	let at = 0;
+	for (const chunk of chunks) {
+		prefix.set(chunk, at);
+		at += chunk.byteLength;
+	}
 	expect(prefix.byteLength).toBe(RESET_PREFIX);
 	for (let index = 0; index < prefix.byteLength; index++) {
 		if (prefix[index] !== (index * 31 + RESET_SEED) % 251) throw new Error(`reset prefix mismatch at ${index}`);
