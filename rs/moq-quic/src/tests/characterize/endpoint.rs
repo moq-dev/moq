@@ -416,6 +416,28 @@ fn cids_exhausted_counts_random_bits_not_bytes() {
 	assert_eq!(exhaust(&mut pair), 193);
 }
 
+/// Connections asking for more IDs than are left get what the space has to give, never a search
+/// for one that may not exist: past 7/8 held, issuance stops.
+#[test]
+fn cid_issuance_stops_before_the_space_is_held() {
+	use crate::shared::{ConnectionEventInner, EndpointEvent, EndpointEventInner};
+
+	let _guard = subscribe();
+	let mut pair = exhausted();
+	assert_eq!(exhaust(&mut pair), 193);
+	let ch = *pair.server.connections.keys().next().unwrap();
+	let event = EndpointEvent(EndpointEventInner::NeedIdentifiers(pair.time, 1000));
+	let Some(event) = pair.server.endpoint.handle_event(ch, event) else {
+		panic!("expected identifiers");
+	};
+	let ConnectionEventInner::NewIdentifiers(ids, _) = event.0 else {
+		panic!("expected identifiers");
+	};
+	// 256 IDs, an eighth held in reserve
+	assert_eq!(pair.server.endpoint.known_cids(), 225);
+	assert_eq!(ids.len(), 225 - 193);
+}
+
 /// Exhaustion before an Initial arrives drops it without a word
 #[test]
 fn cids_exhausted_drops_initial() {

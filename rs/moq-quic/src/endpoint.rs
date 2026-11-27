@@ -390,7 +390,9 @@ impl Endpoint {
 		trace!(initial_dcid = %remote_id);
 
 		let ch = ConnectionHandle(self.connections.vacant_key());
-		let loc_cid = self.new_cid(RouteDatagramTo::Connection(ch));
+		let Some(loc_cid) = self.new_cid(RouteDatagramTo::Connection(ch)) else {
+			return Err(ConnectError::CidsExhausted);
+		};
 		let params = TransportParameters::new(
 			&config.transport,
 			&self.config,
@@ -429,7 +431,11 @@ impl Endpoint {
 	fn send_new_identifiers(&mut self, now: Instant, ch: ConnectionHandle, num: u64) -> ConnectionEvent {
 		let mut ids = vec![];
 		for _ in 0..num {
-			let id = self.new_cid(RouteDatagramTo::Connection(ch));
+			// Fewer IDs than asked for leave the peer with fewer to migrate to, which beats none left
+			// for the connections still to start.
+			let Some(id) = self.new_cid(RouteDatagramTo::Connection(ch)) else {
+				break;
+			};
 			let meta = &mut self.connections[ch];
 			let sequence = meta.cids_issued;
 			meta.cids_issued += 1;
@@ -443,18 +449,22 @@ impl Endpoint {
 		ConnectionEvent(ConnectionEventInner::NewIdentifiers(ids, now))
 	}
 
-	/// Generate and reserve a local connection ID
-	fn new_cid(&mut self, route_to: RouteDatagramTo) -> ConnectionId {
+	/// Generate and reserve a local connection ID, or `None` once the generator's space is nearly
+	/// held, where finding a free one could take arbitrarily long
+	fn new_cid(&mut self, route_to: RouteDatagramTo) -> Option<ConnectionId> {
+		if self.cids_full() {
+			return None;
+		}
 		loop {
 			let cid = self.local_cid_generator.generate_cid();
 			if cid.is_empty() {
 				// Zero-length CID; nothing to track
 				debug_assert_eq!(self.local_cid_generator.cid_len(), 0);
-				return cid;
+				return Some(cid);
 			}
 			if let hash_map::Entry::Vacant(e) = self.index.connection_ids.entry(cid) {
 				e.insert(route_to);
-				break cid;
+				break Some(cid);
 			}
 		}
 	}
@@ -653,23 +663,12 @@ impl Endpoint {
 		}
 
 		if self.cids_exhausted() {
-			debug!("refusing connection");
-			let response = self.initial_close(
-				version,
-				incoming.addresses,
-				&incoming.crypto,
-				src_cid,
-				TransportError::CONNECTION_REFUSED(""),
-				buf,
-			);
-			self.ignore(incoming);
-			return Err(Box::new(AcceptError {
-				cause: ConnectionError::CidsExhausted,
-				response: Some(response),
-			}));
+			return Err(self.refuse_cids_exhausted(incoming, buf));
 		}
 
-		let loc_cid = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx));
+		let Some(loc_cid) = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx)) else {
+			return Err(self.refuse_cids_exhausted(incoming, buf));
+		};
 		let mut params = TransportParameters::new(
 			&server_config.transport,
 			&self.config,
@@ -683,7 +682,10 @@ impl Endpoint {
 		params.retry_src_cid = incoming.token.retry_src_cid;
 		let mut pref_addr_cid = None;
 		if server_config.has_preferred_address() {
-			let cid = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx));
+			let Some(cid) = self.new_cid(RouteDatagramTo::Incoming(incoming.incoming_idx)) else {
+				self.index.retire(loc_cid);
+				return Err(self.refuse_cids_exhausted(incoming, buf));
+			};
 			pref_addr_cid = Some(cid);
 			params.preferred_address = Some(PreferredAddress {
 				address_v4: server_config.preferred_address_v4,
@@ -743,6 +745,24 @@ impl Endpoint {
 			params,
 			args,
 			guard: AcceptDropGuard,
+		})
+	}
+
+	/// Refuse `incoming` for want of connection IDs, releasing everything it held
+	fn refuse_cids_exhausted(&mut self, incoming: Incoming, buf: &mut Vec<u8>) -> Box<AcceptError> {
+		debug!("refusing connection");
+		let response = self.initial_close(
+			incoming.version,
+			incoming.addresses,
+			&incoming.crypto,
+			incoming.packet.header.src_cid,
+			TransportError::CONNECTION_REFUSED(""),
+			buf,
+		);
+		self.ignore(incoming);
+		Box::new(AcceptError {
+			cause: ConnectionError::CidsExhausted,
+			response: Some(response),
 		})
 	}
 
@@ -1119,17 +1139,27 @@ impl Endpoint {
 
 	/// Whether we've used up 3/4 of the available CID space
 	///
-	/// We leave some space unused so that `new_cid` can be relied upon to finish quickly. We don't
-	/// bother to check when the generator has more than 32 random bits because 2^32 connections is
-	/// a lot.
+	/// We leave a quarter unused for the IDs that handshakes and established connections still
+	/// ask for, which [`new_cid`](Self::new_cid) draws on until [`cids_full`](Self::cids_full).
 	fn cids_exhausted(&self) -> bool {
+		self.cid_space_over(2)
+	}
+
+	/// Whether we've used up 7/8 of the available CID space, past which a free one is too costly to find
+	fn cids_full(&self) -> bool {
+		self.cid_space_over(3)
+	}
+
+	/// Whether more than `1 - 2^-shift` of the generator's IDs are held. We don't bother to check
+	/// when the generator has more than 32 random bits because 2^32 connections is a lot.
+	fn cid_space_over(&self, shift: u32) -> bool {
 		let bits = self.local_cid_generator.entropy_bits();
 		if bits == 0 || bits > 32 {
 			return false;
 		}
 
 		let space = 1u64 << bits;
-		let reserve = 1u64 << (bits - 2);
+		let reserve = space >> shift;
 		let len = self.index.connection_ids.len() as u64;
 
 		len > (space - reserve)
