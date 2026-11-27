@@ -32,9 +32,46 @@ This is not the cause [moq-dev/moq#9079](https://github.com/moq-dev/moq/pull/907
 tail. The harness now passes the whole read phase as `max-delay`, unless that setting fails to
 reach the subscription.
 
-1. Read the relay log in the CI run's `interop-failure` artifact (1.4 GB, expires 2026-12-02):
-   the relay logs `moq_net::lite::publisher` at debug, so it shows which subscriptions the gst
-   session opened for `finish-go-19687-836/fixture.hang` and what was served.
+1. Read the relay log in the CI run's `interop-failure` artifact (1.4 GB, expires 2026-12-02).
+   Done: at `420b8dcb0d` the harness logged only `moq_net::lite::subscriber` at debug, so the log
+   shows the relay's upstream subscriptions to the go publisher (conn 188, moq-lite-07-wip) but
+   not what it served the gst session (conn 189, moq-lite-06). Kept here, since the artifact
+   expires (ids and timestamps trimmed, `b=` is `finish-go-19687-836/fixture.hang`):
+
+   ```text
+   18:56:34.274858Z  INFO conn{id=188}: session accepted publish=finish-go-19687-836
+   18:56:34.275641Z  INFO conn{id=188}: negotiated version=moq-lite-07-wip transport=webtransport
+   18:56:34.284444Z DEBUG conn{id=188}: sub::routed: announce route=b
+   18:56:34.344711Z DEBUG conn{id=188}: sub: subscribe started id=0 b track=catalog.json
+   18:56:34.454560Z DEBUG conn{id=188}: sub: finished track released b track=catalog.json
+   18:56:34.469658Z DEBUG conn{id=188}: sub: subscribe started id=1 b track=0.avc3
+   18:56:34.471226Z DEBUG conn{id=188}: sub: subscribe started id=2 b track=catalog.json
+   18:56:34.505872Z  INFO conn{id=189}: session accepted request.role=Some(Subscriber) subscribe=finish-go-19687-836
+   18:56:34.506617Z  INFO conn{id=189}: negotiated version=moq-lite-06 transport=webtransport
+   18:56:34.532027Z DEBUG conn{id=188}: sub: finished track released b track=0.avc3
+   18:56:34.549217Z DEBUG conn{id=188}: sub: subscribe started id=3 b track=tone
+   18:56:34.557630Z DEBUG conn{id=188}: sub: subscribe started id=4 b track=0.avc3
+   18:56:34.571478Z DEBUG conn{id=188}: sub: finished track released b track=tone
+   18:56:34.585852Z DEBUG conn{id=188}: sub: finished track released b track=catalog.json
+   18:56:34.610127Z DEBUG conn{id=188}: sub: finished track released b track=0.avc3
+   18:56:44.298360Z DEBUG conn{id=188}: sub: source closed err=closed
+   18:57:45.825853Z  WARN conn{id=189}: connection closed id=189 err=cancelled
+   ```
+
+   And moqsrc (`finish-go-gst.out`, INFO only, no buffer or event line):
+
+   ```text
+   18:56:34.491280Z  INFO moq_tokio::client: connected version=moq-lite-06 transport=webtransport
+   18:56:34.512437Z  INFO gstmoq::source::imp: waiting for broadcast to be announced path=b
+   18:56:34.519615Z  INFO gstmoq::source::imp: online path=b instance=Some(Instance("ecbb96a1d7e62c2028b4e477d1a24805", "minted"))
+   18:56:44.306453Z  INFO gstmoq::source::imp: offline, holding pads until it returns path=b
+   ```
+
+   Only moqsrc reads `tone`, so `id=3` and `id=4` are its renditions: it read the catalog and
+   subscribed both, and the relay received the whole `0.avc3` tail on `id=4`. Unlike every
+   passing row (python, cpp), where the relay's catalog copy finished before moqsrc's track
+   subscriptions, here moqsrc read the catalog from an in-flight upstream copy (`id=2`) whose end
+   arrived about 30 ms after its track subscriptions.
 2. Reproduce: loop `just test interop --finish --publishers python,go,rust --subscribers gst`
    through `quest gate` under CPU load, with `RUST_LOG=debug` and `GST_DEBUG=moq-src:6` for
    gst-launch, across `--versions moq-lite-06,moq-lite-07-wip`. #9079 could not reproduce its
