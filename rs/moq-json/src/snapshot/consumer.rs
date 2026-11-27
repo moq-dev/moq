@@ -23,7 +23,7 @@ pub struct Config {
 	pub max_size: Option<usize>,
 
 	/// Delivery priority of the consumer's subscription, higher first, as
-	/// [`Subscription::priority`](moq_net::track::Subscription::priority).
+	/// [`Range::priority`](moq_net::track::Range::priority).
 	pub priority: i8,
 
 	/// The reader's playout delay behind the live edge: the subscription's

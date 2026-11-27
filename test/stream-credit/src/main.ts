@@ -40,7 +40,6 @@ window.subscribe = async (plan) => {
 	const consumers = plan.tracks.map((track) => active.track(track.name));
 	const subscribers = plan.tracks.map((track, i) =>
 		consumers[i].subscribe({
-			priority: track.priority,
 			ranges: [
 				{
 					start: {
@@ -49,6 +48,7 @@ window.subscribe = async (plan) => {
 							max: Moq.Clock.Duration.millis(track.budget),
 						},
 					},
+					priority: track.priority,
 				},
 			],
 		}),

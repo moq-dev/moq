@@ -55,8 +55,7 @@ try {
 			[0n, 5n, [0n, 2n, 4n]],
 		] as const) {
 			const reader = broadcast.track("test").subscribe({
-				ranges: [{ ...(start === 0n ? {} : { start }), end: end - 1n }],
-				order: "ascending",
+				ranges: [{ ...(start === 0n ? {} : { start }), end: end - 1n, order: "ascending" }],
 			});
 			try {
 				const seen: bigint[] = [];

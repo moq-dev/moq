@@ -98,7 +98,7 @@ async function run(): Promise<void> {
 			if (renditions) videoTrack = Object.keys(renditions)[0];
 		}
 
-		const video = bc.track(videoTrack).subscribe({ priority: 0 });
+		const video = bc.track(videoTrack).subscribe();
 		let total = 0;
 		for (;;) {
 			const group = await video.recvGroup();

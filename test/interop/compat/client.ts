@@ -37,7 +37,7 @@ function first<T>(section: { renditions: Record<string, T> } | undefined): [stri
 
 /** Read catalog updates until `pick` finds what it needs in one. */
 async function catalog<T>(bc: Moq.Broadcast.Consumer, pick: (root: Catalog.Root) => T | undefined): Promise<T> {
-	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
+	const track = bc.track("catalog.json").subscribe({ ranges: [{ priority: Catalog.PRIORITY.catalog }] });
 	const decoder = new Json.Snapshot.Decoder<Catalog.Root>({ schema: Catalog.RootSchema });
 	for (;;) {
 		const group = await track.recvGroup();
@@ -78,7 +78,7 @@ async function openFormat(
 /** The byte count of the first non-empty video frame. */
 async function video(bc: Moq.Broadcast.Consumer, [name, config]: [string, Catalog.VideoConfig]): Promise<number> {
 	const format = await openFormat("video", config);
-	const track = bc.track(name).subscribe({ priority: 0 });
+	const track = bc.track(name).subscribe();
 	for (let group = await track.recvGroup(); group; group = await track.recvGroup()) {
 		try {
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) {
@@ -251,7 +251,7 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 		if (read.kind === "group") {
 			// Name a group that live demand is filling, so a FETCH of it never races eviction.
 			const name = read.track ?? (await catalog(bc, (root) => first(root.video)?.[0]));
-			const group = await bc.track(name).subscribe({ priority: 0 }).recvGroup();
+			const group = await bc.track(name).subscribe().recvGroup();
 			if (!group) throw new Error(`${name} ended before its first group`);
 			// A group names its start in this checkout's @moq/net, and its sequence in released ones.
 			const id = group as unknown as { start?: bigint; sequence?: bigint };

@@ -9570,7 +9570,6 @@ async fn delay_min_places_a_range_with_no_start() {
 					order: Some(MoqOrder::Ascending),
 					..Default::default()
 				}]),
-				..moq_subscription_defaults()
 			}))
 			.unwrap();
 		kio::clock::timeout(TIMEOUT, consumer.recv_group())
