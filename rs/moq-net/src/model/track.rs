@@ -7132,6 +7132,9 @@ impl Drop for Alive {
 		state.publication = Publication::Pending;
 		state.handoff = resume;
 		drop(state);
+		// Registering the renewal's handler and queueing it wake readers, who may be polled
+		// inline and read this track or its broadcast: hold the wakes until those locks drop.
+		let _hold = kio::hold();
 		let mut request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
 		// Listed again once served, as it was before this producer left.
 		if listed {
