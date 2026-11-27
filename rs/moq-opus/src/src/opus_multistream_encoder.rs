@@ -1583,7 +1583,6 @@ pub unsafe fn opus_multistream_encoder_ctl_impl(st: *mut OpusMSEncoder, request:
 	ret = opus_multistream_encoder_ctl_va_list(st, request, args);
 	return ret;
 }
-#[macro_export]
 macro_rules! opus_multistream_encoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_multistream_encoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -1595,6 +1594,7 @@ macro_rules! opus_multistream_encoder_ctl {
         opus_multistream_encoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_multistream_encoder_ctl;
 pub unsafe fn opus_multistream_encoder_destroy(st: *mut OpusMSEncoder) {
 	free(st as *mut core::ffi::c_void);
 }

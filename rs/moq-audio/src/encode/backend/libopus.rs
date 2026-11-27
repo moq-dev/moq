@@ -3,12 +3,7 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-use moq_opus::{
-	OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_VOIP, OPUS_GET_BITRATE_REQUEST, OPUS_GET_IN_DTX_REQUEST,
-	OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST,
-	OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC, OPUS_SIGNAL_VOICE, OpusEncoder, opus_encode_float, opus_encoder_create,
-	opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
-};
+use moq_opus::{Application, Signal};
 
 use super::Backend;
 use crate::encode::{Config, Encoded, Kind};
@@ -20,7 +15,7 @@ pub(super) const NAME: &str = "libopus";
 const MAX_PACKET_BYTES: usize = 4_000;
 
 pub(super) struct Libopus {
-	inner: *mut OpusEncoder,
+	inner: moq_opus::Encoder,
 	scratch: Vec<u8>,
 	/// Packets submitted but not yet received, which reuse their slots across calls.
 	ready: VecDeque<Encoded>,
@@ -32,11 +27,6 @@ pub(super) struct Libopus {
 	/// Whether discontinuous transmission is on, which only voice turns on.
 	dtx: bool,
 }
-
-// SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
-// struct; libopus encoder methods take a single &mut, so a unique owner is
-// allowed to move it across threads.
-unsafe impl Send for Libopus {}
 
 impl Libopus {
 	/// Opens at the config's rate and layout, which the front end has already
@@ -52,27 +42,14 @@ impl Libopus {
 		// The same application and signal WebCodecs gets from `@moq/publish` for each kind. libopus
 		// has no default application, so an unknown kind takes the general-purpose one.
 		let (application, signal) = match config.kind {
-			Some(Kind::Voice) => (OPUS_APPLICATION_VOIP, Some(OPUS_SIGNAL_VOICE)),
-			Some(Kind::Music) => (OPUS_APPLICATION_AUDIO, Some(OPUS_SIGNAL_MUSIC)),
-			None => (OPUS_APPLICATION_AUDIO, None),
+			Some(Kind::Voice) => (Application::Voip, Signal::Voice),
+			Some(Kind::Music) => (Application::Audio, Signal::Music),
+			None => (Application::Audio, Signal::Auto),
 		};
 		let dtx = config.kind == Some(Kind::Voice);
 
-		let mut err = 0i32;
-		// SAFETY: out-pointer `err` is valid; inner is checked for null below.
-		let inner = unsafe {
-			opus_encoder_create(
-				sample_rate as i32,
-				opus::validate_channels(channels)?,
-				application,
-				&mut err,
-			)
-		};
-		if err != OPUS_OK || inner.is_null() {
-			return Err(opus::error(err, "opus_encoder_create"));
-		}
-
-		// Owned from here, so an early return below destroys it.
+		let inner = moq_opus::Encoder::new(sample_rate, opus::validate_channels(channels)?, application)
+			.map_err(|err| opus::error(err, "create"))?;
 		let mut backend = Self {
 			inner,
 			scratch: vec![0u8; MAX_PACKET_BYTES],
@@ -88,17 +65,13 @@ impl Libopus {
 		if let Some(bitrate) = config.bitrate {
 			backend.set_rate(bitrate.as_bps())?;
 		}
-		if let Some(signal) = signal {
-			backend.set_ctl(OPUS_SET_SIGNAL_REQUEST, signal, "OPUS_SET_SIGNAL")?;
-		}
-		backend.set_ctl(OPUS_SET_DTX_REQUEST, i32::from(dtx), "OPUS_SET_DTX")?;
-
-		let bitrate = backend.get_ctl(OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE")?;
-		backend.bitrate = u64::try_from(bitrate)
-			.map_err(|_| Error::Unsupported(format!("Opus reported negative bitrate {bitrate}")))?;
-		let lookahead = backend.get_ctl(OPUS_GET_LOOKAHEAD_REQUEST, "OPUS_GET_LOOKAHEAD")?;
-		backend.lookahead = usize::try_from(lookahead)
-			.map_err(|_| Error::Unsupported(format!("Opus reported negative lookahead {lookahead}")))?;
+		let encoder = &mut backend.inner;
+		encoder
+			.set_signal(signal)
+			.map_err(|err| opus::error(err, "set signal"))?;
+		encoder.set_dtx(dtx).map_err(|err| opus::error(err, "set DTX"))?;
+		backend.bitrate = encoder.bitrate().map_err(|err| opus::error(err, "get bitrate"))?.into();
+		backend.lookahead = encoder.lookahead().map_err(|err| opus::error(err, "get lookahead"))?;
 
 		Ok(backend)
 	}
@@ -113,51 +86,25 @@ impl Libopus {
 				"Opus bitrate must be between {min} and {max} bits per second for {channels} channel(s) at {frame_size} samples, got {bitrate}"
 			)));
 		}
-		self.set_ctl(OPUS_SET_BITRATE_REQUEST, bitrate as i32, "OPUS_SET_BITRATE")
-	}
-
-	fn set_ctl(&mut self, request: i32, value: i32, name: &'static str) -> Result<(), Error> {
-		// SAFETY: `inner` owns a live encoder and each request here expects one i32.
-		let rc = unsafe { opus_encoder_ctl_impl(self.inner, request, varargs![value]) };
-		if rc != OPUS_OK {
-			return Err(opus::error(rc, name));
-		}
-		Ok(())
-	}
-
-	fn get_ctl(&self, request: i32, name: &'static str) -> Result<i32, Error> {
-		let mut value = 0;
-		// SAFETY: `inner` owns a live encoder and each request here expects one
-		// valid mutable i32 output.
-		let rc = unsafe { opus_encoder_ctl_impl(self.inner, request, varargs![&mut value]) };
-		if rc != OPUS_OK {
-			return Err(opus::error(rc, name));
-		}
-		Ok(value)
+		// The range above fits a u32.
+		self.inner
+			.set_bitrate(bitrate as u32)
+			.map_err(|err| opus::error(err, "set bitrate"))
 	}
 }
 
 impl Backend for Libopus {
 	fn encode(&mut self, pcm: &[f32]) -> Result<(), Error> {
-		// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices are
-		// bounded by the lengths we pass, and the front end sized `pcm` to one frame.
-		let n = unsafe {
-			opus_encode_float(
-				self.inner,
-				pcm.as_ptr(),
-				self.frame_size as i32,
-				self.scratch.as_mut_ptr(),
-				self.scratch.len() as i32,
-			)
-		};
-		if n < 0 {
-			return Err(opus::error(n, "opus_encode_float"));
-		}
-		let payload = Bytes::copy_from_slice(&self.scratch[..n as usize]);
+		// The front end sized `pcm` to one frame.
+		let n = self
+			.inner
+			.encode_float(pcm, &mut self.scratch)
+			.map_err(|err| opus::error(err, "encode"))?;
+		let payload = Bytes::copy_from_slice(&self.scratch[..n]);
 		let activity = opus::activity(&payload, false);
 		// Asked after the frame, so it describes this packet: its keep-alives code a frame while
 		// the encoder stays in discontinuous transmission.
-		let in_dtx = self.dtx && self.get_ctl(OPUS_GET_IN_DTX_REQUEST, "OPUS_GET_IN_DTX")? != 0;
+		let in_dtx = self.dtx && self.inner.in_dtx().map_err(|err| opus::error(err, "get DTX state"))?;
 		self.ready.push_back(Encoded {
 			payload,
 			activity,
@@ -176,9 +123,8 @@ impl Backend for Libopus {
 	}
 
 	fn reset(&mut self) {
-		// SAFETY: `inner` owns a live encoder and OPUS_RESET_STATE takes no arguments.
-		let rc = unsafe { opus_encoder_ctl_impl(self.inner, OPUS_RESET_STATE, varargs![]) };
-		debug_assert_eq!(rc, OPUS_OK, "OPUS_RESET_STATE failed with {rc}");
+		let reset = self.inner.reset();
+		debug_assert_eq!(reset, Ok(()), "reset failed");
 		self.ready.clear();
 	}
 
@@ -203,17 +149,8 @@ impl Backend for Libopus {
 	}
 }
 
-impl Drop for Libopus {
-	fn drop(&mut self) {
-		// SAFETY: `inner` is a live OpusEncoder that nothing else aliases.
-		unsafe { opus_encoder_destroy(self.inner) };
-	}
-}
-
 #[cfg(test)]
 mod tests {
-	use moq_opus::{OPUS_AUTO, OPUS_GET_APPLICATION_REQUEST, OPUS_GET_DTX_REQUEST, OPUS_GET_SIGNAL_REQUEST};
-
 	use super::*;
 
 	#[test]
@@ -226,10 +163,7 @@ mod tests {
 
 		backend.set_bitrate(32_000).unwrap();
 		assert_eq!(backend.bitrate(), 32_000);
-		assert_eq!(
-			backend.get_ctl(OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE").unwrap(),
-			32_000
-		);
+		assert_eq!(backend.inner.bitrate().unwrap(), 32_000);
 	}
 
 	/// Each kind reaches libopus as the application, signal, and transmission `@moq/publish` asks
@@ -237,9 +171,9 @@ mod tests {
 	#[test]
 	fn kind_tunes_libopus() {
 		let cases = [
-			(Some(Kind::Voice), OPUS_APPLICATION_VOIP, OPUS_SIGNAL_VOICE, 1),
-			(Some(Kind::Music), OPUS_APPLICATION_AUDIO, OPUS_SIGNAL_MUSIC, 0),
-			(None, OPUS_APPLICATION_AUDIO, OPUS_AUTO, 0),
+			(Some(Kind::Voice), Application::Voip, Signal::Voice, true),
+			(Some(Kind::Music), Application::Audio, Signal::Music, false),
+			(None, Application::Audio, Signal::Auto, false),
 		];
 		for (kind, application, signal, dtx) in cases {
 			let backend = Libopus::new(&Config {
@@ -248,14 +182,9 @@ mod tests {
 			})
 			.unwrap();
 
-			let get = |request, name| backend.get_ctl(request, name).unwrap();
-			assert_eq!(
-				get(OPUS_GET_APPLICATION_REQUEST, "OPUS_GET_APPLICATION"),
-				application,
-				"{kind:?}"
-			);
-			assert_eq!(get(OPUS_GET_SIGNAL_REQUEST, "OPUS_GET_SIGNAL"), signal, "{kind:?}");
-			assert_eq!(get(OPUS_GET_DTX_REQUEST, "OPUS_GET_DTX"), dtx, "{kind:?}");
+			assert_eq!(backend.inner.application().unwrap(), application, "{kind:?}");
+			assert_eq!(backend.inner.signal().unwrap(), signal, "{kind:?}");
+			assert_eq!(backend.inner.dtx().unwrap(), dtx, "{kind:?}");
 		}
 	}
 }

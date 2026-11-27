@@ -6,10 +6,14 @@ decode Opus without a C toolchain, which keeps cross-compiling the language
 bindings simple.
 
 This is a fork of [`unsafe-libopus`](https://github.com/DCNick3/unsafe-libopus)
-0.2.0 (BSD-3-Clause, like libopus). The API is unchanged: the C functions and
-constants under their C names. Upstream's master has since dropped the
+0.2.0 (BSD-3-Clause, like libopus). Upstream's master has since dropped the
 multistream API that `moq-audio` decodes surround with, and has published no
 release since 2024-11.
+
+Its public API is a small safe wrapper over what `moq-audio` calls: `Encoder`,
+`SurroundEncoder`, `Decoder` with its `Mapping`, and the `packet` helpers. The
+transpiled C functions stay private, so a safe implementation can replace them
+without breaking this API.
 
 ## Changes from upstream
 
@@ -23,7 +27,10 @@ release since 2024-11.
   three in `PLC.rs` on master).
 - Upstream's tests, which link C libopus, are not carried; `moq-audio` tests
   the decoder it uses.
-- Formatted with the workspace's rustfmt, and built with every lint allowed.
+- The C API is private: the crate-root exports, `externs`, `varargs`, and the
+  exported `*_ctl!` macros are crate-only, and a safe wrapper is public instead.
+- Formatted with the workspace's rustfmt, and the transpiled modules built with
+  every lint allowed.
 
 ## Upstream
 

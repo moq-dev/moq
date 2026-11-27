@@ -1,5 +1,4 @@
 use crate::celt::bands::{anti_collapse, celt_lcg_rand, denormalise_bands, quant_all_bands, SPREAD_NORMAL};
-use crate::opus_custom_decoder_ctl;
 
 pub mod arch_h {
 	pub type opus_val16 = f32;
@@ -1464,7 +1463,6 @@ pub unsafe fn opus_custom_decoder_ctl_impl(st: *mut OpusCustomDecoder, request: 
 		_ => return OPUS_BAD_ARG,
 	};
 }
-#[macro_export]
 macro_rules! opus_custom_decoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_custom_decoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -1476,3 +1474,4 @@ macro_rules! opus_custom_decoder_ctl {
         opus_custom_decoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_custom_decoder_ctl;

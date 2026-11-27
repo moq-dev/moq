@@ -43,7 +43,6 @@ use crate::celt::pitch::{celt_inner_prod_c, pitch_downsample, pitch_search, remo
 use crate::celt::quant_bands::{amp2Log2, eMeans, quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
 use crate::celt::rate::clt_compute_allocation;
 use crate::externs::{memcpy, memmove, memset};
-use crate::opus_custom_encoder_ctl;
 use crate::silk::macros::EC_CLZ0;
 use crate::src::analysis::AnalysisInfo;
 use crate::src::opus_defines::{
@@ -3227,7 +3226,6 @@ pub unsafe fn opus_custom_encoder_ctl_impl(st: *mut OpusCustomEncoder, request: 
 		_ => return OPUS_BAD_ARG,
 	};
 }
-#[macro_export]
 macro_rules! opus_custom_encoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_custom_encoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -3239,3 +3237,4 @@ macro_rules! opus_custom_encoder_ctl {
         opus_custom_encoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_custom_encoder_ctl;

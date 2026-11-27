@@ -2782,7 +2782,6 @@ pub unsafe fn opus_encoder_ctl_impl(st: *mut OpusEncoder, request: i32, args: Va
 		_ => return ret,
 	};
 }
-#[macro_export]
 macro_rules! opus_encoder_ctl {
     ($st:expr, $request:expr, $($args:expr),*) => {
         $crate::opus_encoder_ctl_impl($st, $request, $crate::varargs!($($args),*))
@@ -2794,6 +2793,7 @@ macro_rules! opus_encoder_ctl {
         opus_encoder_ctl!($st, $request,)
     };
 }
+pub(crate) use opus_encoder_ctl;
 pub unsafe fn opus_encoder_destroy(st: *mut OpusEncoder) {
 	free(st as *mut core::ffi::c_void);
 }
