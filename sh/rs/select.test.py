@@ -32,8 +32,8 @@ FUZZ_EXCLUDES = " ".join(f"--exclude {crate}" for crate in FUZZ_CRATES)
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 
 
-def target_features():
-    """Every `required-features` of a bench, example, or tested target, as `crate/feature`, for the workspace."""
+def target_features(which="tests"):
+    """Every `required-features` of workspace targets matching `which` (`tests` or `benches-examples`)."""
     metadata = json.loads(
         subprocess.run(
             ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
@@ -49,7 +49,7 @@ def target_features():
             for package in metadata["packages"]
             if not package["name"].endswith("-fuzz")
             for target in package["targets"]
-            if {"bench", "example"} & set(target["kind"]) or target["test"]
+            if (target["test"] if which == "tests" else bool({"bench", "example"} & set(target["kind"])))
             for feature in target.get("required-features", [])
         }
     )
@@ -113,18 +113,22 @@ class SelectTest(unittest.TestCase):
 
     def test_nextest_launcher_selects_workspace(self):
         features = DEVICE_FEATURES.split()
-        features += [feature for feature in target_features() if feature not in features]
+        features += [feature for feature in target_features("tests") if feature not in features]
+        bench_features = target_features("benches-examples")
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --benches --examples --features {' '.join(features)}" if action == "test" else ""
+                    suffix = f" --features {' '.join(features)}" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
-                    self.assertIn(
-                        f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}",
-                        self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
-                    )
+                    calls = self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions)
+                    self.assertIn(f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}", calls)
+                    if action in ("lint", "check-test"):
+                        self.assertIn(
+                            f"rs lint-targets --workspace {FUZZ_EXCLUDES} --features {' '.join(bench_features)}",
+                            calls,
+                        )
         selected = self.selected("sh/rs/nextest.sh")
-        # The gate's lint runs no extra target or feature builds.
+        # The gate's lint runs no extra feature builds beyond bench/example linting.
         self.assertNotIn("rs capture", selected)
 
     def test_cargo_configuration_selects_workspace(self):
@@ -175,11 +179,12 @@ class SelectTest(unittest.TestCase):
                 calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
                 self.assertEqual(calls.count("rs send-depth"), 1, calls)
                 stable = [call for call in calls if call != "rs send-depth"]
-                self.assertEqual(len(stable), 4, stable)
+                self.assertEqual(len(stable), 5, stable)
                 self.assertTrue(stable[0].startswith("rs lint "), stable)
-                self.assertEqual(stable[1], "rs media-defaults", stable)
-                self.assertEqual(stable[2], "rs no-async", stable)
-                self.assertEqual(stable[3], "rs net-fuzz", stable)
+                self.assertTrue(stable[1].startswith("rs lint-targets "), stable)
+                self.assertEqual(stable[2], "rs media-defaults", stable)
+                self.assertEqual(stable[3], "rs no-async", stable)
+                self.assertEqual(stable[4], "rs net-fuzz", stable)
         # The script that runs the proof selects moq-net, so an edit to it is proved too.
         self.assertIn("rs send-depth", self.selected("sh/rs/send-depth.sh"))
         # Only the lint phase runs it, so the gate compiles it once.
@@ -433,7 +438,8 @@ class SelectTest(unittest.TestCase):
 
     def test_a_bench_alone_enables_its_required_features(self):
         # Alone in the selection, no dependent turns these on, and cargo would
-        # skip the targets without a word.
+        # skip the targets without a word. Benches are linted in check mode
+        # during `lint`, not linked during `test`.
         for bench, feature in (
             ("rs/moq-stats/benches/producer_tick.rs", "moq-stats/bench"),
             ("rs/moq-net/benches/codec.rs", "moq-net/fuzz"),
@@ -441,9 +447,11 @@ class SelectTest(unittest.TestCase):
             ("rs/moq-quic/benches/wire.rs", "moq-quic/fuzz"),
         ):
             with self.subTest(bench=bench):
-                (call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
-                self.assertIn(" --benches --examples ", call)
+                (call,) = [call for call in self.selected(bench, action="lint") if call.startswith("rs lint-targets ")]
                 self.assertIn(feature, call.split(" --features ", 1)[1].split())
+                (test_call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
+                self.assertNotIn("--benches", test_call)
+                self.assertNotIn("--examples", test_call)
 
     def test_a_binary_alone_enables_its_required_features(self):
         # moq-boy's only target is its binary, so without openh264 the build
@@ -520,10 +528,7 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             self.calls.read_text().splitlines(),
-            [
-                "rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0"
-                " --no-tests=pass --benches --examples"
-            ],
+            ["rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0 --no-tests=pass"],
         )
 
     def test_malformed_metadata_stops_before_running_tests(self):
