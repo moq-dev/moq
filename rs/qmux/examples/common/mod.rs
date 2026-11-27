@@ -4,14 +4,19 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use bytes::{Bytes, BytesMut};
-use moq_net::transport::poll::{RecvStream as _, SendStream as _};
-use qmux::{RecvStream, SendStream, Version};
+use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
+use qmux::{RecvStream, SendStream, Session, Version};
 
 pub const PROTOCOL: &str = "qmux-interop";
 pub const CLIENT_SEED: usize = 17;
 pub const SERVER_SEED: usize = 29;
 pub const TIMEOUT: Duration = Duration::from_secs(15);
 const PAYLOAD_LEN: usize = 1_200_000;
+
+/// The payload seed, reliable prefix, and code of the stream Rust resets with RESET_STREAM_AT
+const RESET_SEED: usize = 41;
+const RESET_PREFIX: usize = 16 * 1024;
+const RESET_CODE: u32 = 7;
 
 pub fn parse_version(value: &str) -> anyhow::Result<Version> {
 	match value {
@@ -27,6 +32,30 @@ pub fn payload(seed: usize) -> Vec<u8> {
 	(0..PAYLOAD_LEN)
 		.map(|index| ((index * 31 + seed) % 251) as u8)
 		.collect()
+}
+
+/// On QMux02, open a stream, write a prefix and some more, and reset it with RESET_STREAM_AT
+/// keeping only the prefix, which the peer reads before the reset. Both fit the peer's stream
+/// window, so the reset comes while the prefix may still be buffered.
+pub async fn send_reset_at(session: &Session, version: Version) -> anyhow::Result<()> {
+	if version != Version::QMux02 {
+		return Ok(());
+	}
+	let mut send = kio::clock::timeout(TIMEOUT, session.open_uni(SendOptions::default()))
+		.await
+		.context("timed out opening the reset stream")??;
+	let data = payload(RESET_SEED);
+	let mut prefix = Bytes::copy_from_slice(&data[..RESET_PREFIX]);
+	let mut rest = Bytes::copy_from_slice(&data[RESET_PREFIX..RESET_PREFIX + 1024]);
+	while !prefix.is_empty() {
+		send.write_buf(&mut prefix).await?;
+	}
+	let offset = send.offset();
+	while !rest.is_empty() {
+		send.write_buf(&mut rest).await?;
+	}
+	send.reset_at(&offset, RESET_CODE);
+	Ok(())
 }
 
 /// Write all of `data` then the FIN, bounded by [`TIMEOUT`].

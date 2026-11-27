@@ -891,12 +891,11 @@ describe("Session integration (scripted peer)", () => {
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await settle();
 
-			// Our writes stall, but the peer keeps talking, so the session stays up and
-			// every keep-alive tick finds our send side silent.
+			// Our writes stall and the peer goes quiet for most of the idle window, so
+			// keep-alives come due behind the stalled socket.
 			peer.blockWrites();
-			for (let i = 0; i < 40; i++) {
+			for (let i = 0; i < 5; i++) {
 				await clock.advance(Duration.millis(50));
-				peer.send({ type: "ping_response", sequence: 0n });
 				await settle();
 			}
 			peer.unblockWrites();
@@ -1569,6 +1568,40 @@ describe("Session integration (scripted peer)", () => {
 
 				// More than two idle windows elapsed with only occasional inbound frames,
 				// but the successful STREAM writes kept resetting the shared deadline.
+				expect(peer.has("connection_close")).toBe(false);
+				session.close();
+				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
+			} finally {
+				installed.close();
+			}
+		});
+
+		test("a one-way sender draws answers before its idle timeout", async () => {
+			// We send steadily and the peer never speaks unprompted, as a receiver with
+			// nothing to say does: only our keep-alive draws proof of life from it.
+			const clock = new Manual();
+			const installed = clock.install();
+			try {
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
+				peer.send({ type: "transport_parameters", params: peerParams() });
+				await session.ready;
+
+				const writable = await session.createUnidirectionalStream();
+				const writer = writable.getWriter();
+				let answered = 0;
+				for (let i = 0; i < 12; i++) {
+					await clock.advance(Duration.millis(45));
+					await writer.write(new Uint8Array([i]));
+					await settle();
+					const pings = peer.received().flatMap((f) => (f.type === "ping_request" ? [f.sequence] : []));
+					for (const sequence of pings.slice(answered)) {
+						peer.send({ type: "ping_response", sequence });
+					}
+					answered = pings.length;
+					await settle();
+				}
+
+				expect(answered).toBeGreaterThan(0);
 				expect(peer.has("connection_close")).toBe(false);
 				session.close();
 				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
@@ -2391,11 +2424,68 @@ describe("Session integration (scripted peer)", () => {
 			const { session, peer } = accept({ protocol });
 			await started(peer);
 			peer.sendRaw(new Uint8Array());
-			await peer.barrier();
+			// qmux-00 has no QX_PING to fence with, so the parameters behind it are the fence.
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
 			expect(peer.has("connection_close")).toBe(false);
 			session.close();
 		});
+
+		test(`a repeated QX_TRANSPORT_PARAMETERS is a PROTOCOL_VIOLATION on ${protocol}`, async () => {
+			const { session, peer } = accept({ protocol });
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await expectSessionFailure(session);
+			await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
+		});
 	}
+
+	test("a QX_PING on qmux-00 is a FRAME_ENCODING_ERROR", async () => {
+		const { session, peer } = accept({ protocol: "qmux-00" });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		peer.send({ type: "ping_request", sequence: 0n });
+		await expectSessionFailure(session);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FRAME_ENCODING_ERROR);
+		expect(peer.has("ping_response")).toBe(false);
+	});
+
+	test("an older QX_PING request never replaces the answer to a newer one on qmux-01", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		await waitFor(() => peer.has("transport_parameters"));
+
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 5n });
+		peer.send({ type: "ping_request", sequence: 3n });
+		await settle();
+		peer.unblockWrites();
+		await waitFor(() => peer.has("ping_response"));
+		await settle();
+		const answered = peer
+			.received()
+			.filter((f): f is Frame.PingResponse => f.type === "ping_response")
+			.map((f) => f.sequence);
+		expect(answered).not.toContain(3n);
+		expect(answered).toContain(5n);
+		expect(peer.has("connection_close")).toBe(false);
+		session.close();
+	});
+
+	test("a close followed by trailing garbage still reports the peer's close", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		const close = Frame.encode({ type: "application_close", code: VarInt.from(42), reason: "bye" }, "qmux-01");
+		const record = new Uint8Array(close.byteLength + 1);
+		record.set(close);
+		// 0x40 starts a two-byte frame type the record cuts short.
+		record[close.byteLength] = 0x40;
+		peer.sendRaw(record);
+		expect(await session.closed).toEqual({ closeCode: 42, reason: "bye" });
+	});
 
 	// Regression: a STREAM frame delivered by the read loop after the session has
 	// closed used to hit the already-closed incoming-stream controllers, and the

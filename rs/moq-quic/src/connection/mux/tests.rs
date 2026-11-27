@@ -205,8 +205,13 @@ fn close_spills_past_the_transport_parameters() {
 	let now = Instant::now();
 	let mut conn = Connection::new(config(Version::QMux01), Side::Client, now);
 	conn.close(VarInt::from_u32(7), "bye".into());
+	let mut params = Vec::new();
+	conn.local_params().encode(&mut params);
 	let mut buf = BytesMut::new();
-	assert!(conn.fill_into(&mut buf, 8, now).is_some());
+	assert!(
+		conn.fill_into(&mut buf, wire::transport_parameters_size(&params), now)
+			.is_some()
+	);
 	assert!(matches!(conn.end, End::Closing { frame: Some(_), .. }));
 
 	buf.clear();
@@ -501,6 +506,139 @@ fn reset_stream_at_delivers_the_prefix() {
 	assert_eq!(recv.received_reset(), Ok(Some(VarInt::from_u32(9))));
 }
 
+/// On an ordered transport a RESET_STREAM_AT follows the data below its Reliable Size, or the
+/// peer would read a Reliable Size ahead of the bytes it promises, which some peers reject
+#[test]
+fn reset_stream_at_follows_its_prefix() {
+	let mut pair = Pair::new(config(Version::QMux02));
+	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	let mut stream = pair.client.send_stream(id);
+	stream.write(&mut &[7u8; 10_000][..]).unwrap();
+	let at = stream.offset().rewind(9000);
+	stream.reset_at(at, VarInt::from_u32(9)).unwrap();
+
+	let mut delivered = 0;
+	let mut reset = None;
+	let mut accepted = None;
+	loop {
+		let mut idle = true;
+		while let Some(record) = pair.client.transmit(pair.now) {
+			idle = false;
+			let mut bytes = record.clone();
+			while let Some(frame) = wire::next_frame(&mut bytes).unwrap() {
+				match frame {
+					wire::Frame::Quic(frame::Frame::Stream(stream)) | wire::Frame::Continue(stream) => {
+						assert!(reset.is_none(), "data after the reset");
+						delivered = stream.offset + stream.data.len() as u64;
+					}
+					wire::Frame::Quic(frame::Frame::ResetStream(frame)) => {
+						let reliable = frame.reliable_size.expect("a RESET_STREAM_AT").into_inner();
+						assert!(delivered >= reliable, "reset at {reliable} ahead of {delivered} bytes");
+						reset = Some(reliable);
+					}
+					_ => {}
+				}
+			}
+			pair.server.handle_record(record, pair.now);
+		}
+		if accepted.is_none() {
+			accepted = pair.server.streams().accept(Dir::Uni);
+		}
+		if let Some(accepted) = accepted {
+			let mut recv = pair.server.recv_stream(accepted);
+			if let Ok(mut chunks) = recv.read() {
+				while let Ok(Some(_)) = chunks.next(usize::MAX) {}
+				chunks.finalize();
+			}
+		}
+		while let Some(record) = pair.server.transmit(pair.now) {
+			idle = false;
+			pair.client.handle_record(record, pair.now);
+		}
+		if idle {
+			break;
+		}
+	}
+	assert_eq!(reset, Some(9000));
+}
+
+/// A reset frees its stream once the transport takes the record carrying it, not once it is
+/// only serialized
+#[test]
+fn resets_are_acknowledged_once_the_transport_takes_them() {
+	for &version in Version::ALL {
+		let mut pair = Pair::new(config(version));
+		let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		pair.client.send_stream(id).reset(VarInt::from_u32(1)).unwrap();
+		let mut records = 0;
+		while let Poll::Ready(_) = pair.client.poll_transmit(&kio::Waiter::noop(), pair.now) {
+			records += 1;
+		}
+		assert!(records > 0, "{version:?}");
+		assert_eq!(pair.client.streams().send_streams(), 1, "{version:?}: not taken yet");
+		for _ in 0..records {
+			pair.client.transmitted();
+		}
+		assert_eq!(pair.client.streams().send_streams(), 0, "{version:?}: taken");
+	}
+}
+
+/// A one-way sender whose peer only answers still probes it, so the idle timeout never
+/// reclaims a healthy session, even without RTT probes
+#[test]
+fn a_one_way_sender_draws_answers_before_its_idle_timeout() {
+	let quiet = Config {
+		rtt_interval: None,
+		..config(Version::QMux02)
+	};
+	let mut pair = Pair::new(quiet);
+	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	for _ in 0..120 {
+		pair.now = pair.now.saturating_add(Duration::from_secs(1));
+		// Only the sender runs its timers: the receiver never speaks unprompted.
+		pair.client.handle_timeout(pair.now);
+		pair.client.send_stream(id).write(&mut &b"x"[..]).unwrap();
+		pair.drive();
+		assert!(!pair.client.is_closed(), "{:?}", lost(&mut pair.client));
+	}
+	let accepted = pair.server.streams().accept(Dir::Uni).unwrap();
+	assert_eq!(read_all(&mut pair.server, accepted).0.len(), 120);
+}
+
+/// A ping waits for the next record rather than overflow one
+#[test]
+fn a_ping_respects_the_record_budget() {
+	let now = Instant::now();
+	let mut conn = Connection::new(config(Version::QMux02), Side::Client, now);
+	conn.ping_request = true;
+	let mut params = Vec::new();
+	conn.local_params().encode(&mut params);
+	let budget = wire::transport_parameters_size(&params);
+	let mut buf = BytesMut::new();
+	assert!(conn.fill_into(&mut buf, budget, now).is_some());
+	assert_eq!(buf.len(), budget, "only the parameters");
+	assert!(conn.ping_request, "the ping waits");
+
+	buf.clear();
+	assert!(conn.fill_into(&mut buf, budget, now).is_some());
+	assert!(!conn.ping_request);
+	assert!(matches!(
+		wire::next_frame(&mut buf.freeze()),
+		Ok(Some(wire::Frame::PingRequest(_)))
+	));
+}
+
+/// A due ping wakes whoever waits to transmit
+#[test]
+fn a_due_ping_wakes_the_transmitter() {
+	let mut pair = Pair::new(config(Version::QMux02));
+	let woken = Counter::new();
+	assert!(pair.client.poll_transmit(&woken, pair.now).is_pending());
+	pair.advance(Duration::from_secs(1));
+	assert_eq!(woken.wakes(), 1);
+	assert!(pair.client.poll_transmit(&kio::Waiter::noop(), pair.now).is_ready());
+}
+
 #[test]
 fn reset_stream_at_needs_draft02() {
 	let mut reset = Vec::new();
@@ -532,6 +670,15 @@ fn datagrams() {
 	pair.drive();
 	assert_eq!(waiter.wakes(), 1);
 	assert_eq!(pair.server.datagrams().recv().unwrap(), &b"hello"[..]);
+
+	// Nothing follows a close, even one still to be written
+	pair.client.close(VarInt::from_u32(0), String::new());
+	assert_eq!(
+		pair.client
+			.datagrams()
+			.send(Bytes::from_static(b"late"), send::Options::default()),
+		Err(send::Error::ConnectionLost)
+	);
 
 	// Draft-00 has none
 	let mut pair = Pair::new(config(Version::QMux00));

@@ -783,8 +783,11 @@ export class Session implements WebTransport {
 	#sendResetAt = Instant.ZERO;
 	#sendCredit = true;
 	#nextPingSeq = 0;
+	// When the idle keep-alive last sent a QX_PING.
+	#lastPingAt = Instant.ZERO;
 	// Highest sequence seen in a received QX_PING request (draft-02 requires them
-	// to strictly increase). Undefined until the first request arrives.
+	// to strictly increase), which the response always answers. Undefined until the
+	// first request arrives.
 	#lastPingRecv?: bigint;
 	#idleTimer?: Interval;
 	#liveness?: Liveness;
@@ -1101,6 +1104,10 @@ export class Session implements WebTransport {
 				throw new Error("QX_TRANSPORT_PARAMETERS must be the first frame");
 			}
 		}
+		// Draft-00 has no QX_PING.
+		if (!usesRecords(this.#version) && (frame.type === "ping_request" || frame.type === "ping_response")) {
+			throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "QX_PING on qmux-00");
+		}
 
 		if (frame.type === "stream") {
 			this.#handleStreamFrame(frame);
@@ -1152,15 +1159,17 @@ export class Session implements WebTransport {
 			}
 			pushDatagram(this.#datagrams, frame.data);
 		} else if (frame.type === "ping_request") {
-			// Draft-02: request sequence numbers must strictly increase.
-			if (this.#version === "qmux-02") {
-				if (this.#lastPingRecv !== undefined && frame.sequence <= this.#lastPingRecv) {
-					throw new Error("QX_PING request sequence must strictly increase");
-				}
-				this.#lastPingRecv = frame.sequence;
+			// One response answers every request up to its sequence, so an older request
+			// never replaces the answer to a newer one still queued.
+			let answer = frame.sequence;
+			const last = this.#lastPingRecv;
+			if (last !== undefined && answer <= last) {
+				// Draft-02: request sequence numbers must strictly increase.
+				if (this.#version === "qmux-02") throw new Error("QX_PING request sequence must strictly increase");
+				answer = last;
 			}
-			// Respond to ping requests
-			this.#sendPriorityFrame({ type: "ping_response", sequence: frame.sequence });
+			this.#lastPingRecv = answer;
+			this.#sendPriorityFrame({ type: "ping_response", sequence: answer });
 		} else if (frame.type === "ping_response") {
 			// Draft-02: a response must echo a sequence we actually sent (0..nextPingSeq).
 			if (this.#version === "qmux-02" && frame.sequence >= BigInt(this.#nextPingSeq)) {
@@ -1179,7 +1188,7 @@ export class Session implements WebTransport {
 	}
 
 	#handleTransportParameters(params: TransportParams) {
-		if (this.#paramsReceived) return;
+		if (this.#paramsReceived) throw new Error("duplicate QX_TRANSPORT_PARAMETERS");
 		// Record-framed drafts: an advertised max_record_size MUST NOT go below the
 		// default minimum. Omitted values decode to the default, so only an explicit
 		// smaller value trips this (TRANSPORT_PARAMETER_ERROR).
@@ -1414,10 +1423,13 @@ export class Session implements WebTransport {
 			this.#end({ clean: false, cause: new Error("idle timeout") });
 			return;
 		}
-		// Keep-alive: nudge the peer when our outbound side has been silent for a third
-		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
-		// Nothing to keep alive before the peer has spoken at all.
-		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) this.#ping();
+		// Keep-alive: probe the peer once it has been unheard for a third of the timeout,
+		// whatever we sent meanwhile, so even a one-way sender draws an answer before the
+		// deadline. Nothing to keep alive before the peer has spoken at all.
+		if (this.#paramsReceived && at.since(this.#lastRecvAt.max(this.#lastPingAt)).gt(timeout.div(3))) {
+			this.#ping();
+			this.#lastPingAt = at;
+		}
 	}
 
 	/** Encode the next window update owed to the peer, or undefined once none is.

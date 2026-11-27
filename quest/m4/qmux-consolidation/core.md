@@ -21,7 +21,3 @@ Guidance:
 - Align `Datagrams`, stream flush-ack confirmation, ordered `RESET_STREAM_AT` serialization, and close-drain phase handling so `Connection` and `mux::Connection` expose one consistent contract to the shared async handle layer in [handles](/quest/m4/qmux-consolidation/handles.md).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Fix Rust and JS QMux correctness bugs and port web-transport fixes](/quest/m1/qmux-correctness-fixes.md) - lands the one-way-sender idle-timeout, ordered `RESET_STREAM_AT`, and flush-ack semantics before unifying them

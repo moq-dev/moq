@@ -91,23 +91,15 @@ impl<T: WsStream> WsTransport<T> {
 		self.read.split().freeze()
 	}
 
-	/// Queue a keep-alive Ping once one is due and the socket has room; the driver's next flush
-	/// sends it.
-	fn poll_ping(&mut self, waiter: &kio::Waiter) -> Result<(), Error> {
+	/// Note a keep-alive Ping that came due; the driver's next flush sends it.
+	fn poll_ping(&mut self, waiter: &kio::Waiter) {
 		let Some(ping) = &mut self.ping else {
-			return Ok(());
+			return;
 		};
 		let mut cx = waiter.context();
 		while ping.poll_tick(&mut cx).is_ready() {
 			self.ping_due = true;
 		}
-		if self.ping_due && Pin::new(&mut self.ws).poll_ready(&mut cx).is_ready() {
-			Pin::new(&mut self.ws)
-				.start_send(Message::Ping(Bytes::new()))
-				.map_err(|_| Error::Closed)?;
-			self.ping_due = false;
-		}
-		Ok(())
 	}
 }
 
@@ -131,7 +123,7 @@ impl<T: WsStream> Transport for WsTransport<T> {
 	}
 
 	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
-		self.poll_ping(waiter)?;
+		self.poll_ping(waiter);
 
 		let mut cx = waiter.context();
 		// Prefer a message over the deadline: if both are ready, the peer is alive.
@@ -186,10 +178,18 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			.map_err(|_| Error::Closed)
 	}
 
+	/// Queues a due keep-alive Ping first. Waiting for its room here, on the driver's waiter,
+	/// matters: the socket keeps a single write waker, which the driver's own writes take.
 	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		Pin::new(&mut self.ws)
-			.poll_flush(&mut waiter.context())
-			.map_err(|_| Error::Closed)
+		let mut cx = waiter.context();
+		if self.ping_due {
+			ready!(Pin::new(&mut self.ws).poll_ready(&mut cx)).map_err(|_| Error::Closed)?;
+			Pin::new(&mut self.ws)
+				.start_send(Message::Ping(Bytes::new()))
+				.map_err(|_| Error::Closed)?;
+			self.ping_due = false;
+		}
+		Pin::new(&mut self.ws).poll_flush(&mut cx).map_err(|_| Error::Closed)
 	}
 
 	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {

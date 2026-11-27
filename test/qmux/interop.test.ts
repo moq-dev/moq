@@ -2,7 +2,7 @@
 // The Rust side is the in-tree qmux crate's interop examples, built by `just test qmux`.
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import { Session, selectSubprotocol, type Version } from "@moq/qmux";
+import { Session, StreamError, selectSubprotocol, type Version } from "@moq/qmux";
 import { BunSocketStream } from "./bun-socket.ts";
 
 const BIN = process.env.QMUX_INTEROP_BIN;
@@ -14,6 +14,11 @@ const CLIENT_SEED = 17;
 const SERVER_SEED = 29;
 const OPERATION_TIMEOUT_MS = 15_000;
 const VERSIONS = ["qmux-02", "qmux-01", "qmux-00"] as const;
+// The stream the Rust peer resets with RESET_STREAM_AT: its payload seed, the reliable
+// prefix it keeps, and the code, as in rs/qmux/examples/common.
+const RESET_SEED = 41;
+const RESET_PREFIX = 16 * 1024;
+const RESET_CODE = 7;
 
 // Small receive windows force the Rust sender to observe and react to
 // MAX_DATA/MAX_STREAM_DATA updates during the large transfer.
@@ -95,6 +100,36 @@ async function exchangeDatagrams(session: Session, version: Version): Promise<vo
 	datagramWriter.releaseLock();
 }
 
+/** On qmux-02, read the stream the Rust peer resets with RESET_STREAM_AT: exactly its
+ *  reliable prefix, then the reset. A reset ahead of its prefix fails the session. */
+async function expectResetAt(session: Session, version: Version): Promise<void> {
+	if (version !== "qmux-02") return;
+	const incomingReader = session.incomingUnidirectionalStreams.getReader();
+	const incoming = await withTimeout("accepting the reset stream", incomingReader.read());
+	incomingReader.releaseLock();
+	if (incoming.value === undefined) throw new Error("reset stream was missing");
+
+	const reader = incoming.value.getReader();
+	const chunks: Uint8Array[] = [];
+	const reset = await withTimeout(
+		"reading the reset stream",
+		(async () => {
+			for (;;) {
+				const { value, done } = await reader.read();
+				if (done) throw new Error("the reset stream finished instead");
+				chunks.push(value);
+			}
+		})().catch((err: unknown) => err),
+	);
+	expect(reset).toBeInstanceOf(StreamError);
+	expect((reset as StreamError).streamErrorCode).toBe(RESET_CODE);
+	const prefix = new Uint8Array(await new Blob(chunks).arrayBuffer());
+	expect(prefix.byteLength).toBe(RESET_PREFIX);
+	for (let index = 0; index < prefix.byteLength; index++) {
+		if (prefix[index] !== (index * 31 + RESET_SEED) % 251) throw new Error(`reset prefix mismatch at ${index}`);
+	}
+}
+
 /** Close with the code the Rust peer checks, then require it to exit cleanly. */
 async function finish(session: Session, peer: Bun.Subprocess, stderr: Promise<string>): Promise<void> {
 	session.close({ closeCode: 42, reason: "interop complete" });
@@ -161,6 +196,7 @@ async function runClientVersion(version: Version): Promise<void> {
 		const bidiResponse = await withTimeout("reading the bidirectional response", readAll(bidi.readable));
 		expect(new TextDecoder().decode(bidiResponse)).toBe(`pong:${version}`);
 
+		await expectResetAt(session, version);
 		await exchangeDatagrams(session, version);
 		await finish(session, server, stderr);
 	} catch (error) {
@@ -248,6 +284,7 @@ async function runServerVersion(version: Version): Promise<void> {
 		);
 		await withTimeout("finishing the bidirectional response", bidiWriter.close());
 
+		await expectResetAt(session, version);
 		await exchangeDatagrams(session, version);
 		await finish(session, client, stderr);
 	} catch (error) {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { replenishWindow, Window } from "./credit.ts";
+import { TransportCode, type TransportError } from "./error.ts";
 import { RecvStream } from "./recv.ts";
 
 const tick = () => yieldNow();
@@ -37,6 +38,38 @@ describe("RecvStream", () => {
 	test("a frame past either window is a flow control error", () => {
 		expect(() => recvStream(10n, 5n).recv.data(0n, new Uint8Array(6), false)).toThrow("flow control error");
 		expect(() => recvStream(5n, 10n).recv.data(0n, new Uint8Array(6), false)).toThrow("flow control error");
+	});
+
+	test("once the final size is known, moving it is a FINAL_SIZE_ERROR and repeating it is not", () => {
+		const code = (f: () => void) => {
+			try {
+				f();
+			} catch (err) {
+				return (err as TransportError).code;
+			}
+			return undefined;
+		};
+		const finished = () => {
+			const { recv } = recvStream();
+			recv.data(0n, new Uint8Array(3), true);
+			return recv;
+		};
+		const reset = () => {
+			const { recv } = recvStream();
+			recv.data(0n, new Uint8Array(3), false);
+			recv.reset(new Error("reset"), 3n);
+			return recv;
+		};
+		for (const recv of [finished, reset]) {
+			expect(code(() => recv().data(3n, new Uint8Array(1), false))).toBe(TransportCode.FINAL_SIZE_ERROR);
+			expect(code(() => recv().data(undefined, new Uint8Array(1), false))).toBe(TransportCode.FINAL_SIZE_ERROR);
+			expect(code(() => recv().data(0n, new Uint8Array(2), true))).toBe(TransportCode.FINAL_SIZE_ERROR);
+			expect(code(() => recv().reset(new Error("again"), 4n))).toBe(TransportCode.FINAL_SIZE_ERROR);
+			expect(code(() => recv().data(3n, new Uint8Array(0), true))).toBeUndefined();
+			expect(code(() => recv().reset(new Error("again"), 3n))).toBeUndefined();
+			// Drafts through -02 sent a zero final size, which is tolerated.
+			expect(code(() => recv().reset(new Error("again"), 0n))).toBeUndefined();
+		}
 	});
 
 	test("a frame that doesn't continue the stream is refused", () => {
