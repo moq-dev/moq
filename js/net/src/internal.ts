@@ -595,6 +595,8 @@ export interface ResumeShell {
 	commit(info: Info): void;
 	/** End the logical track: cleanly, or with `abort`. */
 	close(abort?: Error): void;
+	/** Parts of `[start, end)` not yet reported to the logical reader (above its floor). */
+	untold(start: bigint, end: bigint): Run[];
 }
 
 /** A drift policy a handed-out group keeps applying; see `hooks.expireGroup`. */
@@ -731,6 +733,8 @@ export interface ResumeSource {
 	absorbSkips(delivered: Delivered, key: bigint): void;
 	/** Mark every existing and future copy as drop-reporting (and optionally wired). */
 	markReporting(wired: boolean): void;
+	/** One past the declared skip run holding `key` on the serving copy, if `key` is skipped. */
+	skipEnd(key: bigint): bigint | undefined;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1281,6 +1285,8 @@ export const hooks: {
 	absorbSkips: (subscriber: Subscriber, delivered: Delivered, key: bigint, seen: number) => number;
 	/** Mark `subscriber` (and any route copies behind it) as drop-reporting. */
 	markReporting: (subscriber: Subscriber) => void;
+	/** One past the declared skip run holding `key` on `subscriber`'s track, if `key` is skipped. */
+	skipEnd: (subscriber: Subscriber, key: bigint) => bigint | undefined;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1822,6 +1828,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	markReporting: () => {
+		throw new Error("track.ts not loaded");
+	},
+	skipEnd: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

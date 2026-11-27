@@ -1253,7 +1253,7 @@ impl Misses {
 			for held in backfill(state, run.clone()).iter() {
 				self.filled.extend(held.clone());
 			}
-			for hole in holes(state, run.clone()) {
+			for hole in holes(state, run.clone()).into_iter().flat_map(|hole| taken.gaps(hole)) {
 				self.adopt_drops(state, hole.clone(), drift);
 				for hole in self.unclaimed(state, hole, drift) {
 					let Unfed { never, lost, awaited } = state.unfed(hole, now);

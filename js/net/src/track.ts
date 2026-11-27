@@ -4088,9 +4088,23 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
-		if (!ordered && !this.#reports) {
-			if (this.#resume) this.#resume.absorbSkips(this.#delivered, key);
-			else this.#absorbSkips(key);
+		if (!ordered) {
+			if (!this.#reports) {
+				if (this.#resume) this.#resume.absorbSkips(this.#delivered, key);
+				else this.#absorbSkips(key);
+			} else {
+				// A skip immediately above `key` that was already reported before `key` was handed
+				// out could not extend a run leftward at report time; merge the already-reported
+				// portion now without touching any unreported skip.
+				const told = this.#reported.at(key + 1n);
+				if (told) {
+					const skipEnd = this.#skipEnd(key + 1n);
+					if (skipEnd !== undefined) {
+						const absorbed = this.#delivered.absorbSkip(key + 1n, min(skipEnd, told.end));
+						if (absorbed) this.#pruneSkip(absorbed.start, absorbed.end);
+					}
+				}
+			}
 		}
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
@@ -4326,23 +4340,45 @@ export class Subscriber {
 		if (changed) this.#resume?.markReporting(this.#wired);
 	}
 
+	// One past the declared skip run holding `key`, if `key` was declared skipped.
+	#skipEnd(key: bigint): bigint | undefined {
+		if (this.#resume) return this.#resume.skipEnd(key);
+		const run = this.#state.drops.at(key);
+		return run?.skip ? run.end : undefined;
+	}
+
+	// Parts of `[start, end)` not yet reported to this reader (above its floor).
+	#untold(start: bigint, end: bigint): Run[] {
+		const from = max(start, this.#floor);
+		return from < end ? runGaps(this.#reported.overlapping(from, end), from, end) : [];
+	}
+
+	// Forget reports of `[start, end)` that were never sent, lowering `#floor` if needed and
+	// forcing a drop rescan so a later widening can report them again.
+	#untell(start: bigint, end: bigint): void {
+		if (start >= end) return;
+		if (start < this.#floor) {
+			const old = this.#floor;
+			this.#floor = start;
+			if (end < old) this.#reported.set(end, old, { start: end, end: old });
+		}
+		this.#reported.set(start, end);
+		this.#delivered.remove(start, end);
+		this.#resume?.untell(start, end);
+	}
+
 	// The publisher's view of this reader's record.
 	#wireRecord(): WireRecord {
 		this.#markReporting(true);
 		const reported = this.#reported;
 		return {
-			told: (key) => reported.at(key) !== undefined,
-			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
+			told: (key) => key < this.#floor || reported.at(key) !== undefined,
+			untold: (start, end) => this.#untold(start, end),
 			tell: (start, end) => {
 				if (start < end) reported.set(start, end, { start, end });
 			},
 			// A front's copies forget it too, so ranges that later ask for it report it again.
-			untell: (start, end) => {
-				if (start >= end) return;
-				reported.set(start, end);
-				this.#delivered.remove(start, end);
-				this.#resume?.untell(start, end);
-			},
+			untell: (start, end) => this.#untell(start, end),
 			skipSettled: (start, end) => {
 				const absorbed = this.#delivered.absorbSkip(start, end);
 				if (absorbed) this.#pruneSkip(absorbed.start, absorbed.end);
@@ -5525,13 +5561,7 @@ export class Subscriber {
 		hooks.lowestBuffered = (subscriber, delivered) =>
 			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
-		hooks.untell = (subscriber, start, end) => {
-			if (start >= end) return;
-			subscriber.#reported.set(start, end);
-			subscriber.#delivered.remove(start, end);
-			// A copy that is itself a front has copies of its own that reported it.
-			subscriber.#resume?.untell(start, end);
-		};
+		hooks.untell = (subscriber, start, end) => subscriber.#untell(start, end);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
@@ -5545,6 +5575,7 @@ export class Subscriber {
 			return absorbSkips(subscriber.#state.drops, delivered, key, floor, end ?? UNBOUNDED, seen);
 		};
 		hooks.markReporting = (subscriber) => subscriber.#markReporting();
+		hooks.skipEnd = (subscriber, key) => subscriber.#skipEnd(key);
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.taking = (subscriber) => {
 			// One staleness verdict for the whole walk, as the Rust `Subscriber::taking` takes.
@@ -5678,6 +5709,7 @@ export class Subscriber {
 				close: (abort) => {
 					closeTrackState(state, abort);
 				},
+				untold: (start, end) => subscriber.#untold(start, end),
 			});
 			return subscriber;
 		};

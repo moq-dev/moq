@@ -2141,6 +2141,14 @@ impl TrackState {
 		}
 	}
 
+	/// One past the declared skip run holding `key`, if `key` was declared skipped.
+	fn skip_end(&self, key: u64) -> Option<u64> {
+		match self.drops.get_key_value(&key) {
+			Some((run, Hole::Skip)) => Some(run.end),
+			_ => None,
+		}
+	}
+
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
 	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
@@ -8463,6 +8471,14 @@ impl Consumer {
 		});
 	}
 
+	/// One past the declared skip run holding `key`, if `key` was declared skipped.
+	pub(super) fn skip_end(&self, key: u64) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.skip_end(key);
+		}
+		self.with_state(|state| state?.read().skip_end(key))
+	}
+
 	/// When the latest group cached at `keys` landed; see [`Subscriber::landed`].
 	pub(super) fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
 		if let Some(serving) = self.serving() {
@@ -11692,10 +11708,25 @@ impl Cursor {
 		self.prune_skipped();
 		self.record.delivered.insert(key);
 		let mut delivered = std::mem::take(&mut self.record.delivered);
+		let mut absorbed = None;
 		if !ordered && !self.reports() {
 			let bounds = self.floor()..self.end_key.unwrap_or(u64::MAX);
 			let state = self.state.read();
 			state.absorb_skips(&mut delivered, Some(key), bounds, &mut self.skips_seen);
+			if delivered.above_gap().is_some() {
+				self.forget_past_budget_with(&state, &mut delivered, self.filter.window.budget(), None);
+			}
+		} else if !ordered
+			&& let Some(next) = key.checked_add(1)
+			&& let Some((run, Report::Final)) = self.record.reported.get_key_value(&next)
+		{
+			// A skip immediately above `key` that was already reported before `key` was handed out
+			// could not extend a run leftward at report time; merge the already-reported portion now.
+			let told_end = run.end;
+			let state = self.state.read();
+			if let Some(skip_end) = state.skip_end(next) {
+				absorbed = delivered.absorb_skip(next..skip_end.min(told_end));
+			}
 			if delivered.above_gap().is_some() {
 				self.forget_past_budget_with(&state, &mut delivered, self.filter.window.budget(), None);
 			}
@@ -11717,6 +11748,9 @@ impl Cursor {
 				&& let Some(end) = key.checked_add(1)
 			{
 				misses.forget(key..end);
+			}
+			if let Some(absorbed) = absorbed {
+				misses.forget(absorbed);
 			}
 		}
 	}
@@ -13290,8 +13324,15 @@ impl Subscriber {
 					delivered.forget_below(key);
 				}
 				delivered.insert(key);
-				if !ordered && !logical.reports {
-					resume.absorb_skips(delivered, key);
+				if !ordered {
+					if !logical.reports {
+						resume.absorb_skips(delivered, key);
+					} else if let Some(next) = key.checked_add(1)
+						&& let Some((run, Report::Final)) = logical.record.reported.get_key_value(&next)
+						&& let Some(skip_end) = resume.skip_end(next)
+					{
+						delivered.absorb_skip(next..skip_end.min(run.end));
+					}
 				}
 				resume.forget_past_budget(delivered);
 			}
@@ -14089,7 +14130,7 @@ impl Subscriber {
 				if let Some(next) = logical.record.next_pending() {
 					return Poll::Ready(next);
 				}
-				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record.delivered, probe, waiter));
+				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record, probe, waiter));
 				logical.record.pending.insert(range, Pending::own(hole));
 			},
 		}
@@ -35904,6 +35945,48 @@ mod test {
 				"front reader unreported skips must survive pool debt: {drops:?}"
 			);
 		}
+	}
+
+	/// A drop-reporting reader polling drops before handing out groups coalesces adjacent
+	/// already-reported skips into `delivered` when the preceding group is handed out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reporting_reader_coalesces_skips_reported_before_their_group() {
+		let (producer, pool) = pooled_producer(1 << 40);
+		producer.received();
+		let mut sub = producer.subscribe(Subscription::default());
+		let mut most = 0;
+		for n in 0..500u64 {
+			let key = 1_000 + 2 * n;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+			g.finish_at(key + 1).unwrap();
+			producer.skip_groups(key + 1..key + 2);
+			// Poll drops FIRST, before handing out group `key`.
+			let drops = drained_drops(&mut sub);
+			assert_eq!(drops, [(key + 1, key + 2)]);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+		}
+		let misses_runs = match &sub.inner {
+			Inner::Plain(cursor) => cursor.misses.as_ref().map_or(0, |m| {
+				use super::super::record::Beside;
+				m.runs()
+			}),
+			Inner::Resume(..) => 0,
+		};
+		assert!(
+			most <= 4,
+			"delivered/reported grew to {most} runs (now={}, delivered={}, reported={}, pending={}, written_off={}, skipped={}, misses={misses_runs})",
+			pool.recorded() / super::super::record::RUN_OVERHEAD,
+			sub.delivered_runs(),
+			sub.record().reported.len(),
+			sub.record().pending.len(),
+			sub.record().written_off.len(),
+			sub.record().skipped.runs(),
+		);
+		assert_eq!(sub.delivered_runs(), 1);
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

@@ -1719,7 +1719,10 @@ class Reader implements ResumeSource {
 		const cursor = this.#shell.cursor.peek();
 		const outside: Run[] = [];
 		this.#drops = this.#drops.filter((run) => {
-			if (delivered.covers(run.start, run.end)) return false;
+			const done = run.skip
+				? this.#shell.untold(run.start, run.end).length === 0
+				: delivered.covers(run.start, run.end);
+			if (done) return false;
 			if (run.skip) {
 				const from = max(run.start, cursor.start);
 				const end = min(run.end, cursor.end ?? run.end);
@@ -1741,7 +1744,8 @@ class Reader implements ResumeSource {
 			const from = max(run.start, cursor.start);
 			const end = min(run.end, cursor.end ?? run.end);
 			if (from >= end) continue;
-			for (const gap of delivered.gaps(from, end)) {
+			const gaps = run.skip ? this.#shell.untold(from, end) : delivered.gaps(from, end);
+			for (const gap of gaps) {
 				const [open] =
 					gap.start < passing
 						? [{ start: gap.start, end: min(gap.end, passing) }]
@@ -2280,6 +2284,11 @@ class Reader implements ResumeSource {
 		if (changed) {
 			for (const copy of this.#copies) hooks.markReporting(copy.sub);
 		}
+	}
+
+	skipEnd(key: bigint): bigint | undefined {
+		const serving = this.#copies.at(-1);
+		return serving ? hooks.skipEnd(serving.sub, key) : undefined;
 	}
 
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader

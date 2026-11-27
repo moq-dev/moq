@@ -7743,3 +7743,38 @@ test("empty-clipped skip runs leave a front reader drop queue and reappear on wi
 		source.close();
 	}
 });
+
+// A wired front publisher polling drops before handing out each group coalesces already-reported
+// adjacent skips into `delivered` on hand-out so `delivered` stays bounded.
+test("a wired front publisher coalesces skips reported before their preceding group", () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	front.serve(handle);
+	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
+	const wire = hooks.wire(sub);
+	try {
+		for (let n = 0n; n < 200n; n++) {
+			const key = 1_000n + 2n * n;
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finishAt(key + 1n);
+			producer.skipGroups(key + 1n, key + 2n);
+
+			const dropped = hooks.tryDrop(sub);
+			expect(dropped).toMatchObject({ kind: "drop", start: key + 1n, end: key + 2n, skip: true });
+			expect(drain(sub)).toEqual([key]);
+			wire.tell(key, key + 1n);
+			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
+			expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+		}
+		expect(hooks.deliveredRuns(sub)).toBe(1);
+		expect(hooks.reportedRuns(sub)).toBe(1);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+	}
+});

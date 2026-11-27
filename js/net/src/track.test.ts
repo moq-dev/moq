@@ -7429,3 +7429,37 @@ test("a sparse live track keeps a bounded record", () => {
 		}
 	}
 });
+
+// A wired publisher polling drops before handing out each group (each ending at `start + 1`, with
+// an explicit skip between groups) merges already-reported adjacent skips into `delivered` on
+// hand-out so `delivered` stays one run without absorbing unreported skips.
+test("a wired publisher coalesces skips reported before their preceding group", () => {
+	const producer = new TrackProducer("sparse").accept({
+		timescale: Timescale.MILLI,
+		maxAge: null,
+	});
+	const sub = producer.subscribe(withMax({ delay: { max: null } }));
+	const wire = hooks.wire(sub);
+	try {
+		for (let n = 0n; n < 500n; n++) {
+			const key = 1_000n + 2n * n;
+			const group = producer.createGroup(key);
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
+			group.finishAt(key + 1n);
+			producer.skipGroups(key + 1n, key + 2n);
+
+			// Poll drops FIRST, before handing out group `key`.
+			const dropped = hooks.tryDrop(sub);
+			expect(dropped).toMatchObject({ kind: "drop", start: key + 1n, end: key + 2n, skip: true });
+			expect(drainGroups(sub)).toEqual([key]);
+			wire.tell(key, key + 1n);
+			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
+			expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+		}
+		expect(hooks.deliveredRuns(sub)).toBe(1);
+		expect(hooks.reportedRuns(sub)).toBe(1);
+	} finally {
+		sub.close();
+		producer.close();
+	}
+});

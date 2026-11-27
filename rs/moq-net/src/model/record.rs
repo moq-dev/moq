@@ -146,11 +146,21 @@ impl Record {
 	}
 
 	/// Forget every report of `range`, which the wire was never told: a run given up below
-	/// where delivery starts, which a later widening may still serve.
+	/// where delivery starts, or a queued skip evicted while outside the reader's range, which a
+	/// later widening may still serve or report. Lowers `floor` if `range` reaches below it,
+	/// preserving the settled tail above `range.end` in `reported`.
 	pub fn untell(&mut self, range: Range<u64>) {
-		if !range.is_empty() {
-			self.reported.remove(range);
+		if range.is_empty() {
+			return;
 		}
+		if range.start < self.floor {
+			let old = self.floor;
+			self.floor = range.start;
+			if range.end < old {
+				self.reported.insert(range.end..old, Report::Final);
+			}
+		}
+		self.reported.remove(range);
 	}
 }
 
@@ -1269,5 +1279,24 @@ mod test {
 			"only the reported run bills above one delivered run"
 		);
 		assert!(!record.told(BASE - 1), "keys below the reader's start stay untold");
+	}
+
+	/// `untell` revokes a range even after pool debt folded it below `floor`, preserving the
+	/// settled keys above and below it.
+	#[test]
+	fn untell_revokes_keys_below_a_folded_floor() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.tell(0..10, Report::Final);
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert!(record.told(6) && record.told(9), "0..10 folded into floor");
+
+		record.untell(6..8);
+		assert!(record.told(5), "below untold stays told");
+		assert!(!record.told(6) && !record.told(7), "untold keys are revocable");
+		assert!(record.told(8) && record.told(9), "above untold stays told");
+		assert_eq!(record.report(6..10, &Hole::Skip, false), Some(6..8));
 	}
 }
