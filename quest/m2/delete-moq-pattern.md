@@ -34,9 +34,19 @@ Scope:
   `Mount::translate(&Patterns)` from `moq-net` and `@moq/net`. Keep prefix
   scoping (`scope`) plus exact-path lookup for `path_routes`; callers wanting
   ad-hoc client-side filtering filter announced paths directly.
+- Update all binding and demo callers in the same quest: remove `filter` from
+  `rs/moq-ffi/src/origin.rs`, `rs/libmoq/src/origin.rs`, and their language
+  wrappers, and migrate `moq-boy` (which reads `entry.captures` to identify
+  games) and the CARLA Python demo (which passes `filter="*"` and reads
+  captures to identify drivers) to scoped announcements that derive IDs from
+  direct child paths.
 - Change `stats::Config::{exclude, exclude_rooted}` from `Patterns` to
-  `Prefixes`, and `moq-relay`'s `SessionFilter.path` from `Option<Pattern>` to
-  `Option<Prefix>`.
+  `Prefixes`. For `moq-relay`'s `SessionFilter` (used for both listing and
+  revalidation) and `moq-cli`, make the switch to prefix filtering an explicit
+  breaking contract change: add a dedicated `prefix` query key and `--prefix`
+  CLI flag, reject the legacy `path` query key loudly instead of silently
+  widening an exact `path=demo` revalidation into a subtree match, and document
+  the breaking change in `MIGRATE.md` and PR Impact.
 - Delete `rs/moq-pattern` and `js/pattern` along with workspace members,
   criterion benches (`sh/rs/instructions.sh`, `sh/gh/nightly.sh`), feature-flag
   lists, trusted-publisher lists, and docs references; update affected quests
@@ -53,7 +63,7 @@ Scope:
 
 ## Related
 
-- [Remove instance from hang::catalog](/quest/m2/remove-catalog-instance.md) -
+- [Remove identity from hang::catalog](/quest/m2/remove-catalog-identity.md) -
   companion pre-0.22 cleanup
 - [Grants stop spelling prefixes as subtree patterns](/quest/m4/grant-alias-delete.md) -
   removes the temporary `foo/**` grant alias after 0.22
