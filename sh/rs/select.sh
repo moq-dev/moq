@@ -193,15 +193,16 @@ required_features() {
         | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
 }
 
-# True when any selected crate in $1 (or any non-fuzz crate under ALL) defines a bench or example.
+# Prints `true` when any selected crate in $1 (or any non-fuzz crate under ALL)
+# defines a bench or example, else `false`.
 has_benches_or_examples() {
-    cargo metadata --locked --format-version 1 --no-deps | jq -e --arg names "$1" --arg all "$packages" '
+    cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$1" --arg all "$packages" '
         ($names | split(" ") | map(select(. != ""))) as $want
         | any(
             .packages[];
             (if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
             and any(.targets[]; .kind // [] | any(. == "bench" or . == "example"))
-        )' >/dev/null
+        )'
 }
 
 case "$packages" in
@@ -254,18 +255,26 @@ case "$action" in
         just rs "$action" "${flags[@]}" || fail=1
         # Lint benches and examples in check mode (no codegen or linking) with
         # their required features, since `test` runs nextest on `--tests` alone.
-        if [[ "$fail" -eq 0 && ("$action" == lint || "$action" == check-test) ]] && has_benches_or_examples "$names"; then
-            target_flags=("${flags[@]}")
-            required=$(
+        if [[ "$fail" -eq 0 && ("$action" == lint || "$action" == check-test) ]]; then
+            has_targets=$(
                 set -e
-                required_features "$names" benches-examples
-            )
-            features=()
-            for feature in $required; do
-                [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
-            done
-            if ((${#features[@]})); then target_flags+=(--features "${features[*]}"); fi
-            just rs lint-targets "${target_flags[@]}" || fail=1
+                has_benches_or_examples "$names"
+            ) || fail=1
+            if [[ "$fail" -eq 0 && "$has_targets" == true ]]; then
+                target_flags=("${flags[@]}")
+                required=$(
+                    set -e
+                    required_features "$names" benches-examples
+                ) || fail=1
+                if [[ "$fail" -eq 0 ]]; then
+                    features=()
+                    for feature in $required; do
+                        [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+                    done
+                    if ((${#features[@]})); then target_flags+=(--features "${features[*]}"); fi
+                    just rs lint-targets "${target_flags[@]}" || fail=1
+                fi
+            fi
         fi
         # The test build enables device features, which can hide unused items
         # in the default-feature test cfg. Keep this compile isolated from the
@@ -316,9 +325,10 @@ case "$action" in
         if wants '(moq-video|moq-audio)'; then
             [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
             building+=" moq-video moq-audio"
-            features+=(moq-video/capture moq-audio/capture moq-audio/playback)
+            features+=(moq-video/capture moq-video/openh264 moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
+        if wants moq-relay; then features+=(moq-relay/test-support); fi
         # Cargo skips a target whose `required-features` are off without a word,
         # and a crate alone in the selection (such as moq-boy, whose one target
         # is its binary) has no dependent to turn them on. Turn on every one

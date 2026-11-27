@@ -29,7 +29,9 @@ FUZZ_CRATES = sorted(
     if package["name"].endswith("-fuzz")
 )
 FUZZ_EXCLUDES = " ".join(f"--exclude {crate}" for crate in FUZZ_CRATES)
-DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
+DEVICE_FEATURES = (
+    "moq-video/capture moq-video/openh264 moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
+)
 
 
 def target_features(which="tests"):
@@ -112,7 +114,7 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        features = DEVICE_FEATURES.split()
+        features = [*DEVICE_FEATURES.split(), "moq-relay/test-support"]
         features += [feature for feature in target_features("tests") if feature not in features]
         bench_features = target_features("benches-examples")
         for github_actions in (False, True):
@@ -248,6 +250,7 @@ class SelectTest(unittest.TestCase):
         for path, features in (
             ("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
             ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264"),
+            ("rs/moq-relay/tests/integration/cluster_drain.rs", "moq-relay/test-support"),
         ):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
