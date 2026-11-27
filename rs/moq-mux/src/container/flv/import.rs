@@ -177,6 +177,8 @@ struct AudioStream {
 	/// Where the open group's audio ends, as its frames' codec states it, or `None` once a frame
 	/// states nothing, which leaves the group with no end to declare.
 	end: Option<Timestamp>,
+	/// The open group's highest frame timestamp, which a cut never falls below.
+	newest: Option<Timestamp>,
 }
 
 impl AudioStream {
@@ -656,6 +658,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
 			})?;
+			stream.newest = match (keyframe, stream.newest) {
+				(false, Some(newest)) => Some(crate::container::later(newest, timestamp)),
+				_ => Some(timestamp),
+			};
 			stream.end = match (keyframe, stream.end, end) {
 				(true, _, end) => end,
 				(false, Some(reach), Some(end)) => Some(crate::container::later(reach, end)),
@@ -803,6 +809,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				join: crate::container::Join::default(),
 				previous: None,
 				end: None,
+				newest: None,
 			},
 		);
 		Ok(())
@@ -838,13 +845,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for stream in self.audio.values_mut() {
 			// Closed as a gap closes it, never past the seek, so the producer doesn't estimate its end
 			// from the spacing of its last frames.
-			let cap = stream
-				.track
-				.track()
-				.info()
-				.timescale
-				.and_then(|scale| Timestamp::new(start, scale).ok())
-				.filter(|cap| stream.previous.is_some_and(|previous| *cap > previous));
+			// Compared in the track's timescale, where the seek counts, and only past the group's
+			// highest frame, which the cut can't fall below.
+			let cap = stream.track.track().info().timescale.and_then(|scale| {
+				let past = stream
+					.newest
+					.is_some_and(|newest| newest.as_scale(scale).is_ok_and(|newest| u128::from(start) > newest));
+				past.then(|| Timestamp::new(start, scale).ok()).flatten()
+			});
 			stream.close(cap)?;
 			stream.track.seek(start)?;
 		}

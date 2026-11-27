@@ -1488,6 +1488,24 @@ async fn a_seek_declares_only_known_audio_ends() {
 	}
 }
 
+/// A seek caps the open group only past its highest packet: one between reordered packets, or at
+/// the last one's own time, leaves the group ending where its audio does.
+#[tokio::test]
+async fn a_seek_caps_only_past_the_newest_packet() {
+	for (tags, seek, end) in [(&[0, 60, 40][..], 50_000, 80_000), (&[0, 20, 40], 40_000, 60_000)] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = Import::new(broadcast, catalog.reserve());
+		importer.decode(&opus_tags(tags)).unwrap();
+		importer.seek(seek).unwrap();
+		let _finished = importer.finish().unwrap();
+
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		assert_eq!(groups_of(&consumer, &name).await, [(0, Some(end))], "{tags:?}");
+	}
+}
+
 /// HE-AAC signaling 960-sample core frames plays 40 ms a packet, so a group closing before the
 /// next tag ends where that tag lands.
 #[tokio::test]
