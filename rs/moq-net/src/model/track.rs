@@ -26930,7 +26930,10 @@ mod test {
 		producer.skip_groups(0..10);
 		producer.finish_at(Position::group(13)).unwrap();
 		let (woken, waiter) = Flag::waiter();
-		assert!(poll(&mut reader, &waiter), "the end leaves the join waiting on its answer");
+		assert!(
+			poll(&mut reader, &waiter),
+			"the end leaves the join waiting on its answer"
+		);
 		producer.answer_join(lag, None, Some(10), Duration::MAX);
 		producer.start_resolved(10).unwrap();
 		assert!(woken.take(), "the answer wakes the read");

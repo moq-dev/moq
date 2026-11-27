@@ -6380,7 +6380,10 @@ function endedBeforeAnswered(order: Order) {
 	hooks.proveTrack(producer);
 	// The SUBSCRIBE asked from the live edge, so where its feed starts waits on the answer.
 	hooks.startTrack(producer, { requested: undefined });
-	const subscriber = producer.subscribe({ order, ranges: [{ start: { live: { min: Duration.secs(1), max: null } } }] });
+	const subscriber = producer.subscribe({
+		order,
+		ranges: [{ start: { live: { min: Duration.secs(1), max: null } } }],
+	});
 	for (const key of [10n, 11n, 12n]) putGroup(producer, key);
 	hooks.skipTrackGroups(producer, 0n, 10n);
 	hooks.endTrack(producer, { group: 13n, frame: 0 });
