@@ -9,13 +9,13 @@
 diff --git a/rs/moq-quic/src/connection/mod.rs b/rs/moq-quic/src/connection/mod.rs
 --- a/rs/moq-quic/src/connection/mod.rs
 +++ b/rs/moq-quic/src/connection/mod.rs
-@@ -786,7 +786,8 @@
- 					debug_assert!(untracked_bytes <= segment_size as u64);
- 
+@@ -882,7 +882,8 @@
+ 					// `Ready::Blocked` does, not by the window or the pacer: only data it has to
+ 					// send counts for those.
  					let bytes_to_send = segment_size as u64 + untracked_bytes;
 -					if self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
 +					// MUTATION: the congestion window never holds a send back.
 +					if false && self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
  						space_idx += 1;
  						send_blocked = true;
- 						cwnd_blocked = true;
+ 						cwnd_blocked |= !bandwidth_probe;

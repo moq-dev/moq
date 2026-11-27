@@ -356,7 +356,10 @@ fn address_change_resets_path_state() {
 	let _guard = subscribe();
 	let (mut pair, client_ch, server_ch) = connected();
 	pair.drive();
-	assert_ne!(pair.server_conn_mut(server_ch).rtt(), transport::Config::default().initial_rtt);
+	assert_ne!(
+		pair.server_conn_mut(server_ch).rtt(),
+		transport::Config::default().initial_rtt
+	);
 
 	pair.client.addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), pair.next_port());
 	pair.client_conn_mut(client_ch).ping();
@@ -364,7 +367,10 @@ fn address_change_resets_path_state() {
 	let now = pair.time;
 	pair.server.drive(now, pair.client.addr);
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
-	assert_eq!(pair.server_conn_mut(server_ch).rtt(), transport::Config::default().initial_rtt);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).rtt(),
+		transport::Config::default().initial_rtt
+	);
 }
 
 /// A copy of the client's packet an attacker forwards from another address moves the server
@@ -386,7 +392,10 @@ fn spurious_migration_returns_to_the_validated_path() {
 	let now = pair.time;
 	pair.server.drive(now, forwarded);
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
-	assert_eq!(pair.server_conn_mut(server_ch).rtt(), transport::Config::default().initial_rtt);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).rtt(),
+		transport::Config::default().initial_rtt
+	);
 
 	// The server challenges the address it left, and the client answers from it
 	pair.drive();

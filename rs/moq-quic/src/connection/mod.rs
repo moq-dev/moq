@@ -1357,11 +1357,11 @@ impl Connection {
 		if self.path.in_flight.bytes + size > self.path.congestion.window() {
 			return false;
 		}
-		let delay = self.path.congestion.pace(now, size).or_else(|| {
-			self.send_rate
-				.as_mut()
-				.and_then(|cap| cap.delay(now, size))
-		});
+		let delay = self
+			.path
+			.congestion
+			.pace(now, size)
+			.or_else(|| self.send_rate.as_mut().and_then(|cap| cap.delay(now, size)));
 		if let Some(delay) = delay {
 			self.timers.set(Timer::Pacing, delay);
 			return false;

@@ -4640,7 +4640,10 @@ fn late_ack_only_packet_is_no_spurious_loss() {
 	pair.client.inbound.extend(late);
 	pair.server_conn_mut(server_ch).ping();
 	pair.drive();
-	assert_eq!(pair.server_conn_mut(server_ch).stats().path.spurious_congestion_events, 0);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).stats().path.spurious_congestion_events,
+		0
+	);
 }
 
 #[test]
