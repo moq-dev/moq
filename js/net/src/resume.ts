@@ -2308,14 +2308,16 @@ class Reader implements ResumeSource {
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader,
 	// or that would under a wider budget, holds unread: as one cursor keeps what it owes, since a
 	// late group there may be fresh by its own successor on that copy. A widened budget reads an
-	// expired copy again, so only a copy whose channel ran out is passed over. Nor past `keep`, an
-	// outer reader's own such group.
+	// expired copy again, so only a copy whose channel ran out, or past the track's max age that
+	// bounds every budget, is passed over: a lease on the copy never holds back the fold for good.
+	// Nor past `keep`, an outer reader's own such group.
 	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
+		const bound = this.#shell.info()?.maxAge?.asMillis() ?? Number.POSITIVE_INFINITY;
 		let kept = keep;
 		for (const copy of this.#copies) {
-			if (copy === newest || !copy.replaced || copy.done !== undefined) continue;
+			if (copy === newest || !copy.replaced || copy.done !== undefined || this.#expired(copy, bound)) continue;
 			const key = hooks.lowestBuffered(copy.sub, delivered);
 			if (key !== undefined) kept = min(kept ?? key, key);
 		}

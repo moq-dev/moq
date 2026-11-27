@@ -8373,6 +8373,15 @@ impl Consumer {
 		})
 	}
 
+	/// The widest budget any reader of this track can get: its max age bound, `None` when
+	/// unlimited.
+	pub(super) fn max_age_bound(&self) -> Option<Duration> {
+		if let Some(serving) = self.serving() {
+			return serving.max_age_bound();
+		}
+		self.with_state(|state| state.and_then(|state| state.read().max_age_bound()))
+	}
+
 	/// Whether this copy's wire names every start; see [`Producer::proven`].
 	pub(super) fn is_proven(&self) -> bool {
 		if let Some(serving) = self.serving() {

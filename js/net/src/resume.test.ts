@@ -85,7 +85,11 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
  * Resumed readers backfill superseded groups, so it sets no publisher limit.
  */
 function copy(source: BroadcastProducer) {
-	const producer = defined(source.createTrack("seq", { maxAge: null }));
+	return copyOf(defined(source.createTrack("seq", { maxAge: null })));
+}
+
+/** {@link copy} of a track `source` already created. */
+function copyOf(producer: track.Producer) {
 	return {
 		producer,
 		write(key: bigint, frames = 1, close = true) {
@@ -6236,6 +6240,54 @@ test("a widened budget reads an expired copy's groups past a hand-out", async ()
 		} finally {
 			installed.close();
 		}
+	}
+});
+
+// A leased copy's unread groups stop holding back the fold once the track's max age passed, as no
+// widened budget reads them then. Mirrors the Rust
+// `an_expired_copy_past_its_max_age_bound_holds_back_no_gap`.
+test("an expired copy past its max age bound holds back no gap", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copyOf(defined(a.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	const tb = copyOf(defined(b.createTrack("seq", { maxAge: Duration.millis(2_000) })));
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(1_000) } }));
+	try {
+		ta.write(0n);
+		ta.write(5n);
+		// Held, so the replaced copy stays subscribed once it expires.
+		const held = defined(sub.tryRecvGroup());
+		expect(drain(sub)).toEqual([0n]);
+		front.serve(b.consume());
+		await settle();
+		tb.write(6n);
+		await clock.advance(Duration.millis(900));
+		expect(drain(sub)).toEqual([6n]);
+		await clock.advance(Duration.millis(50));
+		for (const key of [4n, 2n, 1n]) ta.write(key);
+		tb.write(7n);
+		// Newest first, so the late groups are left unread.
+		const seven = defined(sub.tryRecvGroup());
+		expect(seven.start).toBe(7n);
+		for (let key = 9n; key < 40n; key += 2n) {
+			await clock.advance(Duration.millis(1_100));
+			tb.write(key);
+			expect(drain(sub)).toEqual([key]);
+		}
+		// No more than after the first of them, however long the lease lasts.
+		expect(hooks.deliveredRuns(sub)).toBe(3);
+		seven.close();
+		held.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
 	}
 });
 

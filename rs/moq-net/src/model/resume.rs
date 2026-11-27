@@ -1457,14 +1457,15 @@ impl Subscriber {
 			}
 			None
 		};
-		// Every copy but the newest is replaced. Judged as the pick judges a copy under any
-		// budget, not by the verdict letting it go last made: a widened budget reads an expired
-		// copy again, so what it holds unread stays owed meanwhile, as on one track.
+		// Every copy but the newest is replaced. Judged as the pick judges a copy under the
+		// widest budget its track's max age bound allows, not by the verdict letting it go last
+		// made: a widened budget reads an expired copy again, so what it holds unread stays owed
+		// meanwhile, as on one track. Past that bound no budget does, so a lease on the copy
+		// never holds back the fold for good.
 		let kept = ready
 			.filter(|(copy, _)| {
-				reader
-					.reads(copy, Duration::MAX, delivered, &kio::Waiter::noop())
-					.is_some()
+				let bound = copy.track.max_age_bound().unwrap_or(Duration::MAX);
+				reader.reads(copy, bound, delivered, &kio::Waiter::noop()).is_some()
 			})
 			.filter_map(|(_, sub)| unread(sub))
 			.chain(keep)
@@ -16101,6 +16102,44 @@ mod test {
 			sub.update(Subscription::default().with_max(ms(2000))).unwrap();
 			assert_eq!(drain(&mut sub, false), [2, 1], "routed {routed}");
 		}
+	}
+
+	/// A leased copy's unread group stops holding back the fold once its track's max age bound
+	/// passed, as no widened budget reads it then: the reader's record of the serving route's
+	/// later gaps stays compact however long the lease lasts.
+	#[kio::test]
+	async fn an_expired_copy_past_its_max_age_bound_holds_back_no_gap() {
+		let ms = Duration::from_millis;
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let info = crate::track::Info::timed().with_max_age(ms(2000));
+		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, ms(1000));
+		write(&a, 0);
+		write(&a, 5);
+		// Held, so the replaced copy stays subscribed once it expires.
+		let _held = recv(&mut sub);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 6);
+		kio::clock::sleep(ms(900)).await;
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(ms(50)).await;
+		for key in [4, 2, 1] {
+			write(&a, key);
+		}
+		write(&b, 7);
+		// Newest first, so the late groups are left unread.
+		assert_eq!(recv(&mut sub).start, 7);
+		for key in (9..40).step_by(2) {
+			kio::clock::sleep(ms(1100)).await;
+			write(&b, key);
+			assert_eq!(drain(&mut sub, false), [key]);
+		}
+		// No more than after the first of them, however long the lease lasts.
+		assert_eq!(sub.delivered_runs(), 3);
 	}
 
 	/// A replaced copy a full budget past the newer group that superseded it hands out none of
