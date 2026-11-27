@@ -44,7 +44,7 @@ pub(crate) trait Item: Clone + Eq + fmt::Debug {
 	/// broader one whatever their epochs or routes.
 	fn above(&self) -> u64;
 
-	/// Which run of its Instance the publisher is on: among claims of one Instance at one
+	/// Which run of its Identity the publisher is on: among claims of one Identity at one
 	/// path and distance, a higher epoch supersedes a lower one whatever either's route
 	/// costs, or whether a route reaches it, as `model::origin` ranks them. 0 for
 	/// attributes that carry none.
@@ -140,7 +140,7 @@ pub(crate) enum Kind {
 	Unavailable,
 }
 
-/// A change the reader sees: `id` is the Instance the claim serves.
+/// A change the reader sees: `id` is the Identity the claim serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Event<A, K = Id> {
 	pub id: K,

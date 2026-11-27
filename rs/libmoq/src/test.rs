@@ -50,13 +50,13 @@ fn id(raw: i32) -> u32 {
 }
 
 /// Create a route at `path` on `origin`, returning its route and broadcast fill handles. Frees
-/// the instance handle `options` names, which the call only borrows.
+/// the identity handle `options` names, which the call only borrows.
 fn create_route(origin: u32, path: &[u8], options: Option<&moq_route_options>) -> (u32, u32) {
-	let instance = options.map_or(0, |options| options.instance);
+	let identity = options.map_or(0, |options| options.identity);
 	let options = options.map_or(std::ptr::null(), |options| options as *const _);
 	let route = id(unsafe { moq_origin_route(origin, path.as_ptr() as *const c_char, path.len(), options) });
-	if instance != 0 {
-		assert_eq!(moq_instance_free(instance), 0);
+	if identity != 0 {
+		assert_eq!(moq_identity_free(identity), 0);
 	}
 	(route, id(moq_route_broadcast(route)))
 }
@@ -68,14 +68,14 @@ fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
 	create_route(origin, path, None).1
 }
 
-/// Route options at `cost` under the stable `instance`, or a fresh one when empty.
-fn route_options(cost: u64, instance: &str, hidden: bool) -> moq_route_options {
+/// Route options at `cost` under the stable `identity`, or a fresh one when empty.
+fn route_options(cost: u64, identity: &str, hidden: bool) -> moq_route_options {
 	moq_route_options {
 		cost,
-		instance: if instance.is_empty() {
+		identity: if identity.is_empty() {
 			0
 		} else {
-			parse_instance(instance)
+			parse_identity(identity)
 		},
 		epoch: 0,
 		hidden,
@@ -88,36 +88,36 @@ fn hidden() -> moq_route_options {
 }
 
 /// A caller-owned handle naming `text`.
-fn parse_instance(text: &str) -> u32 {
-	id(unsafe { moq_instance_parse(text.as_ptr().cast(), text.len()) })
+fn parse_identity(text: &str) -> u32 {
+	id(unsafe { moq_identity_parse(text.as_ptr().cast(), text.len()) })
 }
 
-/// The text an instance handle names.
-fn instance_text(instance: u32) -> String {
+/// The text an identity handle names.
+fn identity_text(identity: u32) -> String {
 	let mut dst = moq_string {
 		data: std::ptr::null(),
 		len: 0,
 	};
-	assert_eq!(unsafe { moq_instance_text(instance, &mut dst) }, 0);
+	assert_eq!(unsafe { moq_identity_text(identity, &mut dst) }, 0);
 	unsafe { std::str::from_utf8(std::slice::from_raw_parts(dst.data.cast::<u8>(), dst.len)) }
 		.unwrap()
 		.to_string()
 }
 
-/// The text of a caller-owned instance handle, freeing it.
-fn take_instance(instance: u32) -> String {
-	let text = instance_text(instance);
-	assert_eq!(moq_instance_free(instance), 0);
+/// The text of a caller-owned identity handle, freeing it.
+fn take_identity(identity: u32) -> String {
+	let text = identity_text(identity);
+	assert_eq!(moq_identity_free(identity), 0);
 	text
 }
 
-/// The instance a route serves.
-fn instance_of(route: u32) -> String {
-	take_instance(id(moq_route_instance(route)))
+/// The identity a route serves.
+fn identity_of(route: u32) -> String {
+	take_identity(id(moq_route_identity(route)))
 }
 
-fn claim_instance_of(claim: u32) -> String {
-	take_instance(id(moq_claim_instance(claim)))
+fn claim_identity_of(claim: u32) -> String {
+	take_identity(id(moq_claim_identity(claim)))
 }
 
 /// Request a published broadcast via `moq_origin_request` and return its handle.
@@ -244,7 +244,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
 		route: moq_route_info {
 			cost: 0,
-			instance: 0,
+			identity: 0,
 			available: false,
 		},
 	};
@@ -252,14 +252,14 @@ fn announce_info(announced: u32) -> moq_announce_event {
 	info
 }
 
-/// A fresh stable instance, as an application would name one.
-fn fresh_instance() -> String {
-	moq_net::Instance::random().to_string()
+/// A fresh stable identity, as an application would name one.
+fn fresh_identity() -> String {
+	moq_net::Identity::random().to_string()
 }
 
-/// The instance a received route carries, owned by its announcement.
-fn route_instance(route: &moq_route_info) -> Option<String> {
-	(route.instance != 0).then(|| instance_text(route.instance))
+/// The identity a received route carries, owned by its announcement.
+fn route_identity(route: &moq_route_info) -> Option<String> {
+	(route.identity != 0).then(|| identity_text(route.identity))
 }
 
 impl Drop for Callback {
@@ -767,8 +767,8 @@ fn publish_media_labels_config_without_naming_track() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -844,8 +844,8 @@ fn publish_catalog_config_invalid_broadcast() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -871,8 +871,8 @@ fn publish_catalog_config_invalid_broadcast() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -916,8 +916,8 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -973,8 +973,8 @@ fn publish_video_config_replaces_its_own_rendition() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1024,8 +1024,8 @@ fn manual_video_identity_change_is_refused() {
 		preference: 0,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1068,8 +1068,8 @@ fn manual_audio_identity_change_is_refused() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1238,7 +1238,7 @@ fn publish_catalog_roundtrip() {
 	let height: u32 = 1080;
 	let description: &[u8] = &[0x01, 0x02, 0x03];
 	let reference = "./source";
-	let instance = fresh_instance();
+	let identity = fresh_identity();
 	let track = "video-track";
 	let video = moq_video_config {
 		preference: 0,
@@ -1255,8 +1255,8 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 		broadcast: reference.as_ptr().cast(),
 		broadcast_len: reference.len(),
-		instance: instance.as_ptr().cast(),
-		instance_len: instance.len(),
+		identity: identity.as_ptr().cast(),
+		identity_len: identity.len(),
 		track: track.as_ptr().cast(),
 		track_len: track.len(),
 	};
@@ -1277,8 +1277,8 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1327,8 +1327,8 @@ fn publish_catalog_roundtrip() {
 		has_warmup: true,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1356,8 +1356,8 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1382,8 +1382,8 @@ fn publish_catalog_roundtrip() {
 		Some("source")
 	);
 	assert_eq!(
-		borrowed_string(video_cfg.instance, video_cfg.instance_len),
-		Some(instance.clone())
+		borrowed_string(video_cfg.identity, video_cfg.identity_len),
+		Some(identity.clone())
 	);
 	assert_eq!(
 		borrowed_string(video_cfg.track, video_cfg.track_len).as_deref(),
@@ -1448,8 +1448,8 @@ fn publish_catalog_roundtrip() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1462,7 +1462,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(audio_cfg.channel_count, 2);
 	assert_eq!((audio_cfg.jitter_us, audio_cfg.has_jitter), (20_000, true));
 	assert_eq!((audio_cfg.warmup_us, audio_cfg.has_warmup), (40_000, true));
-	assert!(audio_cfg.broadcast.is_null() && audio_cfg.instance.is_null() && audio_cfg.track.is_null());
+	assert!(audio_cfg.broadcast.is_null() && audio_cfg.identity.is_null() && audio_cfg.track.is_null());
 
 	// Removing the video rendition republishes a catalog without it.
 	assert_eq!(
@@ -1512,8 +1512,8 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1539,8 +1539,8 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1611,8 +1611,8 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		},
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1639,8 +1639,8 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1726,8 +1726,8 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1756,8 +1756,8 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1801,8 +1801,8 @@ fn unpublishable_catalog_containers_are_rejected() {
 		container,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -2709,6 +2709,34 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	assert_eq!(moq_publish_track_abort(track, 410), 0);
 	assert!(moq_publish_track_finish(track) < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A publisher's abort of a group a raw reader is mid-way through ends the track with it, so the
+/// truncation is never silent.
+#[test]
+fn raw_track_ends_on_an_aborted_group() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"raw-track-ends-on-an-aborted-group");
+	let name = b"cut";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	let _reader = consume_track(consume, name, &frame_cb);
+
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, b"cut".as_ptr(), 3, &micros(0)) },
+		0
+	);
+	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+	assert_eq!(moq_publish_group_abort(group, 409), 0);
+	assert!(frame_cb.recv() < 0, "the abort ends the track");
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 /// The subscription's ranges filter the read, and an update replaces them on the live read.
@@ -3842,8 +3870,8 @@ fn media_consumers_cancel_while_subscribing() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -3867,8 +3895,8 @@ fn media_consumers_cancel_while_subscribing() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -4275,11 +4303,11 @@ fn announced_deactivation() {
 
 	let path = b"deactivate/test";
 	let (route, broadcast) = create_route(origin, path, None);
-	let instance = instance_of(route);
+	let identity = identity_of(route);
 
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
-	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
+	assert_eq!(route_identity(&info.route).as_ref(), Some(&identity));
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	// Withdrawing hides the route without tearing down its broadcast: local consumers stop
@@ -4295,7 +4323,7 @@ fn announced_deactivation() {
 	assert_eq!(moq_route_announce(route), 0);
 	let (reannounced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
-	assert_eq!(route_instance(&info.route), Some(instance));
+	assert_eq!(route_identity(&info.route), Some(identity));
 	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
 	let _ = request_broadcast(origin, path);
 
@@ -4396,25 +4424,25 @@ fn a_hidden_route_is_unroutable_until_announced() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A locally announced route carries its cost and instance.
+/// A locally announced route carries its cost and identity.
 #[test]
-fn route_options_carry_cost_and_instance() {
+fn route_options_carry_cost_and_identity() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
-	let instance = fresh_instance();
-	let (route, broadcast) = create_route(origin, b"routed", Some(&route_options(7, &instance, false)));
-	assert_eq!(instance_of(route), instance);
+	let identity = fresh_identity();
+	let (route, broadcast) = create_route(origin, b"routed", Some(&route_options(7, &identity, false)));
+	assert_eq!(identity_of(route), identity);
 
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(info.route.cost, 7);
-	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
+	assert_eq!(route_identity(&info.route).as_ref(), Some(&identity));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	// Re-pricing changes the route in place: the listing never reports it, but a fresh
-	// listing reads the new price under the same instance.
+	// listing reads the new price under the same identity.
 	assert_eq!(moq_route_set_cost(route, 3), 0);
 	let repriced_cb = Callback::new();
 	let repriced_task =
@@ -4422,19 +4450,19 @@ fn route_options_carry_cost_and_instance() {
 	let (announced, info) = repriced_cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(info.route.cost, 3);
-	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
+	assert_eq!(route_identity(&info.route).as_ref(), Some(&identity));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(repriced_task), 0);
 	assert_eq!(repriced_cb.recv_announce_terminal(), 0);
 
-	// Zeroed options are the default: visible at once, cost 0, under a freshly minted instance.
+	// Zeroed options are the default: visible at once, cost 0, under a freshly minted identity.
 	let zeroed = route_options(0, "", false);
 	let (plain, broadcast2) = create_route(origin, b"plain", Some(&zeroed));
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.route.cost, 0);
-	let minted = route_instance(&info.route).unwrap();
-	assert_ne!(minted, instance);
-	assert_eq!(minted, instance_of(plain));
+	let minted = route_identity(&info.route).unwrap();
+	assert_ne!(minted, identity);
+	assert_eq!(minted, identity_of(plain));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
@@ -4466,15 +4494,15 @@ fn a_new_route_at_a_path_restarts() {
 		)
 	});
 
-	let first = fresh_instance();
+	let first = fresh_identity();
 	let (first_route, first_broadcast) = create_route(origin, b"restarted", Some(&route_options(0, &first, false)));
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
-	assert_eq!(route_instance(&info.route), Some(first));
+	assert_eq!(route_identity(&info.route), Some(first));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	let old = id(follow_cb.recv());
 
-	let second = fresh_instance();
+	let second = fresh_identity();
 	let (second_route, second_broadcast) = create_route(origin, b"restarted", Some(&route_options(0, &second, false)));
 	let new = id(follow_cb.recv());
 	assert_ne!(old, new);
@@ -4535,11 +4563,11 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
 	assert_eq!(got, "live/cam");
 
-	// Options naming a freed instance leave the request to answer.
-	let freed = parse_instance("freed");
-	assert_eq!(moq_instance_free(freed), 0);
+	// Options naming a freed identity leave the request to answer.
+	let freed = parse_identity("freed");
+	assert_eq!(moq_identity_free(freed), 0);
 	let unreadable = moq_route_options {
-		instance: freed,
+		identity: freed,
 		..hidden()
 	};
 	assert_eq!(
@@ -4547,22 +4575,22 @@ fn dynamic_serves_a_request_under_a_prefix() {
 		crate::error::MOQ_ERROR_NOT_FOUND
 	);
 
-	// A hidden job route answers nobody until it announces, under the instance its claim
+	// A hidden job route answers nobody until it announces, under the identity its claim
 	// lends.
 	let job = id(unsafe { moq_broadcast_request_route(request, &hidden()) });
 	assert!(
 		unsafe { moq_broadcast_request_route(request, std::ptr::null()) } < 0,
 		"request is consumed"
 	);
-	let lent = claim_instance_of(dynamic);
-	assert_eq!(instance_of(job), lent);
+	let lent = claim_identity_of(dynamic);
+	assert_eq!(identity_of(job), lent);
 	let served = id(moq_route_broadcast(job));
 	assert_eq!(moq_route_announce(job), 0);
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
 	// The answer's route is the job's to withdraw, which moves the claim on.
 	assert_eq!(moq_route_withdraw(job), 0);
-	assert_ne!(claim_instance_of(dynamic), lent);
+	assert_ne!(claim_identity_of(dynamic), lent);
 	assert_eq!(moq_route_free(job), 0);
 
 	assert_eq!(moq_claim_free(dynamic), 0);
@@ -4985,113 +5013,83 @@ fn media_demand_refuses_a_container() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// The on-demand race `abort_unwanted` closes, for one handle. A reader joins after the watcher
-/// reported nobody wants the track, so the call keeps the track and the reader reads on. Once the
-/// reader leaves, the call ends the track and releases the handle.
-fn abort_unwanted_keeps_a_late_reader(
-	consume: u32,
-	name: &[u8],
-	demand_cb: &Callback,
-	abort: impl Fn() -> i32,
-	write: impl Fn(),
+/// The C form of `info`, for accepting a request with the info a track was first published with.
+fn c_track_info(info: &moq_net::track::Info) -> moq_track_info {
+	let refresh = info.refresh;
+	moq_track_info {
+		priority: info.priority,
+		max_age_us: info.max_age.map_or(0, |age| age.as_micros() as u64),
+		max_age_unlimited: info.max_age.is_none(),
+		timescale: info.timescale.map_or(0, |scale| scale.as_u64()),
+		timescale_present: info.timescale.is_some(),
+		refresh: refresh.ratio.unwrap_or(0),
+		refresh_present: refresh.ratio.is_some(),
+		refresh_interval_us: refresh.interval.map_or(0, |interval| interval.as_micros() as u64),
+		refresh_interval_present: refresh.interval.is_some(),
+		compression: moq_compression::MOQ_COMPRESSION_NONE as u32,
+	}
+}
+
+/// Freeing a handle ends its on-demand track, for one kind of handle `publish` makes on a
+/// broadcast with a request handler. Nobody wanting the track, it closes cleanly. A reader that
+/// joined after the watcher reported nobody wants it is handed to the broadcast's next track
+/// request instead of failing, and reads what that request's producer writes, which accepts it
+/// with `info`, the info the track was first published with.
+fn free_ends_on_demand(
+	path: &[u8],
+	info: moq_net::track::Info,
+	publish: impl Fn(u32, &[u8]) -> (u32, moq_net::track::Demand),
+	watch: unsafe extern "C" fn(u32, ffi::moq_status_callback, *mut c_void) -> i32,
+	free: extern "C" fn(u32) -> i32,
 ) {
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-
-	let frame_cb = Callback::new();
-	let reader = consume_track(consume, name, &frame_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
-	assert_eq!(abort(), 0, "a reader wants the track, so it stays");
-
-	write();
-	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
-
-	cancel_track(reader, &frame_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert_eq!(abort(), 1, "nobody wants the track, so it ends");
-	assert!(abort() < 0, "ending the track released the handle");
-	assert!(demand_cb.recv_terminal() < 0, "the watcher ends with the track's abort");
-}
-
-#[test]
-fn track_abort_unwanted_keeps_a_late_reader() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"track-abort-unwanted");
-	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
-	let demand_cb = Callback::new();
-	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
-
-	let consume = consume_local(broadcast);
-	abort_unwanted_keeps_a_late_reader(
-		consume,
-		name,
-		&demand_cb,
-		|| moq_publish_track_abort_unwanted(track, 7),
-		|| {
-			let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
-			assert_eq!(
-				unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(0)) },
-				0
-			);
-			assert_eq!(moq_publish_group_finish(group), 0);
-		},
-	);
-
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// Media comes from a track request here, so the reader is already joined when the handle
-/// exists: the call keeps the track for it, then ends it once it leaves.
-#[test]
-fn media_abort_unwanted_keeps_a_late_reader() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"media-abort-unwanted");
+	let broadcast = publish_broadcast(origin, path);
 	let request_cb = Callback::new();
 	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
-
 	let consume = consume_local(broadcast);
+
+	let (handle, demand) = publish(broadcast, b"idle");
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { watch(handle, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+	assert_eq!(free(handle), 0);
+	assert!(free(handle) < 0, "freeing released the handle");
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	let closed = crate::ffi::RUNTIME
+		.block_on(async { kio::clock::timeout(TIMEOUT, demand.closed()).await })
+		.expect("the freed track never closed");
+	assert!(closed.is_ok(), "an unwanted track ends cleanly, got {closed:?}");
+
+	let (handle, demand) = publish(broadcast, b"late");
+	let name = demand.name().to_string();
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { watch(handle, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
 	let frame_cb = Callback::new();
-	let reader = consume_track(consume, b"audio", &frame_cb);
+	let reader = consume_track(consume, name.as_bytes(), &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+	assert_eq!(free(handle), 0);
 
 	let request = id(request_cb.recv());
-	let init = opus_head();
-	let config = moq_audio_init {
-		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
-		init: init.as_ptr(),
-		init_len: init.len(),
-		label: std::ptr::null(),
-		label_len: 0,
-		hint: moq_audio_hint::default(),
+	let mut got = moq_string {
+		data: std::ptr::null(),
+		len: 0,
 	};
-	let media = id(unsafe { moq_track_request_audio(request, &config) });
-	let demand_cb = Callback::new();
-	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), demand_cb.ptr) });
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
-
-	assert_eq!(moq_publish_media_abort_unwanted(media, 7), 0, "the reader wants it");
-	let payload = b"opus frame";
+	assert_eq!(unsafe { moq_track_request_name(request, &mut got) }, 0);
+	assert_eq!(borrowed_string(got.data, got.len).as_deref(), Some(name.as_str()));
+	let track = id(unsafe { moq_track_request_accept(request, &c_track_info(&info)) });
+	let payload = b"served again";
 	assert_eq!(
-		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(1000)) },
-		0,
-		"the handle still publishes"
+		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(0)) },
+		0
 	);
 	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
 
+	// The watcher follows the track, not the freed handle, so it is stopped here.
+	assert_eq!(moq_publish_demand_cancel(watcher), 0);
+	while demand_cb.recv() > 0 {}
 	cancel_track(reader, &frame_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert_eq!(moq_publish_media_abort_unwanted(media, 7), 1, "nobody wants it");
-	assert!(
-		moq_publish_media_abort_unwanted(media, 7) < 0,
-		"ending the track released the handle"
-	);
-	assert!(
-		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(2000)) } < 0,
-		"nothing publishes to a released handle"
-	);
-	assert!(demand_cb.recv_terminal() < 0);
+	assert_eq!(moq_publish_track_free(track), 0);
 
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
@@ -5099,127 +5097,132 @@ fn media_abort_unwanted_keeps_a_late_reader() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A container handle is not a media handle, so the call refuses it as demand does.
 #[test]
-fn media_abort_unwanted_refuses_a_container() {
+fn track_free_ends_on_demand() {
+	free_ends_on_demand(
+		b"track-free",
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
+		|broadcast, name| {
+			let track = id(unsafe {
+				moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null())
+			});
+			let demand = State::lock()
+				.publish
+				.track_demand(Id::try_from(track).unwrap())
+				.unwrap();
+			(track, demand)
+		},
+		moq_publish_track_demand,
+		moq_publish_track_free,
+	);
+}
+
+#[test]
+fn media_free_ends_on_demand() {
+	free_ends_on_demand(
+		b"media-free",
+		hang::container::track_info(hang::catalog::PRIORITY.audio),
+		|broadcast, _| {
+			let media = id(publish_audio(
+				broadcast,
+				moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+				&opus_head(),
+				None,
+			));
+			let demand = State::lock()
+				.publish
+				.media_demand(Id::try_from(media).unwrap())
+				.unwrap();
+			(media, demand)
+		},
+		moq_publish_media_demand,
+		moq_publish_media_free,
+	);
+}
+
+/// A container handle is not a media handle, so freeing one as media is refused, as demand is.
+#[test]
+fn media_free_refuses_a_container() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"media-abort-unwanted-container");
+	let broadcast = publish_broadcast(origin, b"media-free-container");
 	let container = id(publish_container(
 		broadcast,
 		moq_container_format::MOQ_CONTAINER_FORMAT_FMP4,
 		&[],
 	));
-	assert!(moq_publish_media_abort_unwanted(container, 7) < 0);
+	assert!(moq_publish_media_free(container) < 0);
 	assert_eq!(moq_publish_container_finish(container), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn audio_abort_unwanted_keeps_a_late_reader() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"audio-abort-unwanted");
-	let input = moq_audio_encoder_input {
-		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
-		sample_rate: 48_000,
-		channels: 1,
-	};
-	let output = moq_audio_encoder_output {
-		codec: c"opus".as_ptr(),
-		codec_len: 4,
-		sample_rate: 0,
-		channels: 0,
-		bitrate: 0,
-		frame_duration_us: 0,
-	};
-	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
-	let demand_cb = Callback::new();
-	let _watcher = id(unsafe { moq_encode_audio_demand(producer, Some(channel_callback), demand_cb.ptr) });
-
-	let pcm: Vec<u8> = (0..960).flat_map(|i| (i as f32 / 960.0).to_le_bytes()).collect();
-	let consume = consume_local(broadcast);
-	abort_unwanted_keeps_a_late_reader(
-		consume,
-		b"audio",
-		&demand_cb,
-		|| moq_encode_audio_abort_unwanted(producer, 7),
-		|| {
-			let frame = moq_audio_frame {
-				timestamp: micros(0),
-				data: pcm.as_ptr(),
-				data_size: pcm.len(),
+fn audio_free_ends_on_demand() {
+	free_ends_on_demand(
+		b"audio-free",
+		hang::container::track_info(hang::catalog::PRIORITY.audio),
+		|broadcast, name| {
+			let input = moq_audio_encoder_input {
+				format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+				sample_rate: 48_000,
+				channels: 1,
 			};
-			assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+			let output = moq_audio_encoder_output {
+				codec: c"opus".as_ptr(),
+				codec_len: 4,
+				sample_rate: 0,
+				channels: 0,
+				bitrate: 0,
+				frame_duration_us: 0,
+			};
+			let producer = id(unsafe {
+				moq_encode_audio(
+					broadcast,
+					name.as_ptr() as *const c_char,
+					name.len(),
+					&input,
+					&output,
+					0,
+				)
+			});
+			let demand = State::lock().audio.demand(Id::try_from(producer).unwrap()).unwrap();
+			(producer, demand)
 		},
+		moq_encode_audio_demand,
+		moq_encode_audio_free,
 	);
-	assert!(
-		moq_encode_audio_finish(producer) < 0,
-		"ending the track released the handle"
-	);
-
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn video_abort_unwanted_keeps_a_late_reader() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"video-abort-unwanted");
-	let input = moq_video_encoder_input {
-		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
-		width: 320,
-		height: 240,
-		framerate: moq_video_frame_rate {
-			numerator: 30_000,
-			denominator: 1001,
+fn video_free_ends_on_demand() {
+	free_ends_on_demand(
+		b"video-free",
+		hang::container::track_info(hang::catalog::PRIORITY.video),
+		|broadcast, _| {
+			let input = moq_video_encoder_input {
+				format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+				width: 320,
+				height: 240,
+				framerate: moq_video_frame_rate {
+					numerator: 30_000,
+					denominator: 1001,
+				},
+			};
+			let output = moq_video_encoder_output {
+				codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+				bitrate: 0,
+				join_us: 0,
+				kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+				encoder: std::ptr::null(),
+				encoder_len: 0,
+			};
+			let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+			let demand = State::lock().video.demand(Id::try_from(producer).unwrap()).unwrap();
+			(producer, demand)
 		},
-	};
-	let output = moq_video_encoder_output {
-		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
-		bitrate: 0,
-		join_us: 0,
-		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
-		encoder: std::ptr::null(),
-		encoder_len: 0,
-	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
-	let demand_cb = Callback::new();
-	let _watcher = id(unsafe { moq_encode_video_demand(producer, Some(channel_callback), demand_cb.ptr) });
-	let name = State::lock()
-		.video
-		.demand(Id::try_from(producer).unwrap())
-		.unwrap()
-		.name()
-		.to_string();
-
-	let rgba = gray_rgba(320, 240);
-	let consume = consume_local(broadcast);
-	abort_unwanted_keeps_a_late_reader(
-		consume,
-		name.as_bytes(),
-		&demand_cb,
-		|| moq_encode_video_abort_unwanted(producer, 7),
-		|| {
-			assert_eq!(moq_encode_video_cut(producer), 0);
-			for index in 0..5u64 {
-				let frame = moq_video_encoder_frame {
-					timestamp: micros(index * 1_001_000 / 30),
-					data: rgba.as_ptr(),
-					data_size: rgba.len(),
-				};
-				assert_eq!(unsafe { moq_encode_video_frame(producer, &frame) }, 0);
-			}
-		},
+		moq_encode_video_demand,
+		moq_encode_video_free,
 	);
-	assert!(
-		moq_encode_video_finish(producer) < 0,
-		"ending the track released the handle"
-	);
-
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
@@ -5808,8 +5811,8 @@ fn local_publish_consume() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5841,8 +5844,8 @@ fn local_publish_consume() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5911,7 +5914,7 @@ fn follow_local() {
 	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
 	let media = id(publish_audio(broadcast, format, &init, None));
 
-	// The broadcast handle; the wait carries on for the next instance until cancelled.
+	// The broadcast handle; the wait carries on for the next identity until cancelled.
 	let consume = id(cb.recv());
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -5939,8 +5942,8 @@ fn follow_local() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5957,12 +5960,12 @@ fn follow_local() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Publish an Opus rendition on `a/source` (served under `source_instance`) and describe it
-/// in `a/pub`'s catalog as a sibling reference naming `rendition_instance`, returning
+/// Publish an Opus rendition on `a/source` (served under `source_identity`) and describe it
+/// in `a/pub`'s catalog as a sibling reference naming `rendition_identity`, returning
 /// (source, media, broadcast).
-fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance: Option<&str>) -> (u32, u32, u32) {
+fn publish_sibling_audio(origin: u32, source_identity: &str, rendition_identity: Option<&str>) -> (u32, u32, u32) {
 	// Only the sibling serves the track; the catalog broadcast just describes it.
-	let source = create_route(origin, b"a/source", Some(&route_options(0, source_instance, false))).1;
+	let source = create_route(origin, b"a/source", Some(&route_options(0, source_identity, false))).1;
 	let init = opus_head();
 	let media = id(publish_audio(
 		source,
@@ -5988,8 +5991,8 @@ fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance:
 	let broadcast = publish_broadcast(origin, b"a/pub");
 	let codec = "opus";
 	let sibling = "./source";
-	let (instance, instance_len) = rendition_instance.map_or((std::ptr::null(), 0), |instance| {
-		(instance.as_ptr() as *const c_char, instance.len())
+	let (identity, identity_len) = rendition_identity.map_or((std::ptr::null(), 0), |identity| {
+		(identity.as_ptr() as *const c_char, identity.len())
 	});
 	let config = moq_audio_config {
 		name: name.as_ptr() as *const c_char,
@@ -6009,8 +6012,8 @@ fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance:
 		has_warmup: false,
 		broadcast: sibling.as_ptr() as *const c_char,
 		broadcast_len: sibling.len(),
-		instance,
-		instance_len,
+		identity,
+		identity_len,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -6021,12 +6024,12 @@ fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance:
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
 /// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
 /// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
-/// The rendition's instance, when it matches the sibling's, does not get in the way.
+/// The rendition's identity, when it matches the sibling's, does not get in the way.
 #[test]
 fn consume_audio_follows_a_sibling_broadcast_reference() {
 	let origin = id(moq_origin_create());
-	let instance = fresh_instance();
-	let (source, media, broadcast) = publish_sibling_audio(origin, &instance, Some(&instance));
+	let identity = fresh_identity();
+	let (source, media, broadcast) = publish_sibling_audio(origin, &identity, Some(&identity));
 
 	let consume = request_broadcast(origin, b"a/pub");
 	let catalog_cb = Callback::new();
@@ -6069,12 +6072,12 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A rendition naming an instance refuses a sibling proven to serve another stream, rather
+/// A rendition naming an identity refuses a sibling proven to serve another stream, rather
 /// than delivering that stream's frames.
 #[test]
-fn consume_audio_refuses_a_sibling_of_another_instance() {
+fn consume_audio_refuses_a_sibling_of_another_identity() {
 	let origin = id(moq_origin_create());
-	let (wanted, served) = (fresh_instance(), fresh_instance());
+	let (wanted, served) = (fresh_identity(), fresh_identity());
 	let (source, media, broadcast) = publish_sibling_audio(origin, &served, Some(&wanted));
 
 	let consume = request_broadcast(origin, b"a/pub");
@@ -6090,7 +6093,7 @@ fn consume_audio_refuses_a_sibling_of_another_instance() {
 		0
 	);
 	let code = frame_cb.recv();
-	assert!(code < 0, "a sibling of another instance is refused, got {code}");
+	assert!(code < 0, "a sibling of another identity is refused, got {code}");
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
@@ -6168,13 +6171,13 @@ fn decoders_cancel_while_resolving_a_sibling() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A decoded consumer follows a rendition's sibling reference and instance too, decoding the
+/// A decoded consumer follows a rendition's sibling reference and identity too, decoding the
 /// sibling's track rather than looking for it on the catalog's own broadcast.
 #[test]
 fn decode_audio_follows_a_sibling_broadcast_reference() {
 	let origin = id(moq_origin_create());
-	let instance = fresh_instance();
-	let source = create_route(origin, b"d/source", Some(&route_options(0, &instance, false))).1;
+	let identity = fresh_identity();
+	let source = create_route(origin, b"d/source", Some(&route_options(0, &identity, false))).1;
 	let input = moq_audio_encoder_input {
 		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
 		sample_rate: 48_000,
@@ -6209,7 +6212,7 @@ fn decode_audio_follows_a_sibling_broadcast_reference() {
 			(name.clone(), config.clone())
 		};
 		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-		config.instance = Some(instance.parse().unwrap());
+		config.identity = Some(identity.parse().unwrap());
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
 		catalog
 			.modify(catalog.next_timestamp())
@@ -6289,12 +6292,12 @@ fn publish(origin: u32, path: &str, options: moq_net::origin::RouteOptions) -> m
 	State::lock().origin.get(origin).unwrap().route(path, options).unwrap()
 }
 
-/// Route `path` on `origin` under a fresh instance, as each run of a publisher does.
+/// Route `path` on `origin` under a fresh identity, as each run of a publisher does.
 fn publish_run(origin: u32, path: &str) -> moq_net::origin::Route {
 	publish(origin, path, moq_net::origin::RouteOptions::default())
 }
 
-/// Another publisher instance taking the path delivers a fresh handle on the same wait.
+/// Another publisher identity taking the path delivers a fresh handle on the same wait.
 #[test]
 fn follow_delivers_a_restart() {
 	let origin = id(moq_origin_create());
@@ -6325,7 +6328,7 @@ fn follow_delivers_a_restart() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Another instance taking over while the wait resolves is the one it delivers, and the cancel's
+/// Another identity taking over while the wait resolves is the one it delivers, and the cancel's
 /// terminal is the next callback. `dynamic_at` is where the route the wait first resolves
 /// through covers the path: above it, the takeover's restart lands while resolving; at it, the
 /// origin holds that restart. The hold runs on the runtime's clock, so moq-net's follow tests
@@ -6355,7 +6358,7 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 		)
 	});
 
-	// The wait is on the dynamic route's answer when the exact path takes over under another instance.
+	// The wait is on the dynamic route's answer when the exact path takes over under another identity.
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
 	let takeover = publish_run(origin, "live");
 	let delivered = id(cb.recv());
@@ -6381,56 +6384,56 @@ fn follow_delivers_a_held_takeover_once() {
 type Resolve =
 	unsafe extern "C" fn(u32, *const c_char, usize, u32, crate::ffi::moq_status_callback, *mut c_void) -> i32;
 
-/// Resolve `live` on `origin` through `call`, pinned to `instance`.
-fn resolve_pinned(call: Resolve, origin: u32, instance: &str, cb: &Callback) -> i32 {
+/// Resolve `live` on `origin` through `call`, pinned to `identity`.
+fn resolve_pinned(call: Resolve, origin: u32, identity: &str, cb: &Callback) -> i32 {
 	let path = b"live";
-	let instance = parse_instance(instance);
+	let identity = parse_identity(identity);
 	let code = unsafe {
 		call(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			instance,
+			identity,
 			Some(channel_callback),
 			cb.ptr,
 		)
 	};
-	assert_eq!(moq_instance_free(instance), 0);
+	assert_eq!(moq_identity_free(identity), 0);
 	code
 }
 
-/// An instance pins both resolutions to one stream: a request for another one fails, and a
+/// An identity pins both resolutions to one stream: a request for another one fails, and a
 /// follower never delivers another one taking over but delivers its own once it serves again.
 #[test]
-fn an_instance_pins_request_and_follow() {
+fn an_identity_pins_request_and_follow() {
 	let origin = id(moq_origin_create());
-	let instance = moq_net::Instance::random();
+	let identity = moq_net::Identity::random();
 	let first = publish(
 		origin,
 		"live",
-		moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0),
+		moq_net::origin::RouteOptions::default().with_identity(identity.clone(), 0),
 	);
-	let instance = instance.to_string();
+	let identity = identity.to_string();
 
 	let cb = Callback::new();
-	id(resolve_pinned(moq_origin_request, origin, &instance, &cb));
+	id(resolve_pinned(moq_origin_request, origin, &identity, &cb));
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(cb.recv_terminal(), 0);
 	let cb = Callback::new();
 	id(resolve_pinned(
 		moq_origin_request,
 		origin,
-		moq_net::Instance::random().as_ref(),
+		moq_net::Identity::random().as_ref(),
 		&cb,
 	));
-	assert!(cb.recv() < 0, "another instance resolved");
+	assert!(cb.recv() < 0, "another identity resolved");
 
-	// Another instance winning the path leaves the pinned stream to its own routes: the
+	// Another identity winning the path leaves the pinned stream to its own routes: the
 	// follower delivers it while it still serves, and nothing for the winner.
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
 	let path = b"live";
-	let pin = parse_instance(&instance);
+	let pin = parse_identity(&identity);
 	let task = id(unsafe {
 		moq_origin_follow(
 			origin,
@@ -6441,7 +6444,7 @@ fn an_instance_pins_request_and_follow() {
 			cb.ptr,
 		)
 	});
-	assert_eq!(moq_instance_free(pin), 0);
+	assert_eq!(moq_identity_free(pin), 0);
 	let delivered = id(cb.recv());
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
@@ -6462,7 +6465,7 @@ fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Claim {
 		.unwrap()
 }
 
-/// Wait for the broadcast at `path` on `origin`, delivering each instance through `cb`.
+/// Wait for the broadcast at `path` on `origin`, delivering each identity through `cb`.
 fn follow(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 	id(unsafe {
 		moq_origin_follow(
@@ -6503,7 +6506,7 @@ extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 /// announces again before the follower looks. So the stream serving the path afterwards is
 /// delivered again, though the caller still holds a handle to it.
 #[test]
-fn follow_delivers_the_instance_again_after_an_end() {
+fn follow_delivers_the_identity_again_after_an_end() {
 	let origin = id(moq_origin_create());
 	let (tx, rx) = mpsc::channel();
 	let (release, hold) = mpsc::channel();
@@ -6524,7 +6527,7 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	});
 	let recv = || rx.recv_timeout(TIMEOUT).expect("callback timed out");
 
-	let options = moq_net::origin::RouteOptions::default().with_instance(moq_net::Instance::random(), 0);
+	let options = moq_net::origin::RouteOptions::default().with_identity(moq_net::Identity::random(), 0);
 	let run = publish(origin, "live", options);
 	let first = id(recv());
 
@@ -6547,11 +6550,11 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Freeing a delivered handle changes nothing about the path, and another instance taking it
+/// Freeing a delivered handle changes nothing about the path, and another identity taking it
 /// over is delivered. moq-net's follow tests prove on a simulated clock that the freed
 /// takeover is never delivered again.
 #[test]
-fn follow_waits_for_another_instance_after_a_freed_takeover() {
+fn follow_waits_for_another_identity_after_a_freed_takeover() {
 	let origin = id(moq_origin_create());
 	let dynamic = serve_dynamic(origin, "live");
 	let cb = Callback::new();
@@ -6600,8 +6603,8 @@ fn video_publish_consume() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -6644,8 +6647,8 @@ fn video_publish_consume() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -7775,8 +7778,8 @@ fn catalog_update_on_new_track() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		identity: std::ptr::null(),
+		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -8843,7 +8846,7 @@ fn dial_pinned(url: &str, fingerprint: &str, publish: u32, consume: u32, user_da
 	})
 }
 
-/// A received route accumulates each session's cost across a relay and carries an instance.
+/// A received route accumulates each session's cost across a relay and carries an identity.
 ///
 /// The relay accepts both sessions, as a relay server does: a server asks its peer about
 /// everything, while a client session asks only about what a local reader watches, which
@@ -8883,7 +8886,7 @@ fn announce_route_crosses_a_relay_session() {
 		Some("relayed")
 	);
 	assert_eq!(info.route.cost, 9, "each session adds its default cost of one");
-	assert!(route_instance(&info.route).is_some(), "every route carries an instance");
+	assert!(route_identity(&info.route).is_some(), "every route carries an identity");
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
@@ -8908,10 +8911,10 @@ fn announce_route_crosses_a_relay_session() {
 	}
 }
 
-/// A route received over moq-lite 06 carries a session-minted instance, and only its handle,
+/// A route received over moq-lite 06 carries a session-minted identity, and only its handle,
 /// not its text, pins a request or a follower to that stream.
 #[test]
-fn a_minted_instance_pins_request_and_follow() {
+fn a_minted_identity_pins_request_and_follow() {
 	let source = id(moq_origin_create());
 	let sink = id(moq_origin_create());
 	let server_cb = Callback::new();
@@ -8950,12 +8953,12 @@ fn a_minted_instance_pins_request_and_follow() {
 	let task = id(unsafe { moq_origin_announced(sink, std::ptr::null(), Some(channel_callback), announced_cb.ptr) });
 	let (route, broadcast) = create_route(source, b"live", Some(&route_options(0, "", false)));
 	let (announced, info) = announced_cb.recv_route();
-	let minted = info.route.instance;
-	assert_eq!(moq_instance_minted(minted), 1, "lite-06 carries no instance");
-	let named = parse_instance(&instance_text(minted));
-	assert_eq!(moq_instance_minted(named), 0, "text always names an instance");
-	assert_eq!(moq_instance_equal(minted, named), 0);
-	assert_eq!(moq_instance_equal(minted, minted), 1);
+	let minted = info.route.identity;
+	assert_eq!(moq_identity_minted(minted), 1, "lite-06 carries no identity");
+	let named = parse_identity(&identity_text(minted));
+	assert_eq!(moq_identity_minted(named), 0, "text always names an identity");
+	assert_eq!(moq_identity_equal(minted, named), 0);
+	assert_eq!(moq_identity_equal(minted, minted), 1);
 
 	let path = b"live";
 	let cb = Callback::new();
@@ -8998,9 +9001,9 @@ fn a_minted_instance_pins_request_and_follow() {
 			cb.ptr,
 		)
 	});
-	assert!(cb.recv() < 0, "the minted instance's text names another stream");
+	assert!(cb.recv() < 0, "the minted identity's text names another stream");
 
-	assert_eq!(moq_instance_free(named), 0);
+	assert_eq!(moq_identity_free(named), 0);
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);

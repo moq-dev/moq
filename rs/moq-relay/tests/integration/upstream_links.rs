@@ -113,8 +113,8 @@ async fn node_on(connect: Vec<Peer>, accepts: &[&str], dial: &[&str]) -> Node {
 	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	listen.tcp.tls = Some(true);
 	listen.tls.generate = vec!["localhost".into()];
-	// Links speak lite-07, which carries each route's instance, so every edge ranks a path's
-	// routes alike: over an older version each edge mints instances of its own.
+	// Links speak lite-07, which carries each route's identity, so every edge ranks a path's
+	// routes alike: over an older version each edge mints identities of its own.
 	listen.version = versions(accepts);
 	let mut listener = listen
 		.init(Default::default())
@@ -216,7 +216,7 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 	)
 	.await
 	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"))
-	.expect("the first change is an instance");
+	.expect("the first change is an identity");
 	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
 			min: Some(Duration::from_secs(1)),

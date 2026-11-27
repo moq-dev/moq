@@ -22,5 +22,5 @@ Public API: none. Wire: none.
 ## Related
 
 - [Every counted bench repeats its instruction count](/quest/m0/repeatable-instruction-counts.md) - the other half of making bisect steps trustworthy
-- [Benches move from Criterion to rust2-bench-harness](/quest/m9/bench-harness.md) - later bumps of the same pin, and renames `codspeed.yml`
+- [Benches move from Criterion to rust2-bench-harness](/quest/m5/bench-harness.md) - later bumps of the same pin, and renames `codspeed.yml`
 - [kixel-ai/rust2#1041](https://github.com/kixel-ai/rust2/pull/1041) - plans moving rust2-bench to `kixel-ai/swole`; once it moves, moq's input changes repository, but this bump does not wait for it

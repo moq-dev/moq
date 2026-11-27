@@ -239,16 +239,6 @@ class TrackProducer:
         """
         self._inner.seek(start)
 
-    def abort_unwanted(self, error_code: int) -> bool:
-        """Abort this track with an application error code, but only while nobody wants it.
-
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
-        the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
-        returned ``None`` misses a reader that came and went, and waits on.
-        """
-        return self._inner.abort_unwanted(error_code)
-
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
@@ -320,16 +310,6 @@ class TrackStreamProducer:
         itself enabled, at the next keyframe in the stream.
         """
         self._inner.set_enabled(enabled)
-
-    def abort_unwanted(self, error_code: int) -> bool:
-        """Abort this track with an application error code, but only while nobody wants it.
-
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
-        the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
-        returned ``None`` misses a reader that came and went, and waits on.
-        """
-        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""

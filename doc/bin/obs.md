@@ -12,10 +12,10 @@ OBS Studio install.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream connects or reconnects.
 
-Each Start Streaming publishes under a fresh instance, which the dock shows. The client's automatic
-reconnects keep the same instance. A
+Each Start Streaming publishes under a fresh identity, which the dock shows. The client's automatic
+reconnects keep the same identity. A
 stop/start, or an OBS auto-reconnect after the client gives up, republishes
-the broadcast under a new instance, which viewers see as a new stream.
+the broadcast under a new identity, which viewers see as a new stream.
 
 MoQ Source plays the best enabled audio and video rendition it can decode and place. It follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A decoder setup refusal tries the next ranked rendition, including when a supported codec name carries a description the decoder cannot use. A later peer or decode failure leaves the current rendition playing. Disabling or removing every rendition of a media kind clears it. It also follows a restarted or replaced publisher, including a sibling broadcast the catalog points at, playing the new one from its first keyframe.
 

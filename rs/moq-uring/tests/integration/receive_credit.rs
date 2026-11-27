@@ -152,7 +152,7 @@ fn partial_frame_gives_way() {
 			)
 			.await
 			.expect("broadcast resolves")
-			.expect("the first change is an instance");
+			.expect("the first change is an identity");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
@@ -315,7 +315,7 @@ fn javascript_partial_frame_gives_way() {
 			)
 			.await
 			.expect("broadcast resolves")
-			.expect("the first change is an instance");
+			.expect("the first change is an identity");
 			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {

@@ -54,9 +54,9 @@ Not to be filed:
   [WebRTC epic](/quest/m3/webrtc/README.md) vendored str0m. Since
   2026-11-16 moq-webrtc [returns to upstream](https://github.com/moq-dev/moq/pull/8963),
   so this and three more become candidates once their quests show the
-  public API cannot do it: [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md),
-  [the typed DTLS timeout](/quest/m3/webrtc/dtls-timeout.md),
-  [several bandwidth lines](/quest/m4/webrtc-sdp-bandwidth.md), and the
+  public API cannot do it: [DTLS waits for ICE](/quest/m4/webrtc-dtls-after-ice.md),
+  [the typed DTLS timeout](/quest/m4/webrtc-dtls-timeout.md),
+  [several bandwidth lines](/quest/m5/webrtc-sdp-bandwidth.md), and the
   NACK hook of [WHEP pacing](/quest/m3/rtc-pacing.md). Each needs the
   maintainer's approval and a read of the repository's AI policy before it
   is filed.

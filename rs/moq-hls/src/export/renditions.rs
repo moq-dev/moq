@@ -132,8 +132,8 @@ struct State {
 	waiting: BTreeMap<Key, (Held, Owner)>,
 }
 
-/// Where a rendition's media track is: its broadcast, instance, and track name.
-type Held = (Option<moq_net::path::Relative>, Option<moq_net::Instance>, String);
+/// Where a rendition's media track is: its broadcast, identity, and track name.
+type Held = (Option<moq_net::path::Relative>, Option<moq_net::Identity>, String);
 
 /// Holds `track` on `binding` subscribed until dropped, as demand for its media.
 ///
@@ -680,7 +680,7 @@ impl Producer {
 	/// Renditions join the set only once the catalog declares `sync.interval`, which a
 	/// publisher measures over its first second or group when it knows no GOP: without that grid
 	/// nothing numbers their segments, so none is listed or reported as [`Event::Added`]. The
-	/// interval is fixed for a broadcast instance; should it change anyway, every rendition is
+	/// interval is fixed for a broadcast identity; should it change anyway, every rendition is
 	/// rebuilt on the new grid.
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
@@ -696,7 +696,7 @@ impl Producer {
 		let video = catalog.video.renditions.iter().map(|(name, config)| {
 			let reference = (
 				config.broadcast.clone(),
-				config.instance.clone(),
+				config.identity.clone(),
 				config.track(name).to_string(),
 			);
 			((Kind::Video, name.clone()), reference)
@@ -704,7 +704,7 @@ impl Producer {
 		let audio = catalog.audio.renditions.iter().map(|(name, config)| {
 			let reference = (
 				config.broadcast.clone(),
-				config.instance.clone(),
+				config.identity.clone(),
 				config.track(name).to_string(),
 			);
 			((Kind::Audio, name.clone()), reference)
@@ -716,8 +716,8 @@ impl Producer {
 			if waiting.contains_key(&key) {
 				continue;
 			}
-			let (broadcast, instance, track) = &held;
-			let Ok(binding) = source.bind(broadcast.as_ref(), instance.as_ref()) else {
+			let (broadcast, identity, track) = &held;
+			let Ok(binding) = source.bind(broadcast.as_ref(), identity.as_ref()) else {
 				continue;
 			};
 			let owner = self.fanout.spawn(Hold {

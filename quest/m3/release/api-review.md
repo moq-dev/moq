@@ -98,3 +98,4 @@ What that audit learned, for the run after m2 and the next cut's:
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - the release's code is final before it is reviewed
+- [rind 0.4 adapters](/quest/m0/rind-adapters.md) - removes `UnsupportedCpu` and updates `moq_crypto::provider` signatures before the final API diff

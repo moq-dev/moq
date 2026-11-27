@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
 use moq_net::stats::{Message, Registry, SessionInfo, Tier};
-use moq_net::{Error, Instance, Prefix, Prefixes, Timestamp, auth, origin, track};
+use moq_net::{Error, Identity, Prefix, Prefixes, Timestamp, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
@@ -109,7 +109,7 @@ struct Seen {
 	kind: Kind,
 	available: bool,
 	cost: u64,
-	instance: Option<Instance>,
+	identity: Option<Identity>,
 	at: kio::clock::Instant,
 }
 
@@ -141,7 +141,7 @@ impl Watch {
 					kind,
 					available: route.available(),
 					cost: route.cost().value(),
-					instance: live.then(|| route.instance().clone()),
+					identity: live.then(|| route.identity().clone()),
 					at: kio::clock::now(),
 				};
 				if tx.unbounded_send(seen).is_err() {
@@ -207,20 +207,20 @@ struct Publisher {
 }
 
 impl Publisher {
-	/// Publish `path` on a fresh origin `hop`, under `instance` at epoch 0 when given,
+	/// Publish `path` on a fresh origin `hop`, under `identity` at epoch 0 when given,
 	/// pushed to `edge` over a link priced `cost`.
 	async fn new(
 		name: &'static str,
 		hop: u64,
 		path: &str,
-		instance: Option<&Instance>,
+		identity: Option<&Identity>,
 		edge: &origin::Producer,
 		cost: u64,
 	) -> Self {
 		let origin = produce_origin(hop);
 		let mut options = origin::RouteOptions::hidden();
-		if let Some(instance) = instance {
-			options = options.with_instance(instance.clone(), 0);
+		if let Some(identity) = identity {
+			options = options.with_identity(identity.clone(), 0);
 		}
 		let route = origin.route(path, options).unwrap();
 		let track = route.broadcast().create_track("video", timed()).unwrap();
@@ -337,7 +337,7 @@ async fn a_far_edge_reads_a_claim_and_sees_its_withdrawal_once() {
 /// A reader on an edge of `B` reads `live` through the first core of `A`, which then dies.
 /// The second core of `A` reaches the publisher's edge on its own, so every relay moves
 /// onto a path avoiding the dead core at once: the far edge sees the route updated in
-/// place under the same instance, never restarted, ended, or offline, and its reader
+/// place under the same identity, never restarted, ended, or offline, and its reader
 /// reads every frame once.
 #[kio::test]
 async fn losing_a_core_keeps_the_far_edge_reading() {
@@ -367,8 +367,8 @@ async fn losing_a_core_keeps_the_far_edge_reading() {
 	assert!(!seen.is_empty(), "the far edge's route moved off the dead core");
 	assert!(
 		seen.iter()
-			.all(|seen| seen.kind == Kind::Update && seen.instance == start[0].instance),
-		"updated in place under one instance: {seen:?}"
+			.all(|seen| seen.kind == Kind::Update && seen.identity == start[0].identity),
+		"updated in place under one identity: {seen:?}"
 	);
 	assert!(
 		seen.last().unwrap().available && seen.last().unwrap().cost > VIA_FIRST_CORES,
@@ -379,7 +379,7 @@ async fn losing_a_core_keeps_the_far_edge_reading() {
 	drop(broadcast);
 }
 
-/// Two publishers on the two edges of `A` serve `live` under one explicit instance at the
+/// Two publishers on the two edges of `A` serve `live` under one explicit identity at the
 /// same epoch, the first cheaper. A reader on an edge of `B` reads the first's copy until
 /// the first becomes unreachable, then reads on through the second's: the far edge keeps
 /// one broadcast, sees the route updated in place rather than restarted, and its reader
@@ -387,9 +387,9 @@ async fn losing_a_core_keeps_the_far_edge_reading() {
 #[kio::test]
 async fn a_matching_epoch_takes_over_at_the_far_edge() {
 	let regions = Regions::new().await;
-	let instance = Instance::random();
-	let first = Publisher::new("P1", 1, "live", Some(&instance), &regions.edges[0][0], 1).await;
-	let second = Publisher::new("P2", 2, "live", Some(&instance), &regions.edges[0][1], 10).await;
+	let identity = Identity::random();
+	let first = Publisher::new("P1", 1, "live", Some(&identity), &regions.edges[0][0], 1).await;
+	let second = Publisher::new("P2", 2, "live", Some(&identity), &regions.edges[0][1], 10).await;
 	quiesce().await;
 
 	let far = regions.edges[1][0].clone();
@@ -409,7 +409,7 @@ async fn a_matching_epoch_takes_over_at_the_far_edge() {
 	let seen = watch.seen();
 	assert!(
 		seen.iter()
-			.all(|seen| seen.kind == Kind::Update && seen.instance.as_ref() == Some(&instance)),
+			.all(|seen| seen.kind == Kind::Update && seen.identity.as_ref() == Some(&identity)),
 		"one broadcast, updated in place: {seen:?}"
 	);
 	assert!(seen.last().is_some_and(|seen| seen.available), "{seen:?}");
@@ -460,7 +460,7 @@ impl Lan {
 }
 
 /// A local publisher on `lan[1]` and a CDN publisher on `cdn[0]`. The LAN partitions, and
-/// `lan[0]` reaches the local broadcast through the CDN under the same instance, then
+/// `lan[0]` reaches the local broadcast through the CDN under the same identity, then
 /// moves back onto the LAN in place once it heals. Meanwhile `cdn[1]` reaches the CDN
 /// publisher only over the CDN's own expensive link, never through the LAN.
 ///
@@ -493,7 +493,7 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 		),
 		"over the LAN: {start:?}"
 	);
-	let instance = start[0].instance.clone();
+	let identity = start[0].identity.clone();
 
 	let [lan0, lan1] = lan.lan.clone();
 	let cut_at = kio::clock::now();
@@ -506,14 +506,14 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 		panic!("the island moved once: {partitioned:?}");
 	};
 	assert!(
-		lost.kind == Kind::Update && !lost.available && lost.instance == instance && lost.at == cut_at,
+		lost.kind == Kind::Update && !lost.available && lost.identity == identity && lost.at == cut_at,
 		"unavailable until the CDN's route lands: {partitioned:?}"
 	);
 	assert!(
 		moved.kind == Kind::Update
 			&& moved.available
 			&& moved.cost == through_cdn
-			&& moved.instance == instance
+			&& moved.identity == identity
 			&& moved.at.saturating_duration_since(cut_at) < DEBOUNCE,
 		"through the CDN at once: {partitioned:?}"
 	);
@@ -603,7 +603,7 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 	let narrow = produce_origin(5);
 	let wide_claim = wide.claim("live", origin::RouteOptions::default()).unwrap();
 	let narrow_claim = narrow.claim("live/a", origin::RouteOptions::default()).unwrap();
-	let (wide_instance, narrow_instance) = (wide_claim.instance(), narrow_claim.instance());
+	let (wide_identity, narrow_identity) = (wide_claim.identity(), narrow_claim.identity());
 	let mut wide_heard = heard(wide_claim);
 	let mut narrow_heard = heard(narrow_claim);
 	let _pushes = [push(&wide, &lan.lan[1], 1).await, push(&narrow, &lan.cdn[0], 1).await];
@@ -611,10 +611,10 @@ async fn overlapping_wildcards_resolve_to_the_most_specific_claim_everywhere() {
 
 	let mut subscribing = Vec::new();
 	for relay in lan.relays() {
-		for (under, instance) in [("a", &narrow_instance), ("b", &wide_instance)] {
+		for (under, identity) in [("a", &narrow_identity), ("b", &wide_identity)] {
 			let path = format!("live/{under}/{}", relay.node());
 			let broadcast = relay.consume().request(path.as_str(), None).await.unwrap();
-			assert_eq!(broadcast.info().instance.as_ref(), Some(instance), "{path}");
+			assert_eq!(broadcast.info().identity.as_ref(), Some(identity), "{path}");
 			// Reading a track sends the request on to the claim.
 			let track = broadcast.track("video").unwrap();
 			subscribing.push(kio::clock::sim::spawn(
@@ -674,9 +674,9 @@ async fn a_preferred_down_only_route_hides_the_exportable_alternative() {
 	}
 }
 
-/// Two local publishers serve `live`, each under its own minted instance: `O1` on `lan[1]`
+/// Two local publishers serve `live`, each under its own minted identity: `O1` on `lan[1]`
 /// and, priced to stand by, `O2` on `lan[0]`. `O1` becomes unreachable, and every relay
-/// moves the path onto `O2`'s instance as a Restart, never as an Update and never through
+/// moves the path onto `O2`'s identity as a Restart, never as an Update and never through
 /// an End.
 #[kio::test]
 async fn an_epochless_replacement_restarts_everywhere() {
@@ -694,7 +694,7 @@ async fn an_epochless_replacement_restarts_everywhere() {
 			"relay {}: {start:?}",
 			relay.node()
 		);
-		watched.push((watch, start[0].instance.clone()));
+		watched.push((watch, start[0].identity.clone()));
 	}
 
 	cut(&first.link);
@@ -712,13 +712,13 @@ async fn an_epochless_replacement_restarts_everywhere() {
 			panic!("relay {hop}: no restart: {seen:?}");
 		};
 		assert!(
-			seen[restart].available && seen[restart].instance != *before,
+			seen[restart].available && seen[restart].identity != *before,
 			"relay {hop}: {seen:?}"
 		);
 		assert!(
 			seen[restart..]
 				.iter()
-				.all(|later| later.instance == seen[restart].instance),
+				.all(|later| later.identity == seen[restart].identity),
 			"relay {hop}: {seen:?}"
 		);
 	}
@@ -1019,7 +1019,7 @@ async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 		.await
 		.expect("answered")
 		.expect("resolved through the relay");
-	assert_eq!(broadcast.info().instance, Some(v.routes[0].instance()));
+	assert_eq!(broadcast.info().identity, Some(v.routes[0].identity()));
 	assert!(live.seen().is_empty());
 }
 

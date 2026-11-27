@@ -26,6 +26,14 @@ struct TrackRequest {
 	request: moq_net::track::Request,
 }
 
+/// A track request taken to publish an encoder on, under its broadcast's catalog.
+pub(crate) struct Requested {
+	pub request: moq_net::track::Request,
+	pub catalog: moq_mux::catalog::Producer<Extra>,
+	/// The broadcast's children, which the encoder joins.
+	pub children: Children,
+}
+
 /// A request a handler pulled, before it has a handle. A track request is boxed: it is
 /// several times the size of a fill.
 enum Request {
@@ -667,27 +675,11 @@ impl Publish {
 		}
 	}
 
-	/// Abort a media track with an application error code, but only while nobody wants it.
-	///
-	/// True once the track is closed and its handle released. False leaves both unchanged because
-	/// a reader holds the track.
-	pub fn media_abort_unwanted(&mut self, media: Id, error_code: u16) -> Result<bool, Error> {
-		let Kept { inner, children } = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		let Media { track, video_priority } = inner;
-		match track.abort_unwanted(moq_net::Error::App(error_code)) {
-			Ok(()) => {
-				children.forget(Child::Media(media));
-				Ok(true)
-			}
-			Err(track) => {
-				let inner = Media {
-					track: Box::new(track),
-					video_priority,
-				};
-				self.media.restore(media, Kept { inner, children });
-				Ok(false)
-			}
-		}
+	/// Release a media track without finishing it; see [`Self::track_free`].
+	pub fn media_free(&mut self, media: Id) -> Result<(), Error> {
+		let released = self.media.remove(media).ok_or(Error::MediaNotFound)?;
+		released.children.forget(Child::Media(media));
+		Ok(())
 	}
 
 	/// Write a whole chunk of container bytes.
@@ -1125,6 +1117,22 @@ impl Publish {
 		children.insert(&mut self.tracks, raw, Child::Track)
 	}
 
+	/// Take a track request to publish an encoder on, with the catalog of the broadcast it was
+	/// made on and that broadcast's children.
+	pub(crate) fn track_request_take(&mut self, request: Id) -> Result<Requested, Error> {
+		let TrackRequest {
+			broadcast,
+			children,
+			request,
+		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		let catalog = self.catalog(broadcast)?.clone();
+		Ok(Requested {
+			request,
+			catalog,
+			children,
+		})
+	}
+
 	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].
 	pub fn track_request_audio(
 		&mut self,
@@ -1227,6 +1235,11 @@ impl Publish {
 	/// No codec, container, or catalog framing. This is the moq-net primitive
 	/// for non-media tracks. Pair it with [`Self::video_config`] / [`Self::audio_config`]
 	/// if you want to describe the track in the catalog as well.
+	///
+	/// Errors with `Duplicate` while a live track holds the name, including one whose last
+	/// producer was released while read and whose request handler took its renewal. A renewal
+	/// still queued is served by this: with another `info`, its readers end with
+	/// `MalformedTrack` and the new track takes the name.
 	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
@@ -1307,27 +1320,12 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Abort a raw track with an application error code, but only while nobody wants it.
-	///
-	/// True once the track is closed and its handle released. False leaves both unchanged because
-	/// a reader holds the track.
-	pub fn track_abort_unwanted(&mut self, track: Id, error_code: u16) -> Result<bool, Error> {
-		let id = track;
-		let raw = self.tracks.get(id).ok_or(Error::TrackNotFound)?;
-		// The producer is a handle on the track, so the clone consumed here leaves the kept one
-		// serving when a reader wants it.
-		if raw
-			.inner
-			.clone()
-			.abort_unwanted(moq_net::Error::App(error_code))
-			.is_err()
-		{
-			return Ok(false);
-		}
-		if let Some(raw) = self.tracks.remove(id) {
-			raw.children.forget(Child::Track(id));
-		}
-		Ok(true)
+	/// Release a raw track without finishing or aborting it. Nobody wanting it, it ends cleanly;
+	/// a reader that still does is served by the broadcast's next request for the track.
+	pub fn track_free(&mut self, track: Id) -> Result<(), Error> {
+		let released = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
+		released.children.forget(Child::Track(track));
+		Ok(())
 	}
 
 	/// Create a track on a broadcast and hand it, with the broadcast's catalog, to `publish`, which

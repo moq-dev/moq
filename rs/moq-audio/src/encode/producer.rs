@@ -157,33 +157,33 @@ struct Reserved {
 }
 
 impl Reserved {
+	/// Publish on the track `create` makes from the catalog's info.
 	fn new<E: CatalogExt>(
-		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
+		create: impl FnOnce(moq_net::track::Info) -> Result<moq_net::track::Producer, Error>,
 	) -> Result<Self, Error> {
 		if options.join.is_zero() {
 			return Err(Error::Unsupported("a join of zero opens no group".to_owned()));
 		}
-		let track = match &options.track {
-			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
-			// Lite05 subscribers know what scale to expect and the model layer accepts
-			// Frame::timestamp on append, plus whatever max age the catalog declared.
-			Some(name) => broadcast
-				.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))
-				.ok_or_else(|| hang::Error::Duplicate(name.clone()))?,
-			// Mirrors the video side, which derives a unique name from the codec
-			// rather than making every caller invent one.
-			None => broadcast.unique_track(
-				&format!(".{}", options.config.codec),
-				catalog.track_info(hang::catalog::PRIORITY.audio),
-			),
-		};
-		let track = catalog.audio(
+		// The catalog's info carries the microsecond timescale audio hang frames stamp, so
+		// Lite05 subscribers know what scale to expect and the model layer accepts
+		// Frame::timestamp on append, plus whatever max age the catalog declared.
+		let track = create(catalog.track_info(hang::catalog::PRIORITY.audio))?;
+		// Held to end the track if the catalog refuses the rendition, so a subscriber already
+		// waiting on it learns that rather than reading a drop.
+		let held = track.clone();
+		let track = match catalog.audio(
 			track,
 			moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
 			None,
-		)?;
+		) {
+			Ok(track) => track,
+			Err(err) => {
+				let _ = held.abort(moq_net::Error::NotFound);
+				return Err(err.into());
+			}
+		};
 
 		Ok(Self { track })
 	}
@@ -279,6 +279,34 @@ impl Reserved {
 	}
 }
 
+/// Create the track [`Options::track`] names in `broadcast`, or a unique one after the codec.
+fn named<'a>(
+	broadcast: &'a moq_net::broadcast::Producer,
+	options: &'a Options,
+) -> impl FnOnce(moq_net::track::Info) -> Result<moq_net::track::Producer, Error> + 'a {
+	move |info| match &options.track {
+		Some(name) => Ok(broadcast
+			.create_track(name.clone(), info)
+			.ok_or_else(|| hang::Error::Duplicate(name.clone()))?),
+		// Mirrors the video side, which derives a unique name from the codec
+		// rather than making every caller invent one.
+		None => Ok(broadcast.unique_track(&format!(".{}", options.config.codec), info)),
+	}
+}
+
+/// Accept `request` with `info`, failing if that ended the track, as a renewal with another
+/// info does, so nothing registers a rendition for a track that will never carry frames.
+fn accepted(
+	request: moq_net::track::Request,
+	info: moq_net::track::Info,
+) -> Result<moq_net::track::Producer, moq_net::Error> {
+	let track = request.accept(info);
+	match track.poll_closed(&kio::Waiter::noop()) {
+		std::task::Poll::Ready(Err(err)) => Err(err),
+		_ => Ok(track),
+	}
+}
+
 /// A registered rendition, waiting for its [`Reserved`] to be spent on it.
 ///
 /// Proof that [`Reserved::register`] succeeded, so [`Reserved::encode`] takes no
@@ -301,7 +329,39 @@ impl Producer {
 		input: Input,
 		options: &Options,
 	) -> Result<Self, Error> {
-		Self::build(broadcast, catalog, input, options, None)
+		Self::build(catalog, input, options, None, named(broadcast, options))
+	}
+
+	/// Publish a track encoding `input` on the track a subscriber's `request` asks for,
+	/// registering its rendition in `catalog` immediately, as [`new`](Self::new) does.
+	///
+	/// This is how an on-demand publisher serves a track asked for again after its last producer
+	/// dropped while read: serve it with the options it was first published with. Its readers
+	/// hold the track info they set, so options that change it end the track with
+	/// [`MalformedTrack`](moq_net::Error::MalformedTrack) and fail here. Nothing checks the rest: its
+	/// readers also decode with the codec settings they were first given, so keep those too. The
+	/// request names the track, so [`Options::track`] must be `None`. A config the codec refuses
+	/// rejects the request with [`NotFound`](moq_net::Error::NotFound), or ends the
+	/// accepted track with it.
+	pub fn requested<E: CatalogExt>(
+		request: moq_net::track::Request,
+		catalog: moq_mux::catalog::Producer<E>,
+		input: Input,
+		options: &Options,
+	) -> Result<Self, Error> {
+		let mut request = Some(request);
+		let built = match options.track {
+			Some(_) => Err(Error::Unsupported("a requested track is already named".to_owned())),
+			None => Self::build(catalog, input, options, None, |info| {
+				Ok(accepted(request.take().expect("accepted once"), info)?)
+			}),
+		};
+		// Not accepted: the subscribers waiting on it learn it won't be served. `NotFound`, not
+		// `Unsupported`, which moq-lite sends as a retryable `Internal`, so a relay would ask again.
+		if let (Err(_), Some(request)) = (&built, request) {
+			request.reject(moq_net::Error::NotFound);
+		}
+		built
 	}
 
 	/// [`new`](Self::new) for a capture device, whose samples keep its own clock: each frame's
@@ -314,22 +374,22 @@ impl Producer {
 		input: Input,
 		options: &Options,
 	) -> Result<Self, Error> {
-		Self::build(broadcast, catalog, input, options, Some(Drift::new()))
+		Self::build(catalog, input, options, Some(Drift::new()), named(broadcast, options))
 	}
 
 	fn build<E: CatalogExt>(
-		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		input: Input,
 		options: &Options,
 		drift: Option<Drift>,
+		create: impl FnOnce(moq_net::track::Info) -> Result<moq_net::track::Producer, Error>,
 	) -> Result<Self, Error> {
-		let mut reserved = Reserved::new(broadcast, catalog, options)?;
+		let mut reserved = Reserved::new(catalog, options, create)?;
 		match reserved.register(input, options, drift) {
 			Ok(registered) => Ok(reserved.encode(registered)),
 			Err(err) => {
-				// A subscriber may already be waiting on the track; give it the real cause.
-				reserved.track.abort(moq_net::Error::Transport(err.to_string()));
+				// A subscriber may already be waiting on the track; tell it the track won't be served.
+				reserved.track.abort(moq_net::Error::NotFound);
 				Err(err)
 			}
 		}
@@ -927,20 +987,6 @@ impl Producer {
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the producer back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
-		self.track.abort_unwanted(err).map_err(|track| Self { track, ..self })
-	}
 }
 
 /// An audio track whose [`Producer`] [finished](Producer::finish) it: every packet is published,
@@ -1028,6 +1074,126 @@ mod tests {
 				return Some(frame);
 			}
 		}
+	}
+
+	/// A track asked for again after its producer dropped while read is served by a producer on
+	/// the request, published with the same options, and its reader reads on.
+	#[tokio::test]
+	async fn a_requested_producer_serves_a_renewal() {
+		let input = Input::default();
+		let options = Options {
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), input.clone(), &options).unwrap();
+		let name = producer.track_name().to_owned();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+		producer.write(&pcm_frame(&[0.5; 1920], 0)).unwrap();
+		assert_eq!(
+			packet(&mut reader).await.unwrap().timestamp,
+			Timestamp::from_micros(0).unwrap()
+		);
+		drop(producer);
+
+		let request = requests.requested_track().await.unwrap();
+		assert_eq!(request.name(), name);
+		let mut next = Producer::requested(request, catalog.clone(), input, &options).unwrap();
+		assert!(catalog.snapshot().audio.renditions.contains_key(&name));
+		next.write(&pcm_frame(&[0.25; 1920], 20_000)).unwrap();
+		assert_eq!(
+			packet(&mut reader).await.unwrap().timestamp,
+			Timestamp::from_micros(20_000).unwrap()
+		);
+	}
+
+	/// A renewal served with options that change its track info ends the track with
+	/// `MalformedTrack`, so the producer fails rather than advertise a rendition nothing will carry.
+	#[tokio::test]
+	async fn a_requested_producer_refuses_a_renewal_it_would_change() {
+		let input = Input::default();
+		let options = Options {
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut requests = broadcast.requests();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio - 1))
+			.unwrap();
+		let mut reader = broadcast
+			.consume()
+			.track("audio")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		drop(track);
+
+		let request = requests.requested_track().await.unwrap();
+		let refused = Producer::requested(request, catalog.clone(), input, &options);
+		assert!(matches!(refused, Err(Error::Net(moq_net::Error::MalformedTrack))));
+		assert!(!catalog.snapshot().audio.renditions.contains_key("audio"));
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::MalformedTrack)));
+	}
+
+	/// A rendition the catalog refuses after the request was accepted, here a name another
+	/// producer claims, ends the track with `NotFound` rather than leaving it to drop.
+	#[tokio::test]
+	async fn a_requested_producer_ends_a_track_the_catalog_refuses() {
+		let input = Input::default();
+		let options = Options {
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut requests = broadcast.requests();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut other = moq_net::broadcast::Info::new().produce();
+		let claimed = Options {
+			track: Some("audio".into()),
+			..options.clone()
+		};
+		let _claim = Producer::new(&mut other, catalog.clone(), input.clone(), &claimed).unwrap();
+
+		let track = broadcast
+			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut reader = broadcast
+			.consume()
+			.track("audio")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		drop(track);
+
+		let request = requests.requested_track().await.unwrap();
+		assert!(Producer::requested(request, catalog, input, &options).is_err());
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::NotFound)));
+	}
+
+	/// A request names its track, so a requested producer given a name of its own fails and
+	/// rejects the request, ending the subscriber waiting on it.
+	#[tokio::test]
+	async fn a_requested_producer_refuses_another_name() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut requests = broadcast.requests();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let pending = broadcast.consume().track("audio").unwrap().subscribe(None);
+		let request = requests.requested_track().await.unwrap();
+		let options = Options {
+			track: Some("other".into()),
+			..Options::default()
+		};
+		assert!(Producer::requested(request, catalog, Input::default(), &options).is_err());
+		assert!(matches!(pending.await, Err(moq_net::Error::NotFound)));
 	}
 
 	/// The catalog's stats follow the encoder's target from the first rendition on.

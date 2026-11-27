@@ -145,7 +145,7 @@ offered 20,000 frames/s in the window; the three at the offered rate read
 over each run's lifetime, all during the startup ramp, and `release` none.
 Earlier runs in the same session saw `main` lose up to 11.9% there, with the
 window still draining the backlog, which read the largest CPU per frame of
-any pair. [Chat startup loss](/quest/m3/chat-startup-loss.md) owns that loss.
+any pair. [Chat startup loss](/quest/m1/chat-startup-loss.md) owns that loss.
 
 The transport lead was measured and not taken. A connection with every packet
 acknowledged before it sends the next frees its 8 KiB chunk of sent packets

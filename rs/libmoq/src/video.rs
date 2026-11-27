@@ -401,23 +401,6 @@ impl VideoEncoder {
 		Ok(block_on(self.producer.set_bitrate(bitrate))?)
 	}
 
-	/// End the track with `err` unless a reader holds it, handing the encoder back unchanged when
-	/// one does. Closed, the encoder and the rate follower go with it.
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the encoder back to keep serving without allocating on an idle check"
-	)]
-	fn abort_unwanted(self, id: Id, err: moq_net::Error) -> Result<(), Self> {
-		let Self { producer, .. } = self;
-		match producer.abort_unwanted(err) {
-			Ok(()) => {
-				self.children.forget(crate::publish::Child::Video(id));
-				Ok(())
-			}
-			Err(producer) => Err(Self { producer, ..self }),
-		}
-	}
-
 	/// Drain and finish the encoder behind handle `id`.
 	///
 	/// A drain that fails ends the track with an error instead, since a clean finish promises
@@ -699,6 +682,99 @@ pub unsafe extern "C" fn moq_encode_video(
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
+		let encode = unsafe { Encode::parse(input, output, options)? };
+
+		// Everything the producer needs from the global state, taken out of it: bringing up a
+		// hardware encoder is slow enough that every other call would wait behind it.
+		let (encode, producer, catalog, children) = {
+			let mut state = State::lock();
+			let encode = encode.resolve(&mut state)?;
+			let target = state.publish.target(broadcast)?;
+			(
+				encode,
+				target.producer.clone(),
+				target.catalog.clone(),
+				target.children.clone(),
+			)
+		};
+		let Encode {
+			format,
+			size,
+			options,
+			reserved,
+			..
+		} = encode;
+		let encoder = block_on(moq_video::encode::Producer::new(&producer, catalog, options))?;
+		State::lock().video.insert(&children, encoder, format, size, reserved)
+	})
+}
+
+/// Accept a track request as a video track, encoding the raw frames you publish to it.
+///
+/// Consumes the request handle and returns the same kind of handle as [moq_encode_video], or a
+/// negative code on failure. The request names the track. This is how an on-demand publisher
+/// serves a track asked for again after its handle was freed while read: accept it with the
+/// configuration it was first published with. One that changes the track info its readers hold
+/// ends the track and fails here; nothing checks the codec settings, which its readers decode
+/// with, so keep those too. A configuration this machine can't encode rejects the request. A failure before the request is
+/// taken, such as invalid arguments or an unknown allocator, leaves its handle open: retry, or
+/// release it with [moq_track_request_free](crate::moq_track_request_free).
+///
+/// # Safety
+/// - As [moq_encode_video], for `input`, `output`, and `options`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_encode_video(
+	request: u32,
+	input: *const moq_video_encoder_input,
+	output: *const moq_video_encoder_output,
+	options: *const moq_video_encode_options,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let encode = unsafe { Encode::parse(input, output, options)? };
+
+		// Out of the global state, as moq_encode_video opens its encoder.
+		let (encode, requested) = {
+			let mut state = State::lock();
+			let encode = encode.resolve(&mut state)?;
+			(encode, state.publish.track_request_take(request)?)
+		};
+		let Encode {
+			format,
+			size,
+			options,
+			reserved,
+			..
+		} = encode;
+		let crate::publish::Requested {
+			request,
+			catalog,
+			children,
+		} = requested;
+		let encoder = block_on(moq_video::encode::Producer::requested(request, catalog, options))?;
+		State::lock().video.insert(&children, encoder, format, size, reserved)
+	})
+}
+
+/// A video encode's configuration, parsed from its C structs.
+struct Encode {
+	format: moq_video_pixel_format,
+	size: moq_video::Size,
+	options: moq_video::encode::Options,
+	/// Whether it reserves against a bandwidth allocator.
+	reserved: bool,
+	bandwidth: Option<Id>,
+	lower: Option<Id>,
+}
+
+impl Encode {
+	/// # Safety
+	/// - As [moq_encode_video], for `input`, `output`, and `options`.
+	unsafe fn parse(
+		input: *const moq_video_encoder_input,
+		output: *const moq_video_encoder_output,
+		options: *const moq_video_encode_options,
+	) -> Result<Self, Error> {
 		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let options = unsafe { options.as_ref() }.copied().unwrap_or_default();
@@ -711,27 +787,26 @@ pub unsafe extern "C" fn moq_encode_video(
 		}
 
 		let (format, config) = unsafe { encoder_config(raw_input, raw_output)? };
-		let size = config.size();
-		let mut options = moq_video::encode::Options::new(config);
+		Ok(Self {
+			format,
+			size: config.size(),
+			options: moq_video::encode::Options::new(config),
+			reserved: bandwidth.is_some(),
+			bandwidth,
+			lower,
+		})
+	}
 
-		// Everything the producer needs from the global state, taken out of it: bringing up a
-		// hardware encoder is slow enough that every other call would wait behind it.
-		let (producer, catalog, children) = {
-			let mut state = State::lock();
-			if let Some(bandwidth) = bandwidth {
-				options.bandwidth = state.bandwidth.allocator(bandwidth)?;
-			}
-			if let Some(lower) = lower {
-				options.lower = Some(state.video.rung(lower)?);
-			}
-			let target = state.publish.target(broadcast)?;
-			(target.producer.clone(), target.catalog.clone(), target.children.clone())
-		};
-		let encoder = block_on(moq_video::encode::Producer::new(&producer, catalog, options))?;
-		State::lock()
-			.video
-			.insert(&children, encoder, format, size, bandwidth.is_some())
-	})
+	/// Look up the allocator and lower rendition it names.
+	fn resolve(mut self, state: &mut State) -> Result<Self, Error> {
+		if let Some(bandwidth) = self.bandwidth {
+			self.options.bandwidth = state.bandwidth.allocator(bandwidth)?;
+		}
+		if let Some(lower) = self.lower {
+			self.options.lower = Some(state.video.rung(lower)?);
+		}
+		Ok(self)
+	}
 }
 
 /// This encoder's bandwidth reservation, or 0 if it was published without one.
@@ -883,36 +958,22 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	})
 }
 
-/// End a video track with an application error code, but only while nobody wants it.
+/// Release a video producer without draining or finishing it, along with its encoder and
+/// bandwidth claim, dropping the frames the codec still holds; see
+/// [`crate::moq_publish_track_free`] for how its track ends.
 ///
-/// This is how an on-demand publisher ends the track once its [`moq_encode_video_demand`]
-/// watcher reports `MOQ_DEMAND_UNWANTED`: releasing it instead fails a reader that joined in
-/// between. Returns 1 once the track is closed, which releases the handle, the encoder, and its
-/// bandwidth claim like [moq_encode_video_finish] but drops the frames the codec still holds, and
-/// `0` when a reader wants it again, which leaves the handle serving: wait for
-/// `MOQ_DEMAND_UNWANTED` from a new watcher, since one that already reported it misses a reader
-/// that came and went. A negative code is a failure.
+/// Returns zero, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_encode_video_abort_unwanted(producer: u32, error_code: u16) -> i32 {
+pub extern "C" fn moq_encode_video_free(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(producer)?;
 		let shared = State::lock().video.producer(id)?;
-		let closed = {
-			let mut guard = shared.lock();
-			let encoder = guard.take().ok_or(Error::MediaNotFound)?;
-			match encoder.abort_unwanted(id, moq_net::Error::App(error_code)) {
-				Ok(()) => true,
-				Err(encoder) => {
-					*guard = Some(encoder);
-					false
-				}
-			}
-		};
-		if closed {
-			// A racing close may have released the id already.
-			let _ = State::lock().video.remove(id);
-		}
-		Ok(i32::from(closed))
+		let released = shared.lock().take().ok_or(Error::MediaNotFound)?;
+		released.children.forget(crate::publish::Child::Video(id));
+		// A racing close may have released the id already.
+		let _ = State::lock().video.remove(id);
+		drop(released);
+		Ok(())
 	})
 }
 

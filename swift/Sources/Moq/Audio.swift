@@ -43,6 +43,33 @@ public enum Audio {
                     input: input, output: output, track: track, bandwidth: bandwidth?.ffi))
         }
 
+        private init(_ ffi: MoqAudioProducer) {
+            self.ffi = ffi
+        }
+
+        /// Open an audio track on the track a subscriber's `request` asks for, which names it.
+        ///
+        /// This is how an on-demand publisher serves a track asked for again after its producer
+        /// was released while read: pass the settings it was first published with. Settings that
+        /// change the track info its readers hold end the track with `MalformedTrack` and throw here;
+        /// nothing checks the codec settings, which its readers decode with, so keep those too.
+        /// The request must belong to the catalog's broadcast, and a config that can't be encoded
+        /// rejects it with `NotFound`.
+        public static func requested(
+            catalog: Media.CatalogProducer,
+            request: TrackRequest,
+            input: EncoderInput,
+            output: EncoderOutput,
+            bandwidth: Allocator? = nil
+        ) throws -> Producer {
+            try checkDuration(output.frameDuration, "frameDuration")
+            return Producer(
+                try MoqAudioProducer.requested(
+                    catalog: catalog.ffi, request: request.ffi,
+                    options: MoqAudioProducerOptions(
+                        input: input, output: output, track: nil, bandwidth: bandwidth?.ffi)))
+        }
+
         /// A watch-only handle to whether the audio track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())
@@ -61,15 +88,6 @@ public enum Audio {
         /// This encoder's bandwidth reservation, if published against a session allocator.
         public func reservation() -> Reservation? {
             ffi.reservation().map(Reservation.init)
-        }
-
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track and finalize encoding.

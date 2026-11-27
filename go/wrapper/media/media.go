@@ -484,14 +484,10 @@ func (m *TrackProducer) Seek(start uint64) error {
 	return m.inner.Seek(start)
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (m *TrackProducer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return m.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. The producer is unusable afterwards.
+func (m *TrackProducer) Close() { m.inner.Destroy() }
 
 // Finish closes the media track.
 func (m *TrackProducer) Finish() error {
@@ -563,14 +559,10 @@ func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 	return m.inner.SetEnabled(enabled)
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (m *TrackStreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return m.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. The producer is unusable afterwards.
+func (m *TrackStreamProducer) Close() { m.inner.Destroy() }
 
 // Finish closes the stream.
 func (m *TrackStreamProducer) Finish() error {

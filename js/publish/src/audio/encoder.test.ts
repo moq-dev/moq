@@ -1179,7 +1179,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-		const epoch = announced?.active.peek()?.instance;
+		const epoch = announced?.active.peek()?.identity;
 		const sibling = broadcast.video("video");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
 		await settle();
@@ -1216,7 +1216,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
 		expect(FakeAudioEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.instance).toBe(epoch);
+		expect(announced?.active.peek()?.identity).toBe(epoch);
 		expect(siblingTrack.appendGroup(Moq.Time.Timestamp.fromMicros(1)).start).toBe(1n);
 
 		const reconfiguring = configured();
@@ -1236,7 +1236,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.instance).toBe(epoch);
+		expect(announced?.active.peek()?.identity).toBe(epoch);
 		expect(siblingTrack.appendGroup(Moq.Time.Timestamp.fromMicros(2)).start).toBe(2n);
 	} finally {
 		subscriber?.close();

@@ -21,5 +21,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Benches move from Criterion to rust2-bench-harness](/quest/m9/bench-harness.md) - match whichever bench harness is active when this runs
-- [Seeded differential spike vs `quinn-proto`](/quest/m4/quic-quinn-differential.md) - complementary differential coverage
+- [Benches move from Criterion to rust2-bench-harness](/quest/m5/bench-harness.md) - match whichever bench harness is active when this runs

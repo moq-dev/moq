@@ -1,4 +1,4 @@
-# [S] @moq/net broadcasts expose their requests
+# [M] @moq/net broadcasts expose their requests
 
 ## Goal
 
@@ -24,3 +24,10 @@ wire path on the new handler.
 when `requests()` publishes it.
 
 Moved to m4 2026-11-12 (maintainer, /quest-audit): the downstream host it was ranked for is parked.
+
+Ending an on-demand track comes with it: in Rust, dropping the last producer
+of a track nobody wants ends it cleanly, and one a reader joined in the race
+goes back to the broadcast's handler as a fresh request
+([moq-dev/moq#9550](https://github.com/moq-dev/moq/pull/9550)). JS
+`Producer.close()` still aborts an unfinished track with `Cancel`; give it the
+Rust drop's behavior once a JS handler can serve the re-request.

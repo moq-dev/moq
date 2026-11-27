@@ -129,7 +129,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Frames the input [`decode`](Self::decode) reads. [`Programs`](super::Programs) runs one
 	/// parser for every program instead and hands each its packets.
 	demux: Demux,
-	/// Watches the input [`decode`](Self::decode) reads for a clock step that ends the instance.
+	/// Watches the input [`decode`](Self::decode) reads for a clock step that ends the identity.
 	steps: super::step::Steps,
 	/// PIDs whose route changed while handling the current packet, for the parser to restart.
 	restarts: Vec<u16>,
@@ -412,21 +412,21 @@ impl<E: catalog::Catalog> Import<E> {
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
 	///
-	/// A step of the source's clock onto another timeline ends the instance, failing with
+	/// A step of the source's clock onto another timeline ends the identity, failing with
 	/// [`Restarted`](Error::Restarted): the program clock and every timed stream stepping
 	/// together without `discontinuity_indicator`, forward by more than 10 s or back, or the
 	/// streams stepping back after a flagged break. Until the streams have spoken, which a
 	/// cadenced one does within 0.7 s, the input after a suspected step is held rather than
 	/// published, up to half a group's bytes. A PAT naming another `transport_stream_id` or
 	/// program number restarts too, at that PAT. Every later call fails the same way;
-	/// [`finish`](Self::finish) ends the instance before the step.
+	/// [`finish`](Self::finish) ends the identity before the step.
 	///
 	/// A PAT listing several programs fails with [`MultiplePrograms`](Error::MultiplePrograms)
 	/// unless [`with_program`](Self::with_program) picked one. Input after
 	/// [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished), or with the
 	/// cause of a finish that failed.
 	///
-	/// [`Republish`](super::Republish) carries on past each restart into a new instance, on a
+	/// [`Republish`](super::Republish) carries on past each restart into a new identity, on a
 	/// path of an origin.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		match self.decode_or_restart(data)? {
@@ -445,7 +445,7 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// [`decode`](Self::decode), returning a restart as a value with the input from the step on,
-	/// for [`Republish`](super::Republish) to read into a new instance.
+	/// for [`Republish`](super::Republish) to read into a new identity.
 	pub(super) fn decode_or_restart(&mut self, data: &[u8]) -> Result<Option<super::Restart>> {
 		self.input.check()?;
 		let mut demux = std::mem::take(&mut self.demux);
@@ -1698,7 +1698,7 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// The program clock changed, so the measured rate no longer holds. A leading flag starts this
-	/// instance's clock and cannot invalidate a window not begun.
+	/// identity's clock and cannot invalidate a window not begun.
 	fn reset_mux_rate(&mut self) -> Result<()> {
 		if !self.mux_rate.started() {
 			return Ok(());
@@ -1833,7 +1833,7 @@ impl<E: catalog::Catalog> Import<E> {
 	///
 	/// Input held while a step was judged is read first, failing with
 	/// [`Restarted`](Error::Restarted) if it reaches one, since this import would drop the
-	/// broadcast after it. A step [`decode`](Self::decode) already reported ends the instance
+	/// broadcast after it. A step [`decode`](Self::decode) already reported ends the identity
 	/// there instead. A finish that fails aborts every track with the cause, so it can't be
 	/// retried.
 	pub fn finish(mut self) -> Result<Finished<E>> {
@@ -6291,7 +6291,7 @@ pub(super) mod test {
 	}
 
 	// A looping publisher plays part of a file and wraps to the top (#2729). The wrap rewinds
-	// the PCR and the audio PTS together, which is an encoder restart, so the instance ends at
+	// the PCR and the audio PTS together, which is an encoder restart, so the identity ends at
 	// the wrap and the caller publishes the rest as a new broadcast. Every frame published
 	// before it is still a whole AC-3 frame.
 	#[tokio::test(start_paused = true)]
@@ -6317,7 +6317,7 @@ pub(super) mod test {
 		);
 		assert!(
 			looped.ends_with(&restart.remainder) && restart.remainder.len() <= data.len(),
-			"the new instance starts at the wrap"
+			"the new identity starts at the wrap"
 		);
 		let _finished = import.finish().unwrap();
 
@@ -8879,12 +8879,12 @@ pub(super) mod test {
 		}
 	}
 
-	/// A backwards restart is the same signal, but a rewind: a new broadcast, so the instance
+	/// A backwards restart is the same signal, but a rewind: a new broadcast, so the identity
 	/// ends at the break, once every stream stepped back, and hands the input from there on.
 	/// The unwrapper must not read the step back as the 33-bit field wrapping, which would put
 	/// the new timeline 26 hours out and publish it.
 	#[tokio::test(start_paused = true)]
-	async fn a_flagged_backwards_restart_ends_the_instance() {
+	async fn a_flagged_backwards_restart_ends_the_identity() {
 		let (_consumer, _catalog, mut import) = two_stream_import();
 
 		for pid in [PCR_PID, PEER_PID] {
@@ -8908,7 +8908,7 @@ pub(super) mod test {
 				flagged: true
 			}
 		);
-		assert_eq!(restart.remainder, after, "the new instance starts at the break");
+		assert_eq!(restart.remainder, after, "the new identity starts at the break");
 		let _finished = import.finish().unwrap();
 	}
 
@@ -10450,7 +10450,7 @@ pub(super) mod test {
 	/// An encoder restart that declares the new clock on the PCR PID still restarts lower
 	/// than the live edge: a new broadcast, not a continuation, from the break on.
 	#[tokio::test(start_paused = true)]
-	async fn h264_flagged_backward_restart_ends_the_instance() {
+	async fn h264_flagged_backward_restart_ends_the_identity() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()

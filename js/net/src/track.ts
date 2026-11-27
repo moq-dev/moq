@@ -2941,8 +2941,8 @@ export class Producer {
 	 *
 	 * The same broadcast, track, and group start always name the same content, and nothing
 	 * checks it: the broadcast remembers nothing of an earlier producer of the name. A recreated
-	 * track, or a restarted publisher keeping its instance, keeps its starts moving forward, as
-	 * its media time does, or uses a new track name or instance. Reusing a start only corrupts
+	 * track, or a restarted publisher keeping its identity, keeps its starts moving forward, as
+	 * its media time does, or uses a new track name or identity. Reusing a start only corrupts
 	 * this broadcast for its readers. Datagram keys name no cached content and are exempt.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a scaled timestamp on every frame
@@ -3389,7 +3389,7 @@ export class Producer {
 	}
 
 	/**
-	 * Release this producer, like dropping the last Rust producer. Idempotent.
+	 * Release this producer. Idempotent.
 	 *
 	 * With an end declared ({@link finish}, {@link finishAt}, or {@link fail}), the track ends
 	 * there and its subscribers drain to it. Without one, the track aborts: nothing finished it.
@@ -3582,7 +3582,7 @@ export interface Finished {
 	subscribe(options?: Subscription): Subscriber;
 	/** Abort the track; see {@link Producer.abort}. */
 	abort(error: Error): void;
-	/** Release the track, like dropping the last Rust handle; see {@link Producer.close}. */
+	/** Release the track; see {@link Producer.close}. */
 	close(): void;
 }
 

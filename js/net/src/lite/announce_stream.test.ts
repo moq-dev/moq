@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { ownClaim } from "./announce.ts";
@@ -108,7 +108,7 @@ test("finishing a stream that sent a claim waits for its acknowledgement", async
 		await stream.send({
 			status: "start",
 			suffix: Path.from("a"),
-			instance: Instance.parse("a"),
+			identity: Identity.parse("a"),
 			claim: ownClaim(0n),
 		});
 		let finished = false;
@@ -151,7 +151,7 @@ for (const [code, leaves] of [
 			await stream.send({
 				status: "start",
 				suffix: Path.from("a"),
-				instance: Instance.parse("a"),
+				identity: Identity.parse("a"),
 				claim: ownClaim(0n),
 			});
 			const finished = stream.finish();
