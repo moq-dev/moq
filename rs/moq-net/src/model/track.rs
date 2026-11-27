@@ -4477,7 +4477,19 @@ impl TrackState {
 	/// the end or a start was declared, or a group last arrived, so a feed still delivering toward an
 	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group
 	/// counts as delivered, and the check costs the same however much is cached.
+	///
+	/// While the copy is idle no feed delivers, so nothing it misses is late yet: it is never
+	/// given up until the next feed goes live, whose grace starts then.
 	fn tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
+		let deadline = self.fed_tail_deadline(fin)?;
+		match self.feed {
+			Feed::Idle { .. } => Some(None),
+			Feed::Live { .. } | Feed::Answered { .. } => Some(deadline),
+		}
+	}
+
+	/// [`Self::tail_deadline`] for a copy a feed delivers to.
+	fn fed_tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
 		let active = self.outcome.end()?.tail.pending()?;
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
@@ -4777,6 +4789,10 @@ impl TrackState {
 		if !matches!(self.feed, Feed::Idle { .. }) {
 			return;
 		}
+		// What the tail still misses is waited for from now: no feed delivered while idle.
+		let now = self.cache.pool().now_wall();
+		self.arrivals.demand(0..u64::MAX, now);
+		self.refresh_tail(now);
 		// An answer past the newest group still cached leaves a gap after it.
 		let cached = self.idle_cached();
 		// A feed asked from the cache's head resends what follows it, newest first on a
@@ -5897,10 +5913,15 @@ impl Producer {
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
 		let end = Position::group(state.next_key());
+		// An idle copy's session has no feed: a group it dropped going idle never came, so its
+		// tail stays waiting for the next feed.
+		let idle = matches!(state.feed, Feed::Idle { .. });
 		if let Outcome::Ending(declared) = &mut state.outcome
 			&& declared.tail.is_received()
 		{
-			declared.tail = TailState::Settled;
+			if !(idle && declared.tail.pending().is_some()) {
+				declared.tail = TailState::Settled;
+			}
 			let fin = declared.at.final_key();
 			state.latch_settled();
 			if let Some(fin) = fin {
@@ -17426,8 +17447,8 @@ mod test {
 	/// A copy that goes idle with a group still open drops that group, which the next feed
 	/// sends again, so a returning reader waits for it whatever end was declared and in
 	/// whichever order: an end the ended feed declared, pending or settled, or one the next
-	/// feed declares before the group arrives. One that never comes leaves an abort, not a
-	/// clean end without it.
+	/// feed declares before the group arrives, however long after the last reader left the
+	/// next one returns. One that never comes leaves an abort, not a clean end without it.
 	#[test]
 	fn an_idle_copy_waits_for_a_group_it_dropped() {
 		#[derive(Clone, Copy, Debug, PartialEq)]
@@ -17437,10 +17458,15 @@ mod test {
 			EndedLater,
 			Aborted,
 		}
-		for case in [Case::EndedPending, Case::EndedSettled, Case::EndedLater, Case::Aborted] {
+		let cases = [Case::EndedPending, Case::EndedSettled, Case::EndedLater, Case::Aborted];
+		// A copy from before lite-07 gives a missing group up a grace after it is late.
+		for (case, proven) in cases.into_iter().flat_map(|case| [(case, true), (case, false)]) {
 			let mut producer = track_producer("test", Info::default());
 			producer.received();
-			producer.proven();
+			if proven {
+				producer.proven();
+			}
+			elapse(&producer, Duration::ZERO);
 			let open = framed(&producer, 0, 1);
 			if case != Case::EndedLater {
 				producer.finish_at(Position::group(1)).unwrap();
@@ -17451,6 +17477,8 @@ mod test {
 			// The last reader left before the group's stream finished.
 			producer.set_idle();
 			drop(open);
+			// The next reader returns long after any grace.
+			elapse(&producer, Duration::from_secs(60));
 
 			let mut reader = producer.subscribe(Subscription::default());
 			let noop = kio::Waiter::noop();
@@ -17458,12 +17486,12 @@ mod test {
 				producer.abort(Error::Cancel).unwrap();
 				assert!(
 					matches!(reader.poll_recv_group(&noop), Poll::Ready(Err(_))),
-					"{case:?}: the copy never held the whole track"
+					"{case:?} proven={proven}: the copy never held the whole track"
 				);
 				continue;
 			}
 			let (woken, waiter) = Flag::waiter();
-			assert!(reader.poll_recv_group(&waiter).is_pending(), "{case:?}");
+			assert!(reader.poll_recv_group(&waiter).is_pending(), "{case:?} proven={proven}");
 
 			// The next feed answers and may repeat the end before the group lands again.
 			producer
