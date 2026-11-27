@@ -1045,7 +1045,12 @@ mod tests {
 		let mut updates = catalog.consume().unwrap();
 		within("the catalog", async {
 			loop {
-				let snapshot = updates.next().await.expect("catalog update").expect("catalog open");
+				let snapshot = updates
+					.next()
+					.await
+					.expect("catalog update")
+					.expect("catalog open")
+					.value;
 				if snapshot.video.renditions.len() == video && snapshot.audio.renditions.len() == audio {
 					return snapshot;
 				}

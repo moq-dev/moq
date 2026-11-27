@@ -21,8 +21,8 @@
 (* and awaits the acknowledgement: stale bytes must not hold the send      *)
 (* window. A subscriber that read it whole first keeps the group. A stream *)
 (* reset while serving, evicted or preempted with TOO_FAR_BEHIND for a     *)
-(* group that outranks it, is final. Under `ReliableReset` (RESET_STREAM_AT *)
-(* negotiated), a reset once the transport took the GROUP header still     *)
+(* group that outranks it, is final. Under `ReliableReset` (see its        *)
+(* definition), a reset once the transport took the GROUP header still     *)
 (* delivers it, which accounts for the group, so nothing names it, though  *)
 (* the reset may cut a GROUP_END after it, so the publisher skips the      *)
 (* starts it told again. Any other reset is named in a drop: before then   *)
@@ -56,7 +56,7 @@ EXTENDS Integers, Sequences, FiniteSets
 CONSTANTS
     Groups,        \* starts in range
     Pressure,      \* the cache pool may hand the publisher's reader debt, so its record folds
-    ReliableReset  \* the peer negotiated RESET_STREAM_AT (`Session::reliable_reset`)
+    ReliableReset  \* a reset delivers its prefix: raw QUIC or QMux with RESET_STREAM_AT, never WebTransport (`Session::reliable_reset`)
 
 \* The highest End a group may finish at: one past the highest start.
 MaxEnd == 1 + CHOOSE m \in Groups : \A x \in Groups : x <= m

@@ -344,8 +344,6 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Delete a Pages artifact left by an earlier run attempt.
-      actions: write
       contents: write
       pages: write
       id-token: write
@@ -399,17 +397,18 @@ jobs:
           fail-on-alert: false
       - name: Publish shared history
         run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site benchmark-reports/paired.json
-      - name: Drop a stale Pages artifact
-        run: nix shell --inputs-from . nixpkgs#just --command just gh pages-clean
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      # Each Pages publisher names its own artifact: a run's names must be unique.
+      - id: pages
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: pages-bench
           path: benchmark-site
       - name: Deploy site
         id: deploy
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        run: nix shell --inputs-from . nixpkgs#just --command just gh pages-deploy "$ARTIFACT"
+        env:
+          ARTIFACT: ${{ steps.pages.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}
 
       # Apart from the site, so either failing leaves the other published.
       - name: Write Kixel Quest metrics
@@ -442,11 +441,13 @@ jobs:
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `rs rung-disable` proves FFI simulcast disable and recovery on a shaped BBR3 uplink.
         # `test resume-model` sweeps resume against its model from a fresh seed; PRs run a fixed 64.
         # `test route-sweep` checks random lite-07 meshes against the route rules from a fresh seed; PRs run a fixed 8.
-        # It also runs the router's handoff sweeps over 20,000 fixed scenarios; PRs run 150.
-        # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
+        # It also runs the multicast prototype's and router's ignored sweeps.
+        # `test route-bench` prints the route benchmarks' tables (multicast bake-off and router, warmth, node layers);
+        # the bake-off's growth alone took 15 to 25 minutes on this runner, too long to share route-sweep's hour.
         # `test route-race` races a lite-07 relay's session tasks in seeded orders from a fresh seed; PRs run a fixed 16.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
@@ -460,7 +461,7 @@ jobs:
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
         # `test steady` runs one passthrough broadcast at 60 groups/s for 15 minutes and fails on
         # a heap slope after warm-up, too long for a pull request (see test/steady).
-        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix", "test steady"]
+        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-bench", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix", "test steady"]
         include:
           # Miri interprets moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
@@ -503,8 +504,11 @@ jobs:
           sudo udevadm settle
           # The runner user is not in the video group.
           sudo chmod a+rw /dev/video*
+      # Inside the job's hour, so a recipe that overruns fails the job, where the
+      # failure-based triage sees it, instead of cancelling it.
       - name: Test
         id: test
+        timeout-minutes: 55
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci

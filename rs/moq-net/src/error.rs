@@ -606,6 +606,21 @@ impl Error {
 		self.retry() != Retry::Never
 	}
 
+	/// Whether the session carrying the request is ending, rather than one stream failing on a
+	/// session that serves on: only then does another route take over. Mirrors `closing` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn closing(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Stream(StreamError::Session(_) | StreamError::GoingAway)
+		)
+	}
+
 	/// Whether a source lost its route to the content: only another route continues it.
 	pub(crate) fn unroutable(&self) -> bool {
 		self.retry() == Retry::Reroute

@@ -2886,6 +2886,47 @@ for (const spliced of [true, false]) {
 	});
 }
 
+// A copy whose end settled aborts cleanly for its readers. Its session ending still says its
+// route failed, so a group it closed short reads on from the route replacing it; a subscription
+// reset alone leaves the route serving, so the close stands. Mirrors
+// `a_short_group_waits_for_a_replacement_after_its_settled_copy_fails`.
+for (const lost of [true, false]) {
+	test(`a short group after its settled copy aborts (session ended: ${lost})`, async () => {
+		const clock = new Manual();
+		const installed = install(clock);
+		const front = new Front();
+		const sources = [new BroadcastProducer(), new BroadcastProducer()];
+		const handles = sources.map((source) => source.consume());
+		const route = copy(sources[0]);
+		const short = route.write(0n, 1, false);
+		route.producer.finish();
+		front.serve(handles[0]);
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
+		try {
+			await clock.advance(Duration.ZERO);
+			const group = sub.tryRecvGroup();
+			if (!group) throw new Error("expected group 0");
+			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+			short.finish();
+			route.producer.abort(new StreamError(lost ? StreamCode.SessionClosed : StreamCode.Cancel));
+			const reading = group.readFrame().then((frame) => frame && dec.decode(frame.payload));
+			if (lost) {
+				expect(await isPending(reading)).toBe(true);
+				copy(sources[1]).write(0n, 2);
+				front.serve(handles[1]);
+				expect(await reading).toBe("0.1");
+			}
+			expect(await (lost ? group.readFrame() : reading)).toBeUndefined();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			for (const handle of handles) handle.close();
+			for (const source of sources) source.close();
+			installed.close();
+		}
+	});
+}
+
 test("a short group ends once no route holds more of it", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const ta = copy(a);

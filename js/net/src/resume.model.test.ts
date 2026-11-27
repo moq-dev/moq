@@ -1844,6 +1844,20 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// The serving copy finished the track at its last group while that group was open, then
+		// closed it short and failed: the reader's group reads on from the route replacing it.
+		// Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "end", identity: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "close", identity: 0, slot: 1, group: undefined, down: true },
+				{ kind: "write", identity: 0, slot: 0, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {
