@@ -1134,11 +1134,7 @@ enum PendingUpdate {
 	Announce(RouteMeta),
 	Restart(RouteMeta),
 	Unannounce(RouteMeta, Gone),
-	UnannounceAnnounce {
-		old: RouteMeta,
-		gone: Gone,
-		new: RouteMeta,
-	},
+	UnannounceAnnounce { old: RouteMeta, gone: Gone, new: RouteMeta },
 }
 
 /// How a route left a cursor: the origin ended it, or this node lost it.
@@ -1359,11 +1355,7 @@ impl OriginConsumerState {
 			// needs the leading one. Its reason is the later one only when both carry
 			// one identity; otherwise the later reason is for a route never delivered.
 			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
-				let gone = if old.3 == new.3 {
-					gone
-				} else {
-					prior
-				};
+				let gone = if old.3 == new.3 { gone } else { prior };
 				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
@@ -2256,7 +2248,10 @@ impl Default for OriginScope {
 /// Where a cursor listing `allowed` hangs: each member as a path. A member too long for a
 /// path covers none and asks for nothing.
 fn heads(allowed: &Prefixes) -> Vec<Path> {
-	allowed.iter().filter_map(|prefix| Path::new(prefix.as_str()).ok()).collect()
+	allowed
+		.iter()
+		.filter_map(|prefix| Path::new(prefix.as_str()).ok())
+		.collect()
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.

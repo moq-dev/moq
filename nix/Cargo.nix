@@ -61578,6 +61578,12 @@ rec {
           {
             name = "proc-macro2";
             packageId = "proc-macro2";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
           }
           {
             name = "proptest";
@@ -61606,6 +61612,12 @@ rec {
           {
             name = "quote";
             packageId = "quote";
+            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
           }
           {
             name = "rcgen";
