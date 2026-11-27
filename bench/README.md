@@ -1008,13 +1008,14 @@ build only the bench targets of their names, plus any target of the same name in
 another listed package, since Cargo's `--bench` takes no package. A name the
 commit lacks fails the run; `run` with `--allow-missing` counts the rest and
 names the missing ones on stderr and in a GitHub Actions job summary, failing
-only when the commit has none of them. `compare` selects the same packages and targets at both
-commits, so its base needs every package `sh/rs/instructions.sh` lists. It
-counts the base in another worktree, whose path alone can move a count, so
-recount a change it reports in one checkout, with `--jobs 1` as CI counts,
-before trusting it. It keeps each
-checkout's base worktree and build under `~/.cache/rust2-bench` for the next
-compare; delete the directory, then `git worktree prune`, to reclaim them.
+only when the commit has none of them. `compare` counts the base and the working tree from one
+worktree under `~/.cache/rust2-bench`, so a path the build compiles in moves
+neither side, and selects each side's packages and targets from what that side
+has, so a package or target only one side has reads as added or removed. Not
+every count repeats yet (`quest/m0/repeatable-instruction-counts.md`), so recount
+a change it reports with `--jobs 1`, as CI counts, before trusting it. It keeps the worktree and its build for
+the next compare; delete the directory, then `git worktree prune`, to reclaim
+them.
 
 ### Kixel Quest
 
