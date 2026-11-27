@@ -293,12 +293,13 @@ fn target_duration(length: Duration) -> u64 {
 	(twice.as_secs() + u64::from(twice.subsec_nanos() > 0)).max(1)
 }
 
-/// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` and muxed under
-/// the normalized `config`, hashing its catalog JSON, which every edge encodes alike.
+/// The segment [tag](segments::tag) of `track` numbered on a grid of `interval` by the grid's
+/// [rules](grid::RULES) and muxed under the normalized `config`, hashing its catalog JSON, which
+/// every edge encodes alike.
 fn tag<T: serde::Serialize>(track: &str, interval: Duration, config: &T) -> Arc<str> {
 	// It was parsed from catalog JSON, so it encodes back.
 	let config = serde_json::to_vec(config).expect("a catalog config encodes as JSON");
-	let track = format!("{track}@{}", interval.as_nanos());
+	let track = format!("{track}@{}#{}", interval.as_nanos(), grid::RULES);
 	Arc::from(segments::tag(&track, &config))
 }
 
@@ -1299,7 +1300,7 @@ impl Rendition {
 					duration: s.duration,
 					gap: s.stop,
 					discontinuity,
-					program_date_time: self.wall_clock(s.pts),
+					program_date_time: self.wall_clock(s.media),
 				}
 			})
 			.collect();
@@ -1351,9 +1352,11 @@ impl Rendition {
 			.iter()
 			.filter(|row| !row.stop)
 			.map(|row| {
-				let t = super::span(row.pts).as_millis() as u64;
-				let d = row.end.saturating_sub(super::span(row.pts)).as_millis() as u64;
-				(t, d)
+				// Timed by its media, as its `tfdt` is, from its first sample to where its content
+				// ends: each end in whole milliseconds, so a contiguous next segment's `t` meets it.
+				let t = super::span(row.media).as_millis() as u64;
+				let end = row.content.unwrap_or(row.end).as_millis() as u64;
+				(t, end.saturating_sub(t))
 			})
 			// A zero-duration segment cannot be requested by DASH timing.
 			.filter(|(_, d)| *d > 0)
@@ -1611,16 +1614,20 @@ enum Fetching {
 		_binding: Arc<moq_mux::Binding>,
 		epoch: u64,
 		broadcast: moq_net::broadcast::Consumer,
-		track: moq_net::track::Consumer,
+		_track: moq_net::track::Consumer,
 		muxer: Muxer,
 		/// Every group's frames, accumulated into ONE fragment, so duration inference sees each
 		/// frame's true successor. A per-group fragment would mis-time the trailing sample of
 		/// every group (its real successor lives in the next group), audible on audio segments
 		/// that span many groups.
 		frames: Vec<moq_mux::container::Frame>,
-		/// The group being read, and the ones after it, by start.
-		groups: std::vec::IntoIter<u64>,
+		/// One subscription to the row's span, its groups delivered oldest first.
+		span: Span,
+		/// The groups still to read, by start.
+		groups: std::iter::Peekable<std::vec::IntoIter<u64>>,
 		group: Option<GroupRead>,
+		/// Where the newest group read ends, as its GROUP_END says.
+		declared: Option<moq_net::Timestamp>,
 	},
 	Done,
 }
@@ -1677,7 +1684,11 @@ impl Fetch {
 		}
 		let row = &self.row;
 		let Fetching::Groups {
-			epoch, muxer, frames, ..
+			epoch,
+			muxer,
+			frames,
+			declared,
+			..
 		} = &mut self.state
 		else {
 			unreachable!("read every group above");
@@ -1685,11 +1696,14 @@ impl Fetch {
 		if frames.is_empty() {
 			return Poll::Ready(Ok(None));
 		}
-		// The last presented sample has no successor to time it, so the fragment ends where the
-		// next group starts, unless its codec or a duration marker times it.
-		let end = row
+		// The last presented sample has no successor to time it, so the fragment ends where its
+		// last group's GROUP_END says, else where the next group starts, unless its codec or a
+		// duration marker times it. Read from the group itself, the end is the same on every edge
+		// whether it arrived before or after the next group.
+		let content = row
 			.content
 			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
+		let end = declared.or(content);
 		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
 		// Inline codec metadata was already decoded from these completed groups.
 		// Reuse it instead of fetching a newer, possibly unfinished group.
@@ -1731,32 +1745,63 @@ impl Fetch {
 					else {
 						return Poll::Ready(Ok(false));
 					};
+					// One request for the whole row, rather than a round trip per group.
+					let (Some(first), Some(last)) = (row.groups.first(), row.groups.last()) else {
+						return Poll::Ready(Ok(false));
+					};
+					let range = moq_net::track::Range {
+						start: moq_net::track::Start::Time(first),
+						end: Some(last),
+					};
+					let subscription = moq_net::track::Subscription::default()
+						.with_ranges([range])
+						.with_order(moq_net::track::Order::Ascending);
+					let span = Span::Subscribing(track.subscribe(subscription).into_inner());
 					self.state = Fetching::Groups {
 						_binding: binding.clone(),
 						epoch: *epoch,
 						broadcast,
-						track,
+						_track: track,
 						muxer: rendition.muxer()?,
 						frames: Vec::new(),
-						groups: row.groups.starts(),
+						span,
+						groups: row.groups.starts().peekable(),
 						group: None,
+						declared: None,
 					};
 				}
 				Fetching::Groups {
 					broadcast,
-					track,
 					muxer,
 					frames,
+					span,
 					groups,
 					group,
+					declared,
 					..
 				} => {
 					let read = match group {
 						Some(read) => read,
-						None => match groups.next() {
-							Some(sequence) => group.insert(GroupRead::new(track, sequence)),
-							None => break,
-						},
+						None => {
+							let Some(&sequence) = groups.peek() else {
+								break;
+							};
+							match ready!(span.poll_group(waiter, sequence, broadcast))? {
+								Ok(next) => {
+									groups.next();
+									group.insert(GroupRead::read(next))
+								}
+								Err(miss) => {
+									tracing::warn!(
+										segment = row.segment,
+										group = sequence,
+										err = %miss,
+										"abandoning an advertised segment: a group is unavailable"
+									);
+									return Poll::Ready(Ok(false));
+								}
+							}
+						}
 					};
 					let sequence = read.sequence;
 					let read = match &mut self.sizing {
@@ -1765,7 +1810,7 @@ impl Fetch {
 					};
 					let miss = match read {
 						Ok(()) => {
-							*group = None;
+							*declared = group.take().and_then(|read| read.declared());
 							continue;
 						}
 						Err(miss) => miss,
@@ -2064,11 +2109,12 @@ fn poll_retired(claim: &kio::Consumer<Claim>, waiter: &kio::Waiter) -> Poll<()> 
 /// Follows a rendition's media track into its window, numbering its groups on the grid, until the
 /// track ends or fails.
 ///
-/// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, or once
-/// the track ends. A later one starts with the group after it, as soon as a frame of that group
-/// passes the next line, so the newest group's frames are read as they arrive. A watcher joining mid-segment can't know the groups before its first, so it
-/// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
-/// lists that segment whole, and the same URL must name the same bytes everywhere.
+/// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, once its
+/// newest group's GROUP_END reaches the next line, or once the track ends. A later one starts with
+/// the group after it, as soon as a frame of that group passes the next line, so the newest group's
+/// frames are read as they arrive. A watcher joining mid-segment can't know the groups before its
+/// first, so it lists nothing before the first segment it knows whole (see [`grid::Slot::Media`]):
+/// another edge lists that segment whole, and the same URL must name the same bytes everywhere.
 struct WatchMedia {
 	rendition: Weak<Rendition>,
 	claim: kio::Consumer<Claim>,
@@ -2122,6 +2168,15 @@ struct Follow {
 	/// The newest group, its first frame's pts, and what that frame reached, read again for its
 	/// content's end if the track ends after it, and the gap from the group before it.
 	latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)>,
+	/// The newest group again, with the timescale its GROUP_END counts in, waiting for it to end;
+	/// `None` once it did, or on a track without a timescale.
+	ending: Option<(moq_net::group::Consumer, moq_net::Timescale)>,
+	/// Where the newest group ends, once it ended declaring it.
+	end: Option<moq_net::Timestamp>,
+	/// The picture size the newest group declared in band, from the catalog's until one does, and
+	/// the newest group declaring another.
+	size: Option<(u32, u32)>,
+	resized: Option<u64>,
 	spacing: Option<Duration>,
 	/// Nothing is listed before the first segment this watcher saw start.
 	whole: bool,
@@ -2141,6 +2196,13 @@ impl Follow {
 			after: None,
 			grid: grid::Grid::new(rendition.segment, segments::MAX_SEGMENTS),
 			latest: None,
+			ending: None,
+			end: None,
+			size: match &rendition.config {
+				Config::Video(config) => config.coded_width.zip(config.coded_height),
+				_ => None,
+			},
+			resized: None,
 			spacing: None,
 			whole: false,
 			reading: false,
@@ -2166,10 +2228,12 @@ impl Follow {
 			// grid numbers what resumes by its own timestamps, as every edge does.
 			First::Marker(at) => {
 				self.latest = None;
+				self.ending = None;
+				self.end = None;
 				self.reading = false;
 				(self.grid.stop(at), (group.start, None), None)
 			}
-			First::Media(pts, media, reach, declared) => {
+			First::Media(pts, media, reach, declared, scale) => {
 				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
 					self.spacing = media.checked_sub(*previous).ok().map(super::span).or(self.spacing);
@@ -2179,12 +2243,48 @@ impl Follow {
 				if let Some(newest) = reach.newest() {
 					slots.extend(self.grid.reach(newest));
 				}
+				if let Some(size) = declared
+					&& self.size != Some(size)
+				{
+					self.size = Some(size);
+					self.resized = Some(sequence);
+				}
+				self.ending = scale.map(|scale| (group.clone(), scale));
+				self.end = None;
 				self.latest = Some((group, media, reach));
 				self.reading = true;
 				(slots, (sequence, Some(At { place: pts, media })), declared)
 			}
 		};
 		self.list(rendition, slots, Some(read), size, false)
+	}
+
+	/// Wait for the newest group to end, so its GROUP_END may complete its segment before its
+	/// successor starts; the segments that completes. A group that failed or declared no end leaves
+	/// its segment to its successor. The fragment's bytes take its end from the group itself when
+	/// fetched (see [`Fetch`]), so they never depend on which arrived first.
+	///
+	/// So does a segment holding an in-band resize: the catalog update declaring it may still
+	/// follow, and a retire hands over only groups no listed segment holds (see
+	/// [`Rendition::handover`]).
+	fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Vec<grid::Slot>> {
+		let Some((group, scale)) = &mut self.ending else {
+			return Poll::Ready(Vec::new());
+		};
+		let _ = ready!(group.poll_finished(waiter));
+		let end = group.end().and_then(|end| moq_net::Timestamp::new(end, *scale).ok());
+		self.ending = None;
+		self.end = end;
+		let unplaced = self.grid.unplaced();
+		let resizing = self
+			.resized
+			.zip(unplaced)
+			.is_some_and(|(resized, first)| resized >= first);
+		let slots = match (end, resizing) {
+			(Some(end), false) => self.grid.end(end),
+			_ => Vec::new(),
+		};
+		Poll::Ready(slots)
 	}
 
 	/// List what `slots` place, after reading the group `read` whose keyframe declares `size`;
@@ -2239,7 +2339,9 @@ impl Follow {
 					segment,
 					groups,
 					pts,
+					media,
 					start,
+					whole,
 					..
 				} if claim.retired && theirs(groups.last()) => match (boundary, theirs_at) {
 					// The replacement can't list this segment's number again, so this identity
@@ -2250,9 +2352,11 @@ impl Follow {
 							segment,
 							groups: groups.through(boundary),
 							pts,
+							media,
 							start,
 							end: at.place,
 							content: Some(at.media),
+							whole,
 						};
 						(slot, true)
 					}
@@ -2261,14 +2365,14 @@ impl Follow {
 				slot => (slot, false),
 			};
 			if !*whole {
-				// The first segment listed holds only this identity's groups, and starts whole.
+				// The first segment listed holds only this identity's groups, and every group of its slot.
 				let own = match &slot {
-					grid::Slot::Media { groups, .. } => {
-						after.is_none_or(|after| groups.first().is_some_and(|first| first > after))
+					grid::Slot::Media { groups, whole, .. } => {
+						*whole && after.is_none_or(|after| groups.first().is_some_and(|first| first > after))
 					}
 					_ => false,
 				};
-				if !own || !grid.starts(&slot) {
+				if !own {
 					if last {
 						return Some(Ok(()));
 					}
@@ -2438,6 +2542,13 @@ impl WatchMedia {
 							return Poll::Ready(done);
 						}
 					}
+					// Its end may complete its segment before any later group starts.
+					if let Poll::Ready(slots) = follow.poll_end(waiter)
+						&& !slots.is_empty()
+						&& let Some(done) = follow.list(&self.rendition, slots, None, None, false)
+					{
+						return Poll::Ready(done);
+					}
 					let groups = self.groups.as_mut().expect("subscribed above");
 					// A segment is listed from the groups that arrive, so one given up on is read past.
 					match ready!(groups.poll_next_group(waiter))? {
@@ -2457,6 +2568,14 @@ impl WatchMedia {
 						return Poll::Ready(Ok(()));
 					}
 					let first = ready!(group.poll_read_frame(waiter))?;
+					// The group before it is placed by this group's start whether or not its own end
+					// arrived: one left open may never end. Its end only completes a segment early.
+					if let Poll::Ready(slots) = follow.poll_end(waiter)
+						&& !slots.is_empty()
+						&& let Some(done) = follow.list(&self.rendition, slots, None, None, false)
+					{
+						return Poll::Ready(done);
+					}
 					let Step::First(group) = std::mem::replace(&mut self.step, Step::Next) else {
 						unreachable!("reading the first frame");
 					};
@@ -2465,6 +2584,22 @@ impl WatchMedia {
 					}
 				}
 				Step::End(group, reach) => {
+					let slots = ready!(follow.poll_end(waiter));
+					if !slots.is_empty()
+						&& let Some(done) = follow.list(&self.rendition, slots, None, None, false)
+					{
+						return Poll::Ready(done);
+					}
+					// A declared end says where its content ends without decoding its frames, once
+					// the group is placed: one off the grid is placed by its last frame, as on an edge
+					// without GROUP_END, and its content still stops at the declared end.
+					if let Some(end) = follow.end
+						&& !follow.grid.pending()
+					{
+						let slots = follow.grid.finish(None, Some(end));
+						let done = follow.list(&self.rendition, slots, None, None, true);
+						return Poll::Ready(done.expect("an ended track ends the watch"));
+					}
 					// Read once the track has ended so every frame is in. Fails when the group does:
 					// its last segment would otherwise be listed complete but truncated.
 					let reach_mut = reach.as_mut().expect("read to its end once");
@@ -2620,8 +2755,15 @@ impl Reach {
 /// What a group's first frame holds.
 enum First {
 	/// Media: its place, the group's start or else its first sample's pts, then its first sample's
-	/// pts, with what its samples reach and the picture size its keyframe declares.
-	Media(moq_net::Timestamp, moq_net::Timestamp, Reach, Option<(u32, u32)>),
+	/// pts, with what its samples reach, the picture size its keyframe declares, and the timescale
+	/// its start and end count in, which a scale-less session has none of.
+	Media(
+		moq_net::Timestamp,
+		moq_net::Timestamp,
+		Reach,
+		Option<(u32, u32)>,
+		Option<moq_net::Timescale>,
+	),
 	/// A discontinuity marker, a frame with no payload: the content stops at its timestamp.
 	Marker(moq_net::Timestamp),
 }
@@ -2654,12 +2796,12 @@ fn first_frame(
 	let size = probe.and_then(|probe| probe.picture_size(first).ok().flatten());
 	let mut reach = Reach::default();
 	reach.add(decoded);
-	Some(First::Media(place, pts, reach, size))
+	Some(First::Media(place, pts, reach, size, scale))
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.
 fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
-	let (segment, groups, pts, end, content, stop) = match slot {
+	let (segment, groups, pts, media, end, content, stop) = match slot {
 		// Listed as a gap rather than as a segment every request for would refuse.
 		grid::Slot::Media {
 			segment,
@@ -2674,18 +2816,19 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 				?groups,
 				"a segment holds more groups than one request fetches; listing it as a gap"
 			);
-			(segment, Default::default(), start, end, None, true)
+			(segment, Default::default(), start, start, end, None, true)
 		}
 		// Timed from where its EXTINF starts, which a group resuming past its line puts at the line.
 		grid::Slot::Media {
 			segment,
 			groups,
+			media,
 			start,
 			end,
 			content,
 			..
-		} => (segment, groups, start, end, content, false),
-		grid::Slot::Gap { segment, pts, end } => (segment, Default::default(), pts, end, None, true),
+		} => (segment, groups, start, media, end, content, false),
+		grid::Slot::Gap { segment, pts, end } => (segment, Default::default(), pts, pts, end, None, true),
 		grid::Slot::Reset => unreachable!("a reset lists no row"),
 	};
 	let start = super::span(pts);
@@ -2705,6 +2848,7 @@ fn row(rendition: &Rendition, slot: grid::Slot, broken: bool) -> segments::Row {
 		groups,
 		duration,
 		pts,
+		media,
 		end,
 		discontinuity: rendition.fanout.stamp(&rendition.key(), broken, end),
 		stop,
@@ -2766,6 +2910,56 @@ impl InitRead {
 	}
 }
 
+/// A subscription to a row's span of groups, read oldest first.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per segment request, and the reading variant is the working state"
+)]
+enum Span {
+	Subscribing(moq_net::track::Subscribing),
+	Reading(moq_net::track::Ordered),
+}
+
+impl Span {
+	/// The group starting at `sequence`, passing any older one the span starts at, or the error
+	/// saying it is unservable, as [`GroupRead::poll`] does.
+	fn poll_group(
+		&mut self,
+		waiter: &kio::Waiter,
+		sequence: u64,
+		broadcast: &moq_net::broadcast::Consumer,
+	) -> Poll<Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>>> {
+		let unservable = |err: moq_net::Error| match is_unservable(&err, broadcast) {
+			true => Ok(Err(err)),
+			false => Err(err.into()),
+		};
+		if let Self::Subscribing(subscribing) = self {
+			match ready!(subscribing.poll_ok(waiter)) {
+				Ok(subscriber) => *self = Self::Reading(subscriber.ordered()),
+				Err(err) => return Poll::Ready(unservable(err)),
+			}
+		}
+		let Self::Reading(ordered) = self else {
+			unreachable!("subscribed above");
+		};
+		loop {
+			let item = match ready!(ordered.poll_next_item(waiter)) {
+				Ok(item) => item,
+				Err(err) => return Poll::Ready(unservable(err)),
+			};
+			return Poll::Ready(match item {
+				// The group containing the span's start, when the one starting there is gone.
+				Some(moq_net::track::Item::Group(group)) if group.start < sequence => continue,
+				Some(moq_net::track::Item::Group(group)) if group.start == sequence => Ok(Ok(group)),
+				Some(moq_net::track::Item::Gap { range, .. }) if range.end <= sequence => continue,
+				Some(moq_net::track::Item::Gap { range, error, .. }) if range.contains(&sequence) => unservable(error),
+				// Past it, or the span ended without it: it is gone.
+				_ => Ok(Err(moq_net::Error::NotFound)),
+			});
+		}
+	}
+}
+
 /// Fetches one group, then reads its frames through a muxer.
 struct GroupRead {
 	sequence: u64,
@@ -2783,6 +2977,23 @@ impl GroupRead {
 			sequence,
 			state: GroupReading::Fetching(track.fetch_group(sequence, None).into_inner()),
 		}
+	}
+
+	/// Read `group`, already delivered.
+	fn read(group: moq_net::group::Consumer) -> Self {
+		Self {
+			sequence: group.start,
+			state: GroupReading::Reading(group, Vec::new()),
+		}
+	}
+
+	/// Where the group ends, once read to its end, when its GROUP_END says.
+	fn declared(&self) -> Option<moq_net::Timestamp> {
+		let GroupReading::Reading(group, _) = &self.state else {
+			return None;
+		};
+		let end = moq_net::Timestamp::new(group.end()?, group.timescale()?).ok()?;
+		moq_net::Timestamp::from_micros(end.as_micros().ok()? as u64).ok()
 	}
 
 	/// Count the group's frames and their bytes into `size` as they are read, keeping none; an
@@ -2851,7 +3062,7 @@ impl GroupRead {
 	}
 }
 
-/// True if a FETCH failure means the segment can never be served: a 404, not a 500.
+/// True if a fetch failure means the segment can never be served: a 404, not a 500.
 fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
 	is_cache_miss(err) || is_gone_publisher(err, broadcast)
 }
@@ -3000,6 +3211,7 @@ mod tests {
 			groups: grid::Groups::one(0),
 			duration: Duration::from_secs(1),
 			pts: moq_net::Timestamp::ZERO,
+			media: moq_net::Timestamp::ZERO,
 			end: Duration::from_secs(1),
 			discontinuity: 0,
 			stop: false,

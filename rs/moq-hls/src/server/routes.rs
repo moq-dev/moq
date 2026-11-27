@@ -506,9 +506,9 @@ mod tests {
 			.unwrap()
 			.router();
 		let old_playlist = format!("/live/@{AT}/video/video0/media.m3u8");
-		let old_segment = format!("/live/@{AT}/video/video0/seg/8343e7cd.0.m4s");
+		let old_segment = format!("/live/@{AT}/video/video0/seg/c913b6a2.0.m4s");
 		wait_listed(&app, "/live/master.m3u8", &format!("@{AT}/video/video0/media.m3u8")).await;
-		wait_listed(&app, &old_playlist, "seg/8343e7cd.0.m4s").await;
+		wait_listed(&app, &old_playlist, "seg/c913b6a2.0.m4s").await;
 
 		let next = moq_net::Identity::random();
 		let new = origin
@@ -527,7 +527,7 @@ mod tests {
 			&format!("@{}/video/video0/media.m3u8", crate::export::token(&next)),
 		)
 		.await;
-		wait_listed(&app, &new_playlist, "seg/8343e7cd.0.m4s").await;
+		wait_listed(&app, &new_playlist, "seg/c913b6a2.0.m4s").await;
 		assert_eq!(status(&app, &old_playlist).await, StatusCode::OK);
 		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
 
@@ -556,7 +556,7 @@ mod tests {
 		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
 		let app = server.router();
 		let old_playlist = format!("/live/@{AT}/video/video0/media.m3u8");
-		wait_listed(&app, &old_playlist, "seg/8343e7cd.1.m4s").await;
+		wait_listed(&app, &old_playlist, "seg/c913b6a2.1.m4s").await;
 		let replaced = server.broadcaster("live").await.expect("announced");
 		let mut old_renditions = replaced.renditions();
 		let old_rendition = replaced.rendition(Kind::Video, "video0").expect("listed");
@@ -617,7 +617,7 @@ mod tests {
 		assert_eq!(recorded, [0, 1], "exactly what was listed before the takeover");
 		let playlist = old_rendition.media_playlist(None).unwrap().expect("listed");
 		assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
-		assert!(!playlist.contains("seg/8343e7cd.2.m4s"), "{playlist}");
+		assert!(!playlist.contains("seg/c913b6a2.2.m4s"), "{playlist}");
 
 		let mut added = 0;
 		while let Some(event) = kio::clock::timeout(TIMEOUT, old_renditions.next())
@@ -683,7 +683,7 @@ mod tests {
 		wait_listed(
 			&app,
 			&format!("/live/@{AT}/video/video0/media.m3u8"),
-			"seg/8343e7cd.0.m4s",
+			"seg/c913b6a2.0.m4s",
 		)
 		.await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
@@ -692,7 +692,7 @@ mod tests {
 		let response = oneshot(app.clone(), &format!("/live/@{AT}/video/video0/media.m3u8")).await;
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 		let playlist = String::from_utf8(body.to_vec()).unwrap();
-		assert!(playlist.contains("\nseg/run-1.8343e7cd.0.m4s\n"), "{playlist}");
+		assert!(playlist.contains("\nseg/run-1.c913b6a2.0.m4s\n"), "{playlist}");
 		let map = playlist.lines().find(|line| line.starts_with("#EXT-X-MAP:")).unwrap();
 		let init = map
 			.strip_prefix("#EXT-X-MAP:URI=\"")
@@ -714,26 +714,26 @@ mod tests {
 		);
 
 		assert_eq!(
-			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.c913b6a2.0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.8343e7cd.t0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.c913b6a2.t0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{AT}/video/video0/seg/8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/c913b6a2.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{AT}/video/video0/seg/run-0.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-0.c913b6a2.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		// A new run: the previous generation's URLs are refused even for numbers it reuses.
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert_eq!(
-			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.c913b6a2.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 	}

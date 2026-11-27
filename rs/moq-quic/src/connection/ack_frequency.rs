@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::Duration;
 use crate::connection::spaces::PendingAcks;
 use crate::frame::AckFrequency;
@@ -9,7 +11,16 @@ pub(super) struct AckFrequencyState {
 	//
 	// Sending ACK_FREQUENCY frames
 	//
-	in_flight_ack_frequency_frame: Option<(u64, Duration)>,
+	/// Packet numbers and requested `max_ack_delay`s of the frames sent after the newest one
+	/// acknowledged and not declared lost, oldest first
+	///
+	/// Only packets in flight hold one, so the congestion window bounds it.
+	in_flight: VecDeque<(u64, Duration)>,
+	/// The longest delay requested by a frame declared lost after the newest one acknowledged,
+	/// with the newest such frame's packet number
+	///
+	/// The peer may have received it, so it binds until a later frame is acknowledged.
+	lost: Option<(u64, Duration)>,
 	next_outgoing_sequence_number: VarInt,
 	pub(super) peer_max_ack_delay: Duration,
 
@@ -23,7 +34,8 @@ pub(super) struct AckFrequencyState {
 impl AckFrequencyState {
 	pub(super) fn new(default_max_ack_delay: Duration) -> Self {
 		Self {
-			in_flight_ack_frequency_frame: None,
+			in_flight: VecDeque::new(),
+			lost: None,
 			next_outgoing_sequence_number: VarInt(0),
 			peer_max_ack_delay: default_max_ack_delay,
 
@@ -42,12 +54,15 @@ impl AckFrequencyState {
 	) -> Duration {
 		let min_ack_delay = Duration::from_micros(peer_params.min_ack_delay.map_or(0, |x| x.into()));
 
-		// Use the peer's max_ack_delay if no custom max_ack_delay was provided in the config. A
+		// Use the peer's max_ack_delay transport parameter if no custom max_ack_delay was provided
+		// in the config, rather than the delay last requested, which would only ever shrink. A
 		// configured one is capped below the protocol limit, which the peer's own `max_ack_delay`
 		// and `min_ack_delay` transport parameters were already validated against.
-		let candidate = config.max_ack_delay.map_or(self.peer_max_ack_delay, |delay| {
-			Ord::min(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1))
-		});
+		let candidate = config
+			.max_ack_delay
+			.map_or(Duration::from_millis(peer_params.max_ack_delay.into_inner()), |delay| {
+				Ord::min(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1))
+			});
 
 		// Must be no smaller than the `min_ack_delay` advertised by the peer
 		Ord::max(
@@ -60,15 +75,13 @@ impl AckFrequencyState {
 	/// Returns the `max_ack_delay` for the purposes of calculating the PTO
 	///
 	/// This `max_ack_delay` is defined as the maximum of the peer's current `max_ack_delay` and all
-	/// in-flight `max_ack_delay`s (i.e. proposed values that haven't been acknowledged yet, but
-	/// might be already in use by the peer).
+	/// unacknowledged `max_ack_delay`s (i.e. proposed values that the peer might already use).
 	pub(super) fn max_ack_delay_for_pto(&self) -> Duration {
-		// Note: we have at most one in-flight ACK_FREQUENCY frame
-		if let Some((_, max_ack_delay)) = self.in_flight_ack_frequency_frame {
-			self.peer_max_ack_delay.max(max_ack_delay)
-		} else {
-			self.peer_max_ack_delay
-		}
+		self.in_flight
+			.iter()
+			.map(|&(_, delay)| delay)
+			.chain(self.lost.map(|(_, delay)| delay))
+			.fold(self.peer_max_ack_delay, Ord::max)
 	}
 
 	/// Returns the next sequence number for an ACK_FREQUENCY frame
@@ -92,8 +105,9 @@ impl AckFrequencyState {
 			return true;
 		}
 		let current = self
-			.in_flight_ack_frequency_frame
-			.map_or(self.peer_max_ack_delay, |(_, pending)| pending);
+			.in_flight
+			.back()
+			.map_or(self.peer_max_ack_delay, |&(_, pending)| pending);
 		let desired = self.candidate_max_ack_delay(rtt, config, peer_params);
 		let error = (desired.as_secs_f32() / current.as_secs_f32()) - 1.0;
 		error.abs() > MAX_RTT_ERROR
@@ -101,18 +115,36 @@ impl AckFrequencyState {
 
 	/// Notifies the [`AckFrequencyState`] that a packet containing an ACK_FREQUENCY frame was sent
 	pub(super) fn ack_frequency_sent(&mut self, pn: u64, requested_max_ack_delay: Duration) {
-		self.in_flight_ack_frequency_frame = Some((pn, requested_max_ack_delay));
+		self.in_flight.push_back((pn, requested_max_ack_delay));
 	}
 
-	/// Notifies the [`AckFrequencyState`] that a packet has been ACKed
+	/// Notifies the [`AckFrequencyState`] that the 1-RTT packet `pn`, which carried an
+	/// ACK_FREQUENCY frame, was acknowledged
+	///
+	/// The peer ignores a frame older than one it has seen, so every older request is void.
 	pub(super) fn on_acked(&mut self, pn: u64) {
-		match self.in_flight_ack_frequency_frame {
-			Some((number, requested_max_ack_delay)) if number == pn => {
-				self.in_flight_ack_frequency_frame = None;
-				self.peer_max_ack_delay = requested_max_ack_delay;
-			}
-			_ => {}
+		// Absent when a newer frame was acknowledged first
+		let Some(i) = self.in_flight.iter().position(|&(number, _)| number == pn) else {
+			return;
+		};
+		self.peer_max_ack_delay = self.in_flight[i].1;
+		self.in_flight.drain(..=i);
+		if self.lost.is_some_and(|(number, _)| number < pn) {
+			self.lost = None;
 		}
+	}
+
+	/// Notifies the [`AckFrequencyState`] that the 1-RTT packet `pn`, which carried an
+	/// ACK_FREQUENCY frame, was declared lost
+	pub(super) fn on_lost(&mut self, pn: u64) {
+		let Some(i) = self.in_flight.iter().position(|&(number, _)| number == pn) else {
+			return;
+		};
+		let (_, delay) = self.in_flight.remove(i).expect("found above");
+		self.lost = Some(
+			self.lost
+				.map_or((pn, delay), |(number, lost)| (number.max(pn), lost.max(delay))),
+		);
 	}
 
 	/// Notifies the [`AckFrequencyState`] that an ACK_FREQUENCY frame was received
@@ -250,5 +282,49 @@ mod tests {
 			let delay = state.candidate_max_ack_delay(ms(rtt), &config, &params);
 			assert_eq!(delay, ms(requested), "configured {configured:?} ms, RTT {rtt} ms");
 		}
+	}
+
+	/// Without a configured delay, a request starts from the peer's `max_ack_delay` transport
+	/// parameter, not the delay last requested, so a request shrunk by a short RTT grows back with
+	/// a longer one
+	#[test]
+	fn request_grows_back_with_the_rtt() {
+		let params = TransportParameters {
+			max_ack_delay: 100u32.into(),
+			..TransportParameters::default()
+		};
+		let config = ack_frequency::Config::default();
+		let mut state = AckFrequencyState::new(Duration::from_millis(100));
+		let short = state.candidate_max_ack_delay(Duration::from_millis(30), &config, &params);
+		assert_eq!(short, Duration::from_millis(30));
+		state.ack_frequency_sent(1, short);
+		state.on_acked(1);
+		let long = state.candidate_max_ack_delay(Duration::from_millis(300), &config, &params);
+		assert_eq!(long, Duration::from_millis(100));
+	}
+
+	/// The PTO counts every delay the peer may be using: the one acknowledged last and each
+	/// requested since, sent or lost, until a later request is acknowledged
+	#[test]
+	fn pto_counts_every_unacknowledged_request() {
+		let ms = Duration::from_millis;
+		let mut state = AckFrequencyState::new(ms(25));
+		state.ack_frequency_sent(1, ms(100));
+		state.ack_frequency_sent(2, ms(40));
+		assert_eq!(state.max_ack_delay_for_pto(), ms(100));
+		// The newer request settles the older one
+		state.on_acked(2);
+		assert_eq!(state.peer_max_ack_delay, ms(40));
+		assert_eq!(state.max_ack_delay_for_pto(), ms(40));
+		state.on_acked(1);
+		assert_eq!(state.peer_max_ack_delay, ms(40));
+
+		// A lost request may still have arrived
+		state.ack_frequency_sent(3, ms(200));
+		state.on_lost(3);
+		state.ack_frequency_sent(4, ms(30));
+		assert_eq!(state.max_ack_delay_for_pto(), ms(200));
+		state.on_acked(4);
+		assert_eq!(state.max_ack_delay_for_pto(), ms(30));
 	}
 }

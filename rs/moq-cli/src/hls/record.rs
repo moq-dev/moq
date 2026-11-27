@@ -439,7 +439,8 @@ struct Entry {
 	gap: bool,
 	/// The rendition's discontinuity sequence for the segment; the playlist adds its offset.
 	discontinuity: u64,
-	/// Written on the first entry and after each discontinuity.
+	/// Written on the first entry, after each discontinuity, and wherever the entry before's plus
+	/// its duration doesn't give it.
 	program_date_time: Option<kio::clock::Wall>,
 	/// The init file the identity's first media segment maps.
 	map: Option<String>,
@@ -515,7 +516,11 @@ impl Playlist {
 	/// The lines of the entries from `from` on.
 	fn render(&self, from: usize) -> String {
 		let mut out = String::new();
-		let mut previous = from.checked_sub(1).map(|index| self.entries[index].discontinuity);
+		let before = from.checked_sub(1).map(|index| &self.entries[index]);
+		let mut previous = before.map(|entry| entry.discontinuity);
+		// The wall clock a player derives for the next entry, as the live playlist does: a segment
+		// whose media starts off its grid line by another amount restates it.
+		let mut derived = before.and_then(|entry| Some(entry.program_date_time? + entry.duration));
 		for entry in &self.entries[from..] {
 			let discontinuity = entry.discontinuity;
 			// A skipped discontinuity still counts, so playlists starting anywhere agree.
@@ -527,12 +532,15 @@ impl Playlist {
 			if let Some(map) = &entry.map {
 				out += &format!("#EXT-X-MAP:URI=\"{map}\"\n");
 			}
-			if restart && let Some(pdt) = entry.program_date_time {
+			if let Some(pdt) = entry.program_date_time
+				&& (restart || derived != Some(pdt))
+			{
 				out += &format!(
 					"#EXT-X-PROGRAM-DATE-TIME:{}\n",
 					humantime::format_rfc3339_millis(pdt.into())
 				);
 			}
+			derived = entry.program_date_time.map(|pdt| pdt + entry.duration);
 			if entry.gap {
 				out += "#EXT-X-GAP\n";
 			}
@@ -1063,6 +1071,36 @@ mod tests {
 		assert_eq!(text.matches("PROGRAM-DATE-TIME").count(), 2, "{text}");
 		// An append continuing the same run restates nothing.
 		assert!(!playlist.render(3).contains("PROGRAM-DATE-TIME"));
+	}
+
+	/// An entry whose media starts off its grid line by another amount than the one before
+	/// restates its wall clock, also when appended.
+	#[test]
+	fn a_moved_media_offset_restates_the_program_date_time() {
+		let at = |millis| Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(millis));
+		let mut playlist = Playlist::new(2);
+		for (segment, millis) in [(0, 0), (1, 2_050), (2, 4_000), (3, 6_000)] {
+			playlist.push(Entry {
+				program_date_time: at(millis),
+				..entry(segment, 0)
+			});
+		}
+		let stated = |text: String| -> Vec<String> {
+			text.lines()
+				.filter_map(|line| line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:"))
+				.map(str::to_string)
+				.collect()
+		};
+		assert_eq!(
+			stated(playlist.render(0)),
+			[
+				"1970-01-01T00:00:00.000Z",
+				"1970-01-01T00:00:02.050Z",
+				"1970-01-01T00:00:04.000Z"
+			]
+		);
+		assert_eq!(stated(playlist.render(2)), ["1970-01-01T00:00:04.000Z"]);
+		assert!(stated(playlist.render(3)).is_empty());
 	}
 
 	/// A switch follows the last entry with a discontinuity even when the new identity's own
