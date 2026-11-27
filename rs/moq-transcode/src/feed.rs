@@ -44,8 +44,8 @@ const CAPACITY: usize = 128;
 #[derive(Clone)]
 pub(crate) enum Item {
 	/// Source starts its publisher declared it never produces, sent ahead of the group above
-	/// them. A rung mirroring the source declares them too, so a lite-07 reader of its output
-	/// never waits on a pause between groups.
+	/// them, or with the next group when the skip trailed that one. A rung mirroring the source
+	/// declares them too, so a lite-07 reader of its output never waits on a pause between groups.
 	Skip(std::ops::Range<u64>),
 	/// A new source group started; the frames that follow belong to it. Carries its key, which
 	/// the output group mirroring it shares.
@@ -221,6 +221,9 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// One past the newest group read, and where the next pause may start: that group's End once
 	// it ended whole, since no group starts inside a whole group's span.
 	let mut after: Option<(u64, u64)> = None;
+	// The last run below a group not known skipped when it arrived, as `(from, pause, group)`: a
+	// skip travels apart from the group above it, so it may land after that group.
+	let mut unproven: Option<(u64, u64, u64)> = None;
 	while let Some(mut group) = subscriber.recv_group().await? {
 		let sink = match &mut decoder {
 			Some(sink) => sink,
@@ -230,11 +233,19 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
 		//
-		// Asked once, as the group arrives: a skip still in flight reads as unknown, which only
-		// leaves the run to a fill, never declares a group that exists.
+		// A skip still in flight reads as unknown, so a run is asked again at the next group and
+		// then left to a fill, which never declares a group that exists.
+		if let Some((from, pause, start)) = unproven.take()
+			&& subscriber.is_skipped(pause..start)
+		{
+			let _ = sender.send(Item::Skip(from..start));
+		}
 		let (from, pause) = after.unwrap_or((0, 0));
-		if pause < group.start && subscriber.is_skipped(pause..group.start) {
-			let _ = sender.send(Item::Skip(from..group.start));
+		if pause < group.start {
+			match subscriber.is_skipped(pause..group.start) {
+				true => drop(sender.send(Item::Skip(from..group.start))),
+				false => unproven = Some((from, pause, group.start)),
+			}
 		}
 		let _ = sender.send(Item::Group(group.start));
 
@@ -478,6 +489,16 @@ mod tests {
 		write(&mut unproven, 200, 2);
 		unproven.finish().unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(200 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+
+		// A skip landing after the group above it is named with the next group.
+		track.skip_groups(150 * FRAME + 1..200 * FRAME);
+		let mut next = track.append_group(at(250)).unwrap();
+		write(&mut next, 250, 2);
+		next.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(150 * FRAME + 1..200 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(200 * FRAME + 1..250 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(250 * FRAME));
 	}
 
 	/// A source packet that fails to decode costs its own group: every listener hears it lost,
