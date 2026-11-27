@@ -12,7 +12,8 @@
  *
  * All that holds within one policy, since folding a range into one at another policy would lose its
  * priority or order. Across policies a range is dropped only once ranges at policies that
- * {@link covers | cover} its own cover its span. That fold is redone only when one policy's union
+ * {@link covers | cover} its own cover its span. With one policy there is nothing to fold, so a
+ * change costs O(log n) as above. With several, the fold is redone only when one policy's union
  * moves, at the cost of the union's own length.
  *
  * @module
@@ -61,45 +62,63 @@ function shapeOf(range: Range): Shape {
 }
 
 /**
- * Every subscriber's ranges, counted so that one change costs O(log n) unless it moves the union of
- * its policy's ranges, folded as the window module's `union` folds them.
+ * Every subscriber's ranges, counted so that one change costs O(log n) unless several policies are
+ * asked and it moves the union of its policy's ranges, folded as the window module's `union` folds
+ * them.
  */
 export class Ranges {
 	// The ranges of each policy, by its rank.
 	#classes = new Map<number, Class>();
-	// The union, refolded whenever one policy's union moves.
-	#union: Range[] = [];
+	// The union, until a change moves it. Kept while several policies are asked, to tell whether a
+	// change moved it.
+	#union: Range[] | undefined = [];
 
 	/** Count `range`, returning whether the union changed. */
 	add(range: Range): boolean {
 		if (isEmpty(range)) return false;
 		const rank = policyRank(policyOf(range));
+		const several = this.#classes.size > 1 || (this.#classes.size === 1 && !this.#classes.has(rank));
+		if (several) this.union();
 		let held = this.#classes.get(rank);
 		if (!held) {
 			held = new Class();
 			this.#classes.set(rank, held);
 		}
-		return held.add(range) && this.#refold();
+		return held.add(range) && this.#moved(several);
 	}
 
 	/** Uncount `range`, one {@link add} counted, returning whether the union changed. */
 	remove(range: Range): boolean {
 		if (isEmpty(range)) return false;
+		const several = this.#classes.size > 1;
+		if (several) this.union();
 		const rank = policyRank(policyOf(range));
 		const held = this.#classes.get(rank);
 		if (!held) throw new Error("a counted policy");
 		const moved = held.remove(range);
 		if (held.held === 0) this.#classes.delete(rank);
-		return moved && this.#refold();
+		return moved && this.#moved(several);
 	}
 
 	/** The union in a canonical order, costing its own length rather than the audience's. Read only. */
 	union(): readonly Range[] {
+		this.#union ??= this.#fold();
 		return this.#union;
 	}
 
-	// Fold the union again, returning whether it moved.
-	#refold(): boolean {
+	// Whether a change that moved one policy's union moved the union: always with one policy asked,
+	// and otherwise only when the fold comes out different.
+	#moved(several: boolean): boolean {
+		const old = this.#union;
+		this.#union = undefined;
+		if (!several || old === undefined) return true;
+		const union = this.#fold();
+		this.#union = union;
+		return union.length !== old.length || union.some((range, index) => rangeKey(range) !== rangeKey(old[index]));
+	}
+
+	// Fold every policy's union, dropping a range that ranges at covering policies cover.
+	#fold(): Range[] {
 		const above = new Above();
 		const union: Range[] = [];
 		// Those covering others first.
@@ -110,11 +129,7 @@ export class Ranges {
 			above.extend(spans);
 		}
 		union.sort(compare);
-		const moved =
-			union.length !== this.#union.length ||
-			union.some((range, index) => rangeKey(range) !== rangeKey(this.#union[index]));
-		this.#union = union;
-		return moved;
+		return union;
 	}
 }
 

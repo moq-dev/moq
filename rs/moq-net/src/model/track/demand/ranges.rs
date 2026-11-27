@@ -13,7 +13,8 @@
 //! takes in the rest.
 //!
 //! Across policies a range is dropped only once ranges at policies
-//! [covering](Policy::covers) its own cover its span. That fold is redone only when one
+//! [covering](Policy::covers) its own cover its span. With one policy there is nothing to
+//! fold, so a change costs O(log n) as above. With several, the fold is redone only when one
 //! policy's union moves, at the cost of the union's own length.
 
 use std::cell::OnceCell;
@@ -27,14 +28,15 @@ use super::super::{Order, Range, Start};
 use super::{add, remove};
 use crate::model::subscription::{Policy, max_of};
 
-/// Every subscriber's ranges, counted so that one change costs O(log n) unless it moves the
-/// union of its policy's ranges.
+/// Every subscriber's ranges, counted so that one change costs O(log n) unless several
+/// policies are asked and it moves the union of its policy's ranges.
 #[derive(Default)]
 pub(super) struct Ranges {
 	/// The ranges of each policy, those covering others first.
 	classes: BTreeMap<(Reverse<i8>, Reverse<Order>), (Policy, Class)>,
-	/// The union, refolded whenever one policy's union moves.
-	union: Vec<Range>,
+	/// The union, until a change moves it. Kept while several policies are asked, to tell
+	/// whether a change moved it.
+	union: OnceCell<Vec<Range>>,
 }
 
 impl Ranges {
@@ -44,8 +46,10 @@ impl Ranges {
 			return false;
 		}
 		let policy = range.policy();
+		let several = self.classes.len() > 1 || self.classes.keys().any(|rank| *rank != policy.rank());
+		self.held(several);
 		let (_, class) = (self.classes.entry(policy.rank())).or_insert_with(|| (policy, Class::default()));
-		class.add(range) && self.refold()
+		class.add(range) && self.moved(several)
 	}
 
 	/// Uncount `range`, returning whether the union changed.
@@ -53,22 +57,47 @@ impl Ranges {
 		if range.is_empty() {
 			return false;
 		}
+		let several = self.classes.len() > 1;
+		self.held(several);
 		let rank = range.policy().rank();
 		let (_, class) = self.classes.get_mut(&rank).expect("a counted policy");
 		let moved = class.remove(range);
 		if class.held == 0 {
 			self.classes.remove(&rank);
 		}
-		moved && self.refold()
+		moved && self.moved(several)
 	}
 
 	/// The union in [`Range`] order, costing its own length rather than the audience's.
 	pub(super) fn union(&self) -> Vec<Range> {
-		self.union.clone()
+		self.union.get_or_init(|| self.fold()).clone()
 	}
 
-	/// Fold the union again, returning whether it moved.
-	fn refold(&mut self) -> bool {
+	/// Hold the union before a change when `several` policies are asked around it, so
+	/// [`Self::moved`] has it to compare against.
+	fn held(&self, several: bool) {
+		if several {
+			self.union.get_or_init(|| self.fold());
+		}
+	}
+
+	/// Whether a change that moved one policy's union moved the union: always with one policy
+	/// asked, and otherwise only when the fold comes out different.
+	fn moved(&mut self, several: bool) -> bool {
+		let Some(old) = self.union.take() else {
+			return true;
+		};
+		if !several {
+			return true;
+		}
+		let union = self.fold();
+		let moved = union != old;
+		self.union = OnceCell::from(union);
+		moved
+	}
+
+	/// Fold every policy's union, dropping a range that ranges at covering policies cover.
+	fn fold(&self) -> Vec<Range> {
 		let mut above = Above::default();
 		let mut union = Vec::new();
 		for (policy, class) in self.classes.values() {
@@ -81,9 +110,7 @@ impl Ranges {
 			above.extend(spans);
 		}
 		union.sort_unstable();
-		let moved = union != self.union;
-		self.union = union;
-		moved
+		union
 	}
 }
 
