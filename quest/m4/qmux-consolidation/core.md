@@ -25,4 +25,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fix Rust and JS QMux correctness bugs and port web-transport fixes](/quest/m1/qmux-correctness-fixes.md) - lands the one-way-sender idle-timeout, ordered `RESET_STREAM_AT`, and flush-ack semantics before unifying them
-- [Session keep-alive with a stale signal](/quest/m1/keep-alive.md) - lands the soft/hard keep-alive semantics the unified timer absorbs

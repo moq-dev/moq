@@ -73,5 +73,5 @@ moq-lite change.
 ## Related
 
 - [Fix dual-stack NAT rebinding, prev_path rollback, and probe gating](/quest/m1/quic-path-and-probe-fixes.md) - edits the same path code; land it first or rebase over it
-- [Session keep-alive with a stale signal](/quest/m1/keep-alive.md) - its Stale signal becomes per path
+- [Session keep-alive with a stale signal](https://github.com/moq-dev/moq/pull/9698) - its Stale signal becomes per path
 - [Differential tests against quinn](/quest/m4/quic-quinn-differential.md) - cannot cover multipath, which quinn lacks
