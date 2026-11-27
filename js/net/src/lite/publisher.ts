@@ -80,7 +80,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 	spanBetween,
@@ -261,7 +260,7 @@ interface RunGroup {
 	compress: boolean;
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
-	priority: Priority;
+	priority: Pick<Priority, "reserve" | "add" | "remove">;
 
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
 	unsubscribed: Promise<void>;
@@ -285,6 +284,12 @@ interface RunGroup {
 	 * the group's span are accounted for.
 	 */
 	ended?: (end: bigint) => void;
+
+	/**
+	 * Lite-07: called when a reset after GROUP_END was buffered accounts for the group, with the
+	 * starts inside its span: the reset may cut the GROUP_END, so they are named again.
+	 */
+	cut?: (start: bigint, end: bigint) => void;
 }
 
 /**
@@ -321,33 +326,6 @@ function sameStops(a: ReadonlyMap<bigint, number>, b: ReadonlyMap<bigint, number
 	if (a.size !== b.size) return false;
 	for (const [group, frame] of a) if (b.get(group) !== frame) return false;
 	return true;
-}
-
-/**
- * Wait while frame `index` of group `key` is at or past where `stops` stop it, until an update moves
- * the stop. Throws why the group was given up, or once `gone` settles, which resets the stream: a
- * parked stream holds its credit only until the group expires, the stream closes, or the
- * subscription ends.
- *
- * `gone` is made once per stream and reused, so moving the stop many times attaches no reaction
- * per move.
- */
-async function parkAt(
-	stops: Getter<ReadonlyMap<bigint, number>>,
-	key: bigint,
-	index: number,
-	givenUp: GivenUp,
-	gone: () => Promise<true>,
-): Promise<void> {
-	for (;;) {
-		const stop = stops.peek().get(key);
-		if (stop === undefined || index < stop) return;
-		const stopped = await givenUp.write(async () => {
-			const left = await race([stops.changed().then(() => false), gone()]);
-			if (left === true) throw new Error("parked at a range's end until the stream or subscription ended");
-		});
-		if (stopped) throw stopped;
-	}
 }
 
 /**
@@ -395,7 +373,12 @@ type Control =
 	 * Range IDs it retired and added on lite-07.
 	 */
 	| { kind: "update"; update: SubscribeUpdate; applied: Applied }
-	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
+	/**
+	 * Lite-07: the peer cleanly FIN'd its send half (no further updates; deliver every requested
+	 * range and close cleanly once accounted for).
+	 */
+	| { kind: "fin" }
+	/** The peer FIN'd (pre-lite-07), or our own half went away. Either way there is nobody left to serve. */
 	| { kind: "done" }
 	/** The stream failed; the subscription goes down with it. */
 	| { kind: "error"; error: Error };
@@ -409,6 +392,8 @@ type SubscriptionControlOptions = {
 	live: LiveRanges;
 	/** Apply an update, with the ranges it retired and added by Range ID on lite-07. */
 	apply: (update: SubscribeUpdate, applied: Applied) => void;
+	/** Pre-started `reader.done()` check from one-shot detection, if any. */
+	firstDone?: Promise<boolean>;
 };
 
 /**
@@ -437,6 +422,9 @@ class SubscriptionControls {
 	};
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
+	// Lite-07: the subscriber cleanly FIN'd its send half (no further updates).
+	#peerFin = false;
+	#finTaken = false;
 	#ended: Promise<Error | null>;
 	#resolveEnd!: (end: Error | null) => void;
 	#changed = new Signal(0);
@@ -471,6 +459,10 @@ class SubscriptionControls {
 				update: update.update,
 				applied: { retired: update.retired, added: [...update.added], retuned: [...update.retuned] },
 			};
+		if (this.#peerFin && !this.#finTaken) {
+			this.#finTaken = true;
+			return { kind: "fin" };
+		}
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
 	}
@@ -502,7 +494,12 @@ class SubscriptionControls {
 
 	/** Whether {@link take} has a control to answer with now. */
 	pending(): boolean {
-		return this.#update !== undefined || this.#end !== undefined;
+		return this.#update !== undefined || (this.#peerFin && !this.#finTaken) || this.#end !== undefined;
+	}
+
+	/** Whether the subscriber cleanly FIN'd its send half (lite-07). */
+	get peerFin(): boolean {
+		return this.#peerFin;
 	}
 
 	/** Calls `fn` once {@link take} may answer differently. */
@@ -544,13 +541,19 @@ class SubscriptionControls {
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode({ reader, version, live, apply, quic }: SubscriptionControlOptions) {
+	async #decode({ reader, version, live, apply, quic, firstDone }: SubscriptionControlOptions) {
 		try {
 			// Runs until the peer's half ends, even past our own FIN: a lite-05+ publisher waits
 			// for that end, and every other teardown stops the reader.
-			for (;;) {
-				const update = await SubscribeUpdate.decodeMaybe(reader, version);
-				if (!update) break;
+			for (let first = firstDone; ; first = undefined) {
+				let update: SubscribeUpdate | undefined;
+				if (first !== undefined) {
+					if (await first) break;
+					update = await SubscribeUpdate.decode(reader, version);
+				} else {
+					update = await SubscribeUpdate.decodeMaybe(reader, version);
+					if (!update) break;
+				}
 				// Each lite-07 update edits the live ranges, which only the stream's history names.
 				const edit = live.apply(update);
 				apply(update, edit);
@@ -579,6 +582,11 @@ class SubscriptionControls {
 		} catch (err: unknown) {
 			closeViolation(quic, err);
 			this.#finish(error(err));
+			return;
+		}
+		if (keepsSubscribeOpen(version)) {
+			this.#peerFin = true;
+			this.#changed.update((value) => value + 1);
 			return;
 		}
 		this.#finish(null);
@@ -688,6 +696,31 @@ class Unpinned {
 	due(latest: bigint): bigint[] {
 		return this.#dues.through(latest).flatMap((due) => [...(this.#byDue.get(due) ?? [])]);
 	}
+}
+
+/**
+ * Extracts `(group, startFrame, endFrame)` for a lite-07 single-group Position SUBSCRIBE:
+ * `[Position(G, f1), Position(G + 1, 0))` for a whole group from `f1`, or
+ * `[Position(G, f1), Position(G, f2))` with `f2 > f1` for a frame slice (`endFrame` inclusive).
+ */
+function singleGroupPosition(
+	msg: Subscribe,
+	version: Version,
+): { group: bigint; startFrame: number; endFrame?: number } | undefined {
+	if (!keepsSubscribeOpen(version) || !msg.ranges || msg.ranges.length !== 1) return undefined;
+	const range = msg.ranges[0];
+	const start = range.start?.absolute;
+	const end = range.end?.absolute;
+	if (start === undefined || end === undefined) return undefined;
+	const startFrame = range.start?.frame ?? 0;
+	const endFrame = range.end?.frame ?? 0;
+	if (endFrame === 0 && end === start + 1n) {
+		return { group: start, startFrame };
+	}
+	if (end === start && endFrame > startFrame) {
+		return { group: start, startFrame, endFrame: endFrame - 1 };
+	}
+	return undefined;
 }
 
 /**
@@ -1211,7 +1244,14 @@ export class Publisher {
 		const left = new AbortController();
 		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
 		const leave = () => left.abort(cancel);
-		void race([stream.reader.closed, stream.writer.closed]).then(leave, leave);
+		// On lite-07, clean subscriber FIN means "no further updates; deliver what was requested",
+		// so only STOP_SENDING (writer.closed) or RESET_STREAM (reader.closed rejection) cancels.
+		if (keepsSubscribeOpen(this.version)) {
+			void stream.writer.closed.then(leave, leave);
+			void stream.reader.closed.then(undefined, leave);
+		} else {
+			void race([stream.reader.closed, stream.writer.closed]).then(leave, leave);
+		}
 
 		let front: broadcast.Consumer | undefined;
 		try {
@@ -1226,6 +1266,26 @@ export class Publisher {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
 			return;
+		}
+
+		// Lite-07 one-shot single-group Position SUBSCRIBE + immediate subscriber FIN:
+		// serve via `fetchGroup` on the internal model while speaking standard lite-07
+		// SUBSCRIBE responses on the wire (1 RTT, no live subscription created).
+		let firstDone: Promise<boolean> | undefined;
+		const oneShot = singleGroupPosition(msg, this.version);
+		if (oneShot) {
+			firstDone = stream.reader.done();
+			const fin = await race([
+				firstDone.then(
+					(done) => done,
+					() => false,
+				),
+				yieldNow().then(() => undefined),
+			]);
+			if (fin === true) {
+				await this.#serveOneShotFetch(front, msg, oneShot, stream, watch, left.signal);
+				return;
+			}
 		}
 
 		const consumer = front.track(msg.track);
@@ -1288,7 +1348,25 @@ export class Publisher {
 			// priority.
 			let info: track.Info;
 			try {
-				info = await untilAborted(track.info(), left.signal);
+				if (oneShot && firstDone !== undefined) {
+					const earlyFin = new Promise<"one-shot">((resolve) => {
+						void firstDone.then(
+							(done) => {
+								if (done) resolve("one-shot");
+							},
+							() => {},
+						);
+					});
+					const resolved = await race([untilAborted(track.info(), left.signal), earlyFin]);
+					if (resolved === "one-shot") {
+						track.close();
+						await this.#serveOneShotFetch(front, msg, oneShot, stream, watch, left.signal);
+						return;
+					}
+					info = resolved;
+				} else {
+					info = await untilAborted(track.info(), left.signal);
+				}
 			} catch (err) {
 				if (
 					hasDatagrams(this.version) &&
@@ -1413,6 +1491,7 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
+				firstDone,
 				apply: (update, { retired, added, retuned }) => {
 					legacyPriority.set(update.priority);
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
@@ -1461,10 +1540,10 @@ export class Publisher {
 					// Refused before the model moves, as one SUBSCRIBE asking for nothing is.
 					Object.assign(update, spanBetween(this.version, requested.start(), requested.end()));
 					const add = [...replaced, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
-					// A placed join, added or retuned, stays placed where it was.
+					// A placed join or exact-group Position range stays placed where it was.
 					const placed = new Map<bigint, bigint>();
 					for (const [id, range] of [...replaced, ...added]) {
-						const at = range.start?.joined?.absolute;
+						const at = range.start?.joined?.absolute ?? range.start?.absolute;
 						if (at !== undefined) placed.set(id, at);
 					}
 					hooks.editSubscriber(track, {
@@ -1476,7 +1555,7 @@ export class Publisher {
 					});
 				},
 			});
-			const finished = await this.#runTrack(track, stream.writer, controls, {
+			const result = await this.#runTrack(track, stream.writer, controls, {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				stamp,
@@ -1486,7 +1565,17 @@ export class Publisher {
 				floor,
 				bounds,
 				initial: BigInt(asked.length),
+				requested,
+				oneShot: oneShot !== undefined,
 			});
+			if (result === "one-shot" && oneShot) {
+				track.close();
+				legacy?.close();
+				await Promise.all([datagrams, controls.decoding]);
+				await this.#serveOneShotFetch(front, msg, oneShot, stream, watch, left.signal);
+				return;
+			}
+			const finished = result === true;
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
 			// A lite-05+ subscriber FINs once it has read the tail, so leave its half open and
@@ -1508,6 +1597,163 @@ export class Publisher {
 			legacy?.close(e);
 			stream.abort(e);
 			await Promise.all([datagrams, controls?.decoding]);
+		}
+	}
+
+	/**
+	 * Serves a lite-07 one-shot single-group Position SUBSCRIBE + immediate subscriber FIN via
+	 * `fetchGroup` on the internal model while speaking standard lite-07 SUBSCRIBE on the wire.
+	 */
+	async #serveOneShotFetch(
+		front: broadcast.Consumer,
+		msg: Subscribe,
+		req: { group: bigint; startFrame: number; endFrame?: number },
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		signal: AbortSignal,
+	) {
+		const hold = new AbortController();
+		const holding = AbortSignal.any([signal, hold.signal]);
+		let fetched: group.Consumer | undefined;
+		let released = false;
+		let abandon: Error | undefined;
+		const releaseFetched = (reason: Error) => {
+			if (fetched && !released) {
+				released = true;
+				hooks.releaseGroupReader(fetched, reason);
+			}
+		};
+		let givenUp: GivenUp | undefined;
+		const onAbort = () => {
+			abandon ??= error(signal.reason ?? new StreamError(StreamCode.Cancel));
+			releaseFetched(abandon);
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			// Start info lookup and fetch concurrently so a pipelined one-shot SUBSCRIBE
+			// reaches upstream before TRACK_INFO resolves, while a refused track still resets.
+			const infoPromise = this.#resolveTrackInfo(front, msg.track, holding, true);
+			const options: track.FetchGroupOptions & broadcast.FetchFrom = {
+				priority: msg.priority,
+				signal,
+				frameStart: req.startFrame,
+				held: true,
+			};
+			const groupPromise = front.track(msg.track).fetchGroup(req.group, options);
+			// Track the resolved group immediately so a failure, revoke, or abort before
+			// `await groupPromise` still releases it without unhandled rejections.
+			groupPromise.then(
+				(group) => {
+					fetched = group;
+					if (abandon) releaseFetched(abandon);
+				},
+				() => {},
+			);
+
+			let info: TrackInfoMessage;
+			try {
+				info = await infoPromise;
+			} finally {
+				hold.abort();
+			}
+			if (watch.revoked()) {
+				abandon ??= unauthorized(msg.broadcast);
+				releaseFetched(abandon);
+				return;
+			}
+
+			try {
+				fetched = await groupPromise;
+			} catch (err: unknown) {
+				const e = error(err);
+				if (signal.aborted || watch.revoked()) throw e;
+				await encodeSubscribeResponse(
+					stream.writer,
+					{ start: new SubscribeStart({ id: 0n, start: req.group, largest: "unknown" }) },
+					this.version,
+				);
+				await encodeSubscribeResponse(
+					stream.writer,
+					{ drop: SubscribeDrop.given(req.group, req.group + 1n, e, this.version) },
+					this.version,
+				);
+				stream.writer.close();
+				await acknowledged(stream.writer);
+				return;
+			}
+
+			if (watch.revoked() || signal.aborted) {
+				abandon ??= error(signal.reason ?? unauthorized(msg.broadcast));
+				releaseFetched(abandon);
+				return;
+			}
+
+			await encodeSubscribeResponse(
+				stream.writer,
+				{ start: new SubscribeStart({ id: 0n, start: req.group, largest: "unknown" }) },
+				this.version,
+			);
+
+			const order = sendOrder({ priority: msg.priority, publisher: info.priority });
+			const priority: Pick<Priority, "reserve" | "add" | "remove"> = {
+				reserve: () => ({ rank: () => order, release: () => {} }),
+				add: (w) => w.setPriority(order),
+				remove: () => {},
+			};
+			const unsubscribed = signal.aborted
+				? Promise.resolve()
+				: new Promise<void>((resolve) => {
+						signal.addEventListener("abort", () => resolve(), { once: true });
+					});
+			const pendingCuts: Run[] = [];
+			givenUp = new GivenUp(fetched);
+			const runOptions: RunGroup = {
+				sub: msg.id,
+				group: fetched,
+				givenUp,
+				stamp: stamping(this.version, info),
+				compress: info.compress,
+				priority,
+				unsubscribed,
+				start: req.startFrame,
+				end: req.endFrame,
+				cut: (start, end) => pendingCuts.push({ start, end }),
+			};
+			const writer = await this.#openGroup(runOptions);
+			let failed: Error | undefined;
+			try {
+				failed = writer instanceof Error ? writer : await this.#serveGroup(writer, runOptions);
+			} finally {
+				givenUp.close();
+			}
+			if (watch.revoked() || signal.aborted) return;
+
+			for (const { start, end } of pendingCuts) {
+				await encodeSubscribeResponse(
+					stream.writer,
+					{ drop: SubscribeDrop.given(start, end, new StreamError(StreamCode.Skip), this.version) },
+					this.version,
+				);
+			}
+			if (failed) {
+				const end = max(fetched.end ?? fetched.start, fetched.start + 1n);
+				await encodeSubscribeResponse(
+					stream.writer,
+					{ drop: SubscribeDrop.given(fetched.start, end, failed, this.version) },
+					this.version,
+				);
+			}
+			stream.writer.close();
+			await acknowledged(stream.writer);
+		} catch (err: unknown) {
+			closeViolation(this.#quic, err);
+			const e = error(err);
+			abandon ??= e;
+			releaseFetched(e);
+			stream.abort(e);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+			hold.abort();
 		}
 	}
 
@@ -1672,9 +1918,14 @@ export class Publisher {
 			bounds: FrameBounds;
 			// How many ranges the SUBSCRIBE carried, which take Range IDs from 0.
 			initial: bigint;
+			// Live ranges currently requested on this subscription.
+			requested: Requested;
+			// Lite-07 single-group Position request eligible for one-shot fetch handoff if
+			// subscriber FIN arrives after SUBSCRIBE (e.g. in a separate QUIC STREAM frame).
+			oneShot?: boolean;
 		},
-	): Promise<boolean> {
-		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+	): Promise<boolean | "one-shot"> {
+		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial, requested } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -1796,6 +2047,13 @@ export class Publisher {
 			return ids.some((id, index) => resolution[index]?.floored && (known || !unstarted.get(id)?.live));
 		};
 
+		// Lite-07: whether a range still unanswered waits on this copy's upstream to place it.
+		const awaitsUpstream = (): boolean => {
+			if (!perRange()) return false;
+			const held = [...unstarted.keys()].filter((id) => controls.holds(id));
+			return hooks.servingResolvedKeys(track, held).some((range) => range === undefined);
+		};
+
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
 		// once nothing can resolve it (`finished`). One following the live edge also waits until this
 		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
@@ -1865,14 +2123,18 @@ export class Publisher {
 		};
 
 		// The message naming `[start, end)` given up as `hole` says: lite-07 skips what was never
-		// produced, and earlier versions drop it as not found.
-		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
-			hole.skip && hasSkip(this.version)
-				? { skip: new SubscribeSkip({ start, end }) }
-				: { drop: SubscribeDrop.given(start, end, hole.error, this.version) };
+		// produced with `SKIP`, and earlier versions drop it as not found.
+		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse => ({
+			drop: SubscribeDrop.given(
+				start,
+				end,
+				hole.skip && hasSkip(this.version) ? new StreamError(StreamCode.Skip) : hole.error,
+				this.version,
+			),
+		});
 
-		// What the wire is told when `hole` goes out: on lite-07 a drop, which only a skip replaces.
-		// Mirrors the Rust `TrackRun::report`.
+		// What the wire is told when `hole` goes out. Every report is final. Mirrors the Rust
+		// `TrackRun::report`.
 		const reportOf = (hole: Hole): Omit<Reported, "start" | "end"> => {
 			if (!hasSkip(this.version)) return { kind: "settled" };
 			return { kind: hole.skip ? "skip" : "dropped" };
@@ -1906,9 +2168,8 @@ export class Publisher {
 			return true;
 		};
 
-		// Forward a verdict the reader reached on `[start, end)`, which its record already took in,
-		// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
-		// earlier drop ended stays ended. A drop of a group held whole names its span.
+		// Forward a verdict the reader reached on `[start, end)`, which its record already took in, so
+		// nothing went out over it. A drop of a group held whole names its span.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
 			if (!hole.skip) end = reach(end);
@@ -1986,11 +2247,17 @@ export class Publisher {
 		// Groups whose stream failed, with why, for the control stream to name, as runs: a group held
 		// whole names its span.
 		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
+		// Lite-07: the starts inside whole groups' spans whose GROUP_END a reset may have cut, to name
+		// again as a skip. Mirrors the Rust `GroupOutcomes::cut`.
+		const pendingCuts: Run[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
 		// caller FINs the subscribe stream to say so.
 		let finished = false;
+		// Lite-07: the subscriber cleanly FIN'd its send half (no further updates).
+		let peerFin = false;
+		let canHandOff = Boolean(serving.oneShot);
 		let armed: { woke: Promise<void>; dispose: Dispose } | undefined;
 		// Park until the subscription changes, from the wait armed this pass if any.
 		const park = () => armed?.woke ?? waitForSubscription(controls, track, drops);
@@ -2021,12 +2288,38 @@ export class Publisher {
 						if (range.end < reach || range.stale !== undefined) break;
 						reach = range.start;
 					}
+					// On lite-07, a subscription can also name disjoint history ranges below `reach` whose
+					// groups were already given up before the first group resolved: forward their drops too.
+					const send: Run[] = [];
+					const maxEnd = 1n << 64n;
+					insertRun(send, reach, maxEnd);
+					if (hasRanges(this.version)) {
+						for (const askedRange of requested.values()) {
+							const model = requestedRange(askedRange);
+							if (typeof model.start !== "bigint") continue;
+							const to = model.end !== undefined ? model.end + 1n : maxEnd;
+							if (model.start < to) insertRun(send, model.start, to);
+						}
+					}
 					for (const range of skipped.all) {
-						const below = min(range.end, reach);
-						if (range.start < below) record?.untell(range.start, below);
-						if (!(await forward(max(range.start, reach), range.end, range))) return false;
+						for (const below of runGaps(send, range.start, range.end))
+							record?.untell(below.start, below.end);
+						for (const part of send) {
+							const from = max(part.start, range.start);
+							const to = min(part.end, range.end);
+							if (from < to && !(await forward(from, to, range))) return false;
+						}
 					}
 					skipped = new Runs<DropRun>(sameHole);
+				}
+				for (const { start, end } of pendingCuts.splice(0)) {
+					record?.tell(start, end, { kind: "skip" });
+					if (
+						!(await sendHole({
+							drop: SubscribeDrop.given(start, end, new StreamError(StreamCode.Skip), this.version),
+						}))
+					)
+						return false;
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
@@ -2049,6 +2342,22 @@ export class Publisher {
 				const control = controls.take();
 				if (control) {
 					switch (control.kind) {
+						case "fin":
+							peerFin = true;
+							if (
+								canHandOff &&
+								!startSent &&
+								!endSent &&
+								!first &&
+								groups.size === 0 &&
+								pendingDrops.length === 0 &&
+								pendingCuts.length === 0
+							) {
+								return "one-shot";
+							}
+							// Already finished and waiting for updates or FIN: close cleanly now.
+							if (finished) return true;
+							continue;
 						case "done":
 							// The subscriber left. Its queued groups are pointless now, which
 							// the finally below acts on since `finished` stays false. On lite-07 it
@@ -2058,6 +2367,7 @@ export class Publisher {
 						case "error":
 							throw control.error;
 						case "update": {
+							canHandOff = false;
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
@@ -2166,6 +2476,31 @@ export class Publisher {
 							if (empty === false) return false;
 							if (empty) continue;
 						}
+						// Lite-07 one-shot SUBSCRIBE + FIN: once every bounded range is resolved,
+						// accounted for, and every group stream has finished, close cleanly.
+						if (
+							keepsSubscribeOpen(this.version) &&
+							peerFin &&
+							requested.end() !== undefined &&
+							startSent &&
+							unstarted.size === 0 &&
+							withheld === undefined &&
+							groups.size === 0 &&
+							pendingDrops.length === 0 &&
+							pendingCuts.length === 0 &&
+							record
+						) {
+							const end = hooks.servingEnd(track);
+							if (
+								end !== undefined &&
+								hooks
+									.servingRuns(track, 0n, end)
+									.every((run) => record.untold(run.start, run.end).length === 0)
+							) {
+								finished = true;
+								return true;
+							}
+						}
 						await park();
 						continue;
 					case "boundary":
@@ -2174,6 +2509,29 @@ export class Publisher {
 						if (!endSent && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
+						}
+						if (
+							keepsSubscribeOpen(this.version) &&
+							peerFin &&
+							requested.end() !== undefined &&
+							startSent &&
+							unstarted.size === 0 &&
+							withheld === undefined &&
+							groups.size === 0 &&
+							pendingDrops.length === 0 &&
+							pendingCuts.length === 0 &&
+							record
+						) {
+							const end = hooks.servingEnd(track);
+							if (
+								end !== undefined &&
+								hooks
+									.servingRuns(track, 0n, end)
+									.every((run) => record.untold(run.start, run.end).length === 0)
+							) {
+								finished = true;
+								return true;
+							}
 						}
 						await park();
 						continue;
@@ -2191,6 +2549,12 @@ export class Publisher {
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
 							const from = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
 							if (!(await resolveStart(from, largest))) return false;
+							continue;
+						}
+						// A relay's copy places a range only as its upstream would, so one its upstream has yet
+						// to answer may start below every group held: nothing it owes is final until then.
+						if (awaitsUpstream()) {
+							await park();
 							continue;
 						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
@@ -2215,11 +2579,10 @@ export class Publisher {
 						const drain = keepsSubscribeOpen(this.version) ? await drainedOrControl() : await drained();
 						if (drain === undefined) continue;
 						if (!drain) return false;
-						if (pendingDrops.length > 0) continue;
-						// Lite-07 keeps the stream open past SUBSCRIBE_END: an update may still ask
-						// for the ended track's history, and the subscriber FINs once it wants nothing
-						// more.
-						if (keepsSubscribeOpen(this.version)) {
+						if (pendingDrops.length > 0 || pendingCuts.length > 0) continue;
+						// Lite-07 keeps the stream open past SUBSCRIBE_END until the subscriber FINs
+						// (unless the subscriber already FIN'd for a one-shot SUBSCRIBE).
+						if (keepsSubscribeOpen(this.version) && !peerFin) {
 							finished = true;
 							if (!controls.pending()) await waitForControl(controls);
 							continue;
@@ -2254,22 +2617,8 @@ export class Publisher {
 						}
 						source = floor;
 					}
-					// Newest first, this reader still holds groups below the first to go out: delivery
-					// starts at the lowest it can serve. A newer group's stream can also beat where the
-					// source's feed starts: preserve that start so a resumed subscriber still waits for
-					// the backlog.
-					const lowest = hooks.lowestUnread(track, group.start) ?? group.start;
-					startKey = min(lowest, source ?? lowest);
-					// A group given up, or held and not servable, cannot be where the feed starts. This
-					// stops at the first group out at the latest. Adjacent runs given up with different
-					// errors stay separate, so walk them all. Mirrors the Rust `TrackRun::start`.
-					while (startKey < group.start) {
-						const key = startKey;
-						const end =
-							skipped.at(key)?.end ?? (hooks.heldAt(track, key) === "unservable" ? key + 1n : undefined);
-						if (end === undefined) break;
-						startKey = min(end, group.start);
-					}
+					// A group given up, or held and not servable, cannot be where the feed starts.
+					startKey = hooks.deliveryStart(track, { first: group.start, source, givenUp: skipped });
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this key becomes the floor.
@@ -2296,6 +2645,10 @@ export class Publisher {
 					ended: (end) => {
 						if (end > group.start + 1n) record?.tell(group.start + 1n, end, { kind: "settled" });
 					},
+					cut: (start, end) => {
+						pendingCuts.push({ start, end });
+						drops.update((revision) => revision + 1);
+					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				// A stream reset to make room fails the group like any other reset, so it is dropped,
@@ -2319,6 +2672,7 @@ export class Publisher {
 				void task.finally(() => {
 					groups.delete(task);
 					groupEnded.update((ended) => ended + 1);
+					if (groups.size === 0) drops.update((revision) => revision + 1);
 				});
 			}
 		} finally {
@@ -2828,6 +3182,8 @@ export class Publisher {
 		};
 		// Lite-07: the transport took the whole GROUP header, which every later reset still delivers.
 		let held = false;
+		// Lite-07: the end of the span a buffered GROUP_END accounted for.
+		let spanEnd: bigint | undefined;
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -2851,18 +3207,52 @@ export class Publisher {
 			let reached = hooks.groupIndex(group) === startFrame;
 			// Whether every frame went out, which a finished group's GROUP_END then claims.
 			let whole = false;
-			// What ends a park at a stop (see parkAt), made on the first park and reused.
-			let left: Promise<true> | undefined;
-			const gone = () => {
-				left ??= race(stops ? [stream.closed, stops.ended] : [stream.closed]).then(
-					() => true as const,
-					() => true as const,
-				);
-				return left;
-			};
+
+			// Kept across loop iterations so waking on a Position End change never starts a
+			// second concurrent readGroupFrame(), and stream.closed is derived lazily once
+			// the first read starts (avoiding unhandled rejections if a cap breaks early).
+			let pendingRead: ReturnType<typeof hooks.readGroupFrame> | undefined;
+			let closed: Promise<undefined> | undefined;
+			const stopWake = Symbol("stop-wake");
+			// Track the next unsent frame index separately from `hooks.groupIndex(group)`,
+			// which an in-flight `pendingRead` may advance before its frame is consumed.
+			let nextUnsent = Math.max(hooks.groupIndex(group), startFrame);
 
 			for (;;) {
-				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
+				// Lite-07: reaching a Position end closes the stream cleanly without GROUP_END
+				// (a slice, not the whole group) instead of parking open. If the group itself
+				// already finished at or before `nextUnsent`, let the read below observe EOF so
+				// GROUP_END is still sent.
+				const stopBefore = stops?.at.peek().get(group.start);
+				const settled = hooks.groupSettledFrames(group);
+				if (
+					((stopBefore !== undefined && nextUnsent >= stopBefore) ||
+						(endFrame !== undefined && nextUnsent > endFrame)) &&
+					(settled === undefined || settled > nextUnsent)
+				) {
+					pendingRead?.catch(() => {});
+					closed?.catch(() => {});
+					break;
+				}
+				pendingRead ??= hooks.readGroupFrame(group, compress);
+				closed ??= stream.closed.then(() => undefined);
+				let disposeStop: Dispose | undefined;
+				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;
+				try {
+					if (stops) {
+						const moved = new Promise<typeof stopWake>((resolve) => {
+							disposeStop = stops.at.changed(() => resolve(stopWake));
+						});
+						outcome = await race([pendingRead, closed, moved]);
+					} else {
+						outcome = await race([pendingRead, closed]);
+					}
+				} finally {
+					disposeStop?.();
+				}
+				if (outcome === stopWake) continue;
+				pendingRead = undefined;
+				const read = outcome;
 				if (!read) {
 					// The group ended before the frame the subscriber asked to start
 					// at, so this publisher can't serve the range at all. FINning here
@@ -2877,11 +3267,15 @@ export class Publisher {
 				if (read.index + 1 >= startFrame) reached = true;
 				// Frames below the requested start were excluded, and the receiver
 				// numbers what it gets from `startFrame`.
-				if (read.index < startFrame) continue;
-				if (endFrame !== undefined && read.index > endFrame) break;
-				// Lite-07: hold a frame past a Position end, the stream open, until an update moves the
-				// end. A group ending at the end reads as its end above, so its stream ends as usual.
-				if (stops) await parkAt(stops.at, group.start, read.index, givenUp, gone);
+				if (read.index < startFrame) {
+					nextUnsent = Math.max(nextUnsent, read.index + 1);
+					continue;
+				}
+				const stop = stops?.at.peek().get(group.start);
+				if ((endFrame !== undefined && read.index > endFrame) || (stop !== undefined && read.index >= stop)) {
+					break;
+				}
+				nextUnsent = read.index + 1;
 
 				let delta: bigint | undefined;
 				if (stamp !== undefined) {
@@ -2913,6 +3307,7 @@ export class Publisher {
 			const end = hasGroupEnd(this.version) && whole ? group.end : undefined;
 			if (end !== undefined) {
 				options.ended?.(end);
+				spanEnd = end;
 				await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
 			}
 			stream.close();
@@ -2928,7 +3323,11 @@ export class Publisher {
 			const e = error(err);
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
-			if (hasReliableReset(this.version) && (await accounts(stream, held))) return undefined;
+			if (hasReliableReset(this.version) && (await accounts(stream, held))) {
+				// The reset may cut the GROUP_END, so the starts it accounted for are named again.
+				if (spanEnd !== undefined && spanEnd > group.start + 1n) options.cut?.(group.start + 1n, spanEnd);
+				return undefined;
+			}
 			return e;
 		} finally {
 			priority.remove(stream);

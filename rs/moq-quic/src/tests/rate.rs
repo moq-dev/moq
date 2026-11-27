@@ -15,6 +15,8 @@ const PRE_AUTH: u32 = 16 * 1024;
 const WINDOW: u64 = 4 * 1024 * 1024;
 /// A datagram the tests send, and the most the send cap may overshoot by, one segment
 const DATAGRAM: usize = 1000;
+/// The most bytes an ACK-only packet takes here, which the send cap never holds back
+const ACK_ONLY: u64 = 64;
 
 fn pair() -> Pair {
 	let mut server = server_config();
@@ -430,7 +432,9 @@ fn caps_set_at_construction_hold() {
 		.unwrap();
 
 	let sent = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats().udp_tx.bytes;
+	let acks = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats().frame_tx.acks;
 	let before = sent(&mut pair);
+	let acks_before = acks(&mut pair);
 	let duration = Duration::from_secs(5);
 	let (mut up_read, mut down_read) = (0, 0);
 	run(&mut pair, duration, |pair| {
@@ -444,8 +448,10 @@ fn caps_set_at_construction_hold() {
 	assert!(up_read <= limit, "read {up_read} past the receive cap");
 	assert!(up_read >= RATE * duration.as_secs() * 8 / 10, "read only {up_read}");
 	let sent = sent(&mut pair) - before;
+	// ACKs the cap holds data back from go out alone, outside it (RFC 9002 §7)
+	let acks_alone = (acks(&mut pair) - acks_before) * ACK_ONLY;
 	assert!(
-		sent <= allowance(RATE, duration, DEFAULT_MTU as u64),
+		sent <= allowance(RATE, duration, DEFAULT_MTU as u64) + acks_alone,
 		"sent {sent} past the send cap"
 	);
 	assert!(down_read >= RATE * duration.as_secs() * 7 / 10, "read only {down_read}");
@@ -531,4 +537,37 @@ fn a_tiny_cap_sends_no_empty_grants() {
 	pair.client_conn_mut(client_ch).ping();
 	assert!(!pair.drive_bounded(), "the connection never went idle");
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.max_data, grants);
+}
+
+/// ACKs due now go out alone while the send cap holds data back, as it is a local policy on
+/// data, not on the peer's feedback
+#[test]
+fn acks_go_alone_past_the_send_cap() {
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	// A burst of a few datagrams, far short of the congestion window
+	pair.server_conn_mut(server_ch)
+		.set_limits(Limits {
+			send_rate: capped(4_000),
+			..Limits::default()
+		})
+		.unwrap();
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.drive_server();
+	pair.client.inbound.clear();
+
+	// Two PINGs are due an ACK at once
+	let before = pair.server_conn_mut(server_ch).stats().frame_tx;
+	for _ in 0..2 {
+		pair.client_conn_mut(client_ch).ping();
+		pair.drive_client();
+	}
+	pair.drive_server();
+	let after = pair.server_conn_mut(server_ch).stats().frame_tx;
+	assert!(after.acks > before.acks, "the cap held the ACKs back");
+	assert_eq!(after.stream, before.stream, "data went past the cap");
 }

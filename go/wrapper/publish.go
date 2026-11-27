@@ -316,6 +316,12 @@ func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
 }
 
+// FinishAt marks the group complete with its exclusive end in the track's timescale.
+// No other group may start before end. The handle remains so Abort can still run.
+func (g *GroupProducer) FinishAt(end uint64) error {
+	return g.inner.FinishAt(end)
+}
+
 // Abort terminates the group with an application error code.
 func (g *GroupProducer) Abort(errorCode uint16) error {
 	return g.inner.Abort(errorCode)

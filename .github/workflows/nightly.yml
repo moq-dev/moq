@@ -460,7 +460,7 @@ jobs:
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
         recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
-          # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
+          # Miri interprets moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
           - recipe: rs miri
             nightly: true
@@ -892,7 +892,7 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/home"
           mkdir -p "$HOME"
-          # exec, so a cancel reaches the dispatcher (see queue.yml).
+          # exec, so a cancel reaches the dispatcher (see queue-build.yml).
           exec nix develop --command just gate
 
   fuzz:

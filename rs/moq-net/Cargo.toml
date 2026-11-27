@@ -62,7 +62,7 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
 # The tests' executor, with simulated time.
-kio = { path = "../kio", features = ["runtime", "sim"] }
+kio = { workspace = true, features = ["runtime", "sim"] }
 # This crate's own doors, for its integration tests and benches.
 moq-net = { path = ".", default-features = false, features = ["relay", "test-support"] }
 proptest = { workspace = true }

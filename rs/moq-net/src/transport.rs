@@ -523,6 +523,13 @@ pub mod poll {
 			None
 		}
 
+		/// Whether [`SendStream::reset_at`] still delivers its prefix to the peer's reader, such as
+		/// over QUIC with RESET_STREAM_AT negotiated. A plain RESET_STREAM lets the peer discard
+		/// bytes it has not read, even acknowledged ones, so the default is `false`.
+		fn reliable_reset(&self) -> bool {
+			false
+		}
+
 		/// Apply `limits` to the live session, such as to open the receive window a server held
 		/// back until it admitted the peer.
 		///
@@ -739,6 +746,10 @@ pub mod poll {
 			(**self).receive_window()
 		}
 
+		fn reliable_reset(&self) -> bool {
+			(**self).reliable_reset()
+		}
+
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
 		}
@@ -909,10 +920,11 @@ pub mod poll {
 
 		/// Like [`reset`](Self::reset), but still deliver every byte before `offset`.
 		///
-		/// The peer reads those bytes before the reset's error: RESET_STREAM_AT, or toward a peer
-		/// that does not support it, a RESET_STREAM held until it acknowledged them. A peer that
-		/// stopped the stream gets the reset without them. Takes `&mut self` for the same
-		/// reasons as [`reset`](Self::reset).
+		/// The peer reads those bytes before the reset's error only where the session's
+		/// [`reliable_reset`](Session::reliable_reset) says so; otherwise the transport may send a
+		/// plain reset once it delivered them, which lets the peer discard any it has not read. A
+		/// peer that stopped the stream gets the reset without them. Takes `&mut self` for the
+		/// same reasons as [`reset`](Self::reset).
 		fn reset_at(&mut self, offset: &Self::Offset, code: u32);
 
 		/// Poll until the stream is closed by either side.

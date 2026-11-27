@@ -709,6 +709,10 @@ impl poll::Session for MockSession {
 			None => self.inner.receive_window(),
 		}
 	}
+
+	fn reliable_reset(&self) -> bool {
+		self.inner.reliable_reset()
+	}
 }
 
 #[allow(dead_code, reason = "only some test binaries steer delivery")]

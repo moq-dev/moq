@@ -21,7 +21,6 @@ import {
 	hasOrder,
 	hasRanges,
 	hasRefresh,
-	hasSkip,
 	resolvesStart,
 	Version,
 } from "./version.ts";
@@ -179,7 +178,7 @@ export function toWireRanges(ranges: readonly Range[], placed?: ReadonlyMap<numb
 		const time = rangeTime(range);
 		const min = liveMillis(range);
 		const group = placed?.get(index);
-		if (time !== undefined) out.start = { time };
+		if (time !== undefined) out.start = group === undefined ? { time } : { absolute: group, frame: 0 };
 		else if (min !== undefined) {
 			const budget = rangeBudget(range);
 			const max = budget < NO_MAX_DELAY ? budget : null;
@@ -217,10 +216,7 @@ function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...b
 		return [3, min === null ? 0n : BigInt(min) + 1n, max === null ? 0n : BigInt(max) + 1n];
 	}
 	if (anchor?.absolute !== undefined) {
-		if (anchor.frame) return [2, anchor.absolute, BigInt(anchor.frame)];
-		if (!end) return [1, anchor.absolute];
-		if (anchor.absolute === 0n) throw new Error(EMPTY_RANGE);
-		return [1, anchor.absolute - 1n];
+		return [2, anchor.absolute, BigInt(anchor.frame ?? 0)];
 	}
 	if (anchor?.time !== undefined) return [1, anchor.time];
 	return [0];
@@ -327,8 +323,8 @@ export function requestedPlaced(msg: Span & { ranges?: WireRange[] }, legacy?: S
 		return placed;
 	}
 	for (const [index, range] of msg.ranges.entries()) {
-		const joined = range.start?.joined;
-		if (joined !== undefined) placed.set(index, joined.absolute);
+		const at = range.start?.joined?.absolute ?? range.start?.absolute;
+		if (at !== undefined) placed.set(index, at);
 	}
 	return placed;
 }
@@ -371,7 +367,6 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 		case 2: {
 			const absolute = await r.u62();
 			const frame = await r.u53();
-			if (frame === 0) throw new ProtocolViolation("a position at frame 0");
 			return { absolute, frame };
 		}
 		case 3:
@@ -461,9 +456,11 @@ function frameEmpty(range: WireRange): boolean {
 
 /** Whether absolute `end`, exclusive, stops at or before `start`, frames included. */
 function endsBefore(end: WireAnchor, start: WireAnchor | undefined): boolean {
-	if (end.absolute === undefined || start?.absolute === undefined) return false;
-	if (end.absolute !== start.absolute) return end.absolute < start.absolute;
-	return (end.frame ?? 0) <= (start.frame ?? 0);
+	if (end.absolute === undefined) return false;
+	const from = start?.absolute !== undefined ? start : start?.joined;
+	if (from === undefined) return false;
+	if (end.absolute !== from.absolute) return end.absolute < from.absolute;
+	return (end.frame ?? 0) <= (from.frame ?? 0);
 }
 
 /**
@@ -604,8 +601,6 @@ export function varintSize(value: number | bigint): number {
 export function rangeSize(range: WireRange): number {
 	const size = varintSize;
 	const anchor = (anchor: WireAnchor | undefined, end: boolean): number => {
-		// An end at group 0 can't go out, which encoding refuses; size it as the smallest.
-		if (end && anchor?.absolute === 0n) return size(1) + size(0);
 		const [kind, ...values] = wireAnchor(anchor, end);
 		return values.reduce((total, value) => total + size(value), size(kind));
 	};
@@ -1447,7 +1442,7 @@ export class SubscribeEnd {
 }
 
 /**
- * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: a non-empty `[Group Start, Group End)` on lite-07, an
+ * A SUBSCRIBE_DROP range: a non-empty `[Group Start, Group End)` on lite-07, an
  * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved key
  * 2^64-1, so it never names that group.
  */
@@ -1470,11 +1465,10 @@ async function encodeGroups(w: Writer, start: bigint, end: bigint, version: Vers
 }
 
 /**
- * Names groups that existed but will not be delivered: aborted or reset, evicted or expired with
- * no copy left, or stale.
+ * Names groups that will not be delivered: aborted or reset, evicted or expired with no copy
+ * left, stale, or (on lite-07+ with {@link StreamCode.Skip}) starts declared never produced.
  *
- * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names keys
- * declared skipped, which lite-07 names in {@link SubscribeSkip}.
+ * Draft-03+; publishers send it on Draft-05 and later.
  */
 export class SubscribeDrop {
 	/** The first dropped group key. */
@@ -1533,31 +1527,6 @@ export class SubscribeDrop {
 }
 
 /**
- * Names keys the publisher declared it will never produce (see `Producer.skipGroups`):
- * final, with no error, ending no reader. Lite-07+; earlier versions name them in a
- * {@link SubscribeDrop}.
- */
-export class SubscribeSkip {
-	/** The first skipped group key. */
-	start: bigint;
-	/** One past the last skipped group key. */
-	end: bigint;
-
-	constructor(props: { start: bigint; end: bigint }) {
-		this.start = props.start;
-		this.end = props.end;
-	}
-
-	async encode(w: Writer, version: Version): Promise<void> {
-		return Message.encode(w, (w) => encodeGroups(w, this.start, this.end, version));
-	}
-
-	static async decode(r: Reader, version: Version): Promise<SubscribeSkip> {
-		return Message.decode(r, async (r) => new SubscribeSkip(await decodeGroups(r, version)));
-	}
-}
-
-/**
  * A response message on the subscribe stream, prefixed with a type discriminator
  * on Draft-03+.
  *
@@ -1565,15 +1534,14 @@ export class SubscribeSkip {
  * - Draft-03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
  * - Draft-05/06: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP (SUBSCRIBE_OK
  *   was removed; acceptance is implicit).
- * - Lite-07+: `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP, `0x3` SUBSCRIBE_SKIP, and `0x4`
- *   SUBSCRIBE_START, one per range; `0x0` is unused.
+ * - Lite-07+: `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP (with `SKIP` for declared skips), and
+ *   `0x4` SUBSCRIBE_START, one per range; `0x0` and `0x3` are unused.
  */
 export type SubscribeResponse =
 	| { ok: SubscribeOk }
 	| { start: SubscribeStart }
 	| { end: SubscribeEnd }
-	| { drop: SubscribeDrop }
-	| { skip: SubscribeSkip };
+	| { drop: SubscribeDrop };
 
 export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
 	switch (version) {
@@ -1608,9 +1576,6 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 			} else if ("drop" in resp) {
 				await w.u53(0x2);
 				await resp.drop.encode(w, version);
-			} else if ("skip" in resp && hasSkip(version)) {
-				await w.u53(0x3);
-				await resp.skip.encode(w, version);
 			} else {
 				throw new Error("subscribe response not supported for this version");
 			}
@@ -1645,9 +1610,6 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:
 					return { drop: await SubscribeDrop.decode(r, version) };
-				case 0x3:
-					if (!hasSkip(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
-					return { skip: await SubscribeSkip.decode(r, version) };
 				case 0x4:
 					if (!hasRanges(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 					return { start: await SubscribeStart.decode(r, version) };

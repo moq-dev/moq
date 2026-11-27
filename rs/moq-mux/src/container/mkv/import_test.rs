@@ -2414,7 +2414,7 @@ async fn a_shifted_clock_cuts_where_its_frames_end() {
 	// This source's zero lands 10 s into the catalog clock.
 	let timebase = catalog.timebase();
 	timebase.place(moq_net::Timestamp::ZERO, wall).unwrap();
-	let mut importer = super::Import::new(broadcast, timebase.reserve());
+	let mut importer = super::Import::new(broadcast, catalog.reserve()).with_timebase(timebase);
 	importer.decode(&data).unwrap();
 	let _finished = importer.finish().unwrap();
 

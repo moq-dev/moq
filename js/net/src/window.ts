@@ -217,17 +217,21 @@ export function union(ranges: readonly Range[]): Range[] {
 	const out: Range[] = runs.map((run) =>
 		run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n },
 	);
-	// A range with no time start can't be placed against the time spans.
+	// A range with no time start can't be placed against the time spans. One from the oldest group
+	// takes in every one from there ending before it.
 	const joins = new Map<string, Range>();
+	let oldest: Range | undefined;
 	for (const range of kept) {
 		const join = joinOf(range);
 		if (join === undefined) {
-			if (rangeTime(range) === undefined) out.push(range);
+			if (rangeTime(range) === undefined && (oldest === undefined || (range.end ?? 0n) > (oldest.end ?? 0n)))
+				oldest = range;
 			continue;
 		}
 		const held = joins.get(join);
 		if (!held || rangeBudget(range) > rangeBudget(held)) joins.set(join, range);
 	}
+	if (oldest !== undefined) out.push(oldest);
 	out.push(...joins.values());
 
 	out.sort(compare);
@@ -660,7 +664,8 @@ export class Window {
 		for (const [key, range] of ranges) {
 			window.#ranges.set(key, range);
 			window.#countBudget(range, 1);
-			if (liveMillis(range) !== undefined) window.#joining.set(key, joining(key));
+			const join = joining(key);
+			if (liveMillis(range) !== undefined || join.at !== undefined) window.#joining.set(key, join);
 		}
 		window.#place(latest, holdings);
 		return window;
@@ -788,7 +793,8 @@ export class Window {
 			}
 			this.#retire(key);
 			this.#ranges.set(key, range);
-			if (liveMillis(range) !== undefined) this.#joining.set(key, joining(key));
+			const join = joining(key);
+			if (liveMillis(range) !== undefined || join.at !== undefined) this.#joining.set(key, join);
 			else this.#joining.delete(key);
 			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
 		}
@@ -846,6 +852,28 @@ export class Window {
 		for (const entry of this.#waiting.all()) for (const key of entry.keys) keys.add(key);
 		for (const entry of this.#looking.all()) for (const key of entry.keys) keys.add(key);
 		return keys;
+	}
+
+	/**
+	 * Whether a range not yet placed may still come to hold group `key`: placed, it starts at or below
+	 * the group its time or live edge falls in, which may be `key` or one below. A time at or past
+	 * `end`, where group `key` is known to end, falls in a later group, however far the range got
+	 * placing it. Mirrors the Rust `Window::may_hold`.
+	 */
+	mayHold(key: bigint, end: bigint | undefined): boolean {
+		const reaches = (unsettled: bigint) => {
+			const range = this.#ranges.get(unsettled);
+			if (range === undefined || (range.end !== undefined && range.end < key)) return false;
+			const time = rangeTime(range);
+			return time === undefined || end === undefined || time < end;
+		};
+		for (const unsettled of this.#pending) if (reaches(unsettled)) return true;
+		for (const unsettled of this.#reaching) if (reaches(unsettled)) return true;
+		for (const timed of [this.#waiting, this.#looking]) {
+			const entries = end === undefined ? timed.all() : timed.in(0n, end);
+			for (const entry of entries) for (const unsettled of entry.keys) if (reaches(unsettled)) return true;
+		}
+		return false;
 	}
 
 	/** Whether nothing is left to resolve as groups arrive. */
@@ -954,13 +982,15 @@ export class Window {
 	}
 
 	/**
-	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
-	 * containing each starts at or before its time, so one at or past a read's floor and below a
-	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 * The times in `[start, end)` of the time starts not yet resolved: waiting on the groups held, or
+	 * on a lookup of the track's history. The group containing each starts at or before its time, so
+	 * one at or past a read's floor and below a group may still land between them. Mirrors the Rust
+	 * `Window::unresolved_in`.
 	 */
-	waitingIn(start: bigint, end: bigint): bigint[] {
+	unresolvedIn(start: bigint, end: bigint): bigint[] {
 		const times: bigint[] = [];
 		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		for (const entry of this.#looking.in(start, end)) times.push(entry.time);
 		return times;
 	}
 
@@ -988,9 +1018,12 @@ export class Window {
 		return this.#groups.prev(before);
 	}
 
-	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */
+	/**
+	 * The lowest group in range, undefined while a start waits, a time start's lookup included: it may
+	 * resolve to a group below every one in range. Nothing in range floors at group 0.
+	 */
 	floor(): bigint | undefined {
-		if (this.pending || this.#unplaced()) return undefined;
+		if (this.pending || this.#unplaced() || this.#looking.size > 0) return undefined;
 		return this.#groups.lowest() ?? 0n;
 	}
 
@@ -1015,6 +1048,14 @@ export class Window {
 		if (from >= end) return [];
 		if (this.pending) return [{ start: from, end }];
 		return this.#groups.runs(from, end);
+	}
+
+	/**
+	 * The runs the placed ranges name: unlike {@link runs}, a live join still waiting on a first
+	 * group names none of them. Mirrors the Rust `Window::placed`.
+	 */
+	placed(from = 0n, end = UNBOUNDED): Run[] {
+		return from >= end ? [] : this.#groups.runs(from, end);
 	}
 
 	/**
@@ -1183,8 +1224,9 @@ export class Window {
 		let at = rangeTime(range);
 		const live = typeof range.start === "object" ? range.start.live.min : undefined;
 		const budget = rangeBudget(range);
-		// Placed already, where an earlier copy resolved it: its lag places nothing.
-		const placed = live === undefined ? undefined : this.#joining.get(key)?.at;
+		// Placed already (live join or exact-group Position start): start at that exact group without
+		// time-containment lookup.
+		const placed = this.#joining.get(key)?.at;
 		if (placed !== undefined) {
 			this.#count(key, { at: undefined, start: placed, end, floored: true, waiting: false, budget });
 			return;

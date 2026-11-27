@@ -570,11 +570,12 @@ impl MoqMediaTimebase {
 }
 
 impl MoqMediaTimebase {
-	fn reserve(
+	/// The timebase this handle names, which must belong to `broadcast`.
+	fn timebase(
 		&self,
 		broadcast: &MoqBroadcastProducer,
 		state: &crate::producer::BroadcastProducer,
-	) -> Result<moq_mux::catalog::Reserved<Extra>, MoqError> {
+	) -> Result<moq_mux::catalog::Timebase<Extra>, MoqError> {
 		if !std::ptr::eq(self.broadcast.as_ptr(), broadcast) {
 			return Err(MoqError::Codec {
 				reason: "timebase belongs to another broadcast".into(),
@@ -584,7 +585,7 @@ impl MoqMediaTimebase {
 			.timebases
 			.get(&(Arc::as_ptr(&self.key) as usize))
 			.ok_or(MoqError::Closed)?;
-		Ok(timebase.reserve())
+		Ok(timebase.clone())
 	}
 }
 
@@ -596,36 +597,6 @@ impl Drop for MoqMediaTimebase {
 			state.timebases.remove(&(Arc::as_ptr(&self.key) as usize));
 		}
 	}
-}
-
-/// Reserve a container's catalog slot under the owner lock, from `timebase` when shared, so the
-/// importer is constructed after the lock is released.
-///
-/// Also returns the broadcast's driver, which the importer checks so a driver panic reaches it.
-fn reserve_container(
-	broadcast: &MoqBroadcastProducer,
-	timebase: Option<&MoqMediaTimebase>,
-) -> Result<
-	(
-		moq_net::broadcast::Producer,
-		moq_mux::catalog::Reserved<Extra>,
-		crate::ffi::Background,
-		crate::producer::Children,
-	),
-	MoqError,
-> {
-	broadcast.with_state(|state| {
-		let reserved = match timebase {
-			Some(timebase) => timebase.reserve(broadcast, state)?,
-			None => state.catalog.reserve(),
-		};
-		Ok((
-			state.broadcast.clone(),
-			reserved,
-			state.driver.clone(),
-			state.children.clone(),
-		))
-	})
 }
 
 /// A container format, its leading bytes, and an optional shared source timebase.
@@ -1216,8 +1187,23 @@ impl MoqMediaContainerProducer {
 		init: MoqContainerInit,
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let native = moq_mux::import::ContainerInit::new(init.format.0, init.data);
-		let (target, reserved, driver, children) = reserve_container(broadcast, init.timebase.as_deref())?;
+		// Reserved under the owner lock, so the importer is constructed after it is released. The
+		// driver goes along so a driver panic reaches the importer.
+		let (target, reserved, timebase, driver, children) = broadcast.with_state(|state| {
+			let timebase = init
+				.timebase
+				.as_deref()
+				.map(|timebase| timebase.timebase(broadcast, state))
+				.transpose()?;
+			Ok((
+				state.broadcast.clone(),
+				state.catalog.reserve(),
+				timebase,
+				state.driver.clone(),
+				state.children.clone(),
+			))
+		})?;
+		let native = moq_mux::import::ContainerInit::new(init.format.0, init.data).with_timebase(timebase);
 		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 			reason: format!("init failed: {err}"),
 		})?;

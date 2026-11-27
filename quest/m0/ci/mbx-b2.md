@@ -8,8 +8,8 @@ well as the last scheduled Nightly on R2, and then R2's `mbx-moq-dev`
 bucket, its `mbx-read` and `mbx-write` API tokens, and the `MBX_R2_*`
 secrets (repository and `cache-write` Environment) are deleted.
 
-Non-goals: moq's other R2 buckets ([nix.moq.dev](/quest/m0/ci/nix-b2.md)
-moves separately) and longer-term measurement, which
+Non-goals: moq's other R2 buckets (nix.moq.dev moved separately in
+[moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625)) and longer-term measurement, which
 [the B2 verification](/quest/m0/ci/mbx-b2-verify.md) owns.
 
 ## Plan
@@ -59,5 +59,4 @@ Steps:
 
 ## Related
 
-- [nix.moq.dev moves to B2](/quest/m0/ci/nix-b2.md) - same account and R2 teardown
 - [moq.pro's B2 account move](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/b2-account.md) - the `us-east-005` account and its credits

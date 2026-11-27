@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Duration, Instant } from "@moq/clock";
-import { Ledger } from "./ledger.ts";
+import { Ledger, MAX_RUNS } from "./ledger.ts";
 
 const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
@@ -110,4 +110,18 @@ test("shuffled arrivals and bulk merges agree with the accounted sequence set", 
 	ledger.expire(at(4000), Duration.millis(2000));
 	expect(ledger.hasGaps()).toBe(false);
 	expect(ledger.covers(0n, 4128n)).toBe(true);
+});
+
+test("caps run count at MAX_RUNS when disjoint ranges accumulate without expiry", () => {
+	const ledger = new Ledger();
+	const total = MAX_RUNS + 128;
+	for (let i = 0; i < total; i++) {
+		const start = BigInt(i * 2);
+		ledger.account(start, start + 1n, at(i));
+		expect(ledger.size).toBeLessThanOrEqual(MAX_RUNS);
+	}
+	expect(ledger.size).toBe(MAX_RUNS);
+	const newest = BigInt((total - 1) * 2);
+	expect(ledger.covers(newest, newest + 1n)).toBe(true);
+	expect(ledger.covers(newest - 1n, newest)).toBe(false);
 });

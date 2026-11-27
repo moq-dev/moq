@@ -155,10 +155,16 @@ regenerates the repository metadata, signs it, and uploads the diff.
 
 PRs land through GitHub's merge queue, one at a time with squash merges. Each
 `merge_group` build runs `just ci "$BASE"` against the group's base on the
-self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
-`/dev/kvm`), read-only and without secrets (`.github/workflows/queue.yml`). The
-main ruleset requires its `Queue` context and the merge queue, so only the
-queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
+self-hosted runners `nixos-moq-ci` and `nixos-moq-ci2` (label `moq-queue`, with
+their local caches and `/dev/kvm`), without secrets and read-only apart from
+the report job's `checks: write` (`.github/workflows/queue.yml`, which calls
+main's `queue-build.yml`). Once kixel-ai/dotfiles registers them in moq-dev's
+`moq-queue` runner group, which admits only moq-dev/moq, and only
+`queue-build.yml` and `nightly.yml` at `refs/heads/main`, no other workflow, a
+fork's included, reaches them. The main ruleset requires the `Queue`
+context, which `queue-build.yml` posts with the build's result (and
+`queue-pr.yml` reports skipped on PRs), and the merge queue, so only the queue
+(or the administrator bypass) lands on `main`. kixel-ai/quest's queue
 watcher, `quest land watch`, runs on the maintainer's NixOS host
 (kixel-ai/dotfiles, `nixos/modules/quest-land.nix`)
 with moq-bot's key: it comments on each PR the queue drops, runs the Codex

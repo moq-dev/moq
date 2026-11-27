@@ -19,8 +19,7 @@ impl RangeSet {
 		Default::default()
 	}
 
-	#[cfg(test)]
-	pub(super) fn contains(&self, x: u64) -> bool {
+	pub(crate) fn contains(&self, x: u64) -> bool {
 		self.pred(x).is_some_and(|(_, end)| end > x)
 	}
 

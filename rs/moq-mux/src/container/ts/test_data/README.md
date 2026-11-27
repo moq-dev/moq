@@ -26,3 +26,16 @@ no null packets, so its recorded multiplex rate is the audio's own. Generated in
 ```bash
 ffmpeg -hide_banner -loglevel error -f lavfi -i "anoisesrc=d=5:c=pink:r=44100:a=0.5:seed=7" -af tremolo=f=1.5:d=0.9 -ac 2 -c:a aac -b:a 128k -f mpegts ffmpeg_aac.ts
 ```
+
+The other `ffmpeg_*.ts` are four seconds of stereo audio packed the same way, each a codec the
+export carries: AC-3, E-AC-3 and MP2 at 96 kb/s, Opus at 64 kb/s, and variable-rate AAC pulsed so
+its frames peak at over twice their average. Generated in the repository Nix shell with:
+
+```bash
+SRC="anoisesrc=d=4:c=pink:r=48000:a=0.5:seed=7"
+for codec in ac3 eac3 mp2; do
+  ffmpeg -hide_banner -loglevel error -f lavfi -i "$SRC" -af tremolo=f=1.5:d=0.9 -ac 2 -c:a $codec -b:a 96k -f mpegts ffmpeg_$codec.ts
+done
+ffmpeg -hide_banner -loglevel error -f lavfi -i "$SRC" -af tremolo=f=1.5:d=0.9 -ac 2 -c:a libopus -b:a 64k -f mpegts ffmpeg_opus.ts
+ffmpeg -hide_banner -loglevel error -f lavfi -i "anoisesrc=d=4:c=white:r=44100:a=0.8:seed=7" -af "volume=if(lt(mod(t\,0.5)\,0.1)\,1\,0.001):eval=frame" -ac 2 -c:a aac -q:a 1 -f mpegts ffmpeg_aac_pulse.ts
+```

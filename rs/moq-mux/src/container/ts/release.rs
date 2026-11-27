@@ -451,6 +451,14 @@ impl super::follower::sealed::Followed for Release {
 		self.instance.as_ref()
 	}
 
+	fn departed(&self) -> Option<&crate::Error> {
+		self.failed.as_ref()
+	}
+
+	fn depart(&mut self, err: crate::Error) -> crate::Result<()> {
+		self.leave(err)
+	}
+
 	/// Drop the track being read and read the passthrough track `catalog` names next. What the
 	/// jitter buffer holds still goes out on its clock. The same instance returning carries on
 	/// past the group it was reading; another opens a new timeline, whose clock owes the old

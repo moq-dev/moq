@@ -3088,6 +3088,7 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 	] as const) {
 		test(`resetAt on ${protocol} ${advertised ? "with" : "without"} reset_stream_at sends ${reliable ? "RESET_STREAM_AT" : "RESET_STREAM"} after the prefix`, async () => {
 			const { session, peer, writable, writer } = await sending(protocol, advertised, [1, 2, 3, 4]);
+			expect(writable.reliableReset).toBe(reliable);
 			const reason = new StreamError(7, "reset");
 			writable.resetAt(2, reason);
 			expect(await settleTo(writer.closed)).toBe(reason);

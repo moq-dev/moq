@@ -329,7 +329,7 @@ impl Stream<'_> {
 			if self
 				.state
 				.recv_mut(self.id)
-				.is_some_and(|recv| recv.reader == Reader::Evicted)
+				.is_some_and(|recv| recv.reader.is_evicted())
 			{
 				return Poll::Ready(Err(Error::Evicted));
 			}
@@ -439,7 +439,7 @@ impl Stream<'_> {
 			return false;
 		};
 		let freed = recv.lease.release();
-		if recv.reader == Reader::Evicted {
+		if recv.reader.is_evicted() {
 			self.state.evicted_held -= freed;
 		}
 		let transmit = self.return_credit(freed);
@@ -503,7 +503,7 @@ impl Stream<'_> {
 			return false;
 		}
 		// An out lease holds eviction off, and nothing fills a lease while it is out.
-		debug_assert!(recv.reader != Reader::Evicted && state.chunks.is_empty());
+		debug_assert!(!recv.reader.is_evicted() && state.chunks.is_empty());
 		state.chunks = lease.chunks;
 		state.len = lease.len as u64;
 		state.lent = 0;
@@ -562,7 +562,7 @@ impl Stream<'_> {
 		assert!(!recv.lease.out, "leased again before the last lease was handed back");
 		match recv.reader {
 			Reader::Reading => {}
-			Reader::Evicted => return Err(Error::Evicted),
+			Reader::Evicted { .. } => return Err(Error::Evicted),
 			Reader::Stopped => return Err(Error::Closed),
 		}
 		self.state.unlooked.remove(&self.id);
@@ -632,7 +632,7 @@ impl StreamsState {
 		self.recv
 			.get(&id)
 			.and_then(|slot| slot.as_deref())
-			.is_some_and(|recv| recv.reader == Reader::Evicted)
+			.is_some_and(|recv| recv.reader.is_evicted())
 	}
 
 	fn recv_mut(&mut self, id: StreamId) -> Option<&mut super::Recv> {
@@ -781,8 +781,9 @@ impl StreamsState {
 		let leased = recv.lease.evict();
 		self.evicted_held += recv.lease.held;
 		// The peer hears of it when the application stops the stream with its own code.
+		let has_gaps = !recv.assembler.is_contiguous_to(recv.end);
 		let (unread, _) = recv.stop().expect("a candidate is not stopped");
-		recv.reader = Reader::Evicted;
+		recv.reader = Reader::Evicted { has_gaps };
 		self.held -= leased;
 		self.unlooked.remove(&id);
 		self.evicted += 1;
@@ -801,7 +802,7 @@ impl StreamsState {
 			};
 			let lease = &recv.lease;
 			held += lease.held;
-			if recv.reader == Reader::Evicted {
+			if recv.reader.is_evicted() {
 				evicted_held += lease.held;
 			}
 			assert_eq!(lease.ranked, self.ranks.contains(&lease.rank(id)), "{id}");
