@@ -1705,17 +1705,24 @@ run_finish_gst() {
     # A finished track's last group ages out its max delay after it ends, so moqsrc's 1 s default
     # drops the tail whenever gst-launch takes longer than that to start. Like the other finish
     # readers it grants the whole read phase: how late it joins is not the delivery under test.
+    # moqsrc reports a rendition it could not subscribe or read only to its GStreamer debug
+    # category, and its subscriptions only at debug, so both go to the log a failure prints.
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
+        GST_DEBUG="moq-src:6" GST_DEBUG_NO_COLOR=1 RUST_LOG="info,${RUST_LOG:+$RUST_LOG,}gstmoq=debug,moq_net::lite=debug" \
         gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" max-delay="$((window * 1000))" ${version:+connect-version="$version"} connect-websocket-enabled=false \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0
     until ((count >= 10)); do
         if ! kill -0 "$pid" 2>/dev/null || ((SECONDS >= deadline)); then
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "gst: $count of 10 finished frames before the deadline"
+            else
+                echo "gst: $count of 10 finished frames before gst-launch exited"
+            fi
             kill -KILL "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
-            echo "gst: $count of 10 finished frames before the deadline"
-            tail -n 20 "$out"
+            cat "$out"
             return 1
         fi
         sleep 0.1
