@@ -690,11 +690,13 @@ mod tests {
 		// resends the broadcast from them. The live join starts from each hop's live edge.
 		assert_eq!(
 			published.subscription().map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Some(std::time::Duration::ZERO),
-				max: Some(std::time::Duration::from_secs(10)),
-			})
-			.with_priority(hang::catalog::PRIORITY.video)]),
+			Some(vec![
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(std::time::Duration::ZERO),
+					max: Some(std::time::Duration::from_secs(10)),
+				})
+				.with_priority(hang::catalog::PRIORITY.video)
+			]),
 			"the publisher was asked to rewind the track",
 		);
 	}
@@ -1636,11 +1638,13 @@ mod tests {
 		};
 		assert_eq!(
 			first.map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Some(std::time::Duration::from_millis(300)),
-				max: delay.max,
-			})
-			.with_priority(hang::catalog::PRIORITY.video)])
+			Some(vec![
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(std::time::Duration::from_millis(300)),
+					max: delay.max,
+				})
+				.with_priority(hang::catalog::PRIORITY.video)
+			])
 		);
 	}
 

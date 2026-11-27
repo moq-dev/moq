@@ -820,6 +820,8 @@ export namespace Track {
 	}
 	export interface Range {
 		end?: bigint;
+		order?: Track.Order;
+		priority?: number;
 		start?: Track.Start;
 	}
 	export interface Refresh {
@@ -857,8 +859,6 @@ export namespace Track {
 		default(): Track.Subscription;
 	};
 	export interface Subscription {
-		order?: Track.Order;
-		priority?: number;
 		ranges?: Track.Range[];
 	}
 	export function rescale(info: {

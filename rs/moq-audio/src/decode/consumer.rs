@@ -1178,11 +1178,13 @@ mod tests {
 		};
 		assert_eq!(
 			first.map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Some(Duration::from_millis(400)),
-				max: Some(Duration::from_millis(600)),
-			})
-			.with_priority(hang::catalog::PRIORITY.audio)])
+			Some(vec![
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(Duration::from_millis(400)),
+					max: Some(Duration::from_millis(600)),
+				})
+				.with_priority(hang::catalog::PRIORITY.audio)
+			])
 		);
 	}
 

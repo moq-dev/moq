@@ -199,7 +199,10 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
-/** Tunes how a track subscription is delivered: delay, and ranges, each with its own priority and group ordering. */
+/**
+ * Tunes how a track subscription is delivered: delay, and ranges, each with its own priority and
+ * group ordering.
+ */
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**

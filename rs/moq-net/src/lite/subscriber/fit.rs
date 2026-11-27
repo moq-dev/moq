@@ -217,9 +217,7 @@ pub(super) fn fit(
 	let mut ranges: Vec<Range> = time_spans
 		.ranges()
 		.map(|(start, end, policy)| make_span(start, end, true).with_policy(policy))
-		.chain(
-			(pos_spans.ranges()).map(|(start, end, policy)| make_span(start, end, false).with_policy(policy)),
-		)
+		.chain((pos_spans.ranges()).map(|(start, end, policy)| make_span(start, end, false).with_policy(policy)))
 		.collect();
 	ranges.extend(others);
 	let groups = fills
