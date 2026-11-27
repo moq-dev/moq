@@ -5,7 +5,6 @@
 - Every wait is a `poll_*` method first. The `async` feature adds `async fn` wrappers (via `#[kio::wrapper]`); the default build compiles no coroutines and no host timer runtime (`just rs coroutines`).
 - Keep `kio` free of MoQ assumptions: no MoQ names, epochs, or protocol rules. Those live in `moq-net`.
 - Every `unsafe` block states its safety invariant inline and has tests exercising the ordering or lifetime rule it relies on.
-- Unit tests use `kio::clock::sim` or `kio::clock::Manual` instead of sleeping on the host clock, except explicit host-clock tests gated for Miri.
 - A breaking change gets an entry in `MIGRATE.md` (or `macros/MIGRATE.md` for `kio-macros`).
 
 # Verified code

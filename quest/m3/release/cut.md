@@ -22,6 +22,13 @@ web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
 Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
 web-transport's `^0.3` never resolves to the new API.
+`kio` and `kio-macros` are exempt too and need the same check: crates.io has
+`kio` 0.6.4, published from the release line while `main` stayed at 0.6.2, and
+`kio-macros` 0.1.0, published from kixel-ai/kio before kio moved back
+([moq-dev/moq#9770](https://github.com/moq-dev/moq/pull/9770)). kio's Unreleased
+`MIGRATE.md` entries break its API, so set `rs/kio` to 0.7.0, `kio-macros` above
+0.1.0 if it changed, and raise the workspace `kio` and `kio-macros` requirements to
+match before publishing either or a crate that depends on them.
 Also before publishing, recreate the npm trusted publishers of `@moq/clock`,
 `@moq/libav`, `@moq/stats`, and `@moq/video`, which were claimed as `0.0.0`
 placeholders on 2026-11-24. npm expires a trusted publisher that no OIDC

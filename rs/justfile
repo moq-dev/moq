@@ -411,7 +411,7 @@ tsan:
 
 # Run kio's suite under each adversarial sim schedule with the lost-wakeup probe. Each run draws a fresh seed and prints it on failure.
 sweep:
-    for schedule in random pct; do KIO_SIM_PROBE=1 KIO_SIM_SCHEDULE=$schedule just rs test -p kio; done
+    for schedule in random pct; do KIO_SIM_PROBE=1 KIO_SIM_SCHEDULE=$schedule just rs test -p kio || exit 1; done
 
 # Prove rs/kio/src/log.rs's Verus proof. Needs Verus: run it in `nix develop .#verus`
 # (Linux only). The `verify` package builds kio's sources with `vstd`, which kio itself
