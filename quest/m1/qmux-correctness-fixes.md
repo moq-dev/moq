@@ -4,7 +4,7 @@
 
 All verified Rust (`moq-quic` mux, `rs/qmux`) and JS (`js/qmux`) QMux correctness and interop bugs from the QMux audit, plus the three unported `moq-dev/web-transport` fixes (shared WS/TLS handshake timeout, `TcpStats` teardown fd release, and cached `rustls-platform-verifier` for default `wss://` roots), are fixed with targeted regression and cross-language interop tests.
 
-Boundaries and non-goals: additive fixes only (no wire format breaks and no breaking public API changes; `qmux::ws::Server::accept` stays generic-only with no `_with_xxx` methods). Items already tracked in [quic-stream-and-wire-fixes](/quest/m1/quic-stream-and-wire-fixes.md) (mux close underflow, 32-bit `frame.rs`/`packet.rs` varint truncation) and [wire-and-transport-polish](/quest/m3/wire-and-transport-polish.md) (`config.rs` rate-cap checks, `ws.rs` stale docs) are out of scope here.
+Boundaries and non-goals: additive fixes only (no wire format breaks and no breaking public API changes; `qmux::ws::Server::accept` stays generic-only with no `_with_xxx` methods). Items already tracked in [quic-stream-and-wire-fixes](https://github.com/moq-dev/moq/pull/9716) (mux close underflow, 32-bit `frame.rs`/`packet.rs` varint truncation) and [wire-and-transport-polish](/quest/m3/wire-and-transport-polish.md) (`config.rs` rate-cap checks, `ws.rs` stale docs) are out of scope here.
 
 ## Plan
 
@@ -57,5 +57,5 @@ Public API: none. Wire: none.
 ## Related
 
 - [Session keep-alive with a stale signal](/quest/m1/keep-alive.md) - touches the same QMux timer state machine
-- [Fix moq-quic stream, Assembler, QMux, BloomTokenLog, CidState, rate-cap, and 32-bit wire bugs](/quest/m1/quic-stream-and-wire-fixes.md) - owns mux close underflow and 32-bit `frame.rs`/`packet.rs` varint fixes
+- [Fix moq-quic stream, Assembler, QMux, BloomTokenLog, CidState, rate-cap, and 32-bit wire bugs](https://github.com/moq-dev/moq/pull/9716) - owns mux close underflow and 32-bit `frame.rs`/`packet.rs` varint fixes
 - [Polish wire, transport, qmux config, draft, and HLS escaping edge cases](/quest/m3/wire-and-transport-polish.md) - owns `rs/qmux/src/config.rs` rate-cap validation and `ws.rs` stale docs
