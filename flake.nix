@@ -419,7 +419,7 @@
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
         # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
         # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on, and C
-        # functions for an object's exported traits (`moq_instance_eq`). Its tags
+        # functions for an object's exported traits (`moq_identity_eq`). Its tags
         # add a `-kixelated.N` pre-release so they never collide with upstream's.
         # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {

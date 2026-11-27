@@ -112,7 +112,7 @@ struct MkvTrack {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Read {
 	Live,
-	/// The track ended, cleanly or as a sibling instance went.
+	/// The track ended, cleanly or as a sibling identity went.
 	Finished,
 	/// The track itself failed. A spare of its kind may continue it.
 	Lost,

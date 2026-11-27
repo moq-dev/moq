@@ -139,7 +139,7 @@ test("stripPrefix handles empty prefix", () => {
 	expect(result).toBe("foo/bar" as Path.Valid);
 });
 
-test("stripPrefix accepts Path instances", () => {
+test("stripPrefix accepts Path identities", () => {
 	const path = Path.from("foo/bar/baz");
 	const prefix = Path.from("foo/bar");
 	const result = Path.stripPrefix(prefix, path);
@@ -164,7 +164,7 @@ test("join handles empty suffix", () => {
 	expect(joined).toBe("foo" as Path.Valid);
 });
 
-test("join accepts Path instances", () => {
+test("join accepts Path identities", () => {
 	const base = Path.from("foo");
 	const suffix = Path.from("bar");
 	const joined = Path.join(base, suffix);

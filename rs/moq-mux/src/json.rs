@@ -423,7 +423,7 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 	/// Errors if the entry declares a mode this build doesn't implement.
 	#[cfg(feature = "async")]
 	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
-		let binding = source.bind(self.config().broadcast.as_ref(), self.config().instance.as_ref())?;
+		let binding = source.bind(self.config().broadcast.as_ref(), self.config().identity.as_ref())?;
 		let mut subscribe = EntrySubscribe::Binding {
 			binding,
 			name: self.config().track(self.name()).to_string(),

@@ -5,7 +5,7 @@
  * `.stats/node/<node>` carrying JSON tracks that snapshot current activity. We
  * auto-discover all of those nodes (announcements under `.stats/node`), so this
  * works for a single relay and for a cluster alike, then aggregate each node and
- * let you drill into one. A restarted relay announces a new instance at the same
+ * let you drill into one. A restarted relay announces a new identity at the same
  * path, which each node's follower hands out afresh, so its history starts over.
  *
  * Per node we read the whole node's bucket at the relay's default `depth = 0` through
@@ -124,13 +124,13 @@ discovery.run((effect) => {
 });
 
 function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
-	// Follow the node across instances: a restarted one counts from zero, so its series starts
+	// Follow the node across identities: a restarted one counts from zero, so its series starts
 	// afresh rather than splicing onto the old one's.
 	const following = origin.follow(path);
 	effect.cleanup(() => following.close());
 	effect.run((instance) => {
 		const broadcast = instance.get(following.active);
-		// A new instance or run counts from zero, so neither its node series nor the aggregate
+		// A new identity or run counts from zero, so neither its node series nor the aggregate
 		// (which spans every node) may splice onto the old counts.
 		const reset = () => {
 			nodeStats.mutate((s) => {

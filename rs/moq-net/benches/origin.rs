@@ -32,7 +32,7 @@
 //! A claim broader than its grant is filed at each of the grant's prefixes beneath it: one
 //! is filed and dropped, swept over those prefixes and the claims already filed at each.
 //!
-//! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
+//! A claim's answer, and its retraction moving the claim to a fresh identity, is swept
 //! over the paths the claim already answered and the cursors watching it.
 //!
 //! Peer claims land through the `fuzz` module, as a session lands them.
@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Instance, Pattern, Prefix, Prefixes, Timestamp, auth, broadcast, origin, track};
+use moq_net::{Identity, Pattern, Prefix, Prefixes, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -302,9 +302,9 @@ fn bench_withdraw(c: &mut Criterion) {
 fn bench_withdraw_wave(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/withdraw_wave");
 	group.sample_size(10);
-	let instance: Instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-	// One instance, so the winner moving between the peers is an update, which is held.
-	let route = |chain: &[u64]| moq_net::fuzz::route_info(chain.iter().copied(), 0, Some((instance.clone(), 0)));
+	let identity: Identity = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+	// One identity, so the winner moving between the peers is an update, which is held.
+	let route = |chain: &[u64]| moq_net::fuzz::route_info(chain.iter().copied(), 0, Some((identity.clone(), 0)));
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
 			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
@@ -630,7 +630,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
 						moq_net::fuzz::update_route(&route, peer_route(challenger, cost)).unwrap();
 						for cursor in &mut cursors {
-							// The winner switches between unnamed routes, which is another instance.
+							// The winner switches between unnamed routes, which is another identity.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
 							let moq_net::origin::RouteEvent {
 								kind: moq_net::origin::RouteKind::Restart,
@@ -666,12 +666,12 @@ const MAX_COST: u64 = (1 << 62) - 1;
 
 /// A route as `peer` would have announced it: one hop, at `cost`.
 fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
-	peer_instance(peer, cost, None)
+	peer_identity(peer, cost, None)
 }
 
-/// [`peer_route`], serving `instance` when it names one.
-fn peer_instance(peer: u64, cost: u64, instance: Option<Instance>) -> origin::RouteInfo {
-	moq_net::fuzz::route_info([peer], cost, instance.map(|instance| (instance, 0)))
+/// [`peer_route`], serving `identity` when it names one.
+fn peer_identity(peer: u64, cost: u64, identity: Option<Identity>) -> origin::RouteInfo {
+	moq_net::fuzz::route_info([peer], cost, identity.map(|identity| (identity, 0)))
 }
 
 /// An announcement of an unrelated prefix with `fronts` remote fronts parked on
@@ -722,7 +722,7 @@ fn answer(claim: &origin::Claim, path: &str) -> origin::Route {
 }
 
 /// A claim's answer delivered to every cursor as a start, then retracted, which moves the
-/// claim to a fresh instance. Swept over the paths the claim already answered and the
+/// claim to a fresh identity. Swept over the paths the claim already answered and the
 /// cursors watching it, so finding the lending claim by walking the table rather than the
 /// path's covering routes shows up as a slope.
 fn bench_lend(c: &mut Criterion) {
@@ -1019,7 +1019,7 @@ fn pool_route(hop: u64) -> origin::RouteInfo {
 	peer_route(hop, 3)
 }
 
-/// Re-requesting fronts an instance change left stale, swept over the cache around them and the
+/// Re-requesting fronts an identity change left stale, swept over the cache around them and the
 /// number restarted. Setup, route updates, and teardown stay outside the measurement.
 fn bench_restart_fronts(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/restart_fronts");
@@ -1032,7 +1032,7 @@ fn bench_restart_fronts(c: &mut Criterion) {
 						let pool = pool(1, fronts, 0);
 						moq_net::fuzz::update_route(
 							&pool._members[0],
-							peer_instance(POOL_HOP, 3, Some(Instance::random())),
+							peer_identity(POOL_HOP, 3, Some(Identity::random())),
 						)
 						.unwrap();
 						let paths: Vec<_> = (0..restarting).map(|i| format!("pool/job-{i}")).collect();
@@ -1124,7 +1124,7 @@ fn bench_pool_cursors(c: &mut Criterion) {
 
 /// Publisher handoff at one path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
-/// wins). An open subscription stays on the old instance, so the subscriber
+/// wins). An open subscription stays on the old identity, so the subscriber
 /// re-requests the broadcast. Measured from the standby's attach to the
 /// re-request receiving its first group, with `publishers` unrelated
 /// broadcasts in the table.
@@ -1563,13 +1563,13 @@ struct Generation {
 }
 
 impl Generation {
-	/// Create a hidden generation of `instance` and leave a finished group on every
+	/// Create a hidden generation of `identity` and leave a finished group on every
 	/// track, so a reader that does look has something to resume.
-	fn build(producer: &origin::Producer, tracks: usize, instance: &Instance) -> Self {
+	fn build(producer: &origin::Producer, tracks: usize, identity: &Identity) -> Self {
 		let broadcast = producer
 			.route(
 				COPY_PATH,
-				moq_net::origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+				moq_net::origin::RouteOptions::hidden().with_identity(identity.clone(), 0),
 			)
 			.unwrap();
 		let mut held = Vec::with_capacity(tracks);
@@ -1626,8 +1626,8 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	assert!(copies >= 1, "a front holds at least the serving copy");
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let instance = Instance::random();
-	let first = Generation::build(&producer, tracks, &instance);
+	let identity = Identity::random();
+	let first = Generation::build(&producer, tracks, &identity);
 	first.route();
 	let resolved = kio::clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
 		.await
@@ -1645,12 +1645,12 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	let mut generations = Vec::with_capacity(copies + 1);
 	generations.push(first);
 	for _ in 1..copies {
-		let generation = Generation::build(&producer, tracks, &instance);
+		let generation = Generation::build(&producer, tracks, &identity);
 		generation.announce().await;
 		generations.push(generation);
 	}
 	CopyWalk {
-		next: Some(Generation::build(&producer, tracks, &instance)),
+		next: Some(Generation::build(&producer, tracks, &identity)),
 		_producer: producer,
 		_subscribers: subscribers,
 		generations,
@@ -1658,7 +1658,7 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 }
 
 impl CopyWalk {
-	/// Swap in the prebuilt newer route at the same instance.
+	/// Swap in the prebuilt newer route at the same identity.
 	///
 	/// A local track's info is already known, so the front subscribes, walks
 	/// every track, and each reader walks its copies in one driver turn.
@@ -1770,12 +1770,12 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	} = shape;
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let instance = Instance::random();
+	let identity = Identity::random();
 	let generation = |order: &mut dyn Iterator<Item = usize>| {
 		let broadcast = producer
 			.route(
 				COPY_PATH,
-				moq_net::origin::RouteOptions::hidden().with_instance(instance.clone(), 0),
+				moq_net::origin::RouteOptions::hidden().with_identity(identity.clone(), 0),
 			)
 			.unwrap();
 		let track = broadcast.broadcast().create_track("0", timed()).unwrap();

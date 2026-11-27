@@ -52,14 +52,14 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub endpoint: Args,
 
-	/// How long to wait for the same publisher instance, or with `--stitch` a replacement, to
+	/// How long to wait for the same publisher identity, or with `--stitch` a replacement, to
 	/// come back once the broadcast ends (e.g. `10s`), then carry on with the same stream.
-	/// Zero follows only an instance already serving. A replacement ends the stream unless
+	/// Zero follows only an identity already serving. A replacement ends the stream unless
 	/// `--stitch` is passed.
 	#[usage(long, default = "0s")]
 	pub follow: moq_tokio::cli::Duration,
 
-	/// Follow another publisher instance that replaces the broadcast, as a full program switch
+	/// Follow another publisher identity that replaces the broadcast, as a full program switch
 	/// on the same SRT connection.
 	#[usage(long)]
 	pub stitch: bool,

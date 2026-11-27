@@ -1050,7 +1050,7 @@ class SmokeTest {
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
-                assertEquals(route.instance(), first.announce.route.instance)
+                assertEquals(route.identity(), first.announce.route.identity)
 
                 route.withdraw()
                 val retracted = assertIs<AnnounceEventAbsent>(announced.nextRoute())
@@ -1060,7 +1060,7 @@ class SmokeTest {
                 // Announcing again continues the same stream.
                 route.announce()
                 val again = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertEquals(route.instance(), again.announce.route.instance)
+                assertEquals(route.identity(), again.announce.route.identity)
                 consumer.request("live")
             }
         }
@@ -1118,19 +1118,19 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new instance restarts followers but stays listed`() = runTest {
+    fun `a new identity restarts followers but stays listed`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val consumer = origin.consume()
             val announced = consumer.announced(AnnounceConfig())
-            val following = consumer.follow("instance", null)
-            origin.route("instance", RouteOptions()).use { first ->
+            val following = consumer.follow("identity", null)
+            origin.route("identity", RouteOptions()).use { first ->
                 val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertFalse(present.announce.route.instance.isMinted())
-                assertEquals(first.instance(), present.announce.route.instance)
+                assertFalse(present.announce.route.identity.isMinted())
+                assertEquals(first.identity(), present.announce.route.identity)
                 assertNotNull(following.available()).close()
 
-                val camera = Instance.parse("camera")
-                origin.route("instance", RouteOptions(instance = camera, epoch = 1uL)).use { second
+                val camera = Identity.parse("camera")
+                origin.route("identity", RouteOptions(identity = camera, epoch = 1uL)).use { second
                     ->
                     assertNotNull(following.available()).close()
 
@@ -1138,11 +1138,11 @@ class SmokeTest {
                     first.withdraw()
                     second.withdraw()
                     val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
-                    assertEquals(camera, absent.announce.route.instance)
-                    assertEquals("camera", absent.announce.route.instance.toString())
+                    assertEquals(camera, absent.announce.route.identity)
+                    assertEquals("camera", absent.announce.route.identity.toString())
                 }
 
-                assertFailsWith<MoqException.InvalidInstance> { Instance.parse("") }
+                assertFailsWith<MoqException.InvalidIdentity> { Identity.parse("") }
             }
             following.cancel()
         }
@@ -1188,7 +1188,7 @@ class SmokeTest {
                 val request = assertNotNull(dynamic.requested())
                 assertEquals("live/cam", request.path())
                 request.route(RouteOptions(hidden = true)).use { job ->
-                    assertEquals(dynamic.instance(), job.instance())
+                    assertEquals(dynamic.identity(), job.identity())
                     job.broadcast().use { fill ->
                         // Only announcing answers the requester.
                         job.announce()
@@ -1353,11 +1353,11 @@ class SmokeTest {
     }
 
     /**
-     * Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back pins
-     * `request` and `follow`, while its text parsed is another, named instance that nothing serves.
+     * Over moq-lite-06, whose wire carries no identity, the session mints one: passing it back pins
+     * `request` and `follow`, while its text parsed is another, named identity that nothing serves.
      */
     @Test
-    fun `an announced instance pins request and follow`() = runTest {
+    fun `an announced identity pins request and follow`() = runTest {
         val version = listOf("moq-lite-06")
         Server.listen(
                 ServerConfig(
@@ -1385,7 +1385,7 @@ class SmokeTest {
                                 val session = accepted.await()
                                 val present =
                                     assertIs<AnnounceEventPresent>(moq.announced().nextRoute())
-                                val minted = present.announce.route.instance
+                                val minted = present.announce.route.identity
                                 assertTrue(minted.isMinted())
 
                                 moq.request("live", minted)
@@ -1393,7 +1393,7 @@ class SmokeTest {
                                 assertNotNull(following.available()).close()
                                 following.cancel()
 
-                                val named = Instance.parse(minted.text())
+                                val named = Identity.parse(minted.text())
                                 assertFalse(named.isMinted())
                                 assertEquals(minted.text(), named.toString())
                                 assertNotEquals(minted, named)

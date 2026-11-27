@@ -722,10 +722,10 @@ impl MoqAudioConsumer {
 		// Reject malformed or unknown codec names before resolving the broadcast reference.
 		// Decoder setup checks recognized codecs after resolution, without a second codec gate.
 		let reference = catalog_audio.broadcast.clone();
-		let instance = catalog_audio.instance.clone();
+		let identity = catalog_audio.identity.clone();
 		let cfg = audio_config(catalog_audio)?;
 		let resolved = broadcast
-			.resolve_inner(reference.as_deref(), instance.as_deref())
+			.resolve_inner(reference.as_deref(), identity.as_deref())
 			.await?;
 
 		let mut config = moq_audio::decode::Options::default();
@@ -783,7 +783,7 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
-			instance: None,
+			identity: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,

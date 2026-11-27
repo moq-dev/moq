@@ -12,7 +12,7 @@
 //!   batches behind the first, and each hears its next batch. Swept over the claims
 //!   the origin holds and how far the second lags: neither axis is expected to grow.
 //! - confirmed: a relay holds back every claim from the streams it answers until it
-//!   confirms serving one, all of them at one instance and epoch. One claim restarts at
+//!   confirms serving one, all of them at one identity and epoch. One claim restarts at
 //!   another epoch, then back at the shared one, each confirmed. Swept over the claims
 //!   held and the streams answered: the streams axis is expected to grow, since each is
 //!   sent the claim; the claims axis is not.

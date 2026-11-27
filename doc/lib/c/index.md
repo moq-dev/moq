@@ -71,7 +71,7 @@ if (session < 0)
 ```c
 const char *path = "my-stream.hang";
 moq_route_options options;
-memset(&options, 0, sizeof(options)); // zeroed means visible, cost 0, a fresh instance
+memset(&options, 0, sizeof(options)); // zeroed means visible, cost 0, a fresh identity
 options.hidden = true;                // fill the catalog before anyone finds it
 int route = moq_origin_route(origin, path, strlen(path), &options);
 if (route < 0)
@@ -83,27 +83,27 @@ if (moq_route_announce((uint32_t)route) < 0)
 ```
 
 The route keeps the broadcast announced: `moq_route_free()` retracts it, and
-`moq_publish_close()` ends both. A route carries a cost, the stream's instance, and optionally a credential (`moq_route_set_auth()`);
-relays add the hops. `moq_origin_route()` mints a fresh instance (`moq_route_instance()`) and
+`moq_publish_close()` ends both. A route carries a cost, the stream's identity, and optionally a credential (`moq_route_set_auth()`);
+relays add the hops. `moq_origin_route()` mints a fresh identity (`moq_route_identity()`) and
 keeps it across `moq_route_withdraw()` and `moq_route_announce()`, so a restarted publisher,
 being a new route, is a new stream that `moq_origin_follow` hands viewers instead of a stalled
 broadcast; the path stays `MOQ_ANNOUNCE_KIND_PRESENT` throughout. The follow callback
-reports each instance as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
-`MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `instance` only for a publisher that continues its group starts
-across restarts, and raise `epoch` on each: readers stitch every route of one instance
-together, so restarting the starts under an old instance splices unrelated groups into
+reports each identity as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
+`MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `identity` only for a publisher that continues its group starts
+across restarts, and raise `epoch` on each: readers stitch every route of one identity
+together, so restarting the starts under an old identity splices unrelated groups into
 their tracks. To serve paths on demand, `moq_origin_claim()` returns a claim handle and delivers each request to
 answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
 `moq_broadcast_request_reject()`; `moq_claim_announce()`, `moq_claim_withdraw()`,
 `moq_claim_set_cost()`, `moq_claim_set_auth()`, and `moq_claim_free()` control the claim. Unless one is named, a claim moves to a fresh
-instance (`moq_claim_instance()`) each time a job holding its current one ends, and a job from
+identity (`moq_claim_identity()`) each time a job holding its current one ends, and a job from
 `moq_broadcast_request_route()` takes the claim's, so on moq-lite 07 a reader resolved through the
-claim does not restart; older wires mint another instance for the job's route, restarting it.
+claim does not restart; older wires mint another identity for the job's route, restarting it.
 
-An instance is a handle: `moq_route_instance()` and `moq_claim_instance()` return one you free
-with `moq_instance_free()`, and an announcement's `route.instance` lives as long as the
-announcement. `moq_instance_parse()` names one from text; `moq_instance_text()`,
-`moq_instance_minted()`, and `moq_instance_equal()` read it. A session mints an instance for a
+An identity is a handle: `moq_route_identity()` and `moq_claim_identity()` return one you free
+with `moq_identity_free()`, and an announcement's `route.identity` lives as long as the
+announcement. `moq_identity_parse()` names one from text; `moq_identity_text()`,
+`moq_identity_minted()`, and `moq_identity_equal()` read it. A session mints an identity for a
 route whose wire (moq-lite 06 or older, or moq-transport) carries none, and only a session can,
 so pass the handle a route or announcement reported, not its text, to pin
 `moq_origin_request()` or `moq_origin_follow()` to that stream.

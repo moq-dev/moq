@@ -1,6 +1,6 @@
 //! What a node's announcement reader sees, and the events it logs as that changes:
 //! one implementation for every route rule, keyed by whatever names a claim's owner
-//! there (a publisher under the path rule, an Instance under the relay rule).
+//! there (a publisher under the path rule, an Identity under the relay rule).
 
 use std::collections::BTreeMap;
 

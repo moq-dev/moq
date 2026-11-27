@@ -100,7 +100,7 @@ async def main():
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
-        route.announce()  # each route mints a fresh instance, route.instance
+        route.announce()  # each route mints a fresh identity, route.identity
         audio.finish()
         video.finish()
         events.finish()

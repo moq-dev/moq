@@ -28,9 +28,9 @@ enum Spot {
 	Relay(Box<Router>),
 	/// A publisher: an endpoint that never forwards.
 	Endpoint {
-		/// The Instance its next claim serves.
+		/// The Identity its next claim serves.
 		id: Option<Id>,
-		/// Its claims, each with the Instance it serves.
+		/// Its claims, each with the Identity it serves.
 		claims: BTreeSet<(Path, Id)>,
 		/// What each relay asked it for.
 		asked: BTreeMap<Node, BTreeSet<Path>>,
@@ -223,7 +223,7 @@ impl RelaySim {
 		&self.up
 	}
 
-	/// The claims the publisher at `node` makes now, each with its Instance.
+	/// The claims the publisher at `node` makes now, each with its Identity.
 	pub fn claims(&self, node: Node) -> &BTreeSet<(Path, Id)> {
 		match &self.spots[node] {
 			Spot::Endpoint { claims, .. } => claims,

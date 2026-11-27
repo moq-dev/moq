@@ -325,10 +325,10 @@ final class SmokeTests: XCTestCase {
         session.cancel(code: 0)
     }
 
-    /// Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back
-    /// pins `request` and `follow`, while its text parsed is another, named instance that nothing
+    /// Over moq-lite-06, whose wire carries no identity, the session mints one: passing it back
+    /// pins `request` and `follow`, while its text parsed is another, named identity that nothing
     /// serves.
-    func testAnnouncedInstancePinsRequestAndFollow() async throws {
+    func testAnnouncedIdentityPinsRequestAndFollow() async throws {
         let version = ["moq-lite-06"]
         let published = OriginProducer()
         let route = try published.route(path: "live")
@@ -355,12 +355,12 @@ final class SmokeTests: XCTestCase {
         guard case .present(let present) = try await nextRoute(try consumer.announced()) else {
             return XCTFail("expected an announcement")
         }
-        let minted = present.route.instance
+        let minted = present.route.identity
         XCTAssertTrue(minted.isMinted())
 
-        _ = try await consumer.request(path: "live", instance: minted)
-        let following = try consumer.follow(path: "live", instance: minted)
-        // Cancelling ends the wait below, so an instance that never resolves fails rather than hangs.
+        _ = try await consumer.request(path: "live", identity: minted)
+        let following = try consumer.follow(path: "live", identity: minted)
+        // Cancelling ends the wait below, so an identity that never resolves fails rather than hangs.
         let watchdog = Task {
             try await Task.sleep(nanoseconds: 10_000_000_000)
             following.cancel()
@@ -370,13 +370,13 @@ final class SmokeTests: XCTestCase {
         XCTAssertNotNil(followed)
         following.cancel()
 
-        let named = try Instance.parse(text: minted.text())
+        let named = try Identity.parse(text: minted.text())
         XCTAssertFalse(named.isMinted())
         XCTAssertEqual(named.description, minted.text())
         XCTAssertNotEqual(named, minted)
         do {
-            _ = try await consumer.request(path: "live", instance: named)
-            XCTFail("the same text, named, is another instance")
+            _ = try await consumer.request(path: "live", identity: named)
+            XCTFail("the same text, named, is another identity")
         } catch {}
     }
 
@@ -417,7 +417,7 @@ final class SmokeTests: XCTestCase {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(first.prefix, "live")
-        XCTAssertEqual(first.route.instance, route.instance)
+        XCTAssertEqual(first.route.identity, route.identity)
 
         try route.withdraw()
         guard case .absent(let retracted) = try await nextRoute(announced) else {
@@ -434,7 +434,7 @@ final class SmokeTests: XCTestCase {
         guard case .present(let again) = try await nextRoute(announced) else {
             return XCTFail("expected a reannouncement")
         }
-        XCTAssertEqual(again.route.instance, route.instance)
+        XCTAssertEqual(again.route.identity, route.identity)
         _ = try await consumer.request(path: "live")
         route.cancel()
     }
@@ -501,22 +501,22 @@ final class SmokeTests: XCTestCase {
         chat.cancel()
     }
 
-    func testNewInstanceRestartsFollowersButStaysListed() async throws {
+    func testNewIdentityRestartsFollowersButStaysListed() async throws {
         let origin = OriginProducer()
         let consumer = origin.consume()
         let announced = try consumer.announced(prefix: "")
-        let following = try consumer.follow(path: "instance")
-        let first = try origin.route(path: "instance")
+        let following = try consumer.follow(path: "identity")
+        let first = try origin.route(path: "identity")
         guard case .present(let present) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
-        XCTAssertFalse(present.route.instance.isMinted())
-        XCTAssertEqual(present.route.instance, first.instance)
+        XCTAssertFalse(present.route.identity.isMinted())
+        XCTAssertEqual(present.route.identity, first.identity)
         let firstBroadcast = try await following.available()
         XCTAssertNotNil(firstBroadcast)
 
-        let camera = try Instance.parse(text: "camera")
-        let second = try origin.route(path: "instance", instance: camera, epoch: 1)
+        let camera = try Identity.parse(text: "camera")
+        let second = try origin.route(path: "identity", identity: camera, epoch: 1)
         let takeover = try await following.available()
         XCTAssertNotNil(takeover)
 
@@ -526,12 +526,12 @@ final class SmokeTests: XCTestCase {
         guard case .absent(let absent) = try await nextRoute(announced) else {
             return XCTFail("expected the path to go absent")
         }
-        XCTAssertEqual(absent.route.instance, camera)
-        XCTAssertEqual(absent.route.instance.description, "camera")
+        XCTAssertEqual(absent.route.identity, camera)
+        XCTAssertEqual(absent.route.identity.description, "camera")
 
-        XCTAssertThrowsError(try Instance.parse(text: "")) { error in
-            guard case MoqError.InvalidInstance = error else {
-                return XCTFail("expected InvalidInstance, got \(error)")
+        XCTAssertThrowsError(try Identity.parse(text: "")) { error in
+            guard case MoqError.InvalidIdentity = error else {
+                return XCTFail("expected InvalidIdentity, got \(error)")
             }
         }
         first.cancel()
@@ -568,7 +568,7 @@ final class SmokeTests: XCTestCase {
         let request = try XCTUnwrap(requested)
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
-        XCTAssertEqual(served.instance, dynamic.instance)
+        XCTAssertEqual(served.identity, dynamic.identity)
         let broadcast = served.broadcast
         XCTAssertTrue(broadcast === served.broadcast)
         // Only announcing answers the requester.

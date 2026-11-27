@@ -86,7 +86,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         output = VideoEncoderOutput(codec = VideoCodec.h264(), bitrate = null, join = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestamp = pts, data = rgba))
-    route.announce() // the route mints its own instance: route.instance()
+    route.announce() // the route mints its own identity: route.identity()
     audio.finish()
     video.finish()
     broadcast.end()

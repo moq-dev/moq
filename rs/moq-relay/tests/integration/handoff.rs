@@ -231,7 +231,7 @@ async fn takes_over(from: Backend, to: Backend) {
 		.expect("a third relay took over while the old one served");
 	assert!(format!("{refused:#}").contains("refused"), "{refused:#}");
 
-	// One instance of the node's stats at a time: the old relay's, so far.
+	// One identity of the node's stats at a time: the old relay's, so far.
 	let mut stats = new_origin.follow(".stats/node/test", None).unwrap();
 	assert!(
 		stats.available().now_or_never().is_none(),

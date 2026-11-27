@@ -47,7 +47,7 @@ Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` pro
 
 Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
 ✅ the cut also waits on
-[Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md)
+the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720))
 (renaming `Instance` to `Identity` across every wire message, capping it at
 256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
 keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both

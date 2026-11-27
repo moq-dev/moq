@@ -93,8 +93,8 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if !served.Instance().Eq(dynamic.Instance()) {
-		t.Fatal("a job's route continues the instance its claim lends")
+	if !served.Identity().Eq(dynamic.Identity()) {
+		t.Fatal("a job's route continues the identity its claim lends")
 	}
 	broadcast := served.Broadcast()
 	track, err := broadcast.PublishTrack("status", timedInfo())
@@ -1966,8 +1966,8 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if err := route.Announce(); err != nil {
 		t.Fatal(err)
 	}
-	if ann := nextAnnounced(t, ctx, announced); !ann.Route.Instance.Eq(route.Instance()) {
-		t.Fatalf("reannounce: ann=%+v, want instance %s", ann, route.Instance())
+	if ann := nextAnnounced(t, ctx, announced); !ann.Route.Identity.Eq(route.Identity()) {
+		t.Fatalf("reannounce: ann=%+v, want identity %s", ann, route.Identity())
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err != nil {
 		t.Fatal(err)
@@ -2054,7 +2054,7 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// A route mints its own instance and keeps it across re-pricing. Another route
+// A route mints its own identity and keeps it across re-pricing. Another route
 // keeps the path present in the listing and reaches only followers.
 func TestNewRouteReachesFollowers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -2067,16 +2067,16 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
-	following, err := consumer.Follow("instance", nil)
+	following, err := consumer.Follow("identity", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer following.Cancel()
 
-	route, _ := newRoute(t, origin, "instance", moq.RouteOptions{})
-	fresh := nextAnnounced(t, ctx, announced).Route.Instance
-	if !fresh.Eq(route.Instance()) || fresh.IsMinted() {
-		t.Fatalf("present instance = %v, want the route's own %v", fresh, route.Instance())
+	route, _ := newRoute(t, origin, "identity", moq.RouteOptions{})
+	fresh := nextAnnounced(t, ctx, announced).Route.Identity
+	if !fresh.Eq(route.Identity()) || fresh.IsMinted() {
+		t.Fatalf("present identity = %v, want the route's own %v", fresh, route.Identity())
 	}
 	if _, err := following.Available(ctx); err != nil {
 		t.Fatal(err)
@@ -2085,10 +2085,10 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 	if err := route.SetCost(1); err != nil {
 		t.Fatal(err)
 	}
-	stable := parseInstance(t, "cam")
-	second, _ := newRoute(t, origin, "instance", moq.RouteOptions{Instance: stable, Epoch: 1})
+	stable := parseIdentity(t, "cam")
+	second, _ := newRoute(t, origin, "identity", moq.RouteOptions{Identity: stable, Epoch: 1})
 	if _, err := following.Available(ctx); err != nil {
-		t.Fatalf("follow after the instance change: %v", err)
+		t.Fatalf("follow after the identity change: %v", err)
 	}
 
 	// The listing's next event is the absence, so neither the re-price nor the new
@@ -2100,8 +2100,8 @@ func TestNewRouteReachesFollowers(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := nextRoute(t, ctx, announced)
-	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || !absent.Announce.Route.Instance.Eq(stable) {
-		t.Fatalf("event = %+v, want absent with instance %s", event, stable)
+	if absent, ok := event.(moq.AnnounceEventAbsent); !ok || !absent.Announce.Route.Identity.Eq(stable) {
+		t.Fatalf("event = %+v, want absent with identity %s", event, stable)
 	}
 }
 
@@ -2137,49 +2137,49 @@ func TestFollowReportsOffline(t *testing.T) {
 	}
 }
 
-// A follower pinned to an instance reports another instance taking over as nil.
+// A follower pinned to an identity reports another identity taking over as nil.
 func TestPinnedFollowReportsTakeoverOffline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	pinned := parseInstance(t, "cam")
+	pinned := parseIdentity(t, "cam")
 	following, err := origin.Consume().Follow("pinned", pinned)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer following.Cancel()
 
-	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: pinned})
+	newRoute(t, origin, "pinned", moq.RouteOptions{Identity: pinned})
 	if broadcast, err := following.Available(ctx); err != nil || broadcast == nil {
 		t.Fatalf("first Available = %v, %v; want a broadcast", broadcast, err)
 	}
 
-	other := parseInstance(t, "other")
-	newRoute(t, origin, "pinned", moq.RouteOptions{Instance: other, Epoch: 1})
+	other := parseIdentity(t, "other")
+	newRoute(t, origin, "pinned", moq.RouteOptions{Identity: other, Epoch: 1})
 	if broadcast, err := following.Available(ctx); err != nil || broadcast != nil {
 		t.Fatalf("Available after takeover = %v, %v; want nil", broadcast, err)
 	}
 }
 
-// Callers only name instances: the same text names the same one, and empty text names none.
-func TestParseInstance(t *testing.T) {
-	cam := parseInstance(t, "cam")
+// Callers only name identities: the same text names the same one, and empty text names none.
+func TestParseIdentity(t *testing.T) {
+	cam := parseIdentity(t, "cam")
 	if cam.Text() != "cam" || cam.String() != "cam" || cam.IsMinted() {
 		t.Fatalf("parsed = %v (minted %v), want the named cam", cam, cam.IsMinted())
 	}
-	again := parseInstance(t, "cam")
-	if !cam.Eq(again) || cam.Hash() != again.Hash() || cam.Eq(parseInstance(t, "other")) {
-		t.Fatal("instances compare by text and the minted flag")
+	again := parseIdentity(t, "cam")
+	if !cam.Eq(again) || cam.Hash() != again.Hash() || cam.Eq(parseIdentity(t, "other")) {
+		t.Fatal("identities compare by text and the minted flag")
 	}
-	if _, err := moq.ParseInstance(""); !errors.Is(err, moq.ErrInvalidInstance) {
-		t.Fatalf("ParseInstance(empty) = %v, want ErrInvalidInstance", err)
+	if _, err := moq.ParseIdentity(""); !errors.Is(err, moq.ErrInvalidIdentity) {
+		t.Fatalf("ParseIdentity(empty) = %v, want ErrInvalidIdentity", err)
 	}
 }
 
-// Over a wire that carries no instance, the session mints the announced one, and
+// Over a wire that carries no identity, the session mints the announced one, and
 // passing it back as is pins Request and Follow to that stream.
-func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
+func TestMintedIdentityPinsRequestAndFollow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -2208,9 +2208,9 @@ func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
-	minted := nextAnnounced(t, ctx, announced).Route.Instance
+	minted := nextAnnounced(t, ctx, announced).Route.Identity
 	if !minted.IsMinted() {
-		t.Fatalf("announced instance %v over %s is not minted", minted, version)
+		t.Fatalf("announced identity %v over %s is not minted", minted, version)
 	}
 
 	if _, err := client.Request(ctx, "live", minted); err != nil {
@@ -2225,8 +2225,8 @@ func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
 		t.Fatalf("Available(minted) = %v, %v; want a broadcast", broadcast, err)
 	}
 
-	// The same text, named, is another instance, which nothing serves.
-	named := parseInstance(t, minted.Text())
+	// The same text, named, is another identity, which nothing serves.
+	named := parseIdentity(t, minted.Text())
 	if named.Eq(minted) || named.IsMinted() {
 		t.Fatalf("parsed %v equals the minted %v", named, minted)
 	}
@@ -2236,15 +2236,15 @@ func TestMintedInstancePinsRequestAndFollow(t *testing.T) {
 	}
 }
 
-// parseInstance names an instance, failing the test on an error.
-func parseInstance(t *testing.T, text string) *moq.Instance {
+// parseIdentity names an identity, failing the test on an error.
+func parseIdentity(t *testing.T, text string) *moq.Identity {
 	t.Helper()
 
-	instance, err := moq.ParseInstance(text)
+	identity, err := moq.ParseIdentity(text)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return instance
+	return identity
 }
 
 // nextRoute returns the next announce event.

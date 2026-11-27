@@ -94,15 +94,15 @@ class Command:
     `drive`, `estop`, `reset_estop`, and `respawn` arrive on the wire;
     `driver_left` and `watchdog_expired` are synthesized locally.
 
-    `driver_id` is the driver's path segment, which `status` echoes. `instance`
-    names the run that sent it, one per publisher instance serving the path: the
-    same id under another instance is another run of the driver, so it is a
+    `driver_id` is the driver's path segment, which `status` echoes. `identity`
+    names the run that sent it, one per publisher identity serving the path: the
+    same id under another identity is another run of the driver, so it is a
     different driver for the lease.
     """
 
     kind: CommandKind
     driver_id: str = ""
-    instance: str | None = None
+    identity: str | None = None
     sequence: int = 0
     state: DriveState | None = None
     timestamps: tuple[TimestampEntry, ...] = ()
@@ -118,14 +118,14 @@ class Drive:
     driver whose broadcast ends or restarts loses it.
     It is still cooperative, not enforced: the holder's id is echoed on the
     public `status` track, so anyone allowed to publish there can announce at
-    that path under another instance, which ends the holder's broadcast and frees
+    that path under another identity, which ends the holder's broadcast and frees
     the lease for the newcomer. This stops two honest drivers colliding; it
     does not stop a deliberate takeover.
     """
 
     def __init__(self) -> None:
         self._driver: str | None = None
-        self._instance: str | None = None
+        self._identity: str | None = None
         self._sequence: int | None = None
         self._state = DriveState.stopped()
         self._takeover_pedals: tuple[float, float] | None = None
@@ -139,7 +139,7 @@ class Drive:
     @property
     def holder(self) -> tuple[str, str | None] | None:
         """The lease holder's driver id and run, or None while nobody holds it."""
-        return None if self._driver is None else (self._driver, self._instance)
+        return None if self._driver is None else (self._driver, self._identity)
 
     @property
     def sequence(self) -> int | None:
@@ -160,7 +160,7 @@ class Drive:
 
     def holds(self, command: Command) -> bool:
         """Whether `command` comes from the run of the driver holding the lease."""
-        return self._driver is not None and (self._driver, self._instance) == (command.driver_id, command.instance)
+        return self._driver is not None and (self._driver, self._identity) == (command.driver_id, command.identity)
 
     def accepted(self) -> Accepted:
         return Accepted(state=self._state, estopped=self._estopped)
@@ -172,7 +172,7 @@ class Drive:
                 return False
             claiming = self._driver is None
             self._driver = command.driver_id
-            self._instance = command.instance
+            self._identity = command.identity
             self._sequence = command.sequence
             state = (command.state or DriveState.stopped()).sanitized()
             pedals = (state.throttle, state.brake)
@@ -234,7 +234,7 @@ class Drive:
 
     def _clear_driver(self) -> None:
         self._driver = None
-        self._instance = None
+        self._identity = None
         self._sequence = None
         self._state = DriveState.stopped()
         self._takeover_pedals = None

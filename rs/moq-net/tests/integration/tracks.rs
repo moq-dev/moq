@@ -340,7 +340,7 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 	);
 }
 
-/// A relay's listing follows its broadcast onto another route of the same instance when
+/// A relay's listing follows its broadcast onto another route of the same identity when
 /// the serving one dies: a track listed afterwards still reaches the downstream reader.
 ///
 /// `P` is pulled by `A` directly and through `B`; `D` lists through `A`. `A`'s session

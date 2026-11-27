@@ -446,33 +446,33 @@ async def test_announced_broadcast():
         break
 
 
-async def test_following_restarts_on_a_new_instance():
+async def test_following_restarts_on_a_new_identity():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    following = consumer.follow("instance")
+    following = consumer.follow("identity")
 
-    # The route mints its own instance and keeps it across re-pricing.
-    first = origin.route("instance")
+    # The route mints its own identity and keeps it across re-pricing.
+    first = origin.route("identity")
     present = await next_route(announced)
     assert isinstance(present, moq.AnnounceEventPresent)
-    fresh = present.announce.route.instance
-    assert fresh == first.instance
+    fresh = present.announce.route.identity
+    assert fresh == first.identity
     assert not fresh.is_minted()
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
 
     # Another route is another stream: followers restart onto it, while the path stays
     # present, so neither the re-price nor the restart is listed.
     first.set_cost(1)
-    cam = moq.Instance.parse("cam")
-    second = origin.route("instance", instance=cam, epoch=1)
-    assert second.instance == cam
+    cam = moq.Identity.parse("cam")
+    second = origin.route("identity", identity=cam, epoch=1)
+    assert second.identity == cam
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
     first.withdraw()
     second.withdraw()
     absent = await next_route(announced)
     assert isinstance(absent, moq.AnnounceEventAbsent)
-    assert absent.announce.route.instance == cam
+    assert absent.announce.route.identity == cam
     following.cancel()
     first.broadcast.close()
     second.broadcast.close()
@@ -1025,9 +1025,9 @@ async def test_dynamic_broadcast_request():
     assert request is not None
     assert request.path == "dynamic/broadcast"
 
-    # A hidden job route answers once it announces, under the instance its claim lends.
+    # A hidden job route answers once it announces, under the identity its claim lends.
     served = request.route(hidden=True)
-    assert served.instance == dynamic.instance
+    assert served.identity == dynamic.identity
     track = served.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served.announce()
     with pytest.raises(Exception):
@@ -1982,36 +1982,36 @@ async def test_broadcast_is_reachable_only_while_announced():
     route.announce()
     back = await next_route(announced)
     assert isinstance(back, moq.AnnounceEventPresent)
-    assert back.announce.route.instance == route.instance
+    assert back.announce.route.identity == route.identity
     await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     announced.cancel()
     track.finish()
     route.broadcast.close()
 
 
-async def test_an_instance_pins_request_and_follow():
+async def test_an_identity_pins_request_and_follow():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    cam = moq.Instance.parse("cam")
-    other = moq.Instance.parse("other")
-    route = origin.route("live", instance=cam)
+    cam = moq.Identity.parse("cam")
+    other = moq.Identity.parse("other")
+    route = origin.route("live", identity=cam)
 
-    # Only a session mints an instance: callers name one, and never an empty one.
+    # Only a session mints an identity: callers name one, and never an empty one.
     assert str(cam) == cam.text() == "cam" and not cam.is_minted()
-    assert cam == moq.Instance.parse("cam") and hash(cam) == hash(moq.Instance.parse("cam"))
+    assert cam == moq.Identity.parse("cam") and hash(cam) == hash(moq.Identity.parse("cam"))
     assert cam != other
     with pytest.raises(ValueError):
-        moq.Instance()
-    with pytest.raises(moq.Error.InvalidInstance):
-        moq.Instance.parse("")
+        moq.Identity()
+    with pytest.raises(moq.Error.InvalidIdentity):
+        moq.Identity.parse("")
 
-    await asyncio.wait_for(consumer.request("live", instance=cam), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live", identity=cam), timeout=5.0)
     with pytest.raises(moq.Error.Protocol):
-        await asyncio.wait_for(consumer.request("live", instance=other), timeout=5.0)
-    async with consumer.follow("live", instance=cam) as following:
+        await asyncio.wait_for(consumer.request("live", identity=other), timeout=5.0)
+    async with consumer.follow("live", identity=cam) as following:
         assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
-        # Another instance taking the path over ends the pinned stream.
-        taken = origin.route("live", instance=other)
+        # Another identity taking the path over ends the pinned stream.
+        taken = origin.route("live", identity=other)
         assert await asyncio.wait_for(following.available(), timeout=5.0) is None
     taken.broadcast.close()
     route.broadcast.close()

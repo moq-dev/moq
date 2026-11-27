@@ -270,7 +270,7 @@ struct Feedback {
 /// `<prefix>/<name>.echo` broadcast whose `feedback.json` reports what each rendition the export
 /// reads has received, the connection's transport, and any MPEG-TS sections. Each catalog update
 /// reconciles it: a removed section or a changed path retracts the broadcast it replaces. It
-/// follows the catalog of the instance the export first reads, and ends when the export does.
+/// follows the catalog of the identity the export first reads, and ends when the export does.
 pub struct Echo {
 	target: EchoTarget,
 	source: moq_mux::Source,
@@ -361,7 +361,7 @@ impl Echo {
 			.origin
 			.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let tracks = ReportTrack::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
-		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
+		// A fresh identity, so a reader sees a replaced feedback broadcast as a restart.
 		broadcast.announce()?;
 		Ok(Feedback {
 			path: path.clone(),
@@ -575,7 +575,7 @@ async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines
 		Ok(following) => following,
 		Err(err) => return tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback"),
 	};
-	// The instance being read; a restarted publisher replaces it, and going offline keeps it
+	// The identity being read; a restarted publisher replaces it, and going offline keeps it
 	// draining its final snapshot.
 	let mut reading = None;
 	loop {
@@ -601,7 +601,7 @@ async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines
 	}
 }
 
-/// Write one publisher instance's feedback to `lines` until its track ends or `lines` closes.
+/// Write one publisher identity's feedback to `lines` until its track ends or `lines` closes.
 async fn read_feedback(
 	broadcast: moq_net::broadcast::Consumer,
 	path: moq_net::Path,

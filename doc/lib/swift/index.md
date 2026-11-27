@@ -85,7 +85,7 @@ let video = try Video.Producer(
     track: "camera"
 )
 try video.write(VideoFrame(timestamp: pts, data: rgba))
-try route.announce() // the route mints its own instance: route.instance
+try route.announce() // the route mints its own identity: route.identity
 try audio.finish()
 try video.finish()
 try broadcast.close()
