@@ -18,15 +18,7 @@ import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, peerEnded } from "../error.ts";
 import { Cost, routesEqual, WireRoute } from "../hop.ts";
 import type * as Identity from "../identity.ts";
-import {
-	arrival,
-	bestOfTier,
-	coveringPrefixes,
-	type Filed,
-	hiddenBelow,
-	scopeCaptures,
-	scopeOverlaps,
-} from "../internal.ts";
+import { arrival, bestOfTier, coveringPrefixes, type Filed, hiddenBelow } from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -41,12 +33,11 @@ import type { Version } from "./version.ts";
 
 /** What a `routes()` reader asked for. */
 export interface Request {
-	/** The prefix the reader's scope lies under. */
+	/** The prefix the reader lists: claims at or beneath it. */
 	prefix: Path.Valid;
-	scope: Path.Pattern;
 	/** Also report claims with a `.`-prefixed segment below the prefix. */
 	hidden: boolean;
-	/** Also report claims whose subtree overlaps the scope without matching it. */
+	/** Also report claims above the prefix, whose subtree covers it. */
 	covering: boolean;
 	/** Report each identity's claim at a path rather than the best one. */
 	claims: boolean;
@@ -426,7 +417,7 @@ export class Routed {
 	// one's end. `lost` marks the claims leaving as let go rather than withdrawn, so they go
 	// offline rather than ending.
 	#refresh(reader: Reader, path: Path.Valid, lost: boolean) {
-		const { announced, scope } = reader;
+		const { announced } = reader;
 		if (announced.closed.peek() !== undefined) return;
 		// Keyed by identity with `claims`, and otherwise the one key `undefined`.
 		const now = new Map<Identity.Valid | undefined, WireRoute>();
@@ -476,7 +467,6 @@ export class Routed {
 			}
 		}
 
-		const captures = scopeCaptures(scope, path);
 		const prev = reader.reported.get(path) ?? new Map<Identity.Valid | undefined, WireRoute>();
 		// Arrivals first, so a reader sees a claim replaced rather than the path gone between.
 		for (const [key, next] of now) {
@@ -485,12 +475,12 @@ export class Routed {
 			const restart = !!was && (was.identity !== next.identity || was.epoch !== next.epoch);
 			const kind = !was ? "start" : restart ? "restart" : "update";
 			console.debug(`announced: broadcast=${path} ${kind} identity=${next.identity}`);
-			announced.append({ prefix: path, captures, kind, route: next });
+			announced.append({ prefix: path, kind, route: next });
 		}
 		for (const [key, was] of prev) {
 			if (now.has(key)) continue;
 			console.debug(`announced: broadcast=${path} active=false lost=${lost}`);
-			announced.append({ prefix: path, captures, kind: lost ? "offline" : "end", route: was });
+			announced.append({ prefix: path, kind: lost ? "offline" : "end", route: was });
 		}
 		if (now.size > 0) reader.reported.set(path, now);
 		else reader.reported.delete(path);
@@ -616,7 +606,7 @@ export class Routed {
 
 // Whether `reader` reports a claim at `path`.
 function visible(reader: Reader, path: Path.Valid): boolean {
-	const matches = reader.covering ? scopeOverlaps(reader.scope, path) : reader.scope.matches(path);
+	const matches = Path.hasPrefix(reader.prefix, path) || (reader.covering && Path.hasPrefix(path, reader.prefix));
 	return matches && (reader.hidden || !hiddenBelow(reader.prefix, path));
 }
 

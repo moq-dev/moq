@@ -24,7 +24,7 @@ import {
 import { type FillGroups, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import { finalKey, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { finalKey, hiddenBelow, hooks } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
@@ -136,8 +136,8 @@ type SubscribeSetupState = {
 /** An announced path: each live advertisement referencing it, oldest first, and the route it holds. */
 type Announced = { adverts: { id: number; route: WireRoute }[]; route: WireRoute };
 
-/** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
-type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean; covering: boolean };
+/** A local announce reader's filter: the prefix it asked for, and its hidden and covering opt-ins. */
+type Filter = { prefix: Path.Valid; hidden: boolean; covering: boolean };
 
 /** A local announce reader: its filter, and what settles once its request is off the wire. */
 type Asking = Filter & { gone?: Promise<void> };
@@ -145,7 +145,7 @@ type Asking = Filter & { gone?: Promise<void> };
 /** Whether a reader with `filter` sees an announcement at `path`. */
 function sees(filter: Filter, path: Path.Valid): boolean {
 	return (
-		(filter.covering ? scopeOverlaps(filter.scope, path) : filter.scope.matches(path)) &&
+		(Path.hasPrefix(filter.prefix, path) || (filter.covering && Path.hasPrefix(path, filter.prefix))) &&
 		(filter.hidden || !hiddenBelow(filter.prefix, path))
 	);
 }
@@ -359,29 +359,26 @@ export class Subscriber {
 	}
 
 	/**
-	 * Gets an announced reader matching `scope`. Paths are relative to the session,
-	 * not the scope.
+	 * Gets an announced reader for the routes at or beneath `prefix`. Paths are relative to
+	 * the session, not the prefix.
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
 	 * that only answers are both discovered.
 	 *
-	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
+	 * Hidden routes (a `.`-prefixed segment below the prefix) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
 	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
 	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
 	 *
-	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
-	 * also asks for those whose subtree overlaps it.
+	 * Only routes at or beneath `prefix` are reported, unless `options.covering` also asks for
+	 * those above it.
 	 *
 	 * The request goes out once every overlapping request already closed here is off the
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Routes {
-		// The wire speaks announce interest by prefix.
-		const prefix = scopeHead(scope);
+	routes(prefix: Path.Valid = Path.empty(), options?: announce.Options): announce.Routes {
 		const filter: Asking = {
-			scope,
 			prefix,
 			hidden: options?.hidden ?? false,
 			covering: options?.covering ?? false,
@@ -402,7 +399,6 @@ export class Subscriber {
 			if (!sees(filter, active)) continue;
 			announced.append({
 				prefix: active,
-				captures: scopeCaptures(scope, active),
 				kind: "start",
 				route: info.route,
 			});
@@ -443,8 +439,7 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			// A consumer that closed stays registered until its request is off the wire.
 			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
-			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
+			consumer.append({ prefix: path, kind: "start", route });
 		}
 		return id;
 	}
@@ -476,8 +471,7 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			// A consumer that closed stays registered until its request is off the wire.
 			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
-			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "update", route });
+			consumer.append({ prefix: path, kind: "update", route });
 		}
 	}
 
@@ -505,11 +499,9 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			// A consumer that closed stays registered until its request is off the wire.
 			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
-			const scope = filter.scope;
 			// Only the peer's withdrawal ends the route; losing its stream or path lets it go.
 			consumer.append({
 				prefix: path,
-				captures: scopeCaptures(scope, path),
 				kind: ended ? "end" : "offline",
 				route: existing.route,
 			});

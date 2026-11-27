@@ -12,6 +12,7 @@
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",
+		"./prefix": "./src/prefix.ts",
 		"./zod": "./src/zod.ts"
 	},
 	"scripts": {
@@ -22,7 +23,6 @@
 	},
 	"dependencies": {
 		"@moq/clock": "workspace:^",
-		"@moq/pattern": "workspace:^",
 		"@moq/qmux": "workspace:^",
 		"@moq/signals": "workspace:*",
 		"pako": "^3.0.3"

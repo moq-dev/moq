@@ -307,7 +307,7 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 	} as unknown as WebTransport;
 	const subscriber = new Subscriber(quic, Version.DRAFT_06, toHop(1n));
 
-	const announced = subscriber.routes(Path.Pattern.subtree(Path.from("room")));
+	const announced = subscriber.routes(Path.from("room"));
 	announced.close();
 	// The slot frees up only after the consumer left.
 	opening.resolve();
@@ -516,7 +516,7 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	const grant = new Signal<Grant | undefined>(subscribe("a"));
 	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
 	const everything = subscriber.routes();
-	const a = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
+	const a = subscriber.routes(Path.from("a"));
 	await settle();
 	await ok();
 	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
@@ -525,7 +525,7 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	expect(a.synced.peek()).toBe(true);
 
 	grant.set(subscribe("a", "b"));
-	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	const b = subscriber.routes(Path.from("b"));
 	await settle();
 	expect(b.synced.peek()).toBe(false);
 	// The whole tree holds `b`, which may already be in the peer's answer; `a` cannot gain from it.
@@ -589,9 +589,7 @@ test("a lite-07 grant change under a coarsened ask holds the readers that arrive
 	});
 	const signal = new Signal<Grant | undefined>(grant("a"));
 	const { subscriber, send, ok, settle } = announceHarness(v, 1n, signal);
-	const readers = Array.from({ length: 17 }, (_, i) =>
-		subscriber.routes(Path.Pattern.subtree(Path.from(`a/${i}${"x".repeat(4000)}`))),
-	);
+	const readers = Array.from({ length: 17 }, (_, i) => subscriber.routes(Path.from(`a/${i}${"x".repeat(4000)}`)));
 	// The first reader is asked for alone, and the rest then move the ask to the root.
 	await settle();
 	await ok();
@@ -604,7 +602,7 @@ test("a lite-07 grant change under a coarsened ask holds the readers that arrive
 	signal.set(grant("a", "b"));
 	// Noticed before the reader arrives, while no reader's prefix holds `b`.
 	await settle();
-	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	const b = subscriber.routes(Path.from("b"));
 	await settle();
 	expect(b.synced.peek()).toBe(false);
 	await ok();
@@ -621,10 +619,10 @@ test("a lite-07 grant change under a coarsened ask holds the readers that arrive
 test("a lite-07 unresolved claim outlives another prefix's removal", async () => {
 	const v = Version.DRAFT_07;
 	const { subscriber, send, ok, settle, sessionEnded } = announceHarness(v);
-	const a = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
+	const a = subscriber.routes(Path.from("a"));
 	await settle();
 	await ok();
-	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	const b = subscriber.routes(Path.from("b"));
 	await settle();
 	await ok();
 
@@ -1071,7 +1069,7 @@ test.each([Version.DRAFT_02, Version.DRAFT_06])(
 		const { subscriber, send, sessionEnded, settle } = announceHarness(version);
 		// Each half fits on the wire alone; the joined path is one byte over.
 		const half = Path.from("x".repeat(Path.MAX_BYTES / 2));
-		const announced = subscriber.routes(Path.Pattern.subtree(half));
+		const announced = subscriber.routes(half);
 		await settle();
 
 		if (version === Version.DRAFT_02) {
@@ -4507,7 +4505,7 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 // A lite-07 session whose peer the test plays: what the peer sends on its Announce Stream reaches
 // the subscriber in order, as the session delivers it, and each edit the subscriber sends on its
 // own is answered at once. `another` adds a reader, which shares the stream.
-async function routedStream(options?: RouteOptions, scope?: Path.Pattern) {
+async function routedStream(options?: RouteOptions, scope?: Path.Valid) {
 	const version = Version.DRAFT_07;
 	const { quic, opened, closes } = fakeSession();
 	let sent!: ReadableStreamDefaultController<Uint8Array>;
@@ -4562,7 +4560,7 @@ async function routedStream(options?: RouteOptions, scope?: Path.Pattern) {
 		await delivering;
 	};
 
-	const another = async (scope?: Path.Pattern, more?: RouteOptions) => {
+	const another = async (scope?: Path.Valid, more?: RouteOptions) => {
 		const announced = subscriber.routes(scope, more ?? options);
 		await settled();
 		return { announced };
@@ -4755,7 +4753,7 @@ test("a lite-07 stream reports each identity's claim with claims", async () => {
 test("a lite-07 reader of each identity's claim drops an epoch superseded across filings", async () => {
 	const { subscriber, announced, send, settled, another, trackRequest } = await routedStream();
 	const [x, xa] = [Path.from("x"), Path.from("x/a")];
-	const narrow = await another(Path.Pattern.subtree(xa), { claims: true });
+	const narrow = await another(xa, { claims: true });
 	const i = Identity.parse("i");
 	await send({ status: "start", suffix: xa, identity: i, claim: claimOf({ above: 1n, epoch: 1n }) });
 	await send({ status: "start", suffix: x, identity: i, claim: claimOf({ epoch: 2n }) });
@@ -4780,7 +4778,7 @@ test("a lite-07 reader of each identity's claim drops an epoch superseded across
 test("a lite-07 reader below the request ranks a broader claim as above its prefix", async () => {
 	const { subscriber, announced, send, edits, settled, another } = await routedStream();
 	const [x, xa] = [Path.from("x"), Path.from("x/a")];
-	const narrow = await another(Path.Pattern.subtree(xa));
+	const narrow = await another(xa);
 	// The root covers the narrow reader, so its request is the root's alone.
 	expect(edits).toHaveLength(1);
 	const [broad, exact] = [Identity.parse("broad"), Identity.parse("exact")];
@@ -4806,7 +4804,7 @@ test("a lite-07 reader below the request ranks a broader claim as above its pref
 test("a lite-07 reader below the request shows the claim a consume of its prefix takes", async () => {
 	const { subscriber, announced, send, settled, another, trackRequest } = await routedStream();
 	const [x, xa] = [Path.from("x"), Path.from("x/a")];
-	const narrow = await another(Path.Pattern.subtree(xa));
+	const narrow = await another(xa);
 	const [made, filed] = [Identity.parse("made"), Identity.parse("filed")];
 	await send({ status: "start", suffix: x, identity: made, claim: claimOf() });
 	await send({ status: "start", suffix: xa, identity: filed, claim: claimOf({ above: 1n }) });
@@ -4848,7 +4846,7 @@ test("a lite-07 claim ranks by its priority before its cost, and last while it d
 // At the ANNOUNCE_OK answering an edit, both ends drop every claim within a prefix it removed:
 // the peer never ended them, so they go offline, and it tells again what the added prefix covers.
 test("a lite-07 edit drops the claims within a prefix it removed", async () => {
-	const { subscriber, announced, send, edits, settled } = await routedStream(undefined, Path.Pattern.subtree("a/b"));
+	const { subscriber, announced, send, edits, settled } = await routedStream(undefined, Path.from("a/b"));
 	const [ab, abc] = [Path.from("a/b"), Path.from("a/b/c")];
 	expect(edits).toEqual([{ remove: [], add: [{ prefix: ab, hidden: false }] }]);
 	const i = Identity.parse("i");
@@ -4856,7 +4854,7 @@ test("a lite-07 edit drops the claims within a prefix it removed", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: abc, kind: "start" });
 
 	// A wider reader moves the request up, which removes the narrower prefix.
-	const wide = subscriber.routes(Path.Pattern.subtree("a"));
+	const wide = subscriber.routes(Path.from("a"));
 	await settled();
 	expect(edits[1]).toEqual({ remove: [0n], add: [{ prefix: Path.from("a"), hidden: false }] });
 	expect(await announced.next()).toMatchObject({ prefix: abc, kind: "offline" });

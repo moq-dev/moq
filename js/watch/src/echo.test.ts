@@ -27,7 +27,7 @@ function source(path: string, received: Record<string, Received>) {
 // The feedback broadcasts announced on `origin`, by path.
 function announced(origin: Origin.Producer): Set<string> {
 	const paths = new Set<string>();
-	const listing = origin.announced(Path.Pattern.subtree(Path.empty()));
+	const listing = origin.announced();
 	void (async () => {
 		for (;;) {
 			const entry = await listing.next();

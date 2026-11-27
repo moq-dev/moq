@@ -33,7 +33,7 @@ export * as Group from "./group.ts";
 export * as Identity from "./identity.ts";
 /** Broadcast routing tables, independent of any connection. */
 export * as Origin from "./origin.ts";
-/** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
+/** Broadcast path utilities with delimiter-aware prefix matching, plus grant prefixes. */
 export * as Path from "./path.ts";
 /** Presentation timestamps and their timescales; durations live in {@link Clock}. */
 export * as Time from "./time.ts";

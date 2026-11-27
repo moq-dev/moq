@@ -9,7 +9,7 @@
  * a lone surrogate, which has no UTF-8 bytes of its own.
  * A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
  * either one is spelled, and any other `\` is refused. An escaped `/` never splits a segment:
- * `a\/b` is one segment, a prefix never ends inside it, and a pattern's `*` matches all of it.
+ * `a\/b` is one segment, and a prefix never ends inside it.
  * {@link parts} is the one walk every segment reading goes through. Until the previous release
  * is gone, an escaped `/` still counts against {@link MAX_PARTS}, and one beside a bare `/` or at
  * the end is refused, since that release splits at every `/`.
@@ -18,8 +18,7 @@
  * broadcast and the prefix a route or announcement covers, so a broadcast's own path is
  * the prefix it announces. See {@link Relative} for `..`-style references.
  *
- * {@link Prefix} and {@link Prefixes} (grants) and {@link Pattern} and {@link Patterns}
- * (discovery filters) are re-exported from `@moq/pattern`, the owner of their grammar and algebra.
+ * {@link Prefix} and {@link Prefixes} name grants and scopes: each prefix covers its whole subtree.
  *
  * @example
  * ```typescript
@@ -41,7 +40,7 @@
  * @module
  */
 
-import { parts as split } from "@moq/pattern";
+import { parts as split } from "./prefix.ts";
 
 /** A broadcast path: non-empty segments separated by `/`, or the empty root. */
 export type Valid = string & { __brand: "Name" };
@@ -419,17 +418,5 @@ export function relative(target: Valid, base: Valid): Relative | undefined {
 	return (rel.length === 0 ? "." : rel.join("/")) as Relative;
 }
 
-/** Grant prefixes, path patterns, and a segment's escaping, owned by `@moq/pattern`. */
-export {
-	compareSpecificity,
-	escape,
-	InvalidPattern,
-	InvalidPrefix,
-	Pattern,
-	Patterns,
-	Prefix,
-	Prefixes,
-	type Segment,
-	type Specificity,
-	unescape,
-} from "@moq/pattern";
+/** Grant prefixes and a segment's escaping. */
+export { escape, InvalidPrefix, Prefix, Prefixes, unescape } from "./prefix.ts";

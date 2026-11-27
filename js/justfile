@@ -129,12 +129,6 @@ qmux-bench:
     bun check --no-script -p net/bench/tsconfig.json
     bun net/bench/qmux.ts
 
-# Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
-pattern-bench:
-    uv run --no-project python ../sh/js/install.py frozen
-    bun check --no-script -p pattern/bench/tsconfig.json
-    bun pattern/bench/algebra.ts
-
 # Sweep manual-clock armed timers x due timers, with independent and shared abort scopes.
 clock-bench:
     uv run --no-project python ../sh/js/install.py frozen

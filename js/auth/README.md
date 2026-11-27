@@ -6,7 +6,7 @@ a client presents in its query and the keys that sign and verify it. For the
 contract, the relay flags, and worked examples, see the
 [Authentication Documentation](../../doc/bin/relay/auth.md).
 
-Grants and claims name paths with prefixes from `@moq/pattern`: `foo` is `foo`
+Grants and claims name paths with prefixes from `@moq/net/prefix`: `foo` is `foo`
 and everything beneath it, and the empty prefix `""` is everything. Signing takes
 no wildcard, so `foo/**`, `**`, and `cam-*` are refused. Tokens, a parsed key's
 scope, `Key.public`, and `GrantSchema`'s output spell each prefix as the subtree

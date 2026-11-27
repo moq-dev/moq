@@ -13,8 +13,8 @@ import type * as Path from "./path.js";
  * An announcement is always a prefix, never a broadcast: a route claims that
  * {@link prefix} and every path beneath it can be served. By convention a publisher
  * announces each broadcast's exact path, so enumerating routes enumerates broadcasts;
- * resolve one with the origin's `request(path)`. Narrow with a {@link Path.Pattern}
- * locally to follow a subset.
+ * resolve one with the origin's `request(path)`. List a narrower prefix, or filter the
+ * announced paths locally, to follow a subset.
  *
  * @public
  */
@@ -23,8 +23,6 @@ export interface Announce {
 	 * The prefix the route covers, relative to the origin (for a session, its URL path).
 	 */
 	prefix: Path.Valid;
-	/** What the filter's wildcards stood for, when this prefix pins all of them. */
-	captures: Path.Pattern[] | undefined;
 	/** Hops and cost of the route; on a retraction, its last advertised values. */
 	route: RouteInfo;
 }
@@ -70,18 +68,17 @@ export type RouteEvent = { kind: "start" | "update" | "restart" | "end" | "offli
 export interface Options {
 	/**
 	 * Also report hidden routes: those with a path segment starting with `.` below the
-	 * scope's literal head. Hidden routes are left out by default, so a platform can add
+	 * listed prefix. Hidden routes are left out by default, so a platform can add
 	 * `.`-named broadcasts (stats, internal routes) without them turning up in apps that
 	 * list everything. Subscribing to a hidden path by name works either way.
 	 */
 	hidden?: boolean;
 
 	/**
-	 * Also report every route that could serve a path in scope, not just those whose literal
-	 * name matches it. A route is a prefix serving everything beneath it, so a scope listing
-	 * `.chat` names at any depth still reports a route at `room`, which can serve
-	 * `room/lobby.chat`. A broadcast serves only its own path, yet is reported too, since it
-	 * shadows broader routes beneath it, as in Rust. Code that routes or forwards needs these;
+	 * Also report every route that could serve a path in scope, not just those at or beneath
+	 * the listed prefix. A route is a prefix serving everything beneath it, so listing
+	 * `room/lobby` still reports a route at `room`, which can serve it. A broadcast serves only
+	 * its own path, yet is reported too, since it shadows broader routes beneath it, as in Rust. Code that routes or forwards needs these;
 	 * listing broadcasts does not. Requests resolve through covering routes either way.
 	 */
 	covering?: boolean;
@@ -343,10 +340,10 @@ export class Consumer {
 		for (;;) {
 			const event = await this.#routes.next();
 			if (!event) return undefined;
-			const { kind, prefix, captures } = event;
+			const { kind, prefix } = event;
 			if (kind === "update" || kind === "restart") continue;
 			const route = routeInfo(event.route);
-			return { kind: kind === "start" ? "present" : "absent", prefix, captures, route };
+			return { kind: kind === "start" ? "present" : "absent", prefix, route };
 		}
 	}
 

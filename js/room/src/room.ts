@@ -62,7 +62,7 @@ export class Room {
 			const origin = effect.get(this.connection.origin);
 			if (!origin) return;
 			const prefix = effect.get(this.prefix) ?? Moq.Path.empty();
-			const announced = origin.announced(Moq.Path.Pattern.subtree(prefix));
+			const announced = origin.announced(prefix);
 			effect.cleanup(() => announced.close());
 
 			effect.spawn(this.#run.bind(this, announced, prefix, effect));
@@ -83,20 +83,17 @@ export class Room {
 			const update = await effect.race(announced.next());
 			if (!update) break;
 
-			// The scope's `**` captures what lies beneath the prefix. A broad route
-			// that cannot pin that suffix names no participant to open.
-			const capture = update.captures?.[0];
-			const suffix = capture?.isLiteral ? capture.text : capture?.asPrefix();
-			if (suffix === undefined) continue;
-			const parsed = parse(Moq.Path.from(suffix));
+			// What lies beneath the prefix names the participant.
+			const suffix = Moq.Path.stripPrefix(prefix, update.prefix);
+			if (suffix === null) continue;
+			const parsed = parse(suffix);
 			if (!parsed) continue;
-			const covered = Moq.Path.join(prefix, Moq.Path.from(suffix));
 
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;
 
 			if (update.kind === "present") {
-				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
+				this.#add(parsed.identity, parsed.kind, update.prefix);
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}

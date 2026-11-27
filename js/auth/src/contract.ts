@@ -7,15 +7,16 @@
  * @module
  */
 
-import { Pattern } from "@moq/pattern";
+import { Prefix } from "@moq/net/prefix";
 import * as z from "zod/mini";
 import { paths, UnixSecondsSchema, WireAccessSchema, writtenAccess } from "./wire.ts";
 
+// A path the relay could name: no `*`, no empty segment, valid escapes, at most 32 segments.
 const PathSchema = z.string().check(
 	z.refine(
 		(path) => {
 			try {
-				Pattern.literal(path);
+				Prefix.parse(path);
 				return true;
 			} catch {
 				return false;

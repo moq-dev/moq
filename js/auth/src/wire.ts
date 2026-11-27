@@ -11,9 +11,12 @@
  * @module
  */
 
-import { Prefix, parts } from "@moq/pattern";
+import { Prefix, parts } from "@moq/net/prefix";
 import * as z from "zod/mini";
 import type { Claims } from "./claims.ts";
+
+// The most segments a path may have; a prefix this deep has nothing beneath it.
+const MAX_SEGMENTS = 32;
 
 /**
  * A list of prefix texts, each validated by `Prefix.parse`. A member holding a `*` is refused
@@ -62,7 +65,11 @@ export function readPrefixes(texts: readonly string[] | undefined): string[] {
  * literal, which a release reads as that one path: nothing lies beneath it.
  */
 function written(texts: readonly string[]): string[] {
-	return texts.map((text) => readPrefix(text).pattern().toString());
+	return texts.map((text) => {
+		const prefix = readPrefix(text);
+		if (prefix.isEmpty) return "**";
+		return prefix.segments.length === MAX_SEGMENTS ? prefix.text : `${prefix.text}/**`;
+	});
 }
 
 /**
