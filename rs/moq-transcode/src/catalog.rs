@@ -355,7 +355,8 @@ pub(crate) fn inherit(rungs: &mut [Published], source: &VideoConfig) {
 /// The rungs carry the source's media timestamps, so a catalog change is stamped where the source
 /// stamped it: a player holding an update until its media reaches that time applies it with the
 /// frames it describes. The producer's own clock reads nothing of the source's media, so it never
-/// times a change, except for a scale-less source catalog track, whose keys are not times.
+/// times a change. A scale-less source catalog track's keys are not times: its changes land as early
+/// as they can, in effect for whatever media the reader holds.
 pub(crate) struct Derived {
 	producer: moq_mux::catalog::Producer,
 	/// Where the source's renditions are referenced from, when they are passed through.
@@ -399,7 +400,7 @@ impl Derived {
 	fn stamp(&self, at: moq_net::Timestamp) -> Result<moq_net::Timestamp, Error> {
 		let at = match at.scale() {
 			Some(_) => at,
-			None => self.producer.next_timestamp(),
+			None => moq_net::Timestamp::ZERO,
 		};
 		// The scale `moq_mux::catalog::Producer` creates the catalog tracks with, so two stamps one
 		// unit apart publish as two groups.
@@ -1143,8 +1144,7 @@ mod tests {
 	}
 
 	/// A change keeps the source's stamp while it passes the last publish, compared in the catalog
-	/// track's milliseconds; one that doesn't lands a unit past it, and a scale-less key on the
-	/// producer's own clock, still past it.
+	/// track's milliseconds; one that doesn't lands a unit past it, as does a scale-less key.
 	#[test]
 	fn derived_stamps_follow_the_source_without_rewinding() {
 		let mut output = moq_net::broadcast::Info::new().produce();
@@ -1166,14 +1166,8 @@ mod tests {
 			"a stamp inside the last millisecond moves past it"
 		);
 		assert_eq!(publish(ms(20)), ms(20));
-		let own = publish(moq_net::Timestamp::unscaled(1));
-		assert!(own > ms(20));
-		assert_eq!(own.scale(), Some(moq_net::Timescale::MILLI));
-		assert_eq!(
-			publish(ms(20)),
-			ms(own.value() + 1),
-			"a stamp the producer gave is passed too"
-		);
+		assert_eq!(publish(moq_net::Timestamp::unscaled(30)), ms(21), "a key is no time");
+		assert_eq!(publish(ms(30)), ms(30));
 	}
 
 	/// The first snapshot's clock, or lack of one, is the one every later snapshot carries.

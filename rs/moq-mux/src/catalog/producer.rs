@@ -660,7 +660,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// past the last published catalog's, or the stamp of a change still waiting on the initial
 	/// publish; batch the edits at one frame into one guard. An edit that re-bases the clock by
 	/// writing `sync.clock` is stamped on the clock it adopts, unmoved: a derivative times it on its
-	/// input's timeline, the one it republishes.
+	/// input's timeline, the one it republishes. Don't stamp such an edit with
+	/// [`next_timestamp`](Self::next_timestamp), which reads the clock it replaces.
 	///
 	/// The publish happens when the returned [`Guard`] drops. Use [`mutate`](Self::mutate) for a
 	/// single edit, which is this guard opened and committed for you. Fails once the catalog tracks

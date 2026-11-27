@@ -9,8 +9,8 @@ use crate::Result;
 /// group's snapshot and checks its renditions, reporting failures as this crate's
 /// [`Error`](crate::Error).
 ///
-/// Generic over the application extension `E` (defaulting to `()`); yields a
-/// [`Catalog<E>`](super::Catalog).
+/// Generic over the application extension `E` (defaulting to `()`); yields each
+/// [`Catalog<E>`](super::Catalog) with the timestamp it takes effect at.
 ///
 /// A rendition's `broadcast` field is relative to the path of the broadcast serving the
 /// catalog, taken from the track's [`broadcast::Info::path`](moq_net::broadcast::Info::path).
