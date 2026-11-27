@@ -800,9 +800,11 @@ function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 // `current`, a held range, at the policy a retune `asked` for, and a live join at its new max.
 function retunedRange(current: WireRange, asked: WireRange): WireRange {
 	const range: WireRange = { ...current, priority: asked.priority, order: asked.order };
-	const max = asked.start?.live?.max ?? asked.start?.joined?.max;
-	if (max !== undefined && range.start?.live) range.start = { live: { ...range.start.live, max } };
-	else if (max !== undefined && range.start?.joined) range.start = { joined: { ...range.start.joined, max } };
+	// `null` is no limit, so pick the anchor before reading its max.
+	const join = asked.start?.live ?? asked.start?.joined;
+	if (join === undefined) return range;
+	if (range.start?.live) range.start = { live: { ...range.start.live, max: join.max } };
+	else if (range.start?.joined) range.start = { joined: { ...range.start.joined, max: join.max } };
 	return range;
 }
 
@@ -2422,24 +2424,24 @@ export class Publisher {
 			return { policy: policyOf(range), budget: typeof max === "number" ? max : NO_MAX_DELAY };
 		};
 		// Lite-07: a group goes out at the top of the live ranges still wanting it, falling as it ages
-		// past the ones above, so its stream ranks by its own policy. The ranges covering it are fixed
-		// as it goes out, as the Rust `GroupServe::covered_by`.
+		// past the ones above, so its stream ranks by its own policy. The ranges covering it are read
+		// again each time it is ranked, so an update that adds a range over it, or re-adds its span
+		// under a new Range ID, moves it, as the Rust `Steer::inflight` does.
 		const rankingOf = (group: group.Consumer): Ranking | undefined => {
 			if (!hasRanges(this.version)) return undefined;
-			const covers = hooks.servingCovering(track, group.start).map(([id]) => id);
 			const expiry = hooks.groupExpiry(group);
 			// The widest budget the group is known to have aged past, which only grows.
 			let aged: number | undefined;
 			return {
 				policy: (whole) => {
+					const covers = hooks.servingCovering(track, group.start).map(([id]) => id);
 					for (;;) {
 						const { policy, lasts } = groupPolicy({ whole, steering: rangeSteering }, covers, aged);
 						if (lasts === undefined || !expiry?.aged?.(lasts)) return policy;
 						aged = lasts;
 					}
 				},
-				// Aging moves a group only between ranges, so one covered by a single range never does.
-				changed: covers.length > 1 ? (expiry?.changed ?? []) : [],
+				changed: expiry?.changed ?? [],
 			};
 		};
 

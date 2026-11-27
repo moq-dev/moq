@@ -9675,8 +9675,10 @@ impl group::Expiry for FetchExpiry {
 		let route = recover.and_then(|recover| recover.poll_budget(waiter));
 		let state = self.state.read();
 		let budget = route.map_or(Duration::MAX, |route| route.at(self.key));
-		let budget = clamp_max_delay(budget, state.max_age_bound());
-		(state.poll_drifted(self.key, &Servable::ALL, budget, Some(&self.superseded), waiter)).then_some(budget)
+		// Judged under the bound but named by the budget, as the cursor names one it writes off:
+		// a group past the publisher's max age is gone for every budget above it.
+		let judged = clamp_max_delay(budget, state.max_age_bound());
+		(state.poll_drifted(self.key, &Servable::ALL, judged, Some(&self.superseded), waiter)).then_some(budget)
 	}
 }
 
@@ -9771,8 +9773,10 @@ impl group::Expiry for GroupExpiry {
 		});
 
 		let state = self.state.read();
-		let budget = clamp_max_delay(budget.at(self.key), state.max_age_bound());
-		(state.poll_drifted(self.key, &servable, budget, Some(&self.superseded), waiter)).then_some(budget)
+		// Named by the budget rather than the bound it was judged under; see `FetchExpiry`.
+		let budget = budget.at(self.key);
+		let judged = clamp_max_delay(budget, state.max_age_bound());
+		(state.poll_drifted(self.key, &servable, judged, Some(&self.superseded), waiter)).then_some(budget)
 	}
 }
 
@@ -22861,6 +22865,35 @@ mod test {
 			late.map(|frame| frame.timestamp),
 			Some(Timestamp::from_millis(1950).unwrap())
 		);
+	}
+
+	/// A history reader's group stale past the publisher's max age is named by the reader's
+	/// budget, not the bound it was judged under, so its drop says the publisher's max age and
+	/// no wider reader asks for it again.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_group_stale_past_the_max_age_is_named_by_the_readers_budget() {
+		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(500)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max(None));
+		let mut open = producer.append_next().unwrap();
+		open.write_frame(open.key_time(), bytes::Bytes::from_static(b"a"))
+			.unwrap();
+
+		let mut group = subscriber.recv_group().await.unwrap().expect("group");
+		assert!(group.read_frame().await.unwrap().is_some());
+		let stalled = kio::clock::sim::spawn(async move {
+			let read = group.read_frame().await;
+			(read, group.expired_under())
+		});
+		kio::clock::sim::yield_now().await;
+
+		// Its successor at 1s bounds where it reaches, a second behind the 2s edge.
+		append_at(&mut producer, 1000);
+		append_at(&mut producer, 2000);
+
+		let (read, under) = stalled.await.unwrap();
+		assert!(matches!(read, Err(Error::Old)), "the group fails: {read:?}");
+		assert_eq!(under, Some(Duration::MAX));
 	}
 
 	/// A drained group the budget gives up on fails with [`Error::Old`] on every probe,

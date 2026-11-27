@@ -103,7 +103,7 @@ Sync commit: `f7a41c3ea52fa6b12c6bf698142f428c24ea673b`. Run `git log f7a41c3ea5
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/track/demand/ranges.rs` `Ranges::union`, `Ranges::fold`; `rs/moq-net/src/model/track/demand.rs` `Subscriptions::combined` | `Folds`, `Fold`, `Update`, `FoldRule` |
-| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `rank_at`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
+| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `TrackRun::rank_now`, `GroupServe::poll_steer`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `TrackRun::serve`, `TrackRun::mark_served` | `Send`, `told` |
 | `rs/moq-net/src/model/subscription/window.rs` `Budget::at`; `rs/moq-net/src/model/track.rs` `GroupExpiry::is_expired`; `rs/moq-net/src/model/group.rs` `Consumer::expired_under`; `rs/moq-net/src/lite/publisher.rs` `GroupServe::settle_failed` | `Wanting`, `Widest`, `PubJudged`, `Judge` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::hole`, `TrackRun::give_way`, `TrackRun::shed`; `rs/moq-net/src/model/subscription.rs` `Subscription::narrowest`; `rs/moq-net/src/lite/subscribe.rs` `SubscribeDrop::given_up`, `SubscribeDrop::stale` | `GiveUp`, `Narrowest`, `PubUnjudged`, `verdict` |

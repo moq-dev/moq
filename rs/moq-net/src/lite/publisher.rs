@@ -2669,6 +2669,7 @@ impl Request for SubscribeServe {
 						priority: msg.priority,
 						order: msg.order,
 						ranges,
+						inflight: Default::default(),
 					};
 					let steer_tx = kio::Producer::new(steer.clone());
 
@@ -3433,6 +3434,7 @@ impl OneShotFetch {
 								priority: msg.priority,
 								order: msg.order,
 								ranges: Default::default(),
+								inflight: Default::default(),
 							};
 							let steer_tx = kio::Producer::new(steer.clone());
 							let outcomes = Arc::new(GroupOutcomes::default());
@@ -5723,6 +5725,9 @@ struct Steer {
 	order: Order,
 	/// Lite-07: each live range's own priority, order, and budget, by Range ID.
 	ranges: Arc<std::collections::BTreeMap<u64, Steering>>,
+	/// Lite-07: the Range IDs covering each group in flight when an update last edited the
+	/// ranges, by group key, so a group already streaming goes out at the ranges wanting it now.
+	inflight: Arc<std::collections::BTreeMap<u64, Vec<u64>>>,
 }
 
 /// Which groups a run's cursor hands out.
@@ -5770,6 +5775,7 @@ impl PartialEq for Steer {
 		self.priority == other.priority
 			&& self.order == other.order
 			&& (Arc::ptr_eq(&self.ranges, &other.ranges) || self.ranges == other.ranges)
+			&& (Arc::ptr_eq(&self.inflight, &other.inflight) || self.inflight == other.inflight)
 	}
 }
 
@@ -5833,16 +5839,6 @@ fn poll_policy(
 			_ => return policy,
 		}
 	}
-}
-
-/// Where a group at `key` from `frame_start` ranks among its subscription's when it opens,
-/// `covers` being the ranges covering it: by priority, then by key in that priority's order.
-fn rank_at(steer: &Steer, covers: &[u64], key: u64, frame_start: u64) -> (i8, i64) {
-	let (policy, _) = steer.serving(covers, None);
-	(
-		policy.priority,
-		crate::priority::in_group(key, frame_start, policy.order),
-	)
 }
 
 /// A lite-07 subscription's send groups, one per subscriber priority its groups go out at,
@@ -6518,10 +6514,36 @@ impl TrackRun {
 					.map(|(id, range)| (*id, Steering::of(range))),
 			);
 		}
+		// Read first: the edit moves it.
+		let requested = self.requested.start();
+		let edited = match upd.ranges {
+			lite::Applied::Edit {
+				retired,
+				added,
+				retuned,
+			} => self.edit(retired, added, retuned),
+			lite::Applied::Replace(ranges) => {
+				let legacy = Bounds::legacy(self.ctx.version, upd.max_delay);
+				self.replace_ranges(ranges, legacy)
+			}
+		};
+		// A group already in flight goes out at the ranges wanting it now, which an edit may
+		// retire, re-add under a new Range ID, or join.
+		let inflight = match edited && !ranges.is_empty() {
+			true => {
+				let keys: Vec<u64> = (self.children.iter().chain(&self.opening))
+					.map(|serve| serve.key)
+					.collect();
+				let mut covering = |key| (self.track.covering(key).into_iter().map(|(id, _)| id)).collect();
+				Arc::new(keys.into_iter().map(|key| (key, covering(key))).collect())
+			}
+			false => self.steer_tx.read().inflight.clone(),
+		};
 		let steer = Steer {
 			priority: upd.priority,
 			order: upd.order,
 			ranges,
+			inflight,
 		};
 		if *self.steer_tx.read() != steer {
 			let priority = steer.priority;
@@ -6536,19 +6558,6 @@ impl TrackRun {
 				group.set_priority(crate::priority::group(priority, self.ctx.publisher));
 			}
 		}
-		// Read first: the edit moves it.
-		let requested = self.requested.start();
-		let edited = match upd.ranges {
-			lite::Applied::Edit {
-				retired,
-				added,
-				retuned,
-			} => self.edit(retired, added, retuned),
-			lite::Applied::Replace(ranges) => {
-				let legacy = Bounds::legacy(self.ctx.version, upd.max_delay);
-				self.replace_ranges(ranges, legacy)
-			}
-		};
 		if !edited {
 			return;
 		}
@@ -7088,8 +7097,10 @@ impl TrackRun {
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
+					// Ranked as it would go out now, aged past the ranges it outlived, so a group only
+					// history still wants never displaces one a live range does.
 					if let Some(waiting) = self.opening.as_ref().map(GroupServe::rank)
-						&& rank_at(&self.ctx.steer_seen.clone(), &self.covering(key), key, 0) < waiting
+						&& self.rank_now(&group, waiter) < waiting
 					{
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "shedding a group ranked below one waiting for credit");
 						self.mark_served(key..key + 1);
@@ -7824,6 +7835,14 @@ impl TrackRun {
 		(held.peek().is_some() && held.all(|held| held > waiting)).then_some(waiting)
 	}
 
+	/// Where `group` ranks among the subscription's if it went out now: by the policy it goes
+	/// out at, aged past the budgets it outlived, then by key in that policy's order.
+	fn rank_now(&mut self, group: &group::Consumer, waiter: &kio::Waiter) -> (i8, i64) {
+		let covers = self.covering(group.start);
+		let policy = poll_policy(&self.ctx.steer_seen, &covers, &mut None, group, waiter);
+		(policy.priority, crate::priority::in_group(group.start, 0, policy.order))
+	}
+
 	/// The Range IDs covering the group at `key`; see [`covering`].
 	fn covering(&mut self, key: u64) -> Vec<u64> {
 		covering(&self.ctx.steer_seen, &mut self.track, key)
@@ -7837,20 +7856,17 @@ impl TrackRun {
 			return;
 		};
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key = waiting.key, "giving way to a higher-ranked group");
-		waiting.settle_failed(&Error::Old);
+		waiting.give_up(self.track.subscription().narrowest());
 	}
 
 	/// Give up a group the cursor handed out without a stream, as one expired under the
-	/// subscription's budget is.
+	/// subscription's budget is. Judged now, by the narrowest live range: a drop held for the
+	/// first SUBSCRIBE_START goes out after that range may have left.
 	fn shed(&mut self, group: &group::Consumer) {
 		if self.ctx.version.has_track_stream() {
 			let span = span(group.start, group.end());
-			self.ctx
-				.outcomes
-				.dropped
-				.lock()
-				.unwrap()
-				.push((span, Hole::drop(StreamError::Old)));
+			let hole = Hole::stale(self.track.subscription().narrowest());
+			self.ctx.outcomes.dropped.lock().unwrap().push((span, hole));
 		}
 	}
 
@@ -8387,6 +8403,24 @@ impl GroupServe {
 	}
 
 	/// This, ranked by the policies of `covers`, the live ranges covering its group.
+	/// Take a new steer into `ctx`, and with it the Range IDs `covers` the group at `key` if an
+	/// update edited them. Polled until pending, so the next update wakes the group too.
+	fn poll_steer(ctx: &mut GroupContext, covers: &mut Vec<u64>, key: u64, waiter: &kio::Waiter) {
+		loop {
+			let seen = &ctx.steer_seen;
+			let Poll::Ready(Ok(value)) = ctx.steer.poll(waiter, |value| match **value != *seen {
+				true => Poll::Ready((**value).clone()),
+				false => Poll::Pending,
+			}) else {
+				return;
+			};
+			if let Some(now) = value.inflight.get(&key) {
+				covers.clone_from(now);
+			}
+			ctx.steer_seen = value;
+		}
+	}
+
 	fn covered_by(mut self, covers: Vec<u64>) -> Self {
 		self.policy = self.ctx.steer_seen.serving(&covers, None).0;
 		self.covers = covers;
@@ -8427,6 +8461,8 @@ impl GroupServe {
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(err));
 		}
+		// A retune while it waits moves where it ranks, which may let it preempt a stream.
+		Self::poll_steer(&mut self.ctx, &mut self.covers, self.key, waiter);
 		let policy = poll_policy(&self.ctx.steer_seen, &self.covers, &mut self.aged, &self.group, waiter);
 		// A lite-07 stream opens in the send group of its own priority.
 		let joined = match (&self.rank, &self.ctx.groups) {
@@ -8523,14 +8559,8 @@ impl GroupServe {
 						writer.set_priority(PriorityHandle::send_order_of(rank).into());
 					}
 				}
-				let seen = &self.ctx.steer_seen;
 				// A dropped producer just disables this arm, like the queue arm above.
-				if let Poll::Ready(Ok(value)) = self.ctx.steer.poll(waiter, |value| match **value != *seen {
-					true => Poll::Ready((**value).clone()),
-					false => Poll::Pending,
-				}) {
-					self.ctx.steer_seen = value;
-				}
+				Self::poll_steer(&mut self.ctx, &mut self.covers, self.key, waiter);
 				// Before lite-07 the run loop moves the send group itself, and a stream only
 				// follows the order. A lite-07 group's policy also falls as it ages past the
 				// ranges ranked above, moving it to the send group of its new priority.
@@ -8900,15 +8930,24 @@ impl GroupServe {
 	/// Account for a group that failed with `err`: one that never got a stream, or whose
 	/// header a reset may lose, is named on the control stream with that error.
 	fn settle_failed(&mut self, err: &Error) {
+		self.settle(Hole::drop(StreamError::from(err)));
+	}
+
+	/// Give up a group that waited for credit, for one that outranks it, as one expired under
+	/// `budget` is: the subscription's narrowest live range, judged now rather than when a
+	/// drop held for the first SUBSCRIBE_START goes out.
+	fn give_up(&mut self, budget: Duration) {
+		self.settle(Hole::stale(budget));
+	}
+
+	/// Name the group in a drop as `hole` says, unless it went stale, which names the budget it
+	/// was judged under.
+	fn settle(&mut self, hole: Hole) {
 		if !self.ctx.version.has_track_stream() || matches!(self.state, GroupState::Accounted) {
 			return;
 		}
 		let span = span(self.key, self.group.end());
-		// A group that went stale names the budget it was judged under.
-		let hole = match self.group.expired_under() {
-			Some(budget) => Hole::stale(budget),
-			None => Hole::drop(StreamError::from(err)),
-		};
+		let hole = self.group.expired_under().map_or(hole, Hole::stale);
 		self.ctx.outcomes.dropped.lock().unwrap().push((span, hole));
 	}
 }
@@ -11851,6 +11890,7 @@ mod serve_group_test {
 			priority: whole.priority,
 			order: whole.order,
 			ranges: Arc::new((0..).zip(ranges.iter().map(Steering::of)).collect()),
+			inflight: Default::default(),
 		};
 		let steer_tx = kio::Producer::new(steer.clone());
 		let transport = crate::driver::Transport::new(session);
@@ -11925,6 +11965,7 @@ mod serve_group_test {
 				]
 				.into(),
 			),
+			inflight: Default::default(),
 		};
 
 		let covers = [0, 1, 2];
@@ -12057,6 +12098,40 @@ mod serve_group_test {
 		);
 	}
 
+	/// A group shed or giving way is judged stale when it is given up, under the narrowest live
+	/// range then, so a drop held for the first SUBSCRIBE_START names that budget even once the
+	/// range left, rather than claim the publisher's max age.
+	#[kio::test]
+	async fn lite07_a_group_given_up_for_credit_names_the_budget_it_was_given_up_under() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume());
+		let max = Duration::from_millis(100);
+		let live = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: None,
+				max: Some(max),
+			}),
+			..lite::Range::OPEN
+		};
+		let (mut run, mut writer, _log) = lite07_policy_run(session, &track, &[live, history_at(0, Order::Ascending)]);
+		let waiter = kio::Waiter::noop();
+
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		let group = track.create_group(group::Info { start: 1 }).unwrap().consume();
+		run.shed(&group);
+		run.give_way();
+		let given_up: Vec<_> = (run.ctx.outcomes.dropped.lock().unwrap().iter())
+			.map(|(_, hole)| hole.clone())
+			.collect();
+		assert_eq!(given_up, [Hole::stale(max), Hole::stale(max)]);
+	}
+
 	/// An update retuning a range's priority moves the in-flight groups it ranks.
 	#[kio::test]
 	async fn lite07_a_retuned_range_moves_its_in_flight_groups() {
@@ -12094,6 +12169,53 @@ mod serve_group_test {
 			[(0, crate::priority::group(2, 0)), (1, crate::priority::group(7, 0))]
 		);
 		assert_eq!(log.joins(), [(0, 0), (0, 1)]);
+	}
+
+	/// A range an update adds over a group already in flight moves it, and so does one that
+	/// re-adds a retired range's span under a new Range ID: a group goes out at the ranges
+	/// wanting it now, not those that covered it when it opened.
+	#[kio::test]
+	async fn lite07_an_edit_moves_the_in_flight_groups_it_covers() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
+		let log = session.log.clone();
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[history_at(2, Order::Descending)]);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(log.joins(), [(0, 0)]);
+
+		let mut edit = |retired: Vec<u64>, added: Vec<(u64, lite::Range)>| {
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 1,
+				max_delay: None,
+				ranges: lite::Applied::Edit {
+					retired,
+					added,
+					retuned: Vec::new(),
+				},
+				order: Order::Descending,
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		};
+		edit(Vec::new(), vec![(1, history_at(7, Order::Descending))]);
+		assert_eq!(log.joins(), [(0, 0), (0, 1)], "an added range moves it");
+		// Retire both and re-add the lower one's span: the group falls back to it, rather than
+		// to the subscription's as a whole.
+		edit(vec![0, 1], vec![(2, history_at(4, Order::Descending))]);
+		assert_eq!(
+			log.groups(),
+			[
+				(0, crate::priority::group(2, 0)),
+				(1, crate::priority::group(7, 0)),
+				(2, crate::priority::group(4, 0))
+			]
+		);
+		assert_eq!(log.joins(), [(0, 0), (0, 1), (0, 2)], "a re-added span moves it");
 	}
 
 	/// A retune changes only a resolved time range's policy: the range keeps the group it

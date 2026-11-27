@@ -725,11 +725,17 @@ impl Recovery {
 			.with_ranges(track::Range::span(Some(groups.start), end))
 			.prioritized(priority)
 			.ordered(Order::Ascending);
-		let ranges = vec![lite::Range {
-			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
-			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
-			..lite::Range::OPEN
-		}];
+		let ranges = vec![
+			lite::Range {
+				start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+				end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
+				..lite::Range::OPEN
+			}
+			.with_policy(lite::Policy {
+				priority,
+				order: Order::Ascending,
+			}),
+		];
 		Self::open(serve, serving, groups, subscription, ranges, !one_start)
 	}
 
@@ -744,11 +750,17 @@ impl Recovery {
 			}])
 			.prioritized(priority)
 			.ordered(Order::Ascending);
-		let ranges = vec![lite::Range {
-			start: Some(lite::Anchor::Time(time)),
-			end: Some(lite::Anchor::Time(time)),
-			..lite::Range::OPEN
-		}];
+		let ranges = vec![
+			lite::Range {
+				start: Some(lite::Anchor::Time(time)),
+				end: Some(lite::Anchor::Time(time)),
+				..lite::Range::OPEN
+			}
+			.with_policy(lite::Policy {
+				priority,
+				order: Order::Ascending,
+			}),
+		];
 		Self::open(serve, serving, groups, subscription, ranges, true)
 	}
 

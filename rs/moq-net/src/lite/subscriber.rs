@@ -7007,6 +7007,9 @@ mod tests {
 		}
 	}
 
+	/// The priority the reader a recovery is for reads at.
+	const RECOVERY_PRIORITY: i8 = 3;
+
 	/// A lite-06 copy over `session` whose reader owes `missing`, its run already recovered on a
 	/// SUBSCRIBE of its own.
 	struct Recovering {
@@ -7066,7 +7069,11 @@ mod tests {
 			copy.evict(key);
 		}
 		let mut reader = copy
-			.subscribe(crate::track::Subscription::default().with_range(missing.read))
+			.subscribe(
+				crate::track::Subscription::default()
+					.with_range(missing.read)
+					.prioritized(RECOVERY_PRIORITY),
+			)
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "the read is owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -7094,6 +7101,22 @@ mod tests {
 				.unwrap();
 		}
 		bytes
+	}
+
+	/// A recovery asks at its reader's priority, oldest first: the policy its range carries,
+	/// which the SUBSCRIBE's own priority and order are read off.
+	#[kio::test]
+	async fn a_recovery_asks_at_its_readers_priority_oldest_first() {
+		let Recovering {
+			held: (_reader, session, _requests),
+			..
+		} = recovering(
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()),
+			Missing::evicted(),
+		);
+		// Lite-06 carries the priority alone, read off the ranges as lite-07 reads each one's.
+		let (msg, _) = sent_subscribe(&sent(&session.log, 0), Version::Lite06);
+		assert_eq!(msg.priority, RECOVERY_PRIORITY);
 	}
 
 	/// TEMPORARY MIGRATION, delete with `fills::Recovery::walk`: a relay of the previous release
@@ -17025,14 +17048,21 @@ impl kio::Task for SubFillRun {
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),
 						max_delay: None,
-						ranges: vec![lite::Range {
-							start: Some(lite::Anchor::Absolute(Position {
-								group: self.group,
-								frame: frame_start,
-							})),
-							end: Some(lite::Anchor::Absolute(end_pos)),
-							..lite::Range::OPEN
-						}],
+						// Lite-07 reads the policy off each range alone.
+						ranges: vec![
+							lite::Range {
+								start: Some(lite::Anchor::Absolute(Position {
+									group: self.group,
+									frame: frame_start,
+								})),
+								end: Some(lite::Anchor::Absolute(end_pos)),
+								..lite::Range::OPEN
+							}
+							.with_policy(lite::Policy {
+								priority: request.priority(),
+								order: crate::track::Order::Ascending,
+							}),
+						],
 						order: crate::track::Order::Ascending,
 						meta: self.serve.meta,
 					};

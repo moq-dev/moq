@@ -1647,6 +1647,42 @@ test("lite draft-07: a retuned range moves its in-flight groups", async () => {
 	}
 });
 
+// A range an update adds over a group already in flight moves it, and so does one re-adding a
+// retired range's span under a new Range ID. Mirrors the Rust
+// `lite07_an_edit_moves_the_in_flight_groups_it_covers`.
+test("lite draft-07: an edit moves the in-flight groups it covers", async () => {
+	using clock = manual();
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		ranges: [{ start: { time: 0n }, priority: 2 }],
+	});
+	const group = sub.track.createGroup(0n);
+	const edit = async (remove: bigint[], priority: number) => {
+		const before = sub.track.subscription.peek();
+		await new SubscribeUpdate({ priority: 1, remove, ranges: [{ start: { time: 0n }, priority }] }).encode(
+			sub.client.writer,
+			Version.DRAFT_07,
+		);
+		while (sub.track.subscription.peek() === before) await sub.track.subscription.changed();
+		await clock.advance(Duration.ZERO);
+	};
+	try {
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		expect(await sub.servedHeader()).toBe(0n);
+		await clock.advance(Duration.ZERO);
+		const stream = sub.quic.sendStreams.uni[0];
+		expect(stream.sendOrder).toBe(sendOrder({ priority: 2 }));
+
+		await edit([], 7);
+		expect(stream.sendOrder).toBe(sendOrder({ priority: 7 }));
+		await edit([0n, 1n], 4);
+		expect(stream.sendOrder).toBe(sendOrder({ priority: 4 }));
+	} finally {
+		group.finish();
+		await sub.close();
+	}
+});
+
 // A retune changes only a resolved time range's policy: the range keeps the group it resolved to
 // rather than looking its time up again. Mirrors the Rust
 // `lite07_a_retune_keeps_a_time_range_where_it_resolved`.
@@ -1675,6 +1711,27 @@ test("lite draft-07: a retune keeps a time range where it resolved", async () =>
 		]);
 	} finally {
 		for (const group of groups) group.finish();
+		await sub.close();
+	}
+});
+
+// A retune lifting a live join's max takes the limit away rather than keeping the old one.
+test("lite draft-07: a retune to no max lifts a live join's limit", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		ranges: [{ start: { live: { min: 0, max: 100 } } }],
+	});
+	try {
+		const before = sub.track.subscription.peek();
+		await new SubscribeUpdate({
+			priority: 0,
+			ranges: [],
+			retune: [[0n, { priority: 0, order: "descending", max: null }]],
+		}).encode(sub.client.writer, Version.DRAFT_07);
+		while (sub.track.subscription.peek() === before) await sub.track.subscription.changed();
+		const start = sub.track.subscription.peek()?.ranges?.[0]?.start;
+		expect(start && typeof start === "object" && "live" in start ? start.live.max : "not a join").toBeNull();
+	} finally {
 		await sub.close();
 	}
 });

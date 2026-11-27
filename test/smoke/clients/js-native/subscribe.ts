@@ -86,7 +86,7 @@ async function run(): Promise<void> {
 		// dropped the Catalog.Consumer helper, so read the frames directly.) A lazy
 		// publisher may announce video in a later update, so keep pulling until one
 		// carries a video track.
-		const catalog = bc.track(Catalog.TRACK).subscribe({ priority: Catalog.PRIORITY.catalog });
+		const catalog = bc.track(Catalog.TRACK).subscribe();
 		let videoTrack: string | undefined;
 		while (!videoTrack) {
 			const group = await catalog.recvGroup();
