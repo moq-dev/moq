@@ -16,12 +16,16 @@ all 560 cases and still reported `1 error`, the same one each time:
 > `defined` (`defined.test-util.ts:3`), from `copy_fill.test.ts:66`
 
 That line is the publisher's fill loop in `peers()`:
-`write(defined(fill.accept(key)), key, "old")`. That loop runs detached from
-the test, so a fill still open when the test ends keeps asking for keys.
-`fill.accept` then returns `undefined` before `close()` sets `closed`, and
-`defined` throws outside any test. Find what leaves the fill open past the
-test's end, and end the loop with the fill or wait for it in `close()`,
-rather than ignoring a missing group.
+`write(defined(fill.accept(key)), key, "old")`, which runs detached from the
+test. It throws whenever `fill.accept(key)` returns `undefined` while `closed`
+is still `false`. The cause is not established yet; check:
+
+- when `accept` returns `undefined`;
+- whether any case ends without reaching `close()`;
+- whether the detached loop can still call `accept` after `close()`.
+
+If `accept` can return `undefined` while a case is still running, the fix
+belongs in the fill path, not in `close()`. Never ignore a missing group.
 
 Kept (maintainer, 2026-11-27 merge pick of
 [moq-dev/moq#9735](https://github.com/moq-dev/moq/pull/9735)).
