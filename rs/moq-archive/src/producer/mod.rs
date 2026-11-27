@@ -4,8 +4,8 @@
 //! records each through its own ascending SUBSCRIBE, so it holds what the publisher's cache
 //! stops serving. It asks for history, so a missing group is waited for only until the publisher
 //! drops it or its max age passes, then is a gap, never a stall. TRACKS lists stream tracks only,
-//! so a datagram track, which is live-only, is never recorded. The host picks the key prefix, per broadcast path and instance say, and runs one
-//! producer per broadcast; the producer stores no instance. See the [crate docs](crate#layout) for
+//! so a datagram track, which is live-only, is never recorded. The host picks the key prefix, per broadcast path and identity say, and runs one
+//! producer per broadcast; the producer stores no identity. See the [crate docs](crate#layout) for
 //! what it writes.
 //!
 //! A producer started under a prefix that already holds objects resumes each track at the frame

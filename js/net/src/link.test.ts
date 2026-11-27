@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { accept, connect, type Session } from "./connection/index.ts";
+import * as Identity from "./identity.ts";
 import * as Ietf from "./ietf/index.ts";
-import * as Instance from "./instance.ts";
 import * as Lite from "./lite/index.ts";
 import { Routed } from "./lite/routed.ts";
 import { createMockTransportPair, waitFor } from "./mock.ts";
@@ -13,16 +13,16 @@ afterEach(() => mock.restore());
 const url = new URL("https://localhost:4443/test");
 const path = Path.from("live");
 
-/** One upstream claiming `path` for `instance` at `claimCost`, dialed at `cost` and ranked `priority`. */
+/** One upstream claiming `path` for `identity` at `claimCost`, dialed at `cost` and ranked `priority`. */
 async function upstream(
 	alpn: string,
 	edge: OriginProducer,
-	instance: Instance.Valid,
+	identity: Identity.Valid,
 	link: { cost?: bigint; priority?: number; claimCost?: bigint },
 ) {
 	const pair = createMockTransportPair(alpn);
 	const origin = new OriginProducer();
-	const claim = origin.claim(path, { instance: { id: instance, epoch: 0n }, cost: link.claimCost ?? 0n });
+	const claim = origin.claim(path, { identity: { id: identity, epoch: 0n }, cost: link.claimCost ?? 0n });
 	const consume = link.priority === undefined ? edge : edge.withPriority(link.priority);
 	const sessions: Session[] = await Promise.all([
 		connect({ url, transport: pair.client, consume, cost: link.cost }),
@@ -41,11 +41,11 @@ async function upstream(
 
 type Link = Parameters<typeof upstream>[3];
 
-/** Which of two links to one instance the edge pulls `path` through. */
+/** Which of two links to one identity the edge pulls `path` through. */
 async function chosen(alpn: string, a: Link, b: Link): Promise<"a" | "b"> {
 	const edge = new OriginProducer();
-	const instance = Instance.random();
-	const links = { a: await upstream(alpn, edge, instance, a), b: await upstream(alpn, edge, instance, b) };
+	const identity = Identity.random();
+	const links = { a: await upstream(alpn, edge, identity, a), b: await upstream(alpn, edge, identity, b) };
 	// Both routes land before the request resolves, so it picks between them. Each session hands
 	// its route to the edge before this reader of the same session hears of it.
 	const announced = edge.announced(Path.Pattern.subtree(path));

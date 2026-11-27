@@ -17,7 +17,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import { type Hop, toHop } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, SessionBroadcast, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -1509,16 +1509,16 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 });
 
 /**
- * A new instance on the same broadcast handle is another publisher instance, so a refusal of
- * the old one does not strand it. Rust gets this from the END and START an instance change
+ * A new identity on the same broadcast handle is another publisher identity, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an identity change
  * delivers.
  */
-test("a new instance at the same path clears a refusal", async () => {
+test("a new identity at the same path clears a refusal", async () => {
 	using clock = manual();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
-	const broadcast = origin.route(Path.from("restarted"), { instance: { id: Instance.random(), epoch: 0n } });
+	const broadcast = origin.route(Path.from("restarted"), { identity: { id: Identity.random(), epoch: 0n } });
 
 	void pub.runPublishNamespaces();
 
@@ -1527,7 +1527,7 @@ test("a new instance at the same path clears a refusal", async () => {
 	await declinePublishNamespace(declined, 0n);
 	await clock.advance(Duration.ZERO);
 
-	wireOf(broadcast).update({ ...wireOf(broadcast).info, instance: Instance.random() });
+	wireOf(broadcast).update({ ...wireOf(broadcast).info, identity: Identity.random() });
 
 	const retried = await nextStream(pair.client);
 	expect(await readPublishNamespace(retried)).toBe(Path.from("restarted"));
@@ -4739,7 +4739,7 @@ test("draft-22: a later frame failing leaves a fill whose FIN is unacknowledged"
 
 // A fill whose FIN waits on an acknowledgement resets once its group goes stale under the
 // subscription's budget, as the Rust fill does, rather than hold the connection for stale bytes.
-// Routed through an instance, the fill reads a resume reader whose own timeline stays empty, so
+// Routed through an identity, the fill reads a resume reader whose own timeline stays empty, so
 // the group is judged by the copy that holds it.
 test.each(["plain", "routed"])(
 	"draft-22: a %s fill whose FIN is unacknowledged resets once its group goes stale",

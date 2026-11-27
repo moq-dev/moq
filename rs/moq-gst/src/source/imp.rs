@@ -114,7 +114,7 @@ tokio::task_local! {
 }
 
 /// The session task drives everything: it connects, follows the catalog, and
-/// runs one [`Reader`] per rendition and instance. The element just starts and
+/// runs one [`Reader`] per rendition and identity. The element just starts and
 /// stops it. No control-plane channel is needed because readers push to their pads
 /// directly from their own task (a source pad's push *is* its streaming thread),
 /// so there's nothing to marshal back onto the element.
@@ -420,7 +420,7 @@ struct Shape {
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::Relative>,
-	instance: Option<moq_net::Instance>,
+	identity: Option<moq_net::Identity>,
 	warmup: Duration,
 }
 
@@ -430,7 +430,7 @@ impl PartialEq for Shape {
 			&& self.container == other.container
 			&& self.track == other.track
 			&& self.broadcast == other.broadcast
-			&& self.instance == other.instance
+			&& self.identity == other.identity
 	}
 }
 
@@ -886,7 +886,7 @@ impl Session {
 				err = &mut lost => break Err(err),
 				event = follow.available() => match event {
 					Ok(Some(broadcast)) => {
-						tracing::info!(%path, instance = ?broadcast.info().instance, "online");
+						tracing::info!(%path, identity = ?broadcast.info().identity, "online");
 						Some(broadcast)
 					}
 					Ok(None) => {
@@ -923,7 +923,7 @@ impl Session {
 		result
 	}
 
-	/// Start the instance handed out by the follower until it ends or is replaced, returning its
+	/// Start the identity handed out by the follower until it ends or is replaced, returning its
 	/// cancel handle.
 	fn play(&self, runs: &mut tokio::task::JoinSet<Result<()>>, source: moq_mux::Source) -> watch::Sender<bool> {
 		let (cancel, mut cancelled) = watch::channel(false);
@@ -1083,7 +1083,7 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
-				instance: reference.instance().cloned(),
+				identity: reference.identity().cloned(),
 				warmup: warmup.unwrap_or_default(),
 			};
 			desired.insert((kind, name.clone()), shape);
@@ -1169,11 +1169,11 @@ fn reconcile(
 	});
 	for (path, plan) in plans {
 		// Follow without waiting: an unavailable sibling must not park the catalog loop and hold
-		// up every other rendition. The follower resolves its instances under the run. Every
-		// instance is followed, and each rendition checks the instance it names.
+		// up every other rendition. The follower resolves its identities under the run. Every
+		// identity is followed, and each rendition checks the identity it names.
 		let shape = plan.renditions.values().next().expect("a plan names a rendition");
-		let instances = match source.follow(shape.broadcast.as_ref(), None) {
-			Ok(instances) => instances,
+		let identities = match source.follow(shape.broadcast.as_ref(), None) {
+			Ok(identities) => identities,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring the renditions of {path}: {err:?}");
 				continue;
@@ -1195,7 +1195,7 @@ fn reconcile(
 			empty: empty_tx,
 			emptied: emptied.clone(),
 		}
-		.run(instances, plan);
+		.run(identities, plan);
 		tasks.spawn_on(
 			STREAMING.scope(playback.session.element.clone(), follower_task),
 			RUNTIME.handle(),
@@ -1226,7 +1226,7 @@ struct Playback {
 	session: Session,
 	/// The catalog's broadcast. A sibling outlives its closed catalog until it ends.
 	broadcast: moq_net::broadcast::Consumer,
-	/// Shared by the catalog's own renditions and the first instance of each sibling.
+	/// Shared by the catalog's own renditions and the first identity of each sibling.
 	timeline: Arc<Timeline>,
 	/// Set once the run ends, stopping every follower.
 	stop: watch::Receiver<bool>,
@@ -1237,7 +1237,7 @@ struct Playback {
 struct Plan {
 	renditions: HashMap<Rendition, Shape>,
 	/// The catalog closed: the renditions no longer change. The catalog's own follower ends once
-	/// its readers drain, and a sibling's keeps following its instances until the catalog's
+	/// its readers drain, and a sibling's keeps following its identities until the catalog's
 	/// broadcast ends.
 	closed: bool,
 	/// Every rendition the catalog names but disables, whose reader stops at once rather than
@@ -1245,28 +1245,28 @@ struct Plan {
 	disabled: Arc<HashSet<Rendition>>,
 }
 
-/// Follows the instances at one path and plays the renditions that read it on each in turn: a
-/// start reads them on that instance, an end idles their pads, and another instance taking over
-/// restarts each stream on the same pad. The same instance returning resumes its state. The
-/// catalog's own broadcast is a single instance that never ends.
+/// Follows the identities at one path and plays the renditions that read it on each in turn: a
+/// start reads them on that identity, an end idles their pads, and another identity taking over
+/// restarts each stream on the same pad. The same identity returning resumes its state. The
+/// catalog's own broadcast is a single identity that never ends.
 ///
-/// It owns its renditions' readers and the state of the instance they read, so whether a
+/// It owns its renditions' readers and the state of the identity they read, so whether a
 /// rendition is reading, idle, or playing out its tail is its own state rather than a task's.
 struct Follower {
 	playback: Playback,
 	path: moq_net::Path,
 	renditions: HashMap<Rendition, Entry>,
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
-	/// The instance last started.
+	/// The identity last started.
 	current: Option<Current>,
-	/// The number and timeline of each instance a return would resume: the current one and each
-	/// a rendition pins, by instance.
-	resumable: HashMap<moq_net::Instance, (u64, Arc<Timeline>)>,
+	/// The number and timeline of each identity a return would resume: the current one and each
+	/// a rendition pins, by identity.
+	resumable: HashMap<moq_net::Identity, (u64, Arc<Timeline>)>,
 	/// Shared with the readers.
 	finished: Finished,
-	/// How many instances started, numbering each.
+	/// How many identities started, numbering each.
 	started: u64,
-	/// How many times any instance started, a return included.
+	/// How many times any identity started, a return included.
 	starts: u64,
 	next_id: u64,
 	/// The run's [`Followed::empty`].
@@ -1275,27 +1275,27 @@ struct Follower {
 	emptied: Arc<tokio::sync::Notify>,
 }
 
-/// The instance a [`Follower`] reads.
+/// The identity a [`Follower`] reads.
 struct Current {
 	/// Released at its end, so an offline sibling holds none of its state.
-	instance: Option<moq_net::broadcast::Consumer>,
-	/// Its route's instance, which [`Follower::resumable`] keeps it by.
-	id: Option<moq_net::Instance>,
-	/// Shared by every rendition reading the instance, so their first frames fix one mapping for
+	identity: Option<moq_net::broadcast::Consumer>,
+	/// Its route's identity, which [`Follower::resumable`] keeps it by.
+	id: Option<moq_net::Identity>,
+	/// Shared by every rendition reading the identity, so their first frames fix one mapping for
 	/// all of them.
 	timeline: Arc<Timeline>,
-	/// Its number among the follower's instances.
+	/// Its number among the follower's identities.
 	serial: u64,
 	/// Its number among the follower's starts, which a return does not keep.
 	start: u64,
 }
 
-/// The instance a reader reads, and the start of it that the reader belongs to.
+/// The identity a reader reads, and the start of it that the reader belongs to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Attached {
-	/// The instance's [`Current::serial`].
+	/// The identity's [`Current::serial`].
 	serial: u64,
-	/// The instance's [`Current::start`].
+	/// The identity's [`Current::start`].
 	start: u64,
 }
 
@@ -1305,12 +1305,12 @@ struct Entry {
 	reading: Reading,
 }
 
-/// Whether a rendition reads the current instance.
+/// Whether a rendition reads the current identity.
 enum Reading {
-	/// No reader: no instance yet, or one that does not serve it.
+	/// No reader: no identity yet, or one that does not serve it.
 	Idle,
 	Reader(ReaderHandle),
-	/// Delisted while reading: plays out the instance it reads, then leaves.
+	/// Delisted while reading: plays out the identity it reads, then leaves.
 	Draining(ReaderHandle),
 }
 
@@ -1339,14 +1339,14 @@ impl Drop for ReaderHandle {
 }
 
 impl Follower {
-	/// Play the renditions `plan` names on each instance until the plan closes and the last reader
+	/// Play the renditions `plan` names on each identity until the plan closes and the last reader
 	/// drains, the run stops, or the broadcast fails.
-	async fn run(mut self, mut instances: moq_mux::follow::Instances, mut plan: watch::Receiver<Plan>) {
+	async fn run(mut self, mut identities: moq_mux::follow::Identities, mut plan: watch::Receiver<Plan>) {
 		let mut stop = self.playback.stop.clone();
 		// The catalog's own broadcast is ready at once, so its renditions play even when the
 		// catalog closed before this follower ran.
-		match instances.poll_next(&kio::Waiter::noop()) {
-			std::task::Poll::Ready(Ok(Some(instance))) => self.start(instance),
+		match identities.poll_next(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(Ok(Some(identity))) => self.start(identity),
 			std::task::Poll::Ready(Err(err)) => {
 				gst::warning!(CAT, "lost {}: {err:?}", self.path);
 				return;
@@ -1358,7 +1358,7 @@ impl Follower {
 		let first = plan.borrow_and_update().clone();
 		// Taking plan updates, until the catalog closes or stops referencing this path.
 		let mut listening = !first.closed;
-		// Following instances, which a sibling does past its catalog's close.
+		// Following identities, which a sibling does past its catalog's close.
 		let mut following = listening || sibling;
 		self.apply(first);
 		self.play();
@@ -1405,10 +1405,10 @@ impl Follower {
 						self.exited(rendition, id, exit);
 					}
 				}
-				event = instances.next(), if following => match event {
-					Ok(Some(instance)) => {
+				event = identities.next(), if following => match event {
+					Ok(Some(identity)) => {
 						gst::info!(CAT, "{} is online, starting its renditions", self.path);
-						self.start(instance);
+						self.start(identity);
 					}
 					Ok(None) => {
 						gst::info!(CAT, "{} is offline, holding its pads", self.path);
@@ -1459,7 +1459,7 @@ impl Follower {
 					};
 					true
 				}
-				// A delisted rendition plays out the instance it reads, then leaves. One that never
+				// A delisted rendition plays out the identity it reads, then leaves. One that never
 				// took its pad, or that is disabled or now reads another broadcast, stops now.
 				None => {
 					let drains = !pads.is_listed(rendition)
@@ -1494,26 +1494,26 @@ impl Follower {
 		fresh
 	}
 
-	/// Read `instance`, which took over from any before it.
-	fn start(&mut self, instance: moq_net::broadcast::Consumer) {
+	/// Read `identity`, which took over from any before it.
+	fn start(&mut self, identity: moq_net::broadcast::Consumer) {
 		// Announced again without an end, its readers carry on.
 		if let Some(Current {
-			instance: Some(current),
+			identity: Some(current),
 			..
 		}) = &self.current
-			&& current.is_clone(&instance)
+			&& current.is_clone(&identity)
 		{
 			self.play();
 			return;
 		}
 
-		// An instance served again keeps its timeline and the tracks it finished.
-		let id = instance.info().instance.clone();
+		// An identity served again keeps its timeline and the tracks it finished.
+		let id = identity.info().identity.clone();
 		let (serial, timeline) = match id.as_ref().and_then(|id| self.resumable.get(id)) {
 			Some((serial, timeline)) => (*serial, timeline.clone()),
 			None => {
 				self.started += 1;
-				// The first instance is the one the run started alongside. A later one's
+				// The first identity is the one the run started alongside. A later one's
 				// timestamps share no origin with the run's.
 				let timeline = match self.started {
 					1 => self.playback.timeline.clone(),
@@ -1527,7 +1527,7 @@ impl Follower {
 		}
 		self.starts += 1;
 		self.current = Some(Current {
-			instance: Some(instance),
+			identity: Some(identity),
 			id,
 			timeline,
 			serial,
@@ -1538,16 +1538,16 @@ impl Follower {
 		self.play();
 	}
 
-	/// Drop the state no return can resume: an instance neither current nor pinned by a rendition,
+	/// Drop the state no return can resume: an identity neither current nor pinned by a rendition,
 	/// and the records of a retired pad.
 	fn forget(&mut self) {
-		let pinned: HashSet<&moq_net::Instance> = self
+		let pinned: HashSet<&moq_net::Identity> = self
 			.renditions
 			.values()
-			.filter_map(|entry| entry.shape.instance.as_ref())
+			.filter_map(|entry| entry.shape.identity.as_ref())
 			.chain(self.current.as_ref().and_then(|current| current.id.as_ref()))
 			.collect();
-		self.resumable.retain(|instance, _| pinned.contains(instance));
+		self.resumable.retain(|identity, _| pinned.contains(identity));
 		let serials: HashSet<u64> = self
 			.resumable
 			.values()
@@ -1559,15 +1559,15 @@ impl Follower {
 			.retain(|rendition, serial| pads.is_listed(rendition) && serials.contains(&serial));
 	}
 
-	/// The instance ended: release it and idle until the next one.
+	/// The identity ended: release it and idle until the next one.
 	fn offline(&mut self) {
 		if let Some(current) = &mut self.current {
-			current.instance = None;
+			current.identity = None;
 		}
 		self.idle();
 	}
 
-	/// Stop reading the instance. A draining rendition leaves with it.
+	/// Stop reading the identity. A draining rendition leaves with it.
 	fn idle(&mut self) {
 		self.renditions
 			.retain(|_, entry| !matches!(entry.reading, Reading::Draining(_)));
@@ -1576,7 +1576,7 @@ impl Follower {
 		}
 	}
 
-	/// Start a reader on the current instance for each rendition without one that it may serve.
+	/// Start a reader on the current identity for each rendition without one that it may serve.
 	fn play(&mut self) {
 		self.play_where(|_| true);
 	}
@@ -1586,13 +1586,13 @@ impl Follower {
 		let Some(current) = &self.current else {
 			return;
 		};
-		let Some(instance) = &current.instance else {
+		let Some(identity) = &current.identity else {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
 			if matches!(entry.reading, Reading::Idle)
 				&& only(rendition)
-				&& serves(instance, entry.shape.instance.as_ref())
+				&& serves(identity, entry.shape.identity.as_ref())
 			{
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
@@ -1601,7 +1601,7 @@ impl Follower {
 					playback: self.playback.clone(),
 					rendition: rendition.clone(),
 					shape: entry.shape.clone(),
-					instance: instance.clone(),
+					identity: identity.clone(),
 					attached: Attached {
 						serial: current.serial,
 						start: current.start,
@@ -1644,11 +1644,11 @@ impl Follower {
 	}
 }
 
-/// Whether `instance` may serve a rendition naming `id`. A broadcast not
+/// Whether `identity` may serve a rendition naming `id`. A broadcast not
 /// resolved through an origin has none to compare, and a minted one proves nothing, so only a
 /// known mismatch refuses it.
-fn serves(instance: &moq_net::broadcast::Consumer, id: Option<&moq_net::Instance>) -> bool {
-	match (id, &instance.info().instance) {
+fn serves(identity: &moq_net::broadcast::Consumer, id: Option<&moq_net::Identity>) -> bool {
+	match (id, &identity.info().identity) {
 		(Some(expected), Some(actual)) if !actual.is_minted() => expected == actual,
 		_ => true,
 	}
@@ -1656,19 +1656,19 @@ fn serves(instance: &moq_net::broadcast::Consumer, id: Option<&moq_net::Instance
 
 /// Why a [`Reader`] exited.
 enum Exit {
-	/// It is done with the instance.
+	/// It is done with the identity.
 	Done,
 	/// It lost its pad: the catalog did not list the rendition when it went to claim one, or the
 	/// pad ended first or under it. Its follower starts it again if the rendition is listed.
 	Unlisted,
 }
 
-/// One rendition reading one instance: everything [`Follower::play`] hands a task it spawns.
+/// One rendition reading one identity: everything [`Follower::play`] hands a task it spawns.
 struct Reader {
 	playback: Playback,
 	rendition: Rendition,
 	shape: Shape,
-	instance: moq_net::broadcast::Consumer,
+	identity: moq_net::broadcast::Consumer,
 	attached: Attached,
 	timeline: Arc<Timeline>,
 	/// The follower's [`Follower::finished`].
@@ -1680,14 +1680,14 @@ struct Reader {
 
 impl Reader {
 	/// Subscribe to the track, then hand it to the rendition's pad to play until the track ends,
-	/// errors, its instance stops serving, or `cancel` fires. The pad stays with the session
+	/// errors, its identity stops serving, or `cancel` fires. The pad stays with the session
 	/// either way.
 	async fn run(self) -> Exit {
 		let Reader {
 			playback,
 			rendition,
 			shape,
-			instance,
+			identity,
 			attached,
 			timeline,
 			finished,
@@ -1702,7 +1702,7 @@ impl Reader {
 		} = playback.session;
 		let (kind, name) = (rendition.0, &rendition.1);
 
-		// An instance that already played this track to its end on the pad would replay its last
+		// An identity that already played this track to its end on the pad would replay its last
 		// group.
 		if finished.contains(&rendition, &shape.track, attached) {
 			return Exit::Done;
@@ -1719,7 +1719,7 @@ impl Reader {
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {
-				instance
+				identity
 					.track(&shape.track)?
 					.subscribe(playout.subscription(
 						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
@@ -1727,8 +1727,8 @@ impl Reader {
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
-				// The instance went while subscribing: that is its end, not this rendition's.
-				Err(_) if instance.is_closed() => return Exit::Done,
+				// The identity went while subscribing: that is its end, not this rendition's.
+				Err(_) if identity.is_closed() => return Exit::Done,
 				Err(err) => {
 					gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");
 					return Exit::Done;
@@ -1755,7 +1755,7 @@ impl Reader {
 			element: element.clone(),
 			shape,
 			track,
-			instance,
+			identity,
 			attached,
 			timeline,
 			finished,
@@ -1772,7 +1772,7 @@ struct Play {
 	element: glib::WeakRef<super::MoqSrc>,
 	shape: Shape,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-	instance: moq_net::broadcast::Consumer,
+	identity: moq_net::broadcast::Consumer,
 	attached: Attached,
 	timeline: Arc<Timeline>,
 	finished: Finished,
@@ -1783,14 +1783,14 @@ struct Play {
 }
 
 impl Play {
-	/// Stream the track's frames to `pad` until the track ends, errors, its instance stops serving,
+	/// Stream the track's frames to `pad` until the track ends, errors, its identity stops serving,
 	/// or the reader is cancelled.
 	async fn stream(self, pad: &gst::Pad, rendition: &Rendition) {
 		let Play {
 			element,
 			shape,
 			mut track,
-			instance,
+			identity,
 			attached,
 			timeline,
 			finished,
@@ -1812,12 +1812,12 @@ impl Play {
 				})
 				.await
 			};
-			// The follower stopped this reader (the instance changed, the rendition was reshaped or
+			// The follower stopped this reader (the identity changed, the rendition was reshaped or
 			// delisted, or the run ended).
 			let Some(read) = read else {
 				// The cancel may have beaten a wake the track gave itself, such as the one that
 				// carries it from its last group to its end, so its end is looked for before this
-				// play lets go: the same instance announced again would hand a new subscription
+				// play lets go: the same identity announced again would hand a new subscription
 				// the track's last group.
 				if drained(&mut track) {
 					finished.insert(rendition, &shape.track, attached, false);
@@ -1900,17 +1900,17 @@ impl Play {
 						Err(_) => return,
 					}
 				}
-				// Recorded before the actor takes the next play, so a reshape on this instance
-				// does not replay it, even when the instance closed before the end was read: the
-				// same instance announced again would hand a new subscription its last group.
+				// Recorded before the actor takes the next play, so a reshape on this identity
+				// does not replay it, even when the identity closed before the end was read: the
+				// same identity announced again would hand a new subscription its last group.
 				Ok(None) => {
 					finished.insert(rendition, &shape.track, attached, false);
 					return;
 				}
-				// The track failing with its instance is that instance's end, which idles the
+				// The track failing with its identity is that identity's end, which idles the
 				// pad for the next one rather than ending the rendition.
-				Err(_) if instance.is_closed() => return,
-				// The instance may still hand a new subscription the groups already played,
+				Err(_) if identity.is_closed() => return,
+				// The identity may still hand a new subscription the groups already played,
 				// such as a relay's copy cut off by its publisher's session closing.
 				Err(err) => {
 					gst::warning!(CAT, "track {name} failed: {err:?}");
@@ -1952,14 +1952,14 @@ fn drained(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Cont
 }
 
 /// The track each of a follower's renditions last played to its end or failure on its pad, per
-/// instance the follower keeps, by serial. A new subscription to an ended track replays its last
+/// identity the follower keeps, by serial. A new subscription to an ended track replays its last
 /// group, so a catalog update that still lists the rendition (a publisher's final snapshot lands
 /// after its tracks end, or a disable and an enable) must not start it on that pad again. Another
-/// instance carries a new track, and a pad that never played the track joins it like any late
+/// identity carries a new track, and a pad that never played the track joins it like any late
 /// subscriber.
-/// An end holds for every return of its instance. A failure holds only for the start it happened
-/// on: it may be the instance going away, seen before the instance reports closed, and the same
-/// instance returning serves the track again.
+/// An end holds for every return of its identity. A failure holds only for the start it happened
+/// on: it may be the identity going away, seen before the identity reports closed, and the same
+/// identity returning serves the track again.
 /// Only the last track is kept, so the records stay bounded by the catalog: a rendition switched
 /// back to a track it finished before another replays its last group. Shared with the plays,
 /// since a play queued behind another on its pad learns this only once the other is done.
@@ -2003,7 +2003,7 @@ impl Finished {
 	}
 }
 
-/// The first decoded frame fixes one mapping for every rendition reading an instance.
+/// The first decoded frame fixes one mapping for every rendition reading an identity.
 #[derive(Default)]
 struct Timeline(OnceLock<gst::FormattedSegment<gst::ClockTime>>);
 
@@ -3127,7 +3127,7 @@ mod session_tests {
 			container: Container::Legacy,
 			track: "audio".into(),
 			broadcast: None,
-			instance: None,
+			identity: None,
 			warmup,
 		};
 		assert!(shape(Duration::from_millis(300)) == shape(Duration::from_millis(600)));
@@ -3705,10 +3705,10 @@ mod session_tests {
 		assert_eq!(buffers.load(Ordering::Relaxed), FRAMES, "the finished track replayed");
 	}
 
-	/// A track failing on an instance still up is over there, as a finished one is, yet the
-	/// instance may still hand a new subscription what the pad already played: a relay's copy cut
-	/// off by its publisher's session closing keeps its cache until the instance ends. A catalog
-	/// update, even one reshaping the rendition, must not start it again on that instance.
+	/// A track failing on an identity still up is over there, as a finished one is, yet the
+	/// identity may still hand a new subscription what the pad already played: a relay's copy cut
+	/// off by its publisher's session closing keeps its cache until the identity ends. A catalog
+	/// update, even one reshaping the rendition, must not start it again on that identity.
 	#[test]
 	fn a_failed_track_is_not_replayed_after_a_catalog_update() {
 		let _pad_ids = pad_ids();
@@ -3776,7 +3776,7 @@ mod session_tests {
 		producer.abort(moq_net::Error::Cancel);
 		super::RUNTIME.block_on(pads.settled(&(TrackKind::Video, "video".to_string())));
 
-		// The instance serves the track again, with the frame the pad already played.
+		// The identity serves the track again, with the frame the pad already played.
 		let mut again = moq_mux::container::Producer::new(broadcast.create_track("video", info).unwrap(), container());
 		again.write(keyframe).unwrap();
 
@@ -3936,26 +3936,26 @@ mod session_tests {
 	}
 
 	impl Publisher {
-		/// Publish at `room` on `origin` under `instance`, or a fresh one.
-		fn new(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>, config: VideoConfig) -> Self {
-			Self::routed(origin, "room", instance, config)
+		/// Publish at `room` on `origin` under `identity`, or a fresh one.
+		fn new(origin: &moq_net::origin::Producer, identity: Option<moq_net::Identity>, config: VideoConfig) -> Self {
+			Self::routed(origin, "room", identity, config)
 		}
 
-		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `instance`, or
+		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `identity`, or
 		/// a fresh one.
-		fn sibling(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>) -> Self {
-			Self::routed(origin, "cam", instance, video_rendition())
+		fn sibling(origin: &moq_net::origin::Producer, identity: Option<moq_net::Identity>) -> Self {
+			Self::routed(origin, "cam", identity, video_rendition())
 		}
 
 		/// Announce `path` once its catalog is built.
 		fn routed(
 			origin: &moq_net::origin::Producer,
 			path: &str,
-			instance: Option<moq_net::Instance>,
+			identity: Option<moq_net::Identity>,
 			config: VideoConfig,
 		) -> Self {
-			let options = match instance {
-				Some(instance) => moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+			let options = match identity {
+				Some(identity) => moq_net::origin::RouteOptions::hidden().with_identity(identity, 0),
 				None => moq_net::origin::RouteOptions::hidden(),
 			};
 			let route = origin.route(path, options).unwrap();
@@ -4137,7 +4137,7 @@ mod session_tests {
 		let (_stop, stop) = watch::channel(false);
 		let pads = Pads::default();
 		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
-		let instance = publisher.broadcast.consume();
+		let identity = publisher.broadcast.consume();
 		let reader = super::Reader {
 			playback: super::Playback {
 				session: Session {
@@ -4146,7 +4146,7 @@ mod session_tests {
 					pads,
 					shutdown,
 				},
-				broadcast: instance.clone(),
+				broadcast: identity.clone(),
 				timeline: Arc::default(),
 				stop,
 			},
@@ -4156,10 +4156,10 @@ mod session_tests {
 				container: Container::Legacy,
 				track: "video".into(),
 				broadcast: None,
-				instance: None,
+				identity: None,
 				warmup: Duration::ZERO,
 			},
-			instance,
+			identity,
 			attached: super::Attached { serial: 1, start: 1 },
 			timeline: Arc::default(),
 			finished: super::Finished::default(),
@@ -4188,7 +4188,7 @@ mod session_tests {
 		let (_stop, stop) = watch::channel(false);
 		let pads = Pads::default();
 		pads.list(HashSet::from([rendition.clone()]), &HashSet::new(), &cancel);
-		let instance = publisher.broadcast.consume();
+		let identity = publisher.broadcast.consume();
 		let reader = super::Reader {
 			playback: super::Playback {
 				session: Session {
@@ -4197,7 +4197,7 @@ mod session_tests {
 					pads: pads.clone(),
 					shutdown,
 				},
-				broadcast: instance.clone(),
+				broadcast: identity.clone(),
 				timeline: Arc::default(),
 				stop,
 			},
@@ -4207,10 +4207,10 @@ mod session_tests {
 				container: Container::Legacy,
 				track: "video".into(),
 				broadcast: None,
-				instance: None,
+				identity: None,
 				warmup: Duration::ZERO,
 			},
-			instance,
+			identity,
 			attached: super::Attached { serial: 1, start: 1 },
 			timeline: Arc::default(),
 			finished: super::Finished::default(),
@@ -4553,11 +4553,11 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A `room` whose video rendition references the `cam` sibling, naming `instance` when given.
-	fn referencing(origin: &moq_net::origin::Producer, instance: Option<moq_net::Instance>) -> Publisher {
+	/// A `room` whose video rendition references the `cam` sibling, naming `identity` when given.
+	fn referencing(origin: &moq_net::origin::Producer, identity: Option<moq_net::Identity>) -> Publisher {
 		let mut config = video_rendition();
 		config.broadcast = Some(moq_net::path::Relative::new("./cam").unwrap());
-		config.instance = instance;
+		config.identity = identity;
 		Publisher::new(origin, Default::default(), config)
 	}
 
@@ -4606,10 +4606,10 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A rendition that joins a sibling instance after another started on it shares that instance's
-	/// timeline, so both map the instance's timestamps to one running time.
+	/// A rendition that joins a sibling identity after another started on it shares that identity's
+	/// timeline, so both map the identity's timestamps to one running time.
 	#[test]
-	fn a_rendition_joining_a_sibling_instance_shares_its_timeline() {
+	fn a_rendition_joining_a_sibling_identity_shares_its_timeline() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -4666,16 +4666,16 @@ mod session_tests {
 		assert_eq!(
 			segment(&second),
 			segment(&first),
-			"the joining rendition mapped the instance on its own: {:?}",
+			"the joining rendition mapped the identity on its own: {:?}",
 			recorder.seen()
 		);
 		drop(old);
 	}
 
-	/// The same sibling instance announced again resumes its state, whether or not its end reached
+	/// The same sibling identity announced again resumes its state, whether or not its end reached
 	/// the follower first: a track it finished does not replay on its pad.
 	#[test]
-	fn a_reannounced_sibling_instance_does_not_replay_its_finish() {
+	fn a_reannounced_sibling_identity_does_not_replay_its_finish() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -4722,22 +4722,22 @@ mod session_tests {
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
-			"the next instance moved to another pad"
+			"the next identity moved to another pad"
 		);
 		stop(session);
 
-		// Only the next instance starts a stream on the pad.
+		// Only the next identity starts a stream on the pad.
 		let seen = recorder.seen();
 		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
 		recorder.assert_one_pad_held();
 		drop(first);
 	}
 
-	/// A track's end read after its instance closed is still recorded, with or without a cancel
-	/// alongside it: the same instance announced again would replay its last group to a new
+	/// A track's end read after its identity closed is still recorded, with or without a cancel
+	/// alongside it: the same identity announced again would replay its last group to a new
 	/// subscription.
 	#[test]
-	fn an_end_read_after_its_instance_closed_is_recorded() {
+	fn an_end_read_after_its_identity_closed_is_recorded() {
 		let element = element();
 		for cancelled in [false, true] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
@@ -4748,9 +4748,9 @@ mod session_tests {
 			);
 			let track = moq_mux::container::Consumer::new(producer.consume(), legacy());
 			let _finished = producer.finish().unwrap();
-			let instance = broadcast.consume();
+			let identity = broadcast.consume();
 			broadcast.close();
-			assert!(instance.is_closed());
+			assert!(identity.is_closed());
 
 			let rendition = (TrackKind::Video, "video".to_string());
 			let finished = super::Finished::default();
@@ -4766,11 +4766,11 @@ mod session_tests {
 					container: Container::Legacy,
 					track: "video".into(),
 					broadcast: None,
-					instance: None,
+					identity: None,
 					warmup: Duration::ZERO,
 				},
 				track,
-				instance,
+				identity,
 				attached: super::Attached { serial: 1, start: 1 },
 				timeline: Arc::default(),
 				finished: finished.clone(),
@@ -4782,16 +4782,16 @@ mod session_tests {
 			super::RUNTIME.block_on(play.stream(&pad, &rendition));
 			assert!(
 				finished.contains(&rendition, "video", super::Attached { serial: 1, start: 2 }),
-				"the end was not recorded for the instance's next start (cancelled: {cancelled})"
+				"the end was not recorded for the identity's next start (cancelled: {cancelled})"
 			);
 		}
 	}
 
-	/// A track failing may be its instance going away before the instance reports closed, as a
-	/// relay's copy does when its publisher's session closes, so the same instance announced again
+	/// A track failing may be its identity going away before the identity reports closed, as a
+	/// relay's copy does when its publisher's session closes, so the same identity announced again
 	/// plays the track's later groups on its pad.
 	#[test]
-	fn a_reannounced_sibling_instance_plays_a_track_that_failed() {
+	fn a_reannounced_sibling_identity_plays_a_track_that_failed() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -4825,7 +4825,7 @@ mod session_tests {
 				}
 			)
 		});
-		// The pad plays out the failure while the instance is still announced.
+		// The pad plays out the failure while the identity is still announced.
 		first.video.take().unwrap().abort(moq_net::Error::Cancel);
 		super::RUNTIME.block_on(pads.settled(&(TrackKind::Video, "video".to_string())));
 		first.route.as_ref().unwrap().withdraw();
@@ -4839,7 +4839,7 @@ mod session_tests {
 			)
 		});
 
-		// The returning instance serves the track again, from a later group.
+		// The returning identity serves the track again, from a later group.
 		first.video = Some(moq_mux::container::Producer::new(
 			first
 				.broadcast
@@ -4851,7 +4851,7 @@ mod session_tests {
 		assert_eq!(
 			recorder.written(&mut first, 2),
 			pad,
-			"the returning instance moved to another pad"
+			"the returning identity moved to another pad"
 		);
 		stop(session);
 		recorder.assert_one_pad_held();
@@ -4906,7 +4906,7 @@ mod session_tests {
 	}
 
 	/// A catalog finished while its broadcast stays up still follows its siblings: the next
-	/// instance plays on the same pad, until the catalog's broadcast ends.
+	/// identity plays on the same pad, until the catalog's broadcast ends.
 	#[test]
 	fn a_sibling_is_followed_past_its_catalogs_close() {
 		let _pad_ids = pad_ids();
@@ -4958,10 +4958,10 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A sibling track finishing while its instance stays up idles the pad, and the instance that
+	/// A sibling track finishing while its identity stays up idles the pad, and the identity that
 	/// replaces it starts a new stream there.
 	#[test]
-	fn a_finished_sibling_track_returns_on_the_next_instance() {
+	fn a_finished_sibling_track_returns_on_the_next_identity() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -4976,7 +4976,7 @@ mod session_tests {
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
-			"the next instance moved to another pad"
+			"the next identity moved to another pad"
 		);
 		stop(session);
 
@@ -5010,7 +5010,7 @@ mod session_tests {
 
 	/// A sibling rendition delisted while it plays and listed again before its track finishes stays
 	/// with the reader that drained it: the finished track does not replay on its pad, and the
-	/// next instance plays there.
+	/// next identity plays there.
 	#[test]
 	fn a_sibling_rendition_relisted_while_draining_does_not_replay_its_finish() {
 		let _pad_ids = pad_ids();
@@ -5064,7 +5064,7 @@ mod session_tests {
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
-			"the next instance moved to another pad"
+			"the next identity moved to another pad"
 		);
 		stop(session);
 
@@ -5074,15 +5074,15 @@ mod session_tests {
 		drop(first);
 	}
 
-	/// A publisher handoff after a sibling track finished, the catalog naming the new instance's
-	/// instance, plays that instance on the same pad.
+	/// A publisher handoff after a sibling track finished, the catalog naming the new identity's
+	/// identity, plays that identity on the same pad.
 	#[test]
-	fn an_instance_handoff_after_a_sibling_finish_plays_the_new_instance() {
+	fn an_identity_handoff_after_a_sibling_finish_plays_the_new_identity() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let (old, new) = (moq_net::Instance::random(), moq_net::Instance::random());
+		let (old, new) = (moq_net::Identity::random(), moq_net::Identity::random());
 		let mut room = referencing(&origin, Some(old.clone()));
 		let session = follow(&element, &origin);
 
@@ -5099,11 +5099,11 @@ mod session_tests {
 			.renditions
 			.get_mut("video")
 			.unwrap()
-			.instance = Some(new);
+			.identity = Some(new);
 		assert_eq!(
 			recorder.written(&mut second, 2),
 			pad,
-			"the new instance moved to another pad"
+			"the new identity moved to another pad"
 		);
 		stop(session);
 
@@ -5111,30 +5111,30 @@ mod session_tests {
 		drop(first);
 	}
 
-	/// An instance a rendition pins that wins its path back from another resumes its state: the
+	/// An identity a rendition pins that wins its path back from another resumes its state: the
 	/// track it finished replays on no pad, pinned or not.
 	#[test]
-	fn a_pinned_instance_winning_its_path_back_does_not_replay_its_finish() {
+	fn a_pinned_identity_winning_its_path_back_does_not_replay_its_finish() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let (pinned, other, next) = (
-			moq_net::Instance::random(),
-			moq_net::Instance::random(),
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
+			moq_net::Identity::random(),
+			moq_net::Identity::random(),
 		);
 		let mut room = referencing(&origin, Some(pinned.clone()));
 		{
 			let mut guard = room.catalog.modify(room.catalog.next_timestamp()).unwrap();
 			let mut again = guard.video.renditions["video"].clone();
 			again.track = Some("video".into());
-			again.instance = None;
+			again.identity = None;
 			guard.video.renditions.insert("again".into(), again);
 		}
 		let session = follow(&element, &origin);
 
-		// Each rendition plays the first instance on a pad of its own. Written once, so a second
+		// Each rendition plays the first identity on a pad of its own. Written once, so a second
 		// copy on either pad can only be a replay.
 		let mut first = Publisher::sibling(&origin, Some(pinned));
 		first.write(1);
@@ -5145,7 +5145,7 @@ mod session_tests {
 		first.finish_video();
 		await_finished(&first);
 
-		// Another instance wins the path, which only the unpinned rendition plays, then leaves it
+		// Another identity wins the path, which only the unpinned rendition plays, then leaves it
 		// to the pinned one.
 		let mut second = Publisher::sibling(&origin, Some(other));
 		let unpinned = recorder.written(&mut second, 2);
@@ -5179,14 +5179,14 @@ mod session_tests {
 			.renditions
 			.get_mut("video")
 			.unwrap()
-			.instance = Some(next);
+			.identity = Some(next);
 		third.write(3);
-		recorder.wait("the next instance never reached the pinned pad", |seen| {
+		recorder.wait("the next identity never reached the pinned pad", |seen| {
 			reached(seen, 3).contains(&pad).then_some(())
 		});
 		stop(session);
 
-		// Neither pad replays the first instance's track on its return.
+		// Neither pad replays the first identity's track on its return.
 		let seen = recorder.seen();
 		for pad in [&pad, &unpinned] {
 			assert_eq!(
@@ -5199,9 +5199,9 @@ mod session_tests {
 	}
 
 	/// A rendition delisted while its sibling is offline ends its idle pad, and the sibling's next
-	/// instance plays nothing on it.
+	/// identity plays nothing on it.
 	#[test]
-	fn a_delisted_sibling_rendition_follows_no_later_instance() {
+	fn a_delisted_sibling_rendition_follows_no_later_identity() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -5270,9 +5270,9 @@ mod session_tests {
 	}
 
 	/// A rendition delisted while its sibling is offline and listed again follows the sibling's next
-	/// instance, even though the reader that left took its pad with it.
+	/// identity, even though the reader that left took its pad with it.
 	#[test]
-	fn a_relisted_sibling_rendition_follows_the_next_instance() {
+	fn a_relisted_sibling_rendition_follows_the_next_identity() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
@@ -5337,8 +5337,8 @@ mod session_tests {
 		stop(session);
 	}
 
-	/// A sibling replaced while the old one stays up restarts a reference that names no instance, on
-	/// the same pad, and nothing more from the old instance gets through.
+	/// A sibling replaced while the old one stays up restarts a reference that names no identity, on
+	/// the same pad, and nothing more from the old identity gets through.
 	fn sibling_restart() {
 		let _pad_ids = pad_ids();
 		let element = element();
@@ -5372,22 +5372,22 @@ mod session_tests {
 		sibling_restart();
 	}
 
-	/// A reference naming its sibling's instance never reads the instance replacing it: the pad
-	/// idles, and plays again once the named instance serves the path again.
+	/// A reference naming its sibling's identity never reads the identity replacing it: the pad
+	/// idles, and plays again once the named identity serves the path again.
 	#[test]
-	fn a_sibling_restart_idles_a_reference_naming_the_old_instance() {
+	fn a_sibling_restart_idles_a_reference_naming_the_old_identity() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let named = moq_net::Instance::random();
+		let named = moq_net::Identity::random();
 		let _room = referencing(&origin, Some(named.clone()));
 		let mut old = Publisher::sibling(&origin, Some(named));
 		let session = follow(&element, &origin);
 		await_demand(&old, true);
 		let pad = recorder.written(&mut old, 1);
 
-		// The reference lets the old instance go once another wins its path, and only then
+		// The reference lets the old identity go once another wins its path, and only then
 		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = watch(&origin, "cam");
 		await_event(&mut follow, |event| {
@@ -5426,12 +5426,12 @@ mod session_tests {
 		assert_eq!(
 			recorder.written(&mut old, 3),
 			pad,
-			"the named instance moved to another pad"
+			"the named identity moved to another pad"
 		);
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
-			"another instance played: {:?}",
+			"another identity played: {:?}",
 			recorder.seen()
 		);
 		recorder.assert_one_pad_held();
@@ -5505,7 +5505,7 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// Re-pricing the same instance is an update, which the run rides out without a new stream.
+	/// Re-pricing the same identity is an update, which the run rides out without a new stream.
 	#[test]
 	fn an_update_keeps_the_run() {
 		let _pad_ids = pad_ids();
@@ -6212,7 +6212,7 @@ mod session_tests {
 		relay.stop();
 	}
 
-	/// End to end through a relay: a publisher restarted under a new instance, the old one still up.
+	/// End to end through a relay: a publisher restarted under a new identity, the old one still up.
 	/// The pad linked by name keeps flowing into a synced sink, which renders the new broadcast on
 	/// time even though its timestamps start over.
 	#[test]

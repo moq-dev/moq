@@ -224,7 +224,7 @@ struct FlvTrack {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Read {
 	Live,
-	/// The track ended, cleanly or as a sibling instance went.
+	/// The track ended, cleanly or as a sibling identity went.
 	Finished,
 	/// The track itself failed. Another rendition of its kind and codec may continue it.
 	Lost,

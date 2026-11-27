@@ -637,7 +637,7 @@ impl Consumer {
 	/// skipped too, so a cursor opened mid-broadcast starts at the oldest segment it can record.
 	/// Otherwise missing window rows or unavailable media fail the recording with
 	/// [`SegmentUnavailable`](crate::Error::SegmentUnavailable) instead of silently omitting
-	/// segments. Fetch/transmux errors leave the cursor in place so the caller can retry. A bound instance's retained media drains after End or Restart; a replacement's
+	/// segments. Fetch/transmux errors leave the cursor in place so the caller can retry. A bound identity's retained media drains after End or Restart; a replacement's
 	/// media is never read under the old rows.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Segment>>> {

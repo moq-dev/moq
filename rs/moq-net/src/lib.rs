@@ -29,9 +29,9 @@
 //! `moq-stats` crate.
 //!
 //! ## Wire invariants
-//! - **Stream instances**: a subscription stays on its starting instance while that instance
+//! - **Stream identities**: a subscription stays on its starting identity while that identity
 //!   has a route, even after a newer route wins the path. When none remains, it ends with an
-//!   error (never a clean end, never stitched onto another instance). A clean end means only a
+//!   error (never a clean end, never stitched onto another identity). A clean end means only a
 //!   deliberate publisher finish; apps restart on announcements, never request errors.
 //! - **Live position**: largest group / live edge comes only from an open upstream
 //!   subscription (`SUBSCRIBE_OK`); a copy with none open waits, and a partial group hit still
@@ -40,7 +40,7 @@
 //!   B-frames). Expire a group by timestamp (from `GROUP_END` once whole, else lowest timestamp
 //!   known in any higher group) and by wall clock once its successor arrived longer ago than
 //!   the budget; the latest group never expires.
-//! - **Route switch**: for the same instance, split at one boundary (largest group any copy
+//! - **Route switch**: for the same identity, split at one boundary (largest group any copy
 //!   holds, past its contiguous frames): the new subscription starts there while the old caps
 //!   there and drains below within budget, delivering each frame once from whichever arrives
 //!   first.
@@ -72,7 +72,7 @@
 //!
 //! ## Driving and time
 //! Session and origin drivers never spawn tasks or read the clock.
-//! Minting an [`Instance`] uses secure randomness. `Client::connect` and
+//! Minting an [`Identity`] uses secure randomness. `Client::connect` and
 //! `Server::accept` take an initial [`time::Instant`] and return
 //! `(Session, Driver)`. Poll the `Driver` with the current instant and a
 //! [`kio::Waiter`], then wake on external activity or at the deadline it
@@ -121,8 +121,8 @@ pub mod goaway;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod goaway;
+mod identity;
 mod ietf;
-mod instance;
 mod ledger;
 mod lite;
 mod model;
@@ -162,7 +162,7 @@ pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 #[cfg(feature = "async")]
 pub use driver::Driver;
 pub use error::*;
-pub use instance::{Instance, InvalidInstance};
+pub use identity::{Identity, InvalidIdentity};
 pub use model::*;
 pub use path::{InvalidPattern, InvalidPrefix, Path, Pattern, Patterns, Prefix, Prefixes};
 #[cfg(feature = "async")]

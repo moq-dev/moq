@@ -57,7 +57,7 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
 before a `SUBSCRIBE_NAMESPACE` is synced.
 Both libraries always offer solicit.
-moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
+moq-transport carries no [publisher identity](/concept/moq-lite#publisher-identities),
 so the receiving session mints one per announcement.
 
 Bandwidth estimation is moq-lite only: moq-transport has no PROBE. On
@@ -89,7 +89,7 @@ choices. They follow the product model.
   [Draft 16 §8.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.5)
   requires the relay to send that `SUBSCRIBE` to all matching publishers. See
   [choosing a route](/concept/identity#choosing-a-route) for how that one
-  route is chosen. moq-transport carries no stream instance, so a relay mints
+  route is chosen. moq-transport carries no stream identity, so a relay mints
   one for each namespace it receives.
 
 - **Plain readers leave object and track properties out.**

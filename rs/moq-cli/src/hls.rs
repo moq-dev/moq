@@ -179,14 +179,14 @@ impl Tls {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `instance`. Once the playlist ends, serve the finished broadcast for the linger.
-pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::Instance) -> anyhow::Result<()> {
+/// announced under `identity`. Once the playlist ends, serve the finished broadcast for the linger.
+pub async fn import(target: ImportTarget, args: ImportArgs, identity: moq_net::Identity) -> anyhow::Result<()> {
 	let ImportTarget { origin, name, ingest } = target;
 	// Held through the linger, so the finished broadcast stays announced while it serves the tail.
 	let route = origin
 		.route(
 			&name,
-			moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+			moq_net::origin::RouteOptions::hidden().with_identity(identity, 0),
 		)
 		.context("failed to create broadcast")?;
 
@@ -283,8 +283,8 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 	let mut config = moq_hls::export::Config::default();
 	config.window = args.window.into();
 
-	// Serving and recording share one server, which follows the publisher instances: a recording
-	// ends at what its instance listed once another takes the broadcast over.
+	// Serving and recording share one server, which follows the publisher identities: a recording
+	// ends at what its identity listed once another takes the broadcast over.
 	let server = moq_hls::Server::new(scoped.clone(), config)?;
 
 	let tls = args.tls.into_config()?;
@@ -526,7 +526,7 @@ mod test {
 			playlist: playlist.to_str().unwrap().to_string(),
 			cmaf: false,
 		};
-		let importing = tokio::spawn(import(target, args, moq_net::Instance::random()));
+		let importing = tokio::spawn(import(target, args, moq_net::Identity::random()));
 
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();

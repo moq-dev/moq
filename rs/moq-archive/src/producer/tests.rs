@@ -484,7 +484,7 @@ async fn changed_properties_fail_the_resume() {
 	broadcast.close();
 	finished(task).await;
 
-	// Another instance, recorded under the same prefix, which only a missing `.end` allows.
+	// Another identity, recorded under the same prefix, which only a missing `.end` allows.
 	let store = Store::new(store.inner().fork(), "rec");
 	store
 		.inner()

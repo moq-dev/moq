@@ -446,33 +446,33 @@ async def test_announced_broadcast():
         break
 
 
-async def test_following_restarts_on_a_new_instance():
+async def test_following_restarts_on_a_new_identity():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    following = consumer.follow("instance")
+    following = consumer.follow("identity")
 
-    # The route mints its own instance and keeps it across re-pricing.
-    first = origin.route("instance")
+    # The route mints its own identity and keeps it across re-pricing.
+    first = origin.route("identity")
     present = await next_route(announced)
     assert isinstance(present, moq.AnnounceEventPresent)
-    fresh = present.announce.route.instance
-    assert fresh == first.instance
+    fresh = present.announce.route.identity
+    assert fresh == first.identity
     assert not fresh.is_minted()
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
 
     # Another route is another stream: followers restart onto it, while the path stays
     # present, so neither the re-price nor the restart is listed.
     first.set_cost(1)
-    cam = moq.Instance.parse("cam")
-    second = origin.route("instance", instance=cam, epoch=1)
-    assert second.instance == cam
+    cam = moq.Identity.parse("cam")
+    second = origin.route("identity", identity=cam, epoch=1)
+    assert second.identity == cam
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
     first.withdraw()
     second.withdraw()
     absent = await next_route(announced)
     assert isinstance(absent, moq.AnnounceEventAbsent)
-    assert absent.announce.route.instance == cam
+    assert absent.announce.route.identity == cam
     following.cancel()
     first.broadcast.close()
     second.broadcast.close()
@@ -514,25 +514,72 @@ async def test_finish_serves_until_closed():
     assert isinstance(await next_route(announced), moq.AnnounceEventAbsent)
 
 
-async def test_abort_unwanted_keeps_a_late_reader():
-    """An idle track ends only once a reader that joined after it went unwanted has left."""
+async def test_release_ends_an_on_demand_track():
+    """Released once unwanted, a track ends; a reader that joined since is served by the next request."""
     broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
+
+    idle = broadcast.publish_track("idle")
+    demand = idle.demand()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+    del idle
+    with pytest.raises(moq.Error.Closed):
+        await asyncio.wait_for(demand.wanted_changed(), timeout=5.0)
+
     track = broadcast.publish_track("status")
     demand = track.demand()
     await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
-
-    late = track.consume()
-    assert track.abort_unwanted(7) is False
-    track.write_frame(b"still serving", moq.Timestamp.unscaled(0))
+    late = await broadcast.consume().subscribe_track("status")
+    del track
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "status"
+    track = request.accept()
+    track.write_frame(b"served again", moq.Timestamp.unscaled(0))
     frame = await asyncio.wait_for(late.read_frame(), timeout=5.0)
-    assert frame is not None and frame.payload == b"still serving"
-
-    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    assert frame is not None and frame.payload == b"served again"
     late.cancel()
-    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
-    assert track.abort_unwanted(7) is True
-    with pytest.raises(moq.Error.Closed):
-        track.abort_unwanted(7)
+    broadcast.close()
+
+
+async def test_native_encoders_serve_a_renewal():
+    """A native encoder serves a track asked for again after its producer was released while read."""
+    broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
+    catalog = moq.media.CatalogProducer(broadcast)
+
+    mic = moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1)
+    opus = moq.audio.EncoderOutput(codec=moq.AudioCodec.opus())
+    audio = moq.audio.Producer(catalog, mic, opus, track="mic")
+    late = await broadcast.consume().subscribe_track("mic")
+    del audio
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "mic"
+    audio = moq.audio.Producer.requested(catalog, request, mic, opus)
+    for i in range(3):
+        audio.write(moq.audio.Frame(timestamp=moq.Timestamp(20 * i, 1_000), data=bytes(960 * 4)))
+    assert await asyncio.wait_for(late.read_frame(), timeout=5.0) is not None
+    late.cancel()
+
+    camera = moq.VideoEncoderInput(
+        format=moq.VideoPixelFormat.rgba(),
+        width=320,
+        height=240,
+        framerate=moq.video.FrameRate(numerator=30, denominator=1),
+    )
+    h264 = moq.VideoEncoderOutput(
+        codec=moq.VideoCodec.h264(),
+        kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
+    )
+    video = moq.video.Producer(catalog, camera, h264, track="camera")
+    late = await broadcast.consume().subscribe_track("camera")
+    del video
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "camera"
+    video = moq.video.Producer.requested(catalog, request, camera, h264)
+    video.write(moq.video.Frame(timestamp=moq.Timestamp(0, 1_000_000), data=bytes([0x80]) * (320 * 240 * 4)))
+    video.finish()
+    assert await asyncio.wait_for(late.read_frame(), timeout=5.0) is not None
+    late.cancel()
     broadcast.close()
 
 
@@ -740,25 +787,23 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
-async def test_json_abort_unwanted_keeps_a_late_reader():
-    """An idle JSON stream ends only once a reader that joined after it went unwanted has left."""
+async def test_json_release_ends_an_on_demand_track():
+    """A released JSON stream ends like a raw track: a reader that joined since is served by the next request."""
     broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
     producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", moq.TrackInfo(timescale=1_000)))
     demand = producer.demand()
     await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
 
     late = moq.json.StreamConsumer(await broadcast.consume().subscribe_track("events"))
-    assert producer.abort_unwanted(7) is False
-    producer.append("still serving", moq.Timestamp(0, 1_000))
+    del producer
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "events"
+    producer = moq.json.StreamProducer(broadcast, request.accept(moq.TrackInfo(timescale=1_000)))
+    producer.append("served again", moq.Timestamp(0, 1_000))
     record = await asyncio.wait_for(anext(late), timeout=5.0)
-    assert record == moq.json.Timed("still serving", moq.Timestamp(0, 1_000))
-
-    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    assert record == moq.json.Timed("served again", moq.Timestamp(0, 1_000))
     late.cancel()
-    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
-    assert producer.abort_unwanted(7) is True
-    with pytest.raises(moq.Error.Closed):
-        producer.abort_unwanted(7)
     broadcast.close()
 
 
@@ -980,9 +1025,9 @@ async def test_dynamic_broadcast_request():
     assert request is not None
     assert request.path == "dynamic/broadcast"
 
-    # A hidden job route answers once it announces, under the instance its claim lends.
+    # A hidden job route answers once it announces, under the identity its claim lends.
     served = request.route(hidden=True)
-    assert served.instance == dynamic.instance
+    assert served.identity == dynamic.identity
     track = served.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served.announce()
     with pytest.raises(Exception):
@@ -1943,36 +1988,36 @@ async def test_broadcast_is_reachable_only_while_announced():
     route.announce()
     back = await next_route(announced)
     assert isinstance(back, moq.AnnounceEventPresent)
-    assert back.announce.route.instance == route.instance
+    assert back.announce.route.identity == route.identity
     await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     announced.cancel()
     track.finish()
     route.broadcast.close()
 
 
-async def test_an_instance_pins_request_and_follow():
+async def test_an_identity_pins_request_and_follow():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    cam = moq.Instance.parse("cam")
-    other = moq.Instance.parse("other")
-    route = origin.route("live", instance=cam)
+    cam = moq.Identity.parse("cam")
+    other = moq.Identity.parse("other")
+    route = origin.route("live", identity=cam)
 
-    # Only a session mints an instance: callers name one, and never an empty one.
+    # Only a session mints an identity: callers name one, and never an empty one.
     assert str(cam) == cam.text() == "cam" and not cam.is_minted()
-    assert cam == moq.Instance.parse("cam") and hash(cam) == hash(moq.Instance.parse("cam"))
+    assert cam == moq.Identity.parse("cam") and hash(cam) == hash(moq.Identity.parse("cam"))
     assert cam != other
     with pytest.raises(ValueError):
-        moq.Instance()
-    with pytest.raises(moq.Error.InvalidInstance):
-        moq.Instance.parse("")
+        moq.Identity()
+    with pytest.raises(moq.Error.InvalidIdentity):
+        moq.Identity.parse("")
 
-    await asyncio.wait_for(consumer.request("live", instance=cam), timeout=5.0)
+    await asyncio.wait_for(consumer.request("live", identity=cam), timeout=5.0)
     with pytest.raises(moq.Error.Protocol):
-        await asyncio.wait_for(consumer.request("live", instance=other), timeout=5.0)
-    async with consumer.follow("live", instance=cam) as following:
+        await asyncio.wait_for(consumer.request("live", identity=other), timeout=5.0)
+    async with consumer.follow("live", identity=cam) as following:
         assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
-        # Another instance taking the path over ends the pinned stream.
-        taken = origin.route("live", instance=other)
+        # Another identity taking the path over ends the pinned stream.
+        taken = origin.route("live", identity=other)
         assert await asyncio.wait_for(following.available(), timeout=5.0) is None
     taken.broadcast.close()
     route.broadcast.close()

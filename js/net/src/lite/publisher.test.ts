@@ -10,7 +10,7 @@ import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -194,7 +194,7 @@ test.each([Version.DRAFT_06])("a republish restarts the advertisement (version %
 	await settle();
 	const initial = written.length;
 
-	// Another broadcast at the path, without an instance: another instance.
+	// Another broadcast at the path, without an identity: another identity.
 	const republished = publish(origin, Path.from("cam"));
 	await settle();
 	const bytes = Uint8Array.from(written.slice(initial).flatMap((chunk) => [...chunk]));
@@ -5015,7 +5015,7 @@ test("a lite-07 answer carries this origin's claims", async () => {
 	}
 });
 
-// Another broadcast at the path, without an instance, is another instance, so another claim:
+// Another broadcast at the path, without an identity, is another identity, so another claim:
 // started before the one it replaces ends, so the peer sees the broadcast restart.
 test("a lite-07 republish starts the next claim before ending the last", async () => {
 	const origin = new OriginProducer();
@@ -5031,7 +5031,7 @@ test("a lite-07 republish starts the next claim before ending the last", async (
 		const second = await next();
 		expect(second).toMatchObject({ status: "start", suffix: "cam" });
 		if (first.status !== "start" || second.status !== "start") throw new Error("two claims");
-		expect(second.instance).not.toBe(first.instance);
+		expect(second.identity).not.toBe(first.identity);
 		expect(await next()).toEqual({ status: "endedId", id: 0n, lost: false });
 		republished.close();
 	} finally {
@@ -5265,7 +5265,7 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 			}
 			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
 			expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual([told]);
-			expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+			expect(starts.map((msg) => msg.identity)).toEqual([narrow.identity]);
 
 			// A request there resolves through the same claim.
 			const request = origin.consume().request(Path.join(asked, Path.from("x")));
@@ -5290,11 +5290,11 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 		// Names whose hash order differs between paths.
 		const pair = [`cam${i * 7}`, `pub${i * 13}`];
 		const names = swap ? pair.toReversed() : pair;
-		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
-		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const identity = (name: string) => ({ id: Identity.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { identity: identity(names[0]) });
 		const deep = origin
 			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
-			.claim(Path.from("src"), { instance: instance(names[1]) });
+			.claim(Path.from("src"), { identity: identity(names[1]) });
 		const { next, ok, close } = routedAnswer(origin.scope(root, Path.Prefixes.parse([""])));
 		try {
 			await ok();
@@ -5304,9 +5304,9 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.identity] : []));
 			const request = origin.consume().request(root);
-			const which = (await askedFirst(root, [shallow, deep])).instance;
+			const which = (await askedFirst(root, [shallow, deep])).identity;
 			expect(starts).toEqual([which]);
 			request.close();
 		} finally {
@@ -5328,11 +5328,11 @@ test("a lite-07 rooted answer beneath its root shows the claim a request for tha
 		// Names whose hash order differs between the absolute path and the path from the root.
 		const pair = [`cam${i * 7}`, `pub${i * 13}`];
 		const names = swap ? pair.toReversed() : pair;
-		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
-		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const identity = (name: string) => ({ id: Identity.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { identity: identity(names[0]) });
 		const deep = origin
 			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
-			.claim(Path.from("src"), { instance: instance(names[1]) });
+			.claim(Path.from("src"), { identity: identity(names[1]) });
 		const { next, ok, close } = routedAnswer(
 			origin.scope(root, Path.Prefixes.parse([""])),
 			undefined,
@@ -5346,9 +5346,9 @@ test("a lite-07 rooted answer beneath its root shows the claim a request for tha
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.identity] : []));
 			const request = origin.consume().request(Path.from("src/a/x"));
-			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).instance;
+			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).identity;
 			expect(starts).toEqual([which]);
 			request.close();
 		} finally {
@@ -5376,8 +5376,8 @@ test("a lite-07 rooted answer passes over a broadcast published above its root",
 			msgs.push(msg);
 			if (msg.status === "synced") break;
 		}
-		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
-		expect(starts).toEqual([filed.instance]);
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.identity] : []));
+		expect(starts).toEqual([filed.identity]);
 		const request = origin.consume().request(Path.from("src/a"));
 		await askedFirst(Path.from("src/a"), [filed]);
 		request.close();
@@ -5408,7 +5408,7 @@ test("a lite-07 rooted answer shows the most specific claim filed on either side
 		}
 		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
 		expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual(["d above 1"]);
-		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+		expect(starts.map((msg) => msg.identity)).toEqual([narrow.identity]);
 
 		const request = origin.consume().request(Path.from("a/b/c/d/x"));
 		expect(await askedFirst(Path.from("a/b/c/d/x"), [narrow, broad])).toBe(narrow);
@@ -5468,12 +5468,12 @@ test("a lite-07 claim is shown only where the handle and the grant share a path"
 });
 
 // A claim whose route is withdrawn ends, not lost, though another path still advertises the same
-// named instance: only the advertisement the claim came from proves it moved.
-test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {
+// named identity: only the advertisement the claim came from proves it moved.
+test("a lite-07 withdrawn claim ends though its identity lives on elsewhere", async () => {
 	const origin = new OriginProducer();
-	const instance = { id: Instance.random(), epoch: 0n };
-	const a = origin.route(Path.from("a"), { instance });
-	const b = origin.route(Path.from("b"), { instance });
+	const identity = { id: Identity.random(), epoch: 0n };
+	const a = origin.route(Path.from("a"), { identity });
+	const b = origin.route(Path.from("b"), { identity });
 	const { next, ok, close } = routedAnswer(origin);
 	try {
 		await ok();
@@ -5677,7 +5677,7 @@ test("a lite-07 request naming a node is served here", async () => {
 	const named = await Writer.collect(version, async (w) => {
 		await w.u53(3);
 		await w.string("cam");
-		// No instance pinned, then Node ID 7, marked: a node's marked identity.
+		// No identity pinned, then Node ID 7, marked: a node's marked identity.
 		await w.u53(0);
 		await w.bool(false);
 		await w.u62(7n);
@@ -5690,7 +5690,7 @@ test("a lite-07 request naming a node is served here", async () => {
 		await w.write(named.subarray(1));
 	});
 	const msg = await TrackMessage.decode(new Reader(undefined, sized, version), version);
-	expect(msg).toMatchObject({ broadcast: "cam", track: "video", instance: undefined });
+	expect(msg).toMatchObject({ broadcast: "cam", track: "video", identity: undefined });
 });
 
 // Lite-07: Position matches exact group (including 0), never falling back to an earlier group's

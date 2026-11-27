@@ -193,7 +193,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	// Each broadcast mints an instance the migration carries across sessions.
+	// Each broadcast mints an identity the migration carries across sessions.
 	publish(&local, "up");
 	publish(&origin, "down");
 	let mut upstream = view(&origin, "up");
@@ -218,7 +218,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 	assert!(sessions.try_recv().is_err(), "the client dialed past its replacement");
 }
 
-/// Without an epoch, as with default clients, a subscription stays on the instance it
+/// Without an epoch, as with default clients, a subscription stays on the identity it
 /// started on, so the old session keeps serving it after the replacement is up. It closes
 /// once the application lets that subscription go, not at the handover cap.
 #[tokio::test]

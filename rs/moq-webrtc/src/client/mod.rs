@@ -74,7 +74,7 @@ impl Client {
 	/// `client publish`: push the broadcast `source` resolved to a remote WHIP endpoint,
 	/// until the session ends.
 	///
-	/// It stays on that publisher instance, and fails once the instance's route dies. A
+	/// It stays on that publisher identity, and fails once the identity's route dies. A
 	/// broadcast that ends cleanly closes the peer connection once its last frames are sent,
 	/// and ends `Ok`.
 	/// The source's origin resolves a rendition whose catalog `broadcast` field references

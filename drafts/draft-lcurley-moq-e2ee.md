@@ -34,7 +34,7 @@ informative:
 
 This document specifies `moq-e2ee-01-wip`, a versioned profile for end-to-end encryption of MoQ application payloads.
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
-Each publisher instance mints an epoch and announces it as the route's Instance for an opaque broadcast path.
+Each publisher instance mints an epoch and announces it as the route's Identity for an opaque broadcast path.
 HKDF-SHA-256 derives per-track AES-128-GCM keys from the secret and epoch, with separate domains for grouped frames and datagrams.
 Physical track names deterministically encrypt semantic names under AES-128-GCM with an HMAC-derived nonce, so publishers can recover requested names without pre-declaring them.
 Media frames and datagrams carry only ciphertext plus a 16-byte tag, with no on-wire header.
@@ -105,7 +105,7 @@ Each publisher instance MUST mint a unique epoch; two instances (including resta
 Binding a discovered epoch MUST yield a consume-only generation, and clones of a producing generation MUST share permanent track claims so reopening a track cannot reset its nonce counters.
 
 A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and semantic broadcast name ({{derive}}), without the epoch so all instances share one path.
-Each instance announces its epoch text as the route's {{moql}} Instance; on a wire without route Instance support, the application delivers the epoch out of band.
+Each instance announces its epoch text as the route's {{moql}} Identity, which relays rank like any other Identity rather than newest first; on a wire that cannot carry the route's Identity, where a relay mints one of its own, the application delivers the epoch over its own authenticated channel.
 The path carries no protection marker; a plaintext consumer simply fails to find a plaintext catalog.
 
 Epoch and path are neither secret nor authenticated.
@@ -266,7 +266,7 @@ This document requests no registrations.
 
 - Assigned `moq-e2ee-01-wip` as this draft's profile until finalized as `moq-e2ee-01`; every label and the salt follow it.
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
-- Require canonical UUIDv7 epochs, carried as the route's Instance rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
+- Require canonical UUIDv7 epochs, carried as the route's Identity rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.

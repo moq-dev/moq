@@ -5,7 +5,7 @@ async function main() {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url, consume: origin });
 
-	// Keep one publisher instance, or throw if none serves the path; wait.ts shows following
+	// Keep one publisher identity, or throw if none serves the path; wait.ts shows following
 	// publisher restarts. The request owns the broadcast, so close it when done.
 	const request = origin.request(Moq.Path.from("my-broadcast"));
 	const broadcast = await request.broadcast();

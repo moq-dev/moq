@@ -893,7 +893,7 @@ mod tests {
 		writer
 			.buffer(&lite::Track {
 				broadcast: crate::Path::from_static("test"),
-				instance: None,
+				identity: None,
 				node: None,
 				track: "video".into(),
 			})

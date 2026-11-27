@@ -110,6 +110,22 @@ impl Default for Config {
 	}
 }
 
+/// The token naming `identity` in an `@{token}` URL or key segment: a hash of whether a session
+/// minted it together with its text, so a minted identity never shares URLs with a named one of
+/// the same text, and an identity up to 256 bytes, such as a public key, keeps URLs short.
+/// `moq export archive` keys recordings by it too, so a recording's key matches its HLS URLs.
+pub fn token(identity: &moq_net::Identity) -> Arc<str> {
+	let mut hash = rind::digest::Context::new(&rind::digest::SHA256);
+	hash.update(&[u8::from(identity.is_minted())]);
+	hash.update(identity.as_str().as_bytes());
+	// 64 bits: the token only has to tell apart the identities one path ever serves.
+	hash.finish().as_ref()[..8]
+		.iter()
+		.map(|b| format!("{b:02x}"))
+		.collect::<String>()
+		.into()
+}
+
 /// All renditions of one broadcast, kept in sync with its catalog.
 ///
 /// A cheap handle: clones share the one broadcaster, which stops watching the catalog once the
@@ -117,9 +133,9 @@ impl Default for Config {
 #[derive(Clone)]
 pub struct Broadcaster {
 	broadcast: moq_net::broadcast::Consumer,
-	/// The stream served, which every URL the master playlist and manifest list starts with:
-	/// its instance, or an id minted for a broadcast that came through no route.
-	instance: Arc<str>,
+	/// The [`token`] of the stream served, which every URL the master playlist and manifest list
+	/// starts with: of its identity, or of one minted for a broadcast that came through no route.
+	token: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
 	include: Option<include::Producer>,
@@ -166,12 +182,12 @@ impl Broadcaster {
 		origin: Option<moq_net::origin::Consumer>,
 	) -> (Self, Driver) {
 		let broadcast = source.broadcast();
-		// An instance names the stream on every edge, so each serves it under the same URLs.
-		let instance = broadcast
+		// An identity names the stream on every edge, so each serves it under the same URLs.
+		let token = broadcast
 			.info()
-			.instance
-			.clone()
-			.unwrap_or_else(moq_net::Instance::random);
+			.identity
+			.as_ref()
+			.map_or_else(|| token(&moq_net::Identity::random()), token);
 		let (spawner, mut driver) = driver::Spawner::new();
 		let include = origin.map(|origin| include::Producer::new(origin, config.window, spawner.clone()));
 		let renditions = renditions::Producer::new(config.window, spawner);
@@ -184,7 +200,7 @@ impl Broadcaster {
 		));
 		let broadcaster = Self {
 			broadcast,
-			instance: Arc::from(instance.as_str()),
+			token,
 			_guard: Arc::new(Guard {
 				renditions: renditions.clone(),
 				include: include.clone(),
@@ -222,13 +238,13 @@ impl Broadcaster {
 		Arc::downgrade(&self._guard)
 	}
 
-	/// The publisher instance every listed URL is under (`@{instance}/{kind}/{rendition}/...`).
+	/// The identity token every listed URL is under (`@{token}/{kind}/{rendition}/...`).
 	#[cfg_attr(
 		not(feature = "server"),
-		allow(dead_code, reason = "only the `server` feature routes by instance")
+		allow(dead_code, reason = "only the `server` feature routes by identity")
 	)]
-	pub(crate) fn instance(&self) -> &Arc<str> {
-		&self.instance
+	pub(crate) fn token(&self) -> &Arc<str> {
+		&self.token
 	}
 
 	/// Whether the source broadcast has closed (ended or dropped).
@@ -338,7 +354,7 @@ impl Broadcaster {
 			}
 			match rendition.kind {
 				Kind::Video => video.push(master::VideoVariant {
-					uri: master::rendition_uri(&self.instance, Kind::Video, &rendition.name, query),
+					uri: master::rendition_uri(&self.token, Kind::Video, &rendition.name, query),
 					bandwidth: rendition.bandwidth(),
 					width: rendition.width,
 					height: rendition.height,
@@ -346,14 +362,14 @@ impl Broadcaster {
 				}),
 				Kind::Audio => audio.push(master::AudioVariant {
 					name: rendition.name.clone(),
-					uri: master::rendition_uri(&self.instance, Kind::Audio, &rendition.name, query),
+					uri: master::rendition_uri(&self.token, Kind::Audio, &rendition.name, query),
 					bandwidth: rendition.bandwidth(),
 					codec: rendition.codec.clone(),
 				}),
 			}
 		}
 		if let Some(include) = &self.include {
-			let (extra_video, extra_audio) = include.variants(&self.instance, query);
+			let (extra_video, extra_audio) = include.variants(&self.token, query);
 			video.extend(extra_video);
 			audio.extend(extra_audio);
 		}
@@ -459,7 +475,7 @@ impl Broadcaster {
 
 		Ok(Some(mpd::render_manifest(
 			&mpd::Manifest {
-				instance: self.instance.clone(),
+				identity: self.token.clone(),
 				availability_start,
 				publish: kio::clock::wall(),
 				window: self.renditions.window(),
@@ -2085,7 +2101,7 @@ mod tests {
 			"the init needs no generation"
 		);
 		let manifest = broadcaster.manifest(None).unwrap().expect("manifest");
-		let run = broadcaster.instance();
+		let run = broadcaster.token();
 		assert!(manifest.contains(&format!("media=\"@{run}/video/video0/seg/run-1.{tag}.t$Time$.m4s\"")));
 
 		broadcaster.set_generation(Some("run-2")).unwrap();
@@ -2107,10 +2123,10 @@ mod tests {
 		);
 	}
 
-	// A replaced instance's ended playlists keep their URLs: a generation set after the cut would
+	// A replaced identity's ended playlists keep their URLs: a generation set after the cut would
 	// otherwise relabel its frozen rows under a run they never belonged to.
 	#[tokio::test]
-	async fn a_replaced_instance_keeps_its_generation() {
+	async fn a_replaced_identity_keeps_its_generation() {
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2396,7 +2412,7 @@ mod tests {
 		);
 		assert!(manifest.contains("id=\"video/video0\""));
 		assert!(manifest.contains("id=\"audio/audio0\""));
-		let run = broadcaster.instance();
+		let run = broadcaster.token();
 		let video_tag = broadcaster.rendition(Kind::Video, "video0").unwrap().tag().to_string();
 		assert!(manifest.contains(&format!("media=\"@{run}/video/video0/seg/{video_tag}.t$Time$.m4s\"")));
 		// Both renditions cut the same segment spans (the live edge is not listed).
@@ -3173,9 +3189,9 @@ mod tests {
 	}
 
 	// A replacement is readable on a fresh binding, while the old rendition bootstraps
-	// its first init and drains only the old instance's retained groups.
+	// its first init and drains only the old identity's retained groups.
 	#[tokio::test]
-	async fn retained_media_after_replacement_keeps_its_original_instance() {
+	async fn retained_media_after_replacement_keeps_its_original_identity() {
 		tokio::time::pause();
 		const NEW: &[u8] = &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
 		for sibling in [false, true] {
@@ -3284,7 +3300,7 @@ mod tests {
 		);
 
 		// Control: an export started after the takeover does serve the new publisher's media, so
-		// the assertion above is about which instance a rendition is bound to, not about a broadcast
+		// the assertion above is about which identity a rendition is bound to, not about a broadcast
 		// that happens to be unreadable.
 		let fresh = crate::resolved(&origin, "live").await;
 		let (_renditions, rendition) = export(&fresh, &video_config());
@@ -3306,7 +3322,7 @@ mod tests {
 
 	// The sibling half of the case above. A rendition whose catalog names another broadcast is
 	// bound to whatever serves that path when the rendition is created, not when its first
-	// segment is requested: its rows keep describing the instance they were read from, so a media
+	// segment is requested: its rows keep describing the identity they were read from, so a media
 	// publisher that reconnects (restarting its group numbering) must not answer for them.
 	#[tokio::test]
 	async fn a_replacement_sibling_is_not_served_under_the_replaced_catalog() {
@@ -3488,7 +3504,7 @@ mod tests {
 	}
 
 	// A replacement already present when the export starts is the sibling the request
-	// resolves to: it is served, not treated as a stale instance.
+	// resolves to: it is served, not treated as a stale identity.
 	#[tokio::test]
 	async fn a_sibling_present_at_export_start_is_served() {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
@@ -4549,7 +4565,7 @@ mod tests {
 			);
 			assert_eq!(old.next().await.unwrap().unwrap().segment, 0);
 			// The segment still waiting on a later one is listed once that starts. What starts it
-			// is no longer the old instance's.
+			// is no longer the old identity's.
 			records.gop(2);
 			assert_eq!(old.next().await.unwrap().unwrap().segment, 1);
 			assert!(old.next().await.unwrap().is_none());
@@ -4685,7 +4701,7 @@ mod tests {
 		);
 	}
 
-	// The DASH manifest lists only the current instance's segments, so its readiness waits for the
+	// The DASH manifest lists only the current identity's segments, so its readiness waits for the
 	// replacement's own first segment, even while the HLS playlist serves the predecessor's.
 	#[tokio::test(start_paused = true)]
 	async fn dash_readiness_waits_for_the_replacements_own_segment() {
@@ -4744,7 +4760,7 @@ mod tests {
 		assert_eq!(numbers(&test.listed("video0", 1).await), [0, 1]);
 	}
 
-	// Reconfigures that list nothing keep only the instance that does, however many there are.
+	// Reconfigures that list nothing keep only the identity that does, however many there are.
 	#[tokio::test(start_paused = true)]
 	async fn reconfigures_listing_nothing_hold_nothing() {
 		let mut test = Groups::with(&["video0"], &[]);
@@ -4760,10 +4776,10 @@ mod tests {
 		assert!(test.renditions.targets() <= 3, "{} targets", test.renditions.targets());
 	}
 
-	// A config that returns while its earlier instance's segments are still listed gets its tag
-	// back, and each segment URL still reaches the instance that lists it.
+	// A config that returns while its earlier identity's segments are still listed gets its tag
+	// back, and each segment URL still reaches the identity that lists it.
 	#[tokio::test(start_paused = true)]
-	async fn a_returning_config_serves_both_instances_segments() {
+	async fn a_returning_config_serves_both_identities_segments() {
 		let mut test = Groups::with(&["video0"], &[]);
 		let mut records = test.publish("video0");
 		for sequence in 0..3 {
@@ -4819,8 +4835,8 @@ mod tests {
 		assert_eq!(breaks, [false, false, false, false, true, false]);
 	}
 
-	// A segment holding both groups the retired instance had read and groups past them is listed
-	// by the retired instance, ending where the replacement's first group starts: the replacement
+	// A segment holding both groups the retired identity had read and groups past them is listed
+	// by the retired identity, ending where the replacement's first group starts: the replacement
 	// can't list that number again, so otherwise up to an interval of media would reach neither.
 	#[tokio::test(start_paused = true)]
 	async fn a_retire_mid_segment_lists_the_predecessors_part() {
@@ -4871,7 +4887,7 @@ mod tests {
 	}
 
 	// The catalog and the media are separate tracks, so a resize's first group can reach the
-	// retiring instance before the catalog update declaring it. Its keyframe's size says it is the
+	// retiring identity before the catalog update declaring it. Its keyframe's size says it is the
 	// replacement's, so it is listed under the new init rather than muxed under the old.
 	//
 	// Its GROUP_END reaching the next line doesn't list it under the old init first either.
@@ -4913,7 +4929,7 @@ mod tests {
 		assert_eq!(breaks, [false, false, false, true, false]);
 	}
 
-	// Mid-segment, the retiring instance lists its part of the segment, ending where the resize's
+	// Mid-segment, the retiring identity lists its part of the segment, ending where the resize's
 	// first group starts, even though it read that group before the catalog update.
 	#[tokio::test(start_paused = true)]
 	async fn a_resize_ahead_of_the_catalog_mid_segment_ends_the_predecessors_part() {
@@ -5119,7 +5135,7 @@ mod tests {
 		let target = |test: &Groups, name: &str| test.rendition(name).target_duration();
 		assert_eq!((target(&test, "video0"), target(&test, "video1")), (4, 4));
 
-		// The interval is fixed for a broadcast instance; should it change anyway, every rendition
+		// The interval is fixed for a broadcast identity; should it change anyway, every rendition
 		// is rebuilt on the new grid, keeping its playlist URI's target.
 		let original = test.rendition("video0");
 		test.catalog.sync.interval = Some(Duration::from_secs(3));

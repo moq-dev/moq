@@ -18,7 +18,7 @@
  * const generation = credential.produce();
  * const route = origin.route(await credential.path("meeting.hang"), {
  *   hidden: true,
- *   instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
+ *   identity: { id: Epoch.identity(generation.epoch), epoch: 0n },
  * });
  * const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", { timescale });
  * route.announce();
@@ -41,7 +41,7 @@ export { Credential } from "./credential.ts";
 /** Protected datagram track producers, consumers, and read events. */
 export * as Datagram from "./datagram.ts";
 export type { Name } from "./derive.ts";
-/** Generation epochs: the UUIDv7 text a publisher instance announces as its route's instance. */
+/** Generation epochs: the UUIDv7 text a publisher instance announces as its route's identity. */
 export * as Epoch from "./epoch.ts";
 export { type Code, Failure } from "./failure.ts";
 /** Producing generations mint an epoch; consuming generations bind a discovered one. Types only: a {@link Credential} makes them. */

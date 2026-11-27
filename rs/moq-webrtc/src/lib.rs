@@ -128,16 +128,16 @@ mod tests {
 			.expect("publish source packet");
 	}
 
-	/// An Opus instance of `source`: its route, its bridge, and its catalog, kept so the test
-	/// can kill the instance.
+	/// An Opus identity of `source`: its route, its bridge, and its catalog, kept so the test
+	/// can kill the identity.
 	type Opus = (moq_net::origin::Route, Box<dyn Bridge>, moq_mux::catalog::Producer);
 
-	/// Publish an Opus instance of `source` under `instance`.
-	fn publish_opus(origin: &moq_net::origin::Producer, instance: moq_net::Instance) -> Opus {
+	/// Publish an Opus identity of `source` under `identity`.
+	fn publish_opus(origin: &moq_net::origin::Producer, identity: moq_net::Identity) -> Opus {
 		let route = origin
 			.route(
 				"source",
-				moq_net::origin::RouteOptions::default().with_instance(instance, 0),
+				moq_net::origin::RouteOptions::default().with_identity(identity, 0),
 			)
 			.expect("publish source broadcast");
 		let catalog =
@@ -148,13 +148,13 @@ mod tests {
 		(route, Box::new(bridge), catalog)
 	}
 
-	/// Publish a replacement instance of `source`, returning once the origin serves it.
+	/// Publish a replacement identity of `source`, returning once the origin serves it.
 	async fn take_over(origin: &moq_net::origin::Producer) -> Opus {
-		let instance = moq_net::Instance::random();
-		let mut instances = origin.consume().follow("source", instance.clone()).unwrap();
-		let (route, mut new, catalog) = publish_opus(origin, instance);
+		let identity = moq_net::Identity::random();
+		let mut identities = origin.consume().follow("source", identity.clone()).unwrap();
+		let (route, mut new, catalog) = publish_opus(origin, identity);
 		push(&mut *new, 20_000, NEW_PACKET);
-		let started = kio::clock::timeout(TIMEOUT, instances.available())
+		let started = kio::clock::timeout(TIMEOUT, identities.available())
 			.await
 			.expect("the replacement never took over")
 			.unwrap();
@@ -162,7 +162,7 @@ mod tests {
 		(route, new, catalog)
 	}
 
-	/// Kill an instance the way a dropped publisher session does.
+	/// Kill an identity the way a dropped publisher session does.
 	fn kill((route, bridge, catalog): Opus) {
 		let err = moq_net::Error::Transport("connection lost".into());
 		bridge.abort(err.clone());
@@ -377,13 +377,13 @@ mod tests {
 		}
 	}
 
-	/// A WHEP viewer stays on the instance its session resolved: a publisher taking over the
+	/// A WHEP viewer stays on the identity its session resolved: a publisher taking over the
 	/// path never reaches it, so the session never resets its timestamps or codec state, and it
-	/// fails once that instance's route dies.
+	/// fails once that identity's route dies.
 	#[tokio::test]
-	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
+	async fn a_whep_viewer_stays_on_its_identity_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
-		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Identity::random());
 		let mut live = Live::new(&mut *old);
 		live.push(OPUS_PACKET);
 
@@ -399,7 +399,7 @@ mod tests {
 		assert_eq!(
 			live.play(OLD_PACKET, &mut played).await,
 			OLD_PACKET,
-			"the viewer left its instance"
+			"the viewer left its identity"
 		);
 
 		kill((old_route, old, old_catalog));
@@ -417,7 +417,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whep_viewer_ends_with_its_broadcast() {
 		let origin = moq_tokio::origin::spawn();
-		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Identity::random());
 		let mut live = Live::new(&mut *bridge);
 		live.push(OPUS_PACKET);
 
@@ -461,7 +461,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whep_viewer_joining_after_the_catalog_ends_plays_the_rest() {
 		let origin = moq_tokio::origin::spawn();
-		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Identity::random());
 		let mut live = Live::new(&mut *bridge);
 		live.push(OPUS_PACKET);
 		catalog.finish().unwrap();
@@ -500,7 +500,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_reoffer_from_the_same_address_plays() {
 		let origin = moq_tokio::origin::spawn();
-		let (_route, mut bridge, _catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (_route, mut bridge, _catalog) = publish_opus(&origin, moq_net::Identity::random());
 		let mut live = Live::new(&mut *bridge);
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
@@ -518,12 +518,12 @@ mod tests {
 		http.abort();
 	}
 
-	/// A WHIP push stays on the instance it resolved the same way, and
-	/// [`Client::publish`] fails once that instance's route dies.
+	/// A WHIP push stays on the identity it resolved the same way, and
+	/// [`Client::publish`] fails once that identity's route dies.
 	#[tokio::test]
-	async fn a_whip_push_stays_on_its_instance_until_the_route_dies() {
+	async fn a_whip_push_stays_on_its_identity_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
-		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Identity::random());
 		let mut live = Live::new(&mut *old);
 		live.push(OPUS_PACKET);
 
@@ -573,7 +573,7 @@ mod tests {
 		assert_eq!(
 			live.play(OLD_PACKET, &mut played).await,
 			OLD_PACKET,
-			"the push left its instance"
+			"the push left its identity"
 		);
 
 		kill((old_route, old, old_catalog));
@@ -686,7 +686,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whip_publisher_past_its_cap_plus_burst_is_closed() {
 		let origin = moq_tokio::origin::spawn();
-		let (_route, mut opus, _catalog) = publish_opus(&origin, moq_net::Instance::random());
+		let (_route, mut opus, _catalog) = publish_opus(&origin, moq_net::Identity::random());
 		// 8 kbps with a tenth of a second of burst allows 100 bytes up front.
 		let cap =
 			moq_net::bandwidth::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));

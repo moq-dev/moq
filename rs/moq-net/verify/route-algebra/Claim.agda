@@ -2,7 +2,7 @@
 -- Claims across trust boundaries: the same algebra at the grain of the relays
 -- that hand a claim on, as `route::relay::Router` ranks and passes claims.
 --
--- The destination is a broadcast: one Instance at one path. A claim filed at a
+-- The destination is a broadcast: one Identity at one path. A claim filed at a
 -- prefix of the path reaches it lowered, as a request there sees it, so the claims
 -- of one prefix tie on precedence wherever each is filed and rank as one tier
 -- (`Router::tier`). A claim's route to it carries the claim's precedence, its draining, penalty, and cost, whether a

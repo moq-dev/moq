@@ -135,31 +135,41 @@ void main() {
     broadcast.close();
   });
 
-  test('abortUnwanted keeps a reader that joined late', () async {
+  test('releasing a producer ends an on-demand track', () async {
     final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+
+    final idle = broadcast.publishTrack(name: 'idle', info: null);
+    final idleDemand = idle.demand();
+    while (await idleDemand.wantedChanged().timeout(timeout)) {}
+    idle.dispose();
+    await expectLater(
+      idleDemand.wantedChanged().timeout(timeout),
+      throwsA(isA<ClosedMoqException>()),
+    );
+
     final track = broadcast.publishTrack(name: 'status', info: null);
     final demand = track.demand();
     while (await demand.wantedChanged().timeout(timeout)) {}
+    final late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'status', subscription: null)
+        .timeout(timeout);
+    track.dispose();
 
-    final late = track.consume(subscription: null);
-    expect(track.abortUnwanted(errorCode: 7), isFalse);
-    track.writeFrame(
+    final request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'status');
+    final next = request.accept(info: null);
+    next.writeFrame(
       frame: Frame(
-        payload: utf8.encode('still serving'),
+        payload: utf8.encode('served again'),
         timestamp: Timestamp.unscaled(0),
       ),
     );
     final frame = await late.readFrame().timeout(timeout);
-    expect(utf8.decode(frame!.payload), 'still serving');
-
-    while (!await demand.wantedChanged().timeout(timeout)) {}
+    expect(utf8.decode(frame!.payload), 'served again');
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout)) {}
-    expect(track.abortUnwanted(errorCode: 7), isTrue);
-    expect(
-      () => track.abortUnwanted(errorCode: 7),
-      throwsA(isA<ClosedMoqException>()),
-    );
+    requests.cancel();
     broadcast.close();
   });
 
@@ -468,8 +478,8 @@ void main() {
     },
   );
 
-  test('an announced instance pins request and follow', () async {
-    // moq-lite-06 carries no instance, so the session mints one for the route.
+  test('an announced identity pins request and follow', () async {
+    // moq-lite-06 carries no identity, so the session mints one for the route.
     const version = ['moq-lite-06'];
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -502,19 +512,19 @@ void main() {
 
     final announced = client.announced();
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    final minted = present.announce.route.instance;
+    final minted = present.announce.route.identity;
     expect(minted.isMinted(), isTrue);
 
-    await client.request('live', instance: minted).timeout(timeout);
-    final following = client.follow('live', instance: minted);
+    await client.request('live', identity: minted).timeout(timeout);
+    final following = client.follow('live', identity: minted);
     expect(await following.available().timeout(timeout), isNotNull);
 
-    // The same text, parsed, names another instance that nothing serves.
-    final named = Instance.parse(text: minted.text());
+    // The same text, parsed, names another identity that nothing serves.
+    final named = Identity.parse(text: minted.text());
     expect(named.isMinted(), isFalse);
     expect(named, isNot(minted));
     await expectLater(
-      client.request('live', instance: named).timeout(timeout),
+      client.request('live', identity: named).timeout(timeout),
       throwsA(isA<ProtocolMoqException>()),
     );
 
@@ -854,7 +864,7 @@ void main() {
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventPresent>());
     expect((first as AnnounceEventPresent).announce.prefix, 'live');
-    expect(first.announce.route.instance, route.instance());
+    expect(first.announce.route.identity, route.identity());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
@@ -868,7 +878,7 @@ void main() {
     // Announcing again continues the same stream.
     route.announce();
     final again = await nextRoute(announced) as AnnounceEventPresent;
-    expect(again.announce.route.instance, route.instance());
+    expect(again.announce.route.identity, route.identity());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
@@ -918,31 +928,31 @@ void main() {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final consumer = origin.consume();
     final announced = consumer.announced(config: MoqAnnounceConfig());
-    final following = consumer.follow(path: 'instance');
-    final first = origin.route(path: 'instance', options: RouteOptions());
+    final following = consumer.follow(path: 'identity');
+    final first = origin.route(path: 'identity', options: RouteOptions());
 
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    expect(present.announce.route.instance, first.instance());
+    expect(present.announce.route.identity, first.identity());
     (await following.available().timeout(timeout))!.dispose();
 
-    final camera = Instance.parse(text: 'camera');
+    final camera = Identity.parse(text: 'camera');
     expect(camera.isMinted(), isFalse);
     final second = origin.route(
-      path: 'instance',
-      options: RouteOptions(instance: camera, epoch: 1),
+      path: 'identity',
+      options: RouteOptions(identity: camera, epoch: 1),
     );
-    expect(second.instance(), camera);
+    expect(second.identity(), camera);
     (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
     first.withdraw();
     second.withdraw();
     final absent = await nextRoute(announced) as AnnounceEventAbsent;
-    expect(absent.announce.route.instance, camera);
+    expect(absent.announce.route.identity, camera);
 
     expect(
-      () => Instance.parse(text: ''),
-      throwsA(isA<InvalidInstanceMoqException>()),
+      () => Identity.parse(text: ''),
+      throwsA(isA<InvalidIdentityMoqException>()),
     );
     first.cancel();
     second.cancel();
@@ -997,10 +1007,10 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
-    // A hidden job route answers nobody until it announces, under the instance its
+    // A hidden job route answers nobody until it announces, under the identity its
     // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instance(), dynamic.instance());
+    expect(served.identity(), dynamic.identity());
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.
@@ -1052,14 +1062,94 @@ void main() {
     broadcast.close();
   });
 
-  test('JSON abortUnwanted keeps a reader that joined late', () async {
+  test('native encoders serve a renewal', () async {
+    final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+
+    moq_audio.ProducerOptions mic(String? track) => moq_audio.ProducerOptions(
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()),
+      track: track,
+    );
+    final audio = moq_audio.Producer(catalog: catalog, options: mic('mic'));
+    var late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'mic', subscription: null)
+        .timeout(timeout);
+    audio.dispose();
+    var request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'mic');
+    final served = moq_audio.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: mic(null),
+    );
+    for (var i = 0; i < 3; i++) {
+      served.write(
+        frame: moq_audio.Frame(
+          timestamp: Timestamp(value: i * 20000, scale: 1000000),
+          data: Uint8List(960 * 4),
+        ),
+      );
+    }
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+
+    moq_video.ProducerOptions camera(String? track) =>
+        moq_video.ProducerOptions(
+          input: moq_video.EncoderInput(
+            format: moq_video.PixelFormat.rgba(),
+            width: 320,
+            height: 240,
+            framerate: moq_video.FrameRate(numerator: 30, denominator: 1),
+          ),
+          output: moq_video.EncoderOutput(
+            codec: moq_video.Codec.h264(),
+            kind: moq_video.SoftwareEncoder(),
+          ),
+          track: track,
+        );
+    final video = moq_video.Producer(
+      catalog: catalog,
+      options: camera('camera'),
+    );
+    late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'camera', subscription: null)
+        .timeout(timeout);
+    video.dispose();
+    request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'camera');
+    final next = moq_video.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: camera(null),
+    );
+    next.write(
+      frame: moq_video.Frame(
+        timestamp: Timestamp(value: 0, scale: 1000000),
+        data: Uint8List(320 * 240 * 4)..fillRange(0, 320 * 240 * 4, 0x80),
+      ),
+    );
+    next.finish();
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+    requests.cancel();
+    broadcast.close();
+  });
+
+  test('JSON release serves a reader that joined late', () async {
     final broadcast = MoqBroadcastProducer();
+    final requests = broadcast.requests();
+    final info = MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh());
     final producer = moq_json.StreamProducer(
       broadcast: broadcast,
-      track: broadcast.publishTrack(
-        name: 'events',
-        info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
-      ),
+      track: broadcast.publishTrack(name: 'events', info: info),
     );
     final demand = producer.demand();
     while (await demand.wantedChanged().timeout(timeout)) {}
@@ -1070,22 +1160,22 @@ void main() {
           .subscribeTrack(name: 'events', subscription: null)
           .timeout(timeout),
     );
-    expect(producer.abortUnwanted(errorCode: 7), isFalse);
-    producer.append(
-      value: jsonEncode('still serving'),
+    producer.dispose();
+
+    final request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'events');
+    final next = moq_json.StreamProducer(
+      broadcast: broadcast,
+      track: request.accept(info: info),
+    );
+    next.append(
+      value: jsonEncode('served again'),
       timestamp: Duration.zero.toTimestamp(),
     );
     final record = await late.next().timeout(timeout);
-    expect(jsonDecode(record!.value), 'still serving');
-
-    while (!await demand.wantedChanged().timeout(timeout)) {}
+    expect(jsonDecode(record!.value), 'served again');
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout)) {}
-    expect(producer.abortUnwanted(errorCode: 7), isTrue);
-    expect(
-      () => producer.abortUnwanted(errorCode: 7),
-      throwsA(isA<ClosedMoqException>()),
-    );
+    requests.cancel();
     broadcast.close();
   });
 

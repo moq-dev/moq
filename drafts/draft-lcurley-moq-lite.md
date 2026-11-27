@@ -73,7 +73,7 @@ Client and publisher endpoints implement only the core stream and delivery rules
 moq-lite structures content into a hierarchy:
 
 - **Session**: A QUIC, WebTransport, or QMux connection between two peers.
-- **Broadcast**: A collection of Tracks named by a path and an Instance.
+- **Broadcast**: A collection of Tracks named by a path and an Identity.
 - **Track**: Either a series of independently deliverable Groups, or a stream of unreliable Datagrams.
 - **Group**: An append-only, in-order series of Frames (typically one independent decodable unit, such as a GOP).
 - **Frame**: A sized, opaque payload of bytes at a transport timestamp.
@@ -85,8 +85,8 @@ The empty path has zero segments and prefixes every path.
 Segment splitting, matching, and counting treat an escaped `\/` as part of one segment, and a prefix never ends inside an escape.
 Paths have at most 32 segments and 4,096 bytes.
 
-A continuous stream is identified by a non-empty UTF-8 **Instance** carried on its claims ({{announce-start}}): `(path, Instance)` names one Broadcast whose Group starts never collide.
-Replicas of the same content share an Instance; a restart whose timestamps could move backwards MUST use a new Instance, while a restart whose Group starts stay strictly increasing MAY keep its Instance by raising its **Epoch** counter (never compared across Instances).
+A continuous stream is identified by a non-empty UTF-8 **Identity** of at most 256 bytes carried on its claims ({{announce-start}}): `(path, Identity)` names one Broadcast whose Group starts never collide.
+Replicas of the same content share an Identity; a restart whose timestamps could move backwards MUST use a new Identity, while a restart whose Group starts stay strictly increasing MAY keep its Identity by raising its **Epoch** counter (never compared across Identities).
 Receivers do not detect publishers that break this invariant; violations corrupt only that Broadcast.
 
 Publishers advertise capability via path-prefix **claims** (`ANNOUNCE_START`): a claim asserts that paths beneath its prefix may be served, never that any specific broadcast exists.
@@ -238,7 +238,7 @@ Publisher replies with one `SUBSCRIBE_START` per Range once its start resolves, 
 Subscriber sends `TRACK`; publisher replies with one immutable `TRACK_INFO` and FINs (or resets on error).
 Publishers SHOULD prioritize `TRACK_INFO` ahead of group data.
 An open Track Stream registers demand on the Track until the subscriber closes its side; subscribers going on to `SUBSCRIBE` keep it open until `SUBSCRIBE`'s first response or reset so demand never lapses.
-`TRACK_INFO` is scoped to one Broadcast/Instance, not the path.
+`TRACK_INFO` is scoped to one Broadcast/Identity, not the path.
 
 ### Tracks {#tracks-stream}
 Subscriber sends `TRACKS` to discover a Broadcast's publisher-produced Tracks (not on-demand tracks; listing never creates tracks).
@@ -355,10 +355,10 @@ Publishers SHOULD omit hidden claims unless `ANNOUNCE_REQUEST` set `Hidden = 1` 
 Hiding affects discovery only, never authorization or direct `SUBSCRIBE`/`TRACK` resolution.
 
 ## Claims (Non-Routing Sessions) {#claims}
-On sessions not exchanging routes, a publisher sends at most one claim per `(path, Instance)` matching requested prefixes (the winning claim per {{resolution}}, never echoing a claim back to its source), carrying accumulated cost, lowest path priority, drain flag, `Marked` flag (never sent over a marked session), and `Chain`.
+On sessions not exchanging routes, a publisher sends at most one claim per `(path, Identity)` matching requested prefixes (the winning claim per {{resolution}}, never echoing a claim back to its source), carrying accumulated cost, lowest path priority, drain flag, `Marked` flag (never sent over a marked session), and `Chain`.
 
 - **Grant clamping**: a claim is filed at its prefix if the holding grant covers it, otherwise clamped to each grant prefix beneath it with `Above` equal to the segment distance, and presented no broader than filed.
-- **Updates & unavailability**: path/cost changes send `ANNOUNCE_UPDATE`. If a held claim temporarily loses all routes, the publisher sets `Unavailable` (failing requests with `UNROUTABLE`) and withdraws with `ANNOUNCE_END(Lost=1)` after 800 ms. Receivers ignore initial `Unavailable` claims until cleared by `ANNOUNCE_UPDATE`. A new Instance sends `ANNOUNCE_START` before the old `ANNOUNCE_END`.
+- **Updates & unavailability**: path/cost changes send `ANNOUNCE_UPDATE`. If a held claim temporarily loses all routes, the publisher sets `Unavailable` (failing requests with `UNROUTABLE`) and withdraws with `ANNOUNCE_END(Lost=1)` after 800 ms. Receivers ignore initial `Unavailable` claims until cleared by `ANNOUNCE_UPDATE`. A new Identity sends `ANNOUNCE_START` before the old `ANNOUNCE_END`.
 - **Link accounting**: receivers add session link `Cost` and take `min(claim.priority, session_priority)`. Routing nodes re-announce learned claims under their own Node ID (using their marked Node ID if the session or claim is marked).
 - **Domain loop prevention (`Chain`)**: a routing node appends its `Relay` when importing a claim from a non-routing source and when exporting to a non-routing peer (unless already trailing). A routing node MUST reject any claim whose chain with its own `Relay` appended would repeat a `Relay` or reach 32 entries, and never exports a chain that would reach 32.
 
@@ -372,11 +372,11 @@ Routing nodes form a path-vector mesh where routes lead to routing nodes (each o
 - **Validation**: a receiver MUST close with `PROTOCOL_VIOLATION` on a `ROUTE` whose Path has `Session Number != 0` on hop 0, does not end with sender's Node ID, contains receiver's `Relay`, has 1 hop with `Cost != 0`, places `Marked = 1` past hop 0, or starts with a marked Node ID not followed by `(same Relay, Marked=0, Session Number=0)`.
 
 ### Request Forwarding and Failover
-Requests (`TRACK`, `TRACKS`, `SUBSCRIBE`, `DATAGRAMS`) carry optional `Node` (the routing node owning the selected claim) and `Instance`/`Minted`:
+Requests (`TRACK`, `TRACKS`, `SUBSCRIBE`, `DATAGRAMS`) carry optional `Node` (the routing node owning the selected claim) and `Identity`/`Minted`:
 
 - A relay forwards a request naming `Node` (never back to the requester) along a route to `Node` via a neighbour that sent the claim (preferring its selected route), or along its selected route if it holds no covering claim of `Node`, or locally if `Node` is itself; else resets with `UNROUTABLE`. If the claim is available/eligible and a route exists to `Node` (not via requester) whose claims have not yet arrived, the relay holds the request until they arrive or eligibility ends.
-- Relays MAY seamlessly move live subscriptions across claims sharing an `Instance` (including onto a higher `Epoch`) resuming at the next missing frame, and MUST NOT splice across differing Instances.
-- Bridging an older version without Instances mints a fresh Instance per `ANNOUNCE_START` with `Minted = 1, Epoch = 0`.
+- Relays MAY seamlessly move live subscriptions across claims sharing an `Identity` (including onto a higher `Epoch`) resuming at the next missing frame, and MUST NOT splice across differing Identities.
+- Bridging an older version without Identities mints a fresh Identity per `ANNOUNCE_START` with `Minted = 1, Epoch = 0`.
 
 ## Floors {#floors}
 Each routing node monotonically increments a `Revision` (from `0` per Node ID) on claim changes.
@@ -394,10 +394,10 @@ Requests naming no `Node` resolve against claims covering the requested path:
 
 1. **Longest covering prefix**: a claim's effective prefix is its shown path less `Above` ({{announce-start}}). Only the longest prefix tier is consulted; claims over the same prefix form one tier, wherever each is shown.
 2. **Terminal refusals**: refusals never fall through to shorter prefixes and are never retried on sibling claims. Advertisers signal capacity by withdrawing or repricing claims.
-3. **Epoch gating**: within the winning tier, a claim is ineligible if another claim of the tier carries its `Instance` at a higher `Epoch` (even if unavailable -> `UNROUTABLE`).
+3. **Epoch gating**: within the winning tier, a claim is ineligible if another claim of the tier carries its `Identity` at a higher `Epoch` (even if unavailable -> `UNROUTABLE`).
 4. **Ranking (SHOULD)**: not `Unavailable` > not draining > highest `Priority` > lowest total `Cost` (claim cost + route cost) > claims shown at exactly the requested path from a non-routing session (skipping Rendezvous Hash, ties broken by most recently received) > lowest 64-bit FNV-1a Rendezvous Hash (`offset = 0xCBF29CE484222325`) of `requested_path_utf8 || instance` > most recently received. (When choosing which claim to advertise for a prefix, `requested_path` is the prefix itself.)
 
-Relays MUST NOT announce a path merely because they resolved it; producers SHOULD announce concrete paths once active (optionally under the claim's Instance, rotating the claim's Instance if that concrete announcement later ends).
+Relays MUST NOT announce a path merely because they resolved it; producers SHOULD announce concrete paths once active (optionally under the claim's Identity, rotating the claim's Identity if that concrete announcement later ends).
 
 
 # Delivery
@@ -611,7 +611,7 @@ ANNOUNCE_START Message {
   Path Base (i),
   Path Keep (i),
   Claim Prefix Suffix (s),
-  Instance (b),           ; non-empty UTF-8
+  Identity (b),           ; non-empty UTF-8, at most 256 bytes
   Minted (8),             ; 0 or 1
   Epoch (i),
   Claim (..),
@@ -626,9 +626,9 @@ Claim {
   Relay (i) ...,          ; non-zero
 }
 ~~~
-`Instance` + `Minted` uniquely identify the stream (a minted and non-minted Instance with identical text are distinct).
+`Identity` + `Minted` uniquely identify the stream (a minted and non-minted Identity with identical text are distinct).
 `Cost` is the sender's cost to the claim: a routing node sends a routing neighbour the cost it learned the claim at (the neighbour adds its own route cost), and any other peer that cost plus its route cost to the node announcing the claim.
-`Above` exceeds the shown path's segment count, `Chain Count > 31`, `Relay = 0`, empty/non-UTF-8 `Instance`, or invalid `Minted`/flags -> `PROTOCOL_VIOLATION`.
+`Above` exceeds the shown path's segment count, `Chain Count > 31`, `Relay = 0`, empty, over 256 bytes, or non-UTF-8 `Identity`, or invalid `Minted`/flags -> `PROTOCOL_VIOLATION`.
 
 ### ANNOUNCE_END {#announce-end}
 ~~~
@@ -675,15 +675,15 @@ Node {
 }
 ~~~
 
-Empty `Instance` with `Minted = 0` matches whichever Instance wins the path; empty `Instance` with `Minted = 1` is `PROTOCOL_VIOLATION`.
-Non-empty `Instance` pins that stream (`UNROUTABLE` if absent).
+Empty `Identity` with `Minted = 0` matches whichever Identity wins the path; empty `Identity` with `Minted = 1`, or one over 256 bytes or not UTF-8, is `PROTOCOL_VIOLATION`.
+Non-empty `Identity` pins that stream (`UNROUTABLE` if absent).
 
 ### TRACK {#track}
 ~~~
 TRACK Message {
   Message Length (i),
   Broadcast Path (s),
-  Instance (b),
+  Identity (b),
   Minted (8),
   Node (..),
   Track Name (s),
@@ -714,7 +714,7 @@ TRACK_INFO Message {
 TRACKS Message {
   Message Length (i),
   Broadcast Path (s),
-  Instance (b),
+  Identity (b),
   Minted (8),
   Node (..),
 }
@@ -757,7 +757,7 @@ SUBSCRIBE Message {
   Message Length (i),
   Subscribe ID (i),       ; unique across all SUBSCRIBE/DATAGRAMS on session
   Broadcast Path (s),
-  Instance (b),
+  Identity (b),
   Minted (8),
   Node (..),
   Track Name (s),
@@ -887,7 +887,7 @@ DATAGRAMS Message {
   Message Length (i),
   Subscribe ID (i),
   Broadcast Path (s),
-  Instance (b),
+  Identity (b),
   Minted (8),
   Node (..),
   Track Name (s),
@@ -1063,8 +1063,8 @@ This document has no IANA actions.
 
 - Bounded paths to 32 segments / 4,096 bytes, disallowed empty segments, and restricted `\` escapes to `\` and `/`.
 - Added `.`-prefixed hidden path filtering and `ANNOUNCE_REQUEST.Hidden`.
-- Replaced bidirectional Announce Stream (`0x1`) with one unidirectional Announce Stream (`0x3`) per peer carrying prefix-set edits (`ANNOUNCE_REQUEST` with `More`, `ANNOUNCE_OK`), `SYNCED(Prefix ID)`, claims (`ANNOUNCE_START`/`UPDATE`/`END` with `Instance`, `Minted`, `Epoch`, `Above`, `Cost`, `Flags`, `Priority`, `Chain`, `Path Base`/`Path Keep`, `Lost`), and path-vector routing (`Node ID` parameter, `ROUTE`, `ROUTE_END`, `DEAD`, `DRAIN`, `ANNOUNCE_FLOOR`).
-- Added `Instance`, `Minted`, and `Node` to `TRACK`, `TRACKS`, `SUBSCRIBE`, and `DATAGRAMS`; replaced Warm/Cold costs with single additive `Cost >= 1` and FNV-1a Rendezvous Hash tie-breaking.
+- Replaced bidirectional Announce Stream (`0x1`) with one unidirectional Announce Stream (`0x3`) per peer carrying prefix-set edits (`ANNOUNCE_REQUEST` with `More`, `ANNOUNCE_OK`), `SYNCED(Prefix ID)`, claims (`ANNOUNCE_START`/`UPDATE`/`END` with `Identity`, `Minted`, `Epoch`, `Above`, `Cost`, `Flags`, `Priority`, `Chain`, `Path Base`/`Path Keep`, `Lost`), and path-vector routing (`Node ID` parameter, `ROUTE`, `ROUTE_END`, `DEAD`, `DRAIN`, `ANNOUNCE_FLOOR`).
+- Added `Identity` (non-empty UTF-8, at most 256 bytes), `Minted`, and `Node` to `TRACK`, `TRACKS`, `SUBSCRIBE`, and `DATAGRAMS`; replaced Warm/Cold costs with single additive `Cost >= 1` and FNV-1a Rendezvous Hash tie-breaking.
 
 ### Tracks, Subscriptions, and Delivery {#changelog-07-delivery}
 {:numbered="false"}

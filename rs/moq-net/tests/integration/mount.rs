@@ -181,12 +181,12 @@ async fn relayed(version: &str) {
 
 /// `W -> R -> V`: `W`'s worker claims `tenant-a`, which covers the mount's target, and
 /// answers a request for `tenant-a/public/cam` with that exact path under the claim's
-/// instance. `V` reads `R` through tenant B's mounted handle, or plain when `mounted` is
+/// identity. `V` reads `R` through tenant B's mounted handle, or plain when `mounted` is
 /// false, and asks for the camera by the name its handle gives it.
 ///
 /// Proves the answer arrives beneath the mount point exactly as it does unmounted, as
 /// `claim_continues::chain` pins it: the claim starts at the mount point, the answer
-/// starts beneath it under the lent instance, and the first subscription continues on
+/// starts beneath it under the lent identity, and the first subscription continues on
 /// lite-07 while an older wire's resets once.
 async fn claimed(version: &str, mounted: bool) {
 	use crate::claim_continues::{Worker, drain, kinds, settle, watch};
@@ -217,7 +217,7 @@ async fn claimed(version: &str, mounted: bool) {
 	let events = drain(&mut routes).await;
 	assert_eq!(kinds(&events), [("start", answer.to_string())], "{version}");
 	if continues {
-		assert_eq!(events[0].2, worker.claim.instance(), "{version}");
+		assert_eq!(events[0].2, worker.claim.identity(), "{version}");
 	}
 
 	// A late snapshot starts what stands.

@@ -39,7 +39,7 @@ const BACKOFF: Duration = Duration::from_millis(300);
 /// serves until the replacement takes over.
 const HANDOVER: Duration = Duration::from_secs(1);
 
-/// Only lite-07 carries the instance that lets a failover resume the subscription.
+/// Only lite-07 carries the identity that lets a failover resume the subscription.
 const LITE_07: &str = "moq-lite-07-wip";
 
 /// Bound `fut` by [`TEST_TIMEOUT`], panicking with `step` so a hang names the
@@ -180,14 +180,14 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	assert_eq!(read(&mut reading).await, (0, Some("a".into())));
 
 	// The cursor replays A's route first. After the GOAWAY, A's ranks last, so the next
-	// route under any other instance is B's.
+	// route under any other identity is B's.
 	let mut announced = consumer.routes();
-	let instance_a = match within("A's route", announced.next()).await.expect("announce update") {
+	let identity_a = match within("A's route", announced.next()).await.expect("announce update") {
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start,
 			announce: update,
 			..
-		} => update.route.instance().clone(),
+		} => update.route.identity().clone(),
 		other => panic!("expected A's route, got {other:?}"),
 	};
 	session_a
@@ -197,7 +197,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	within("routed via B", async {
 		loop {
 			let event = announced.next().await.expect("announce update");
-			// Under another instance, B's route is another source: a restart.
+			// Under another identity, B's route is another source: a restart.
 			if let moq_net::origin::RouteEvent {
 				kind:
 					moq_net::origin::RouteKind::Start
@@ -205,7 +205,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 					| moq_net::origin::RouteKind::Restart,
 				announce: update,
 				..
-			} = event && *update.route.instance() != instance_a
+			} = event && *update.route.identity() != identity_a
 			{
 				break;
 			}
@@ -364,7 +364,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 /// 3. The draining MID-A leg keeps serving through the handover window, so
 ///    every group published across the swap arrives exactly once.
 /// 4. Once the old leg closes, the SAME subscription keeps flowing: both legs'
-///    routes carry TOP's instance on lite-07, so BOTTOM's front re-splices onto
+///    routes carry TOP's identity on lite-07, so BOTTOM's front re-splices onto
 ///    the MID-B leg instead of ending the subscription.
 /// 5. No GOAWAY leaks to the subscriber's own session, and the path never
 ///    retracts under the subscriber.
@@ -435,7 +435,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	)
 	.await
 	.expect("broadcast announced")
-	.expect("the first change is an instance");
+	.expect("the first change is an identity");
 	// The age budget is what makes the completeness check below meaningful: this test
 	// asserts every group arrives exactly once, which is more than the default budget
 	// promises. A subscriber that wants completeness across a failover has to say how
@@ -536,7 +536,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	drop(mid_a_upstream);
 
 	// The subscription was served through the MID-A leg, but its close does not
-	// end it: both legs' routes carry TOP's instance, so BOTTOM's front re-splices
+	// end it: both legs' routes carry TOP's identity, so BOTTOM's front re-splices
 	// onto the MID-B leg and the subscription rides through. Keep publishing and keep reading the SAME subscription.
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = kio::clock::sim::spawn(async move {

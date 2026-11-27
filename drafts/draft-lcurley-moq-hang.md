@@ -107,7 +107,7 @@ type Catalog = {
   "include": Record<string, {
     "version": number | undefined,
     "broadcast": string,
-    "instance": string | undefined,
+    "identity": string | undefined,
   }> | undefined,
   // ... application extensions ...
 }
@@ -137,7 +137,7 @@ In contrast, `cmaf` `init` ({{container}}) and {{moqmpegts}} binary fields use b
 
 ## Track Identity {#identity}
 A track name always refers to the same content and decoder configuration: `codec`, `description`, `container`, plus `displayAspectWidth`, `displayAspectHeight`, and `interlaced` (video) or `sampleRate` and `numberOfChannels` (audio).
-Publishers MUST NOT change these fields for an existing track name, and MUST NOT reuse a removed track name with a different identity; identity changes require a new track name (optionally keeping the rendition ID via `track`) or a new broadcast Instance {{moql}}.
+Publishers MUST NOT change these fields for an existing track name, and MUST NOT reuse a removed track name with a different identity; identity changes require a new track name (optionally keeping the rendition ID via `track`) or a new broadcast Identity {{moql}}.
 Consumers MAY configure a decoder once per track from the catalog.
 
 All other rendition fields (`codedWidth`, `codedHeight`, `bitrate`, `framerate`, `enabled`, `preference`, `color`, `projection`, `stereo`, `layout`, `jitter`, `delay`) and video `display`/`rotation`/`flip` are live state and MAY update in place within their own rules (picture size changes require a keyframe and no out-of-band parameter sets in `description`, within the declared `codec` profile/level).
@@ -164,7 +164,7 @@ Audio, video, and text renditions share these fields (extending the WebCodecs de
 type CommonExtensions = {
   "version": number | undefined,
   "broadcast": string | undefined,
-  "instance": string | undefined,
+  "identity": string | undefined,
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
@@ -184,15 +184,15 @@ Publishers MUST NOT emit absolute paths or references escaping above the consume
 An MSF {{moqmsf}} gateway maps the resolved path to absolute `namespace` (and derives a relative `broadcast` on import, treating an absent `namespace` or one matching the catalog path's trailing segments as the catalog broadcast itself).
 A gateway MUST preserve the namespace/track pair or refuse the rendition, never substituting the catalog broadcast for an unrepresentable reference.
 
-### instance {#field-instance}
-Optional non-empty {{moql}} Instance string pinning the referenced broadcast stream (or the catalog's own broadcast when `broadcast` is absent); empty `instance` MUST be rejected.
+### identity {#field-identity}
+Optional non-empty {{moql}} Identity string pinning the referenced broadcast stream (or the catalog's own broadcast when `broadcast` is absent); empty `identity`, or one longer than 256 UTF-8 bytes (the ceiling {{moql}} puts on an Identity), MUST be rejected.
 
-For each referenced path in a catalog instance, a consumer reads from the first broadcast resolved there (keeping catalog and renditions aligned across replacements).
-Without `instance`, a consumer accepts that first stream and MAY follow restarts; with `instance`, it MUST read only a broadcast of that Instance, failing the rendition rather than falling back or following restarts (and later catalog updates naming a different Instance for an already-resolved path fail those renditions rather than replacing the resolved broadcast; a new catalog instance resolves afresh).
+For each referenced path in a catalog identity, a consumer reads from the first broadcast resolved there (keeping catalog and renditions aligned across replacements).
+Without `identity`, a consumer accepts that first stream and MAY follow restarts; with `identity`, it MUST read only a broadcast of that Identity, failing the rendition rather than falling back or following restarts (and later catalog updates naming a different Identity for an already-resolved path fail those renditions rather than replacing the resolved broadcast; a new catalog identity resolves afresh).
 
-On routes carrying a receiver-minted Instance {{moql}}, `instance` is best effort, and consumers MUST NOT treat it as permission to splice subscriptions across routes.
-Publishers MUST omit `instance` for on-demand broadcasts.
-MSF {{moqmsf}} has no instance field; gateways converting to MSF drop `instance` and SHOULD report it.
+On routes carrying a receiver-minted Identity {{moql}}, `identity` is best effort, and consumers MUST NOT treat it as permission to splice subscriptions across routes.
+Publishers MUST omit `identity` for on-demand broadcasts.
+MSF {{moqmsf}} has no identity field; gateways converting to MSF drop `identity` and SHOULD report it.
 
 ### track {#field-track}
 Overrides the wire track name (defaulting to the map entry ID), allowing distinct IDs when referencing same-named tracks across broadcasts.
@@ -364,7 +364,7 @@ type JsonSchema = {
   "version": number | undefined,
   "mode": "snapshot" | "stream",
   "schema": string | undefined,   // descriptive JSON Schema URI
-  "broadcast": string | undefined, "instance": string | undefined,
+  "broadcast": string | undefined, "identity": string | undefined,
   "track": string | undefined,
   "bitrate": number | undefined, "jitter": number | undefined, "delay": number | undefined,
 }
@@ -373,7 +373,7 @@ type BinarySchema = {
   "version": number | undefined,
   "mode": "snapshot" | "stream",
   "mime": string | undefined,     // descriptive RFC 6838 media type
-  "broadcast": string | undefined, "instance": string | undefined,
+  "broadcast": string | undefined, "identity": string | undefined,
   "track": string | undefined,
   "bitrate": number | undefined, "jitter": number | undefined, "delay": number | undefined,
 }
@@ -392,7 +392,7 @@ Required (no default); consumers MUST ignore unrecognized values.
   - A consumer reads groups in arrival order, MUST NOT skip to a newer group, MUST watch concurrently for a second group without waiting for the first to end, and MUST fail the read once buffered frames from the first group run out if a second group exists or if an evicted prefix makes the log incomplete.
 
 ### Shared and Estimate Fields {#data-shared}
-`broadcast`, `instance`, `track`, `bitrate`, `jitter`, and `delay` follow {{common}} (with payloads in place of frames).
+`broadcast`, `identity`, `track`, `bitrate`, `jitter`, and `delay` follow {{common}} (with payloads in place of frames).
 Payload timestamps use capture time on the broadcast clock when known, else write time (never an unrelated clock); `delay` MUST only be reported from capture-timed payloads, and suppressed no-op `snapshot` updates are not measured.
 
 ## Sync {#sync}
@@ -413,7 +413,7 @@ Promises that every audio and video track starts a group at least every `interva
 Fixed for the broadcast's lifetime so HLS/DASH edges derive an identical segment grid ({{hls}}); occasional overruns are tolerated.
 
 ## Includes {#include}
-Lists external broadcasts (e.g., transcoder outputs) for lazy selection, each carrying relative `broadcast` ({{field-broadcast}}) and optional `instance` ({{field-instance}}).
+Lists external broadcasts (e.g., transcoder outputs) for lazy selection, each carrying relative `broadcast` ({{field-broadcast}}) and optional `identity` ({{field-identity}}).
 
 - Includes MUST share the listing catalog's PTS timeline and root `sync` settings (consumers use the listing catalog's settings without checking).
 - Listing an include MUST NOT subscribe to it; consumers open an include's catalog only when selected (HLS masters read listed include catalogs without subscribing to media; on-demand publishers MUST answer their catalog without starting media production).
@@ -593,10 +593,10 @@ This document has no IANA actions.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Removed the MPEG-TS Service Information section: {{moqmpegts}} defines the `mpegts` root section.
 - Removed the Discovery section.
-- Added the optional root `include` map ({{include}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, sharing the listing catalog's timeline and `sync`, opened only on selection, whose rendition IDs stay their own.
+- Added the optional root `include` map ({{include}}): whole broadcasts named by a relative `broadcast` and an optional `identity`, sharing the listing catalog's timeline and `sync`, opened only on selection, whose rendition IDs stay their own.
 - Added optional `stats` and `echo` catalog sections, publisher and viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
-- Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}).
+- Added an optional `identity` beside every rendition and data track `broadcast` reference ({{field-identity}}).
 - A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity.
 - Fixed a track's identity for its name ({{identity}}); every other field updates in place.

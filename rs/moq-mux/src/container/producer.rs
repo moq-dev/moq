@@ -68,6 +68,9 @@ fn timed(timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) ->
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container, R = ()> {
+	/// The catalog rendition this media producer owns, when it was created through a catalog.
+	/// Dropped before the track, so a handler asked for the track again finds the name free.
+	rendition: Option<Box<dyn Rendition<R>>>,
 	inner: moq_net::track::Producer,
 	container: C,
 	group: Option<moq_net::group::Producer>,
@@ -140,9 +143,6 @@ pub struct Producer<C: Container, R = ()> {
 	/// Peak-hold claim on the connection allocator, when one was supplied.
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
 	bandwidth: Option<crate::catalog::Claim>,
-
-	/// The catalog rendition this media producer owns, when it was created through a catalog.
-	rendition: Option<Box<dyn Rendition<R>>>,
 
 	/// The counters the catalog reports for this track, when it was created through a catalog.
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,
@@ -1386,25 +1386,6 @@ where
 			let _ = group.abort(err.clone());
 		}
 		let _ = self.inner.abort(err);
-	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the producer back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
-		// The check and the abort are one step on the track; the rest is the same cleanup.
-		if self.inner.clone().abort_unwanted(err.clone()).is_err() {
-			return Err(self);
-		}
-		self.abort(err);
-		Ok(())
 	}
 
 	/// Create a consumer for this track.
