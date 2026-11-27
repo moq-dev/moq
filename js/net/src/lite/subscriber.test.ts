@@ -3398,6 +3398,45 @@ test("a range added past the feed start keeps it declared", async () => {
 	}
 });
 
+// A live join answered under the max it was first asked with, before the update retuning it wider
+// went out, places no reader waiting with the wider max, so that join goes out on a probe of its
+// own. Mirrors the Rust `a_join_answered_before_its_retune_is_probed`.
+test("a join answered before its retune goes out is probed", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const asked = (max: Duration) => ({ ranges: [{ start: { live: { min: Duration.ZERO, max } } }] });
+	const track = broadcast.track("video").subscribe(asked(Duration.ZERO));
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		// The reader waits on its join and widens its max, and the answer to the first max lands
+		// before the retune goes out.
+		const reading = track.recvGroup().catch(() => undefined);
+		track.update(asked(Duration.millis(100)));
+		await respond(request, version, [
+			{ start: answer(version, 20n, 0n, { position: { group: 20n, frame: 1 }, ended: false }) },
+		]);
+		const retune = await SubscribeUpdate.decode(sent, version);
+		expect(retune.retune).toEqual([[0n, 100]]);
+		// Without the probe nothing more goes out, and the reader waits on its join for good.
+		const probe = await SubscribeUpdate.decode(sent, version);
+		expect(probe.ranges).toEqual([{ start: { live: { min: 0, max: 100 } } }]);
+		track.close();
+		await reading;
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A placed join under a max age may be answered past groups the publisher still holds, stale for
 // it alone, so its answer places no history reader at its group; one with no max age skips nothing.
 // Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.
