@@ -1,9 +1,9 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-rust-4201-19095.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4201-19095.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4201-19095.hang track=catalog.json
-[page] subscribe error: id=2 broadcast=smoke-rust-4201-19095.hang track=catalog.json error=SUBSCRIBE error: not_supported (code=3) 
-[page] error fetching catalog smoke-rust-4201-19095.hang Error: SUBSCRIBE error: not_supported (code=3) 
-    at #C (http://localhost:39287/assets/index-DYbY3AOv.js:1:221762)
-decoded 0 frames from smoke-rust-4201-19095.hang (vite)
+[page] announced: broadcast=smoke-rust-4277-25080.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4277-25080.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4277-25080.hang track=catalog.json
+[page] subscribe error: id=2 broadcast=smoke-rust-4277-25080.hang track=catalog.json error=SUBSCRIBE error: not_supported (code=3) 
+[page] error fetching catalog smoke-rust-4277-25080.hang Error: SUBSCRIBE error: not_supported (code=3) 
+    at #C (http://localhost:41755/assets/index-DYbY3AOv.js:1:221762)
+decoded 0 frames from smoke-rust-4277-25080.hang (vite)
