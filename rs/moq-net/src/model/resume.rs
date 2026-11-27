@@ -745,6 +745,12 @@ fn copy_failed(copy: &track::Consumer) -> bool {
 	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if err.retryable())
 }
 
+/// Whether the copy's route failed, even after its declared end settled, which ends its readers
+/// cleanly: a group it closed short may hold more on the route replacing it.
+fn route_lost(copy: &track::Consumer) -> bool {
+	copy_failed(copy) || copy.aborted().is_some_and(|err| err.retryable())
+}
+
 /// A route's copy, as one reader reads it.
 struct Copy {
 	generation: u64,
@@ -3877,8 +3883,8 @@ impl Recover {
 			// Stalled poll after switch-back advanced `self.generation` before the old
 			// bare FIN arrived, the copy will not deliver frames past `range_end`.
 			Cause::Cut => return true,
-			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
-			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
+			Cause::Stalled if copy_failed(&self.copy) => return true,
+			Cause::Closed if route_lost(&self.copy) || self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -4042,8 +4048,9 @@ impl Recover {
 			let serving = match (serving, cause) {
 				(Some(serving), _) => serving,
 				// Nothing replaced a copy that closed the group, as when its track parks, so its
-				// close stands.
-				(None, Cause::Closed) => return Poll::Ready(Err(Error::NotFound)),
+				// close stands, unless its route failed: then it waits for a route as a failed
+				// copy does, unless none will come.
+				(None, Cause::Closed) if done || !route_lost(&self.copy) => return Poll::Ready(Err(Error::NotFound)),
 				(None, Cause::Cut) if staged.is_none() || done => return Poll::Ready(Err(Error::Evicted)),
 				(None, Cause::Cut) => return Poll::Pending,
 				// Nothing serves: a failed copy waits for a route, unless none will come.
@@ -4061,7 +4068,7 @@ impl Recover {
 					Cause::Stalled => return Poll::Pending,
 					// Its route failed, or the front stages the copy to replace it, so that one
 					// may hold more, unless none will come.
-					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => {
+					Cause::Closed if (route_lost(&self.copy) || staged.is_some()) && !done => {
 						return Poll::Pending;
 					}
 					// It serves on with no front to replace it, so its close stands.

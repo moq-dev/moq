@@ -8753,6 +8753,12 @@ impl Consumer {
 		self.with_state(|state| state?.read().resume_position())
 	}
 
+	/// The error that aborted the track, kept even when the abort came after its declared end
+	/// settled and so ended its readers cleanly.
+	pub(super) fn aborted(&self) -> Option<Error> {
+		self.with_state(|state| state?.read().outcome.aborted().cloned())
+	}
+
 	/// Poll for the track closing: no producer is left to write it, so nothing more
 	/// will ever arrive. A name the broadcast serves nothing under reads as closed.
 	pub(super) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
