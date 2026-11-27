@@ -193,7 +193,7 @@ the mesh replay's reader stranded after every link of its source's relay reopene
 ([moq-dev/moq#9236](https://github.com/moq-dev/moq/pull/9236)). Owned by open PRs or
 quests: the 11-22 resume mutants
 ([moq-dev/moq#9393](https://github.com/moq-dev/moq/pull/9393),
-[resume and route mutants](/quest/m0/nightly/resume-route-mutants.md)), quic-interop's
+[moq-dev/moq#9750](https://github.com/moq-dev/moq/pull/9750)), quic-interop's
 lossy handshake cells ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
 [moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
 [moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)), the TLA+ failover model's
@@ -244,7 +244,7 @@ PRs: Windows' CRLF crate names ([moq-dev/moq#9545](https://github.com/moq-dev/mo
 and quic-interop's lossy handshakes ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
 [moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
 [moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)); the 11-26 mutants went to
-[resume and route mutants](/quest/m0/nightly/resume-route-mutants.md). Dropped as one-night
+[moq-dev/moq#9750](https://github.com/moq-dev/moq/pull/9750). Dropped as one-night
 failures (re-check if one repeats): `benchmark_receive_windows`' `group timed out` on a
 non-skipped cell, the Firefox player's `after resume` tone at 65/75 samples, Interop's
 Chromium `volume 0.25` at 27/31 samples, Interop's `finish go -> *` gst reader on 11-25, and
