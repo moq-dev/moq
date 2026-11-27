@@ -457,3 +457,58 @@ fn backends_agree() {
 		}
 	}
 }
+
+/// `bframes_64x64_pattern_30f.h264` (libx264 High, three B-frames with a
+/// pyramid, a keyframe every 15) puts each access unit, in decode order, at this
+/// place in presentation order. Read off the order `ffprobe -show_frames`
+/// returns the pictures in, matched to `ffprobe -show_packets` by byte
+/// position.
+const BFRAMES_PRESENTATION: [u64; 30] = [
+	0, 4, 2, 1, 3, 6, 5, 9, 7, 8, 12, 10, 11, 14, 13, 15, 19, 17, 16, 18, 23, 21, 20, 22, 24, 26, 25, 28, 27, 29,
+];
+
+/// Decode the B-frame fixture with `decoder`, each access unit stamped with its
+/// presentation time, and check that the pictures come out in presentation
+/// order, flush included, each with its own access unit's timestamp.
+pub(super) fn check_presentation_order(name: &str, decoder: &mut dyn Backend) {
+	let mut units = split(include_bytes!("test_data/bframes_64x64_pattern_30f.h264"));
+	assert_eq!(units.len(), BFRAMES_PRESENTATION.len(), "the fixture split wrongly");
+	for (unit, place) in units.iter_mut().zip(BFRAMES_PRESENTATION) {
+		unit.timestamp = Timestamp::from_micros(place * FRAME_MICROS).expect("fixture timestamp");
+	}
+
+	let mut decoded = Vec::new();
+	for unit in units {
+		decoded.extend(
+			decoder
+				.decode_all(unit.payload, unit.timestamp, unit.keyframe)
+				.unwrap_or_else(|e| panic!("{name} failed to decode: {e}")),
+		);
+	}
+	decoded.extend(
+		decoder
+			.flush_all()
+			.unwrap_or_else(|e| panic!("{name} failed to flush: {e}")),
+	);
+
+	// Timestamps have no total order across scales, so they compare as microseconds.
+	let got: Vec<u128> = decoded
+		.iter()
+		.map(|frame| frame.timestamp.as_micros().unwrap())
+		.collect();
+	let want: Vec<u128> = (0..BFRAMES_PRESENTATION.len() as u128)
+		.map(|place| place * FRAME_MICROS as u128)
+		.collect();
+	assert_eq!(got, want, "{name} returned pictures out of presentation order");
+}
+
+/// Every backend returns the pictures of a stream with B-frames in presentation
+/// order, which is what [`Decoder`](super::Decoder) and its callers rely on.
+#[test]
+#[cfg(feature = "openh264")]
+fn b_frames_come_out_in_presentation_order() {
+	for name in decoders() {
+		let mut decoder = open(name).expect("backend opened during probing");
+		check_presentation_order(name, decoder.as_mut());
+	}
+}
