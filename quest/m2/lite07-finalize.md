@@ -269,7 +269,7 @@ the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-
 keys, and hashing it in `moq-hls` URLs; rejected: keeping `Instance`, 1024-byte
 cap, raw URLs, no wire cap) and on
 metadata-only subscriptions ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)) plus its
-[subscriber API](/quest/m2/subscribe-meta.md) (reversing the 2026-11-25
+subscriber API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) (reversing the 2026-11-25
 deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD indexing is
 an immediate consumer and `moq_subscription` changes the C ABI; rejected:
 moving only the wire into `m2`, leaving both in `m3`).
@@ -284,7 +284,6 @@ decrease (rejected: the next wip version after the cut).
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 - [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
-- [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - Rust, JS, and C/binding metadata subscriber API lands before the cut so the C ABI does not break right after 0.22
 
 ## Related
 

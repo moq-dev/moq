@@ -9,11 +9,12 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::decode::Read;
-use crate::ffi::OnStatus;
-use crate::task::Task;
+use crate::ffi::{OnHeader, OnStatus};
+use crate::task::{Task, Terminal};
 use crate::{
-	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_json_window_event,
-	moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config, moq_video_properties,
+	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_header, moq_json_value,
+	moq_json_window_event, moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config,
+	moq_video_properties,
 };
 
 struct DatagramTaskEntry {
@@ -205,8 +206,8 @@ pub(crate) async fn resolve(
 }
 
 /// A raw track task also accepts subscription updates and refreshes while it is running.
-struct RawTaskEntry {
-	task: Task,
+struct RawTaskEntry<C = OnStatus> {
+	task: Task<C>,
 	control: RawControl,
 	/// Dropped with the entry once the task ends, which ends its refresh waits.
 	alive: kio::Producer<()>,
@@ -315,6 +316,9 @@ pub struct Consume {
 	/// Raw track refresh waits. Close withdraws the request; the task delivers one callback,
 	/// then removes itself.
 	raw_refresh: NonZeroSlab<Task>,
+
+	/// Metadata subscription tasks, which deliver each frame's header alone.
+	meta_task: NonZeroSlab<RawTaskEntry<OnHeader>>,
 
 	/// Live datagram consumer tasks, independent of stream-track readers.
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
@@ -1071,6 +1075,134 @@ impl Consume {
 	pub fn raw_frame_close(&mut self, frame: Id) -> Result<(), Error> {
 		self.raw_frame.remove(frame).ok_or(Error::FrameNotFound)?;
 		Ok(())
+	}
+
+	/// Subscribe to a track's metadata by name, delivering each frame's header alone, group by
+	/// group in arrival order, each borrowed for its callback.
+	pub fn meta_track(
+		&mut self,
+		broadcast: Id,
+		name: &str,
+		subscription: RawSubscription,
+		on_header: OnHeader,
+	) -> Result<Id, Error> {
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
+		let name = name.to_string();
+
+		let (task, mut close) = Task::new(on_header);
+		let id = self.meta_task.insert(RawTaskEntry {
+			task,
+			control: RawControl::Pending(None),
+			alive: kio::Producer::new(()),
+		})?;
+
+		tokio::spawn(async move {
+			let res = crate::ffi::run(driver.watch(async move {
+				let subscribe = async {
+					let subscription = Self::raw_subscription(subscription);
+					Ok::<_, Error>(broadcast.meta(&name)?.subscribe(subscription).await?)
+				};
+				let Some(track) = Self::until_closed(&mut close, subscribe).await? else {
+					return Ok(());
+				};
+				let control = track.control();
+				// Go live under the lock, so no later update lands before the pending one.
+				if let Some(entry) = State::lock().consume.meta_task.get_mut(id) {
+					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));
+					if let RawControl::Pending(Some(subscription)) = pending {
+						Self::update_raw(&control, Self::raw_update(&control, subscription))?;
+					}
+				}
+				Self::run_meta(on_header, track, close).await
+			}))
+			.await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			let entry = State::lock().consume.meta_task.remove(id);
+			if let Some(entry) = entry {
+				entry.task.callback.terminal(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_meta(
+		callback: OnHeader,
+		mut track: moq_net::meta::Subscriber,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		// `close` is a oneshot that panics if polled after completion, so a `Stop` must unwind
+		// the whole task rather than fall through to the outer loop.
+		loop {
+			let mut group = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::meta::Group>, Error>> {
+				if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
+					return Poll::Ready(Ok(RawStep::Stop));
+				}
+				Poll::Ready(Ok(match ready!(track.poll_recv_group(waiter))? {
+					Some(group) => RawStep::Item(group),
+					None => RawStep::End,
+				}))
+			})
+			.await?
+			{
+				RawStep::Item(group) => group,
+				RawStep::End | RawStep::Stop => return Ok(()),
+			};
+
+			loop {
+				let header = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Info>, Error>> {
+					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
+						return Poll::Ready(Ok(RawStep::Stop));
+					}
+					match ready!(group.poll_next_header(waiter)) {
+						Ok(Some(header)) => Poll::Ready(Ok(RawStep::Item(header))),
+						// A superseded group is passed as the raw reader passes it.
+						Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
+							Poll::Ready(Ok(RawStep::End))
+						}
+						Err(err) => Poll::Ready(Err(err.into())),
+					}
+				})
+				.await?
+				{
+					RawStep::Item(header) => header,
+					RawStep::End => break,
+					RawStep::Stop => return Ok(()),
+				};
+
+				let header = moq_header {
+					group: group.start,
+					frame: group.index() - 1,
+					size: header.size,
+					timestamp: header.timestamp.into(),
+				};
+				callback.header(&header);
+			}
+		}
+	}
+
+	pub fn meta_track_update(&mut self, meta: Id, subscription: RawSubscription) -> Result<(), Error> {
+		let entry = self.meta_task.get_mut(meta).ok_or(Error::TrackNotFound)?;
+		match &mut entry.control {
+			RawControl::Pending(pending) => *pending = Some(subscription),
+			RawControl::Live(control) => Self::update_raw(control, Self::raw_update(control, subscription))?,
+		}
+		Ok(())
+	}
+
+	pub fn meta_track_close(&mut self, meta: Id) -> Result<(), Error> {
+		self.meta_task
+			.get_mut(meta)
+			.ok_or(Error::TrackNotFound)?
+			.task
+			.close(Error::TrackNotFound)
 	}
 
 	/// Subscribe to a live datagram track by name.

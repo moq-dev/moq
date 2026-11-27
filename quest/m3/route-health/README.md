@@ -66,7 +66,7 @@ standby and [failover](/quest/m3/route-health/failover.md).
 Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
 ✅ move both the metadata wire/serving quest
 ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)) and the subscriber
-API quest ([subscribe-meta.md](/quest/m2/subscribe-meta.md)) back into `m2` on
+API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) back into `m2` on
 `moq-lite-07-wip`, reversing the 2026-11-25 deferral to `m3` / `lite-08-wip`
 (rejected: moving only the wire into `m2` and keeping the subscriber API in
 `m3`; leaving both in `m3`). `moq-hls` live and archive/VOD indexing is an

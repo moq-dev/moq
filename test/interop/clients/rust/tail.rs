@@ -83,14 +83,14 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|compress|datagram|status|late|meta]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
 		matches!(
 			mode,
-			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late")
+			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status" | "late" | "meta")
 		),
 		"unknown mode: {mode:?}"
 	);
@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
 	let datagram = mode == Some("datagram");
 	let status = mode == Some("status");
 	let late = mode == Some("late");
+	let meta = mode == Some("meta");
 	let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 	let mut config = moq_tokio::connect::Config::default();
 	// An empty version offers the defaults, so a mode can follow it.
@@ -244,6 +245,36 @@ async fn main() -> anyhow::Result<()> {
 					println!("datagram {sequence}");
 				}
 				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
+				session.close().await?;
+				client.close().await;
+				return Ok(());
+			}
+			if meta {
+				// A metadata subscription: every group, each frame's declared size, no payload.
+				let options = moq_net::track::Subscription::default()
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
+				let mut track = broadcast.meta("tail")?.subscribe(Some(options)).await?;
+				let mut seen = Vec::new();
+				while let Some(mut group) = track.recv_group().await? {
+					let sequence = group.start;
+					ensure!(sequence < GROUPS, "unexpected group {sequence}");
+					for (index, want) in frames(sequence, mode).iter().enumerate() {
+						let header = group.next_header().await?.context("short group")?;
+						ensure!(
+							header.size == want.len() as u64,
+							"wrong size of frame {index} in group {sequence}"
+						);
+					}
+					ensure!(group.next_header().await?.is_none(), "extra frame in group {sequence}");
+					seen.push(sequence);
+				}
+				seen.sort_unstable();
+				ensure!(seen == (0..GROUPS).collect::<Vec<_>>(), "wrong groups: {seen:?}");
+				ensure!(
+					track.finished().await? == moq_net::track::Position::group(GROUPS),
+					"wrong declared end"
+				);
+				eprintln!("tail meta clean end=4 groups=0,1,2,3 frames=4");
 				session.close().await?;
 				client.close().await;
 				return Ok(());

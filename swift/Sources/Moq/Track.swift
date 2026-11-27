@@ -114,6 +114,82 @@ public final class GroupConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// Read side of a metadata subscription: a track's groups, each frame as its header alone.
+/// Iterating yields groups in arrival order: `for try await group in meta { ... }`.
+public final class MetaConsumer: AsyncSequence, Sendable {
+    /// The group emitted by this sequence, in arrival order.
+    public typealias Element = MetaGroup
+
+    let ffi: MoqMetaConsumer
+
+    init(_ ffi: MoqMetaConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The next group in arrival order, as `TrackConsumer.recvGroup` returns it. `nil` once
+    /// the track ends.
+    public func recvGroup() async throws -> MetaGroup? {
+        (try await ffi.recvGroup()).map(MetaGroup.init)
+    }
+
+    /// The publisher-side properties learned during subscription.
+    public func info() -> TrackInfo {
+        ffi.info()
+    }
+
+    /// Change this subscriber's delivery preferences, as `TrackConsumer.update` does.
+    public func update(subscription: Subscription) throws {
+        try checkSubscription(subscription)
+        try ffi.update(subscription: subscription)
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<MetaGroup, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            (try await ffi.recvGroup()).map(MetaGroup.init)
+        }.makeAsyncIterator()
+    }
+}
+
+/// One group of a metadata subscription. Iterating yields its frames' headers.
+public final class MetaGroup: AsyncSequence, Sendable {
+    /// The frame header emitted by this sequence.
+    public typealias Element = FrameHeader
+
+    let ffi: MoqMetaGroup
+
+    init(_ ffi: MoqMetaGroup) {
+        self.ffi = ffi
+    }
+
+    /// The start of this group within the track.
+    public var start: UInt64 {
+        ffi.start()
+    }
+
+    /// The next frame's header, without its payload, or `nil` once the group ends.
+    public func nextHeader() async throws -> FrameHeader? {
+        try await ffi.nextHeader()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<FrameHeader, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.nextHeader()
+        }.makeAsyncIterator()
+    }
+}
+
 /// A watch-only handle to whether a published track has subscribers, and when they ask for a
 /// new group.
 ///
