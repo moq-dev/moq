@@ -6,14 +6,15 @@ use bytes::BufMut;
 
 use crate::{Duration, Instant, frame, range_set::ArrayRangeSet};
 
-/// When received packets arrived, kept until an ACK reports them to a peer that asked
+/// When received packets arrived, kept until the next ACK reports them to a peer that asked
 ///
-/// Each arrival is reported once. An ACK-only packet is never acknowledged, so repeating
+/// Each arrival is reported at most once. An ACK-only packet is never acknowledged, so repeating
 /// arrivals until the peer confirms them would resend every one in every ACK, and the sender
-/// only reads the times of packets an ACK newly acknowledges. Losing an ACK loses its times,
-/// which the draft leaves to best effort.
+/// only reads the times of packets an ACK newly acknowledges. So every ACK forgets them all,
+/// whether they fit or not, and holds only those since the previous one. Losing an ACK loses its
+/// times, which the draft leaves to best effort.
 pub(super) struct Log {
-	/// Packet numbers and arrivals not yet reported, oldest first, arrivals never decreasing
+	/// Packet numbers and arrivals since the last ACK, oldest first, arrivals never decreasing
 	received: VecDeque<(u64, Instant)>,
 	/// The latest arrival recorded, which no later one goes before
 	latest: Option<Instant>,
@@ -58,9 +59,9 @@ impl Log {
 		self.received.iter().any(|&(packet, _)| ranges.contains(packet))
 	}
 
-	/// Writes the Receive Timestamps field for an ACK of `ranges` in at most `space` bytes,
-	/// newest arrival first, and forgets the arrivals it reported
-	pub(super) fn encode<W: BufMut>(&mut self, ranges: &ArrayRangeSet, space: usize, buf: &mut W) {
+	/// Writes the Receive Timestamps field for an ACK of `ranges` in at most `space` bytes, at
+	/// least one, newest arrival first
+	pub(super) fn encode<W: BufMut>(&self, ranges: &ArrayRangeSet, space: usize, buf: &mut W) {
 		let largest = ranges.max().expect("an ACK acknowledges a packet");
 		let basis = self.basis.expect("an arrival sets the basis");
 		let received = self
@@ -70,15 +71,14 @@ impl Log {
 			.filter(|&&(packet, _)| ranges.contains(packet))
 			.take(self.max)
 			.map(|&(packet, at)| (packet, ((at - basis).as_micros() as u64) >> self.exponent));
-		let mut reported = frame::ReceiveTimestamps::encode(largest, received, space, buf);
+		debug_assert!(space >= 1, "no room for the timestamp range count");
+		frame::ReceiveTimestamps::encode(largest, received, space, buf);
+	}
 
-		// The reported arrivals are the newest the ACK covers. One it skipped among them is out
-		// of the ranges for good, as pending ranges only drop their oldest, so cut them all.
-		let mut cut = self.received.len();
-		while reported > 0 {
-			cut -= 1;
-			reported -= usize::from(ranges.contains(self.received[cut].0));
-		}
-		self.received.truncate(cut);
+	/// Forgets every arrival, once an ACK went out: it acknowledged each one still in the
+	/// pending ranges, so the peer reads none of their times from a later ACK, and the ranges
+	/// only drop their oldest, so the rest are never acknowledged again
+	pub(super) fn clear(&mut self) {
+		self.received.clear();
 	}
 }
