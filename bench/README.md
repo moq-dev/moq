@@ -989,9 +989,11 @@ Criterion, or to CodSpeed's instrumented Criterion under `cfg(codspeed)`, which
 rust2-bench sets. Nothing gates on it.
 
 Each count's measure names the environment it ran in, such as `instructions
-(x86_64-3059cd1d9e65)`: Valgrind's simulated CPU, glibc's tunables, and the
-Valgrind version, which rust2's flake input pins. Counts compare only within one
-fingerprint, and a Valgrind bump starts new series. A matching fingerprint does
+(x86_64-ce1501c93c32)`: Valgrind's simulated CPU, glibc's tunables, the
+Valgrind version, and the library rust2-bench preloads into each counted process
+to pin its randomness and clock, which rust2's flake input pins. Counts compare
+only within one fingerprint, and a bump that moves Valgrind or the preload starts
+new series. A matching fingerprint does
 not yet reproduce CI's counts: two hosts sharing one agreed exactly on fewer
 than a quarter of the benchmarks. On x86-64 Linux:
 
@@ -1003,13 +1005,17 @@ nix develop --command just rs instructions compare origin/main  # a table of eac
 
 Add `--benchmarks <file>`, one name a line, to count only those benchmarks and
 build only the bench targets of their names, plus any target of the same name in
-another listed package, since Cargo's `--bench` takes no package. `compare` selects the same packages and targets at both
-commits, so its base needs every package `sh/rs/instructions.sh` lists. It
-counts the base in another worktree, whose path alone can move a count, so
-recount a change it reports in one checkout, with `--jobs 1` as CI counts,
-before trusting it. It keeps each
-checkout's base worktree and build under `~/.cache/rust2-bench` for the next
-compare; delete the directory, then `git worktree prune`, to reclaim them.
+another listed package, since Cargo's `--bench` takes no package. A name the
+commit lacks fails the run; `run` with `--allow-missing` counts the rest and
+names the missing ones on stderr and in a GitHub Actions job summary, failing
+only when the commit has none of them. `compare` counts the base and the working tree from one
+worktree under `~/.cache/rust2-bench`, so a path the build compiles in moves
+neither side, and selects each side's packages and targets from what that side
+has, so a package or target only one side has reads as added or removed. Not
+every count repeats yet (`quest/m0/repeatable-instruction-counts.md`), so recount
+a change it reports with `--jobs 1`, as CI counts, before trusting it. It keeps the worktree and its build for
+the next compare; delete the directory, then `git worktree prune`, to reclaim
+them.
 
 ### Kixel Quest
 
@@ -1019,7 +1025,9 @@ the run finishes and turns a regression into an investigation quest in
 `quest/m0/`. It bisects one to the landing that caused it by dispatching the
 Instructions workflow on a `kixel-bisect/<run>/<commit>` branch, with its
 `benchmarks` input naming the suspects, so each step builds and counts only
-those. The Instructions workflow uploads rust2-bench's `metrics.json`, which
+those. A step at a commit lacking some suspects counts the rest
+(`--allow-missing`), and Kixel Quest reads the missing ones as skipped there,
+not clean. The Instructions workflow uploads rust2-bench's `metrics.json`, which
 rust2-bench checks against Kixel Quest's limits as it writes it; Nightly reports
 every successful source's report, without its `bench-*` prefix, and each paired
 comparison's base as a second observation of that commit (`just gh
