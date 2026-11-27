@@ -576,8 +576,9 @@ pub mod poll {
 		}
 
 		/// Whether [`SendStream::reset_at`] still delivers its prefix to the peer's reader, such as
-		/// over QUIC with RESET_STREAM_AT negotiated. A plain RESET_STREAM lets the peer discard
-		/// bytes it has not read, even acknowledged ones, so the default is `false`.
+		/// over raw QUIC with RESET_STREAM_AT negotiated, but never over WebTransport, whose browser
+		/// API may discard it anyway. A plain RESET_STREAM lets the peer discard bytes it has not
+		/// read, even acknowledged ones, so the default is `false`.
 		fn reliable_reset(&self) -> bool {
 			false
 		}

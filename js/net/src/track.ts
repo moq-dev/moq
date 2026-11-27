@@ -3709,6 +3709,9 @@ export class Subscriber {
 	// or once it expires, which must not reopen what this reader already gave up. Only a wider budget
 	// takes a stale one back, and the read passing it forgets it. Mirrors the Rust `Misses::adopt_drops`.
 	#adopted: DropRun[] = [];
+	// Each group handed out above a gap, from the hand-out floor up, whose reach media time put past
+	// the widest budget it was judged under, with that reach; see #pastBudget.
+	#passed?: { widest: number; steps: { key: bigint; reach: number }[] };
 	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
 	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
 	// what it still reads, so a widening back over one asks it afresh.
@@ -3890,11 +3893,17 @@ export class Subscriber {
 		const deadline = arrived.since(Instant.ZERO).asNanos() + budget * 1_000_000;
 		if (now().since(Instant.ZERO).asNanos() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
-		// A closed subscriber keeps no timeline to bound the reach with, and only a live edge
-		// above `key` convicts it by media time.
+		return this.#staleByMedia(key, drift);
+	}
+
+	// Whether the live edge presents a full budget past where group `key` could still reach. Unlike
+	// the wall clock, which judges a key by when its successor arrived, this only grows with the key's
+	// age, since timestamps never rewind: a key past it has every key below past it too. A closed
+	// subscriber keeps no timeline to bound the reach with, and only a live edge above `key` convicts.
+	#staleByMedia(key: bigint, drift: Drift): boolean {
 		if (this.#arrivals || drift.presentation === undefined || drift.presentation.key <= key) return false;
 		const reach = this.#reach(key, drift.end, drift.scope);
-		return reach !== undefined && drift.presentation.at - reach >= budget;
+		return reach !== undefined && drift.presentation.at - reach >= drift.budget.at(key);
 	}
 
 	// Where a live join this reader placed at `placed` starts for a reader within `budget`
@@ -4064,6 +4073,9 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
+		// A late group below what the fill floor passed opens the gaps above it to be judged again.
+		const steps = this.#passed?.steps;
+		while (steps && steps.length > 0 && steps[steps.length - 1].key >= key) steps.pop();
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -4755,7 +4767,10 @@ export class Subscriber {
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextKey);
 			for (const runs of [this.#asked, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
-			cutRun(this.#adopted, 0n, read);
+			// Below where the budget passed, no fill is judged again, so no verdict is needed there. What
+			// this reader asked or gave up stays until its read passes it: a bounded read ends on those.
+			const passed = max(read, this.#pastBudget(drift));
+			cutRun(this.#adopted, 0n, passed);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -4763,7 +4778,7 @@ export class Subscriber {
 			// Below where the feed starts, only the history the copy's start rule leaves fillable.
 			const floor = fillFloor(producer, this.#window.start());
 			const { drops, refused } = this.#state;
-			const low = floor === undefined ? start : max(start, floor);
+			const low = max(floor === undefined ? start : max(start, floor), passed);
 			const edge = min(end, max(this.#state.received.peek(), (fillEdge(producer) ?? -1n) + 1n));
 			const above = max(low, edge);
 			const unknown = this.#unknownRuns(budget, coverage);
@@ -4858,6 +4873,47 @@ export class Subscriber {
 			this.#fillsMoved(stale);
 		}
 		return owed;
+	}
+
+	// The lowest key a fill could still bring this reader: its hand-out floor, raised to each group
+	// it handed out above a gap once media time puts that group past the widest budget, which puts
+	// every key below past it too (see #staleByMedia). That floor holds below a cached group no range
+	// covers, and an arrival read never raises its key cursor, so without this its fill verdicts since
+	// the join pile up and are judged again on every change. A scale-less track has no media time, and
+	// an unchecked one's timestamps may rewind, so their floor stays.
+	//
+	// The groups it passed are kept as steps with the reach each was judged by, which never falls
+	// from one step to the next. A widening takes back the newest steps until one is past the wider
+	// budget, and a group handed out below a step (see #handOut) takes back the steps from it up, so
+	// each costs what it undoes rather than the history since the join.
+	#pastBudget(drift: Drift): bigint {
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		if (this.#state.info.peek()?.unchecked === true) return floor;
+		const widest = drift.budget.widest();
+		const edge = this.#arrivals ? undefined : drift.presentation;
+		const past = (key: bigint, reach: number | undefined) =>
+			edge !== undefined && reach !== undefined && edge.key > key && edge.at - reach >= widest;
+		this.#passed ??= { widest, steps: [] };
+		const passed = this.#passed;
+		const steps = passed.steps;
+		let below = 0;
+		while (below < steps.length && steps[below].key < floor) below++;
+		if (below > 0) steps.splice(0, below);
+		if (widest > passed.widest) {
+			while (steps.length > 0 && !past(steps[steps.length - 1].key, steps[steps.length - 1].reach)) steps.pop();
+		}
+		passed.widest = widest;
+		const top = () => max(steps[steps.length - 1]?.key ?? floor, floor);
+		for (
+			let next = this.#delivered.nextAboveGap(top());
+			next !== undefined;
+			next = this.#delivered.nextAboveGap(next)
+		) {
+			const reach = this.#reach(next, drift.end, drift.scope);
+			if (reach === undefined || !past(next, reach)) break;
+			steps.push({ key: next, reach });
+		}
+		return top();
 	}
 
 	// Take what changed since the last probe as unjudged again: every key once the terms it
@@ -5361,6 +5417,11 @@ export class Subscriber {
 				.filter((run) => run.skip)
 				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
+		hooks.fillRuns = (subscriber) =>
+			subscriber.#asked.length +
+			subscriber.#givenUp.length +
+			subscriber.#heads.length +
+			subscriber.#adopted.length;
 		// Mirrors the Rust `Subscriber::ask_unproven`: a copy that is another front's logical track
 		// asks its serving copy the same way, one level per nesting.
 		hooks.askUnproven = (subscriber, unproven) => {

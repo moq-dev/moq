@@ -1463,7 +1463,7 @@ fn a_relay_that_leaves_for_good_takes_its_floors() {
 /// other half, which never restarts, holds on average after each round of restarts. A
 /// restart clears a relay's own table, so a restarted relay's says nothing about growth.
 #[test]
-#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_relay_floor_growth() {
 	println!("shape,relays,links,replaced,floors_per_lasting_relay");
 	for relays in [12, 32] {
