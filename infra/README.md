@@ -160,7 +160,7 @@ their local caches and `/dev/kvm`), without secrets and read-only apart from
 the report job's `checks: write` (`.github/workflows/queue.yml`, which calls
 main's `queue-build.yml`). Once kixel-ai/dotfiles registers them in moq-dev's
 `moq-queue` runner group, which admits only moq-dev/moq, and only
-`queue-build.yml` and `nightly.yml` at `refs/heads/main`, no other workflow, a
+`queue-build.yml` at `refs/heads/main`, no other workflow, a
 fork's included, reaches them. The main ruleset requires the `Queue`
 context, which `queue-build.yml` posts with the build's result (and
 `queue-pr.yml` reports skipped on PRs), and the merge queue, so only the queue

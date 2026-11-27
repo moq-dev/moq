@@ -604,10 +604,8 @@ clients/
 
 ## CI
 
-`.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-release PRs that touch `test/interop/`), then again with `--versions ietf`. A
-release PR's moq-transport step runs only drafts 18 and 22 between Rust and native
-JS. A red cell means a real interop break in the current tree.
+`.github/workflows/interop.yml` runs the full matrix nightly (and on demand), then
+again with `--versions ietf`. A red cell means a real interop break in the current tree.
 
 The scheduled run on `main` publishes its report to <https://git.moq.dev/interop/>;
 every other run keeps it as the `interop-report` artifact. The report is a pass/fail

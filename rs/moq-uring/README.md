@@ -111,7 +111,7 @@ datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
 WebTransport. All of them skip (loudly) below the kernel floor. CI runs them
 on `ubuntu-24.04-arm`, whose kernel clears it, with `CI_STRICT=1` refusing a
-skip: in the `uring.yml` release gate and the nightly `rs uring` job.
+skip, in the nightly `rs uring` job.
 
 ## Benchmarks
 

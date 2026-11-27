@@ -20,7 +20,7 @@ Starts once m2 lands, so the APIs it reviews are the ones that ship; the cut
 waits for it. API shape is the maintainer's call (decided 2026-10-19), so this
 run changes no code. Inventory the diff against the last published version
 by running `just api-diff`
-locally against `main`, since its CI report only appears on the cut PR, and
+locally against `main`, and
 hand diff the surfaces it cannot see. For each export that is awkward, judge it
 against AGENTS.md's Public API rules: names mirrored across languages, no
 callbacks or 4+ args, misuse unrepresentable, private until a consumer needs

@@ -32,4 +32,3 @@ Tests: clean container test substituting both the current `devShells.default` an
 - [Confirm nix.moq.dev no longer drops NAR streams](/quest/m0/ci/nix-nar-stream.md) - verifies the B2 Worker's NAR resume behavior carried into `nix.kixel.quest`
 - [R2's Rust cache is torn down](/quest/m0/ci/mbx-b2.md) - finishes tearing down the older R2 `mbx` bucket
 - [Verify the B2 Rust cache](/quest/m0/ci/mbx-b2-verify.md) - measures B2 `mbx` hit rates and egress
-- [Release pull requests read the B2 Rust cache](/quest/m3/mbx-release-cache.md) - release branch's B2 `mbx` check

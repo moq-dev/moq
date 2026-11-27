@@ -38,7 +38,7 @@ on:
 permissions:
   contents: read
 
-# Separate PR builds from publishes so a PR run can't queue ahead of (and
+# Separate dry-runs from publishes so a dry-run can't queue ahead of (and
 # delay) a release.
 concurrency:
   group: release-swift-lib-${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && 'publish' || github.ref }}

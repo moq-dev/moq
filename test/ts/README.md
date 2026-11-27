@@ -565,7 +565,7 @@ as well. `--source` also requires the source's SI tables and PAT-declared PMTs, 
 actual grader. Identical streams, different PES interleave, late acquisition with
 bootstrap tables, and PCR wrap must pass. Persistent phase shifts, accumulating
 drift, disappearing/absent/sparse tables, and insufficient shared media must fail.
-Controls run nightly and on release PRs; the real pair runs nightly and on manual TS validation.
+Controls and the real pair run nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
@@ -1011,9 +1011,7 @@ pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` cover
 outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
-browser interop. It runs nightly on `main`, and release PRs touching a workspace
-crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
-toolchain run it too:
+browser interop. It runs nightly on `main`, and on demand:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
 open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion, MPTS, an encoder switch back and forward, and a restarted import), one program of the MPTS joined late, EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.

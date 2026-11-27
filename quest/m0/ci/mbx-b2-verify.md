@@ -91,7 +91,3 @@ through the maintainer's agent Chrome.
 ## Required
 
 - [R2's Rust cache is torn down](/quest/m0/ci/mbx-b2.md) - lands only once a scheduled Nightly hits B2
-
-## Related
-
-- [Release pull requests read the B2 Rust cache](/quest/m3/mbx-release-cache.md) - the release branch's check, behind the cut

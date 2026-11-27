@@ -2,7 +2,7 @@ name: Queue build
 
 # The merge queue's build of a group, on the host's self-hosted runner. Only
 # queue.yml calls it, at main: the moq-queue runner group admits only this
-# workflow and Nightly at refs/heads/main, so no other workflow can reach the
+# workflow at refs/heads/main, so no other workflow can reach the
 # runner, an approved fork run's included, and a PR's edit to this file runs
 # only after it lands.
 #

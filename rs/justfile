@@ -26,7 +26,7 @@ tla spec *args:
     python3 sh/tlc.py rs/{{ spec }} {{ args }}
 
 # Default features for the selected packages; `features` covers the feature
-# matrix nightly and on release PRs. No `cargo check` pass: clippy is a
+# matrix nightly. No `cargo check` pass: clippy is a
 # superset of it, and the two use different rustc wrappers, so running both
 # compiles the workspace twice.
 #
@@ -118,8 +118,7 @@ test-changed $LIST:
     sh/rs/select.sh test "$LIST"
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
-# skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
-# so a release PR compiles only the affected crates. Default
+# skips; platform.yml runs it on a Windows runner over every package. Default
 # features, since jemalloc doesn't build on MSVC.
 
 # Compile what the branch changed since BASE on a Windows host, or everything with `--all`.
@@ -135,16 +134,6 @@ windows-test:
     run just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
     finish
-
-# Run io_uring tests when the branch affects the relay or its dependencies.
-[positional-arguments]
-uring-changed base="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    changed=$(mktemp)
-    trap 'rm -f "$changed"' EXIT
-    bash sh/changed.sh "$1" > "$changed"
-    bash sh/rs/select.sh uring "$changed"
 
 # Test the io_uring relay path on a kernel that supports it.
 # Linux-only; CI_STRICT requires a supported kernel instead of skipping tests.

@@ -112,7 +112,7 @@ check $BASE="":
 # The landing worker runs this gate in one job. The test build also enforces
 # clippy; a separate lint covers media tests with default features. The
 # feature matrix and optimized bindings run
-# nightly and on release PRs. Missing tools fail under CI_STRICT. The host
+# nightly. Missing tools fail under CI_STRICT. The host
 # land gate also sets CHECK_FAIL_FAST=1, so a failing batch stops at its first
 # failed module.
 

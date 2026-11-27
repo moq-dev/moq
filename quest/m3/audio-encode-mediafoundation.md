@@ -16,7 +16,7 @@ behind the encode seam on Windows.
 - The catalog ASC is synthesized at construction per the encode seam; the
   output type's `MF_MT_USER_DATA` must match it, asserted in tests.
 - Round-trip regression through the Media Foundation decoder; verification on
-  a Windows host, since the per-PR CI compiles only.
+  a Windows host, since CI only compiles it, nightly.
 
 This backend implements the zero-or-more packet return and `flush` that
 moq-audio's encoder took in m2 before the cut

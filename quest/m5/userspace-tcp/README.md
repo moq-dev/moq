@@ -65,4 +65,4 @@ Decided 2026-11-19 by the agent, on the maintainer's "you choose the rest":
 - m4: no named consumer waits on it yet; it adds relay config, so it isn't m9.
   It moves to m3 once a deployment waits on it.
 - Linux only, the only platform with AF_XDP. The privileged tests (XDP on a veth
-  in a netns) run on a self-hosted Linux runner and skip loudly elsewhere.
+  in a netns) run under sudo on a GitHub-hosted Linux runner and skip loudly elsewhere.

@@ -53,10 +53,9 @@ name: Nightly
 # also fails when an open finding's config starts passing, so the fix promotes
 # its rule.
 #
-# Main PRs run only the landing gate's selection as a signal, so every
-# path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
-# Scanner image, platform.yml and the release dry-runs) runs here on main too,
-# and release-gate.yml runs them on release PRs.
+# Pull requests run no CI and the merge queue runs only the diff's selection,
+# so every path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
+# Scanner image, platform.yml and the release dry-runs) runs here on main.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in `just ci`.
@@ -101,7 +100,7 @@ jobs:
       contents: read
       actions: read
 
-  # The path-filtered gates main PRs skip; release PRs still run them.
+  # The path-filtered gates the merge queue skips.
   x11:
     uses: ./.github/workflows/x11.yml
     secrets: inherit
@@ -232,8 +231,8 @@ jobs:
             artifact-path: target/coverage/js
           # OBS (over moq-ffi) and libmoq's C fixtures link a Rust staticlib from
           # outside cargo, so a stale `rs/libmoq/native-libs/*.txt` breaks them and
-          # no cargo build. release-gate.yml's OBS filter can't list every such input;
-          # this diff-independent run catches what it misses, a day late.
+          # no cargo build. No path filter lists every such input, so this
+          # diff-independent run catches the break, a day late.
           - name: OBS
             recipe: obs ci
             shell: .#obs
@@ -437,7 +436,7 @@ jobs:
       fail-fast: false
       matrix:
         # `rs uring` runs the io_uring tests under CI_STRICT, which fails them below
-        # the 6.12 kernel floor; uring.yml also runs it on affected release PRs.
+        # the 6.12 kernel floor.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
@@ -565,7 +564,7 @@ jobs:
         run: nix shell --inputs-from . nixpkgs#just --command just test route-proof
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
-  # player already runs in interop.yml, nightly and on release PRs. WebKit has
+  # player already runs in interop.yml, nightly. WebKit has
   # engine defects this cannot pass; see test/interop/README.md.
   media-firefox:
     name: Media (firefox player)
@@ -607,7 +606,7 @@ jobs:
           path: ${{ runner.temp }}/moq-test-runs
           if-no-files-found: error
 
-  # The only macOS and Windows coverage main gets; release PRs run it too.
+  # The only macOS and Windows coverage main gets; pushes to release run it too.
   platform:
     uses: ./.github/workflows/platform.yml
     secrets: inherit
@@ -866,19 +865,13 @@ jobs:
           path: target/bench/size
           retention-days: 45
 
-  # The queue's Check over every package, catching what a diff-scoped queue run
-  # let into main. On the queue's runners, which check what the queue checks
-  # and have the disk for a full build, which a hosted runner ran out of.
-  # Those runners keep state the queue builds with, such as the Cargo registry,
-  # so only main's reviewed code runs here, without the Rust cache, which only
-  # the queue writes (see .github/actions/rust-cache), and with a fresh home.
+  # The merge queue's gate over every package, catching what a diff-scoped
+  # queue run let into main. It reads the Rust cache without writing it, the
+  # setup in which this build fits a hosted runner's disk; a cold read-write
+  # build ran out of space.
   gate:
     name: Gate
-    if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, moq-queue]
-    concurrency:
-      group: moq-queue-nightly
-      cancel-in-progress: false
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     permissions:
       contents: read
@@ -888,12 +881,16 @@ jobs:
           persist-credentials: false
           # Full history for the dispatcher's base comparison.
           fetch-depth: 0
+      - uses: ./.github/actions/nix
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
+          write: false
       - name: Check every package
-        run: |
-          export HOME="$RUNNER_TEMP/home"
-          mkdir -p "$HOME"
-          # exec, so a cancel reaches the dispatcher (see queue-build.yml).
-          exec nix develop --command just gate
+        # exec, so a cancel reaches the dispatcher (see queue-build.yml).
+        run: exec nix develop --command just gate
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

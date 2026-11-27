@@ -19,8 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The queue checks default features only. Nightly and release PRs
-        # keep the feature matrix and optimized artifacts; release binding
+        # The queue checks default features only. Nightly keeps the
+        # feature matrix and optimized artifacts; release binding
         # workflows cover their optimized libraries separately.
         recipe: ["rs features"]
     steps:

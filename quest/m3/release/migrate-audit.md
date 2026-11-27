@@ -53,7 +53,7 @@ m1 quest on 2026-10-22.
   a group received over moq-transport is checked too, since its time is its
   Group ID, and only a moq-lite-05/06 copy keeps its timestamps unchecked,
   so "serves both on" becomes "serves it on".
-- Run the API-diff report on the cut PR and read the diff of the
+- Run the API-diff report (`just api-diff`) on the cut's head and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
   env vars, and config keys by hand. Add this manual pass to

@@ -1,11 +1,10 @@
 name: API diff
 
-# Diffs every published API against its last release on PRs into `release`.
-# A backport fails on any break, since it must keep the published API. The cut
-# (a PR from `main`) only reports, for the migration audit, unless the cycle's
-# `phase` in version.json is `additive`: an additive cut publishes patches, so
-# a break fails it. Nightly calls this on `main` and runs only in that phase,
-# so a break that lands early surfaces within a day rather than at the cut.
+# Diffs every published API against its last release. Nightly calls this on
+# `main` and runs it only while the cycle's `phase` in version.json is
+# `additive`, failing on any break, so a break that lands early surfaces within
+# a day rather than at the cut. Backports and cuts run `just api-diff` locally
+# (see RELEASE.md).
 permissions:
   contents: read
 
@@ -34,19 +33,8 @@ jobs:
           # `release` has no version.json until the first shared cut lands there.
           phase=null
           if [[ -f version.json ]]; then phase=$(jq -r .phase version.json); fi
-          if [[ "$EVENT" != pull_request* ]]; then
-            # Nightly on `main`: only the additive phase forbids a break there.
-            [[ "$phase" == additive ]] && echo "args=--deny" >>"$GITHUB_OUTPUT" || echo "skip=1" >>"$GITHUB_OUTPUT"
-          elif [[ "$HEAD_REF" == main && "$HEAD_REPO" == "$GITHUB_REPOSITORY" && "$phase" != additive ]]; then
-            # Only this repository's own `main` is the cut; a fork's `main` is a backport.
-            echo "args=" >>"$GITHUB_OUTPUT"
-          else
-            echo "args=--deny" >>"$GITHUB_OUTPUT"
-          fi
-        env:
-          EVENT: ${{ github.event_name }}
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          # Only the additive phase forbids a break on `main`.
+          [[ "$phase" == additive ]] || echo "skip=1" >>"$GITHUB_OUTPUT"
       - if: ${{ !steps.mode.outputs.skip }}
         uses: ./.github/actions/nix
       - if: ${{ !steps.mode.outputs.skip }}
@@ -61,10 +49,8 @@ jobs:
       - name: Diff against the last release
         id: diff
         if: ${{ !steps.mode.outputs.skip }}
-        # The report-only mode passes no argument.
-        run: nix develop --command just api-diff ${ARGS:+"$ARGS"}
+        run: nix develop --command just api-diff --deny
         env:
-          ARGS: ${{ steps.mode.outputs.args }}
           # Lists and downloads the libmoq and moq-ffi release assets.
           GH_TOKEN: ${{ github.token }}
       - name: Keep the report

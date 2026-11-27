@@ -260,10 +260,6 @@ module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
 # and @moq/obs, and nixpkgs moves on a flake.lock bump alone.
 module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$|js/obs/src/obs\.ts$)' \
     tools='clang-format cmake gersemi jq' fix
-# ts.yml's crate filters against the closure test/ts/run.sh builds, which
-# moves only with a manifest, the lockfile, or the harness's packages.
-module ts_paths '^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)' \
-    tools='cargo python3'
 # Ruff lints and formats every Python file under the nearest pyproject.toml.
 module python '(\.pyi?|(^|/)pyproject\.toml)$' \
     tools='ruff' fix
@@ -493,7 +489,6 @@ step() {
                 return "$status"
             }
             ;;
-        check:ts_paths) run python3 sh/gh/ts-paths.py ;;
         check:cargo_nix) run just rs cargo-nix --check ;;
         check:biome) run just biome ;;
         check:markdown)

@@ -26,3 +26,10 @@ online with its labels. Delete this quest once they are listed.
 - Follow `nixos`'s sandboxed runner containers where the host allows it,
   binding in only the GPU device nodes and the host driver's libraries.
 - The quality job is nightly, so its runners can stay at home.
+
+## Waiting
+
+- Maintainer: the 2026-11-27 CI policy runs a public repository's async jobs on GitHub-hosted runners and allows no new per-repository self-hosted runner. How do the GPU rows run nightly?
+  - A scheduled job on each GPU host that runs over SSH and uploads its rows, with no Actions runner (Recommended) - keeps every GPU row without a repository runner
+  - GitHub's NVIDIA GPU runners - billed, and with no Intel or AMD GPU, two hosts' rows go
+  - Self-hosted moq-dev/moq runners, as planned - an exception to the policy

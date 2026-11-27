@@ -131,7 +131,7 @@ class QueryTests(unittest.TestCase):
             ("js/net/src/index.ts", False),
             ("kt/example.kt", True),
             ("infra/moq-sh/install.sh", False),
-            (".github/workflows/check.yml", False),
+            (".github/workflows/queue.yml", False),
         ):
             with self.subTest(path=path):
                 self.change(path)
@@ -857,7 +857,7 @@ esac
             ("sh/rs/select.sh", True),
             ("bench/compare.py", True),
             ("test/smoke/runner.py", True),
-            (".github/workflows/check.yml", True),
+            (".github/workflows/queue.yml", True),
             (".cargo/config.toml", True),
             (".release-plz.toml", True),
             ("rs/moq-ffi/build.sh", True),
