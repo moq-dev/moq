@@ -423,6 +423,7 @@ impl Range {
 	};
 
 	/// Whether this range asks for every group the publisher holds, whatever its policy.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn is_all(&self) -> bool {
 		self.start == Start::Oldest && self.end.is_none()
 	}
@@ -688,6 +689,7 @@ impl Subscription {
 	/// The priority and order these ranges ask as a whole: see [`Policy::top`]. What a wire
 	/// carrying one policy per subscription carries, and the order a reader hands its groups
 	/// out in.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn policy(&self) -> Policy {
 		Policy::of(&self.ranges)
 	}
