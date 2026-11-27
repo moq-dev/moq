@@ -194,6 +194,37 @@ test.each(VIA)("metadata pulls payload only across an older hop via the relay's 
 	}
 });
 
+test.each(VIA)("readers share the payload subscription across an older hop via the relay's %s", async (via) => {
+	using clock = manual();
+	const { heard, payloads } = tap();
+	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07, via);
+	try {
+		const payload = chained.remote.track("video").subscribe();
+		const meta = trackMetaOf("video", chained.remote).subscribe();
+		chained.write(0n, 0);
+		const group = defined(await clock.drive(timeout(TIMEOUT, payload.recvGroup())));
+		const frame = defined(await clock.drive(timeout(TIMEOUT, group.readFrame())));
+		expect(frame.payload.byteLength).toBe(BIG);
+		expect(await headers(clock, meta)).toEqual([
+			0n,
+			[
+				[BIG, 0],
+				[0, 1],
+			],
+		]);
+		await clock.advance(Duration.millis(1000));
+		// The lite-06 hop carries one payload subscription both readers share, so each frame crosses
+		// it once, and crosses the lite-07 hop once, to the payload reader.
+		expect(heard.filter((subscribe) => subscribe.version === Version.DRAFT_06).length).toBe(1);
+		expect(payloads()).toBe(4);
+		group.close();
+		payload.close();
+		meta.close();
+	} finally {
+		await chained.close();
+	}
+});
+
 test.each(VIA)("a payload reader and a metadata reader each get their own via the relay's %s", async (via) => {
 	using clock = manual();
 	const { payloads } = tap();

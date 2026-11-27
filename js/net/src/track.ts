@@ -501,7 +501,7 @@ function orderOf(order: Order | undefined): Order {
 export class Request {
 	/** The requested track name. */
 	readonly name: string;
-	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. */
+	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. @internal */
 	readonly meta: boolean;
 
 	#producer: Producer;

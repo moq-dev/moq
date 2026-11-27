@@ -146,6 +146,18 @@ pub(super) struct Partial {
 	scratch: bool,
 }
 
+/// What [`Producer::write_stored`] writes as one whole frame.
+enum Stored {
+	/// A payload frame's bytes.
+	Payload(Bytes),
+	/// A metadata copy's frame header: its declared plain size, and the object fields it
+	/// arrived with.
+	Header {
+		size: u64,
+		fields: Option<Arc<super::object::Fields>>,
+	},
+}
+
 /// A completed frame as a group stores it, with what egress needs beside it.
 pub(super) struct Entry {
 	owner: Mutex<Option<frame::Shared>>,
@@ -2084,23 +2096,31 @@ impl Producer {
 		if self.handle.alive.meta {
 			return Err(Error::Unsupported);
 		}
-		self.write_stored(timestamp, data.into_bytes(), None)
+		self.write_stored(timestamp, Stored::Payload(data.into_bytes()))
 	}
 
-	/// Write the header of a frame of `size` plain bytes at `timestamp` into a metadata copy
+	/// Write the `header` of a frame of `header.info.size` plain bytes into a metadata copy
 	/// (see [`Self::new_meta`]), as a metadata subscription delivers it: no payload, and no
-	/// frame or byte billed.
+	/// frame or byte billed. Its object fields are kept for a relay to forward.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn write_header(&mut self, timestamp: Timestamp, size: u64) -> Result<()> {
+	pub(crate) fn write_header(&mut self, header: frame::Header) -> Result<()> {
 		if !self.handle.alive.meta {
 			return Err(Error::Unsupported);
 		}
-		self.write_stored(timestamp, Bytes::new(), Some(size))
+		let stored = Stored::Header {
+			size: header.info.size,
+			fields: header.fields,
+		};
+		self.write_stored(header.info.timestamp, stored)
 	}
 
-	/// Write one whole frame as the group stores it: `payload`, or a metadata copy's empty
-	/// one with its `declared` size beside it.
-	fn write_stored(&mut self, timestamp: Timestamp, payload: Bytes, declared: Option<u64>) -> Result<()> {
+	/// Write one whole frame as the group stores it: a payload, or a metadata copy's empty
+	/// one with its declared size beside it.
+	fn write_stored(&mut self, timestamp: Timestamp, stored: Stored) -> Result<()> {
+		let (payload, declared, fields) = match stored {
+			Stored::Payload(payload) => (payload, None, None),
+			Stored::Header { size, fields } => (Bytes::new(), Some(size), fields),
+		};
 		let timestamp = self.handle.track.rescale_in(timestamp, self.handle.info.start)?;
 		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
@@ -2127,7 +2147,8 @@ impl Producer {
 			None => payload,
 		};
 		let size = payload.len() as u64;
-		if !state.trim(size) {
+		let metadata_bytes = fields.as_ref().map_or(0, |fields| fields.heap());
+		if !state.trim(size.saturating_add(metadata_bytes)) {
 			return Err(self.abort_too_large(state));
 		}
 		let inflated = if state.sized() { inflated } else { 0 };
@@ -2136,12 +2157,25 @@ impl Producer {
 			payload: payload.into(),
 			arrived: super::clock::now(),
 		};
-		let mut entry = Entry::plain(frame, inflated);
+		let object_id = fields.as_ref().map_or(state.next_index as u64, |fields| fields.id);
+		let mut entry = Entry {
+			fields,
+			..Entry::plain(frame, inflated)
+		};
 		// Checked here too, so a group without shared content skips the call.
 		if state.content.is_some()
 			&& let Err(err) = state.canonicalize(state.next_index, &mut entry)
 		{
 			return Err(self.abort_conflict(state, err));
+		}
+		if metadata_bytes > 0 {
+			state.relay().bytes += metadata_bytes;
+			state.charge.add(metadata_bytes);
+		}
+		let index = state.next_index as u64;
+		if let Some(wire) = state.wire_mut() {
+			wire.last = Some(object_id);
+			wire.sparse |= object_id != index;
 		}
 		let now = state.commit(entry);
 		state.next_index = next_index;
@@ -6031,6 +6065,62 @@ mod test {
 		}
 
 		drop((objects, mixed));
+		group.abort(Error::Cancel).unwrap();
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// A metadata copy keeps each header's object fields, so a relay forwards sparse object
+	/// IDs and properties from it as it would from a payload copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn metadata_headers_keep_their_object_fields() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let mut group = Producer::new_meta(Info::from(0u64), track::Info::default(), cache);
+		group
+			.set_wire(Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (id, size) in [(0, 5), (7, 3)] {
+			group
+				.write_header(frame::Header {
+					info: frame::Info {
+						size,
+						timestamp: Timestamp::unscaled(0),
+					},
+					fields: (id != 0).then(|| {
+						Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})
+					}),
+					inflated: None,
+				})
+				.unwrap();
+		}
+		let wire = group.wire().unwrap();
+		assert!(wire.sparse, "object 7 at index 1 is sparse");
+		assert_eq!(wire.last, Some(7));
+
+		let group = group.finish().unwrap();
+		let mut objects = group.consume();
+		let waiter = kio::Waiter::noop();
+		for (id, size) in [(None, 5), (Some(7), 3)] {
+			let Poll::Ready(Ok(Some(object))) = objects.poll_read_object(&waiter) else {
+				panic!("object {id:?} is ready");
+			};
+			assert_eq!(object.fields.map(|fields| fields.id), id);
+			assert_eq!(object.inflated, Some(size));
+			assert!(object.frame.payload.is_empty());
+		}
+		drop(objects);
 		group.abort(Error::Cancel).unwrap();
 		assert_eq!(pool.used(), 0);
 	}

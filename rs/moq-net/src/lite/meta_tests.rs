@@ -38,6 +38,17 @@ fn sent(registry: &stats::Registry) -> (u64, u64) {
 		})
 }
 
+/// The track subscriptions `registry`'s sessions served as publisher.
+fn subscriptions(registry: &stats::Registry) -> u64 {
+	registry
+		.snapshot()
+		.traffic()
+		.into_iter()
+		.filter(|(_, role, _)| *role == stats::Role::Publisher)
+		.map(|(_, _, traffic)| traffic.subscriptions_started)
+		.sum()
+}
+
 /// Connect a client publishing `publish` to a server subscribing into `subscribe` over
 /// `version`, billing what the client sends to `registry`.
 async fn hop(
@@ -194,6 +205,46 @@ async fn metadata_pulls_payload_only_across_an_older_hop() {
 		"the older hop carried the payload"
 	);
 	assert_eq!(sent(&chain.downstream), (0, 0), "the relay sent payload");
+}
+
+/// Over a lite-06 hop, which cannot carry the mode, a payload reader and a metadata reader of
+/// one track share the one payload subscription and copy: the payload crosses that hop once.
+#[kio::test]
+async fn metadata_shares_the_payload_subscription_across_an_older_hop() {
+	let chain = chain("moq-lite-06", "moq-lite-07-wip").await;
+	let mut payload = kio::clock::timeout(TIMEOUT, chain.remote.track("video").unwrap().subscribe(None))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
+	let mut meta = kio::clock::timeout(TIMEOUT, chain.remote.track_meta("video").unwrap().subscribe(None))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
+	write_group(&chain.track, 0);
+
+	let mut group = kio::clock::timeout(TIMEOUT, payload.recv_group())
+		.await
+		.expect("recv timeout")
+		.expect("recv")
+		.expect("the track ended");
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("frame timeout")
+		.expect("frame")
+		.expect("a frame");
+	assert_eq!(frame.payload.len(), BIG, "the payload reader gets the payload");
+	assert_eq!(read_headers(&mut meta).await, (0, vec![(BIG as u64, 0), (0, 1)]));
+	settle().await;
+	assert_eq!(
+		subscriptions(&chain.upstream),
+		1,
+		"the older hop carried a second subscription"
+	);
+	assert_eq!(
+		sent(&chain.upstream),
+		(BIG as u64, 2),
+		"the payload crossed the older hop twice"
+	);
 }
 
 /// A payload reader and a metadata reader of one track each get their own: the payload goes to

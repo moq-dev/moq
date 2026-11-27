@@ -38,11 +38,11 @@ impl Group {
 
 	/// Write a metadata copy's next frame header, as [`group::Producer::write_header`].
 	#[cfg(feature = "async")]
-	pub fn write_header(&mut self, timestamp: crate::Timestamp, size: u64) -> Result<(), Error> {
+	pub fn write_header(&mut self, header: frame::Header) -> Result<(), Error> {
 		self.writer
 			.as_mut()
 			.expect("group writer is available between frames")
-			.write_header(timestamp, size)
+			.write_header(header)
 	}
 
 	/// The relay state of the group, readable while a frame holds the writer.

@@ -2097,7 +2097,7 @@ impl FrameIngest {
 						continue;
 					}
 					// A metadata FRAME is its header alone: no payload follows it.
-					group.write_header(header.info.timestamp, header.info.size)?;
+					group.write_header(header)?;
 					self.phase = self.next_frame();
 					ready!(budget.poll_yield(waiter));
 				}

@@ -54,14 +54,21 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   resume cursor.
 - ✅ A relay pulls payload upstream only for payload demand (except over an
   older version, below), and holds at most one upstream subscription per
-  mode for a track. Metadata demand is served from a payload copy while the
-  relay holds one, and otherwise travels upstream as a metadata subscription.
-  When the last payload reader leaves and metadata demand remains, the relay
-  opens the metadata subscription and closes the payload one.
-  - Pending maintainer decision on [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758): it built metadata demand that
-    always travels upstream as its own metadata subscription over lite-07,
-    even while the relay holds a payload copy, so the two modes never splice
-    (recommended: costs only duplicate header bytes under mixed demand).
+  mode for a track.
+- Decided 2026-11-27 (maintainer, on
+  [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)): ✅ over a
+  lite-07 hop, metadata demand travels upstream as its own metadata
+  subscription into a separate metadata copy, even while the relay holds a
+  payload copy, so the two modes never splice. Over an older hop, which
+  cannot carry the mode, metadata readers are served from the track's one
+  payload subscription and copy, and the relay never opens a second payload
+  subscription for them, since that downloads the payload twice. Reusing the
+  payload copy on lite-07 too is
+  [meta-reuse.md](/quest/m3/meta-reuse.md) (rejected for now: the 2026-10-13
+  rule's "Metadata demand is served from a payload copy while the relay holds
+  one ... When the last payload reader leaves and metadata demand remains,
+  the relay opens the metadata subscription and closes the payload one",
+  which costs a cross-copy splice).
 - Superseded 2026-11-25 (maintainer, `/quest-run`, on
   the metadata wire quest, [moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)): ✅ nothing
   refuses the mode. A relay whose upstream is lite-06 or earlier subscribes
