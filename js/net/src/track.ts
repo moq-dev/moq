@@ -5965,7 +5965,8 @@ export class Subscriber {
 	 * Both bounds are assigned, in either direction: an omitted start is group 0 and an
 	 * omitted end removes the cap. They narrow the subscription's ranges, never widen them.
 	 * Lowering the floor or raising the cap offers the groups it newly covers that the track
-	 * still caches and this reader never handed out; a group is never handed out twice. A local
+	 * still caches and this reader never handed out; a group is never handed out twice while the
+	 * subscription's ranges hold it (see {@link update}). A local
 	 * filter, not a request: it leaves the wire subscription alone, so to change what is asked
 	 * for, replace {@link Subscription.ranges} with {@link update}. One exception: on a track
 	 * served across route changes, lowering the floor asks the serving route again for the groups
@@ -7301,9 +7302,10 @@ export class Subscriber {
 
 	/**
 	 * Update this subscription's options (e.g. priority), triggering a SUBSCRIBE_UPDATE to the
-	 * publisher. Replacing the ranges resolves them again, without redelivering groups already
-	 * read; an arrival reader can receive the unread groups it still holds that the new ranges
-	 * take in. Changing only a live join's {@link Live.max} keeps where it joined.
+	 * publisher. Replacing the ranges resolves them again, without redelivering a group read
+	 * while they held it throughout; ranges replaced off a group may forget it, so ranges holding
+	 * it again may hand it out again, as a new subscription would. An arrival reader can receive
+	 * the unread groups it still holds that the new ranges take in. Changing only a live join's {@link Live.max} keeps where it joined.
 	 * Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {
