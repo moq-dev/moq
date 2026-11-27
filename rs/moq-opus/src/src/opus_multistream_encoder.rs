@@ -352,9 +352,7 @@ pub unsafe fn surround_analysis(
 		memcpy(
 			in_0.as_mut_ptr() as *mut core::ffi::c_void,
 			mem.offset((c * overlap) as isize) as *const core::ffi::c_void,
-			(overlap as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64)
-				.wrapping_add((0 * in_0.as_mut_ptr().offset_from(mem.offset((c * overlap) as isize)) as i64) as u64),
+			(overlap as u64).wrapping_mul(::core::mem::size_of::<opus_val32>() as u64),
 		);
 		(Some(copy_channel_in.expect("non-null function pointer"))).expect("non-null function pointer")(
 			x.as_mut_ptr(),
@@ -491,13 +489,7 @@ pub unsafe fn surround_analysis(
 		memcpy(
 			mem.offset((c * overlap) as isize) as *mut core::ffi::c_void,
 			in_0.as_mut_ptr().offset(frame_size as isize) as *const core::ffi::c_void,
-			(overlap as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64)
-				.wrapping_add(
-					(0 * mem
-						.offset((c * overlap) as isize)
-						.offset_from(in_0.as_mut_ptr().offset(frame_size as isize)) as i64) as u64,
-				),
+			(overlap as u64).wrapping_mul(::core::mem::size_of::<opus_val32>() as u64),
 		);
 		c += 1;
 	}

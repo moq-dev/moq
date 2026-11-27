@@ -1,8 +1,8 @@
 //! Opus encoding and decoding, through libopus 1.3.1 transpiled to Rust by c2rust.
 //!
 //! The public API is safe and covers what `moq-audio` needs: a mono or stereo
-//! [`Encoder`], a [`SurroundEncoder`], a [`Decoder`] for any channel [`Mapping`]
-//! (mono and stereo included), and the [`packet`] helpers. The transpiled C stays private, vendored
+//! [`Encoder`], a [`Decoder`] for any channel [`Mapping`] (mono and stereo
+//! included), and the [`packet`] helpers. The transpiled C stays private, vendored
 //! from `unsafe-libopus` 0.2.0 and kept as transpiled, unlinted, so it diffs
 //! against upstream with `git diff -w` (only the formatting differs), and so a
 //! safe implementation can replace it without changing this API.
@@ -16,7 +16,7 @@ pub mod packet;
 
 pub use encoder::{Application, Encoder, Signal};
 pub use error::Error;
-pub use multistream::{Decoder, Mapping, SurroundEncoder};
+pub use multistream::{Decoder, Mapping};
 
 // The transpiled C below is unlinted, so it stays as upstream wrote it.
 #[allow(warnings, clippy::all, reason = "transpiled C, kept as upstream wrote it")]

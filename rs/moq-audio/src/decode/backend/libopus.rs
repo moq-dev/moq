@@ -236,29 +236,75 @@ mod tests {
 		}
 	}
 
+	/// The family 1 streams, coupled streams, and mapping table for each channel
+	/// count (RFC 7845 §5.1.1.2), as libopus's surround encoder lays them out.
+	const MAPPINGS: [(u8, u8, &[u8]); 8] = [
+		(1, 0, &[0]),
+		(1, 1, &[0, 1]),
+		(2, 1, &[0, 2, 1]),
+		(2, 2, &[0, 1, 2, 3]),
+		(3, 2, &[0, 4, 1, 2, 3]),
+		(4, 2, &[0, 4, 1, 2, 3, 5]),
+		(4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+		(5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+	];
+
 	/// Encode `channels` of Vorbis-ordered tones as a family 1 stream, returning
 	/// its OpusHead and packets.
+	///
+	/// Each stream is its own mono or stereo encoder, and each packet joins their
+	/// packets, every one but the last self-delimited (RFC 6716 Appendix B).
 	fn surround(channels: usize) -> (bytes::Bytes, Vec<Vec<u8>>) {
 		let speakers = VORBIS[channels - 1];
-		let mut encoder =
-			moq_opus::SurroundEncoder::new(RATE as u32, channels as u8, moq_opus::Application::Audio).unwrap();
+		let (streams, coupled, table) = MAPPINGS[channels - 1];
+		// The input channels each stream codes: the left and right of a coupled
+		// stream, or the one channel of a mono stream.
+		let inputs: Vec<Vec<usize>> = (0..streams)
+			.map(|stream| {
+				let decoded: Vec<u8> = match stream < coupled {
+					true => vec![2 * stream, 2 * stream + 1],
+					false => vec![coupled + stream],
+				};
+				let channel = |index| table.iter().position(|&entry| entry == index).unwrap();
+				decoded.into_iter().map(channel).collect()
+			})
+			.collect();
+		let mut encoders: Vec<_> = inputs
+			.iter()
+			.map(|input| moq_opus::Encoder::new(RATE as u32, input.len() as u8, moq_opus::Application::Audio).unwrap())
+			.collect();
 
 		let packets = (0..PACKETS)
 			.map(|packet| {
-				let mut pcm = Vec::with_capacity(FRAME * channels);
-				for i in packet * FRAME..(packet + 1) * FRAME {
-					for &speaker in speakers {
-						let phase = std::f32::consts::TAU * tone(speaker) * i as f32 / RATE as f32;
-						pcm.push(phase.sin() * 0.5);
+				let mut joined = Vec::new();
+				for (index, (encoder, input)) in encoders.iter_mut().zip(&inputs).enumerate() {
+					let mut pcm = Vec::with_capacity(FRAME * input.len());
+					for i in packet * FRAME..(packet + 1) * FRAME {
+						for &channel in input {
+							let phase = std::f32::consts::TAU * tone(speakers[channel]) * i as f32 / RATE as f32;
+							pcm.push(phase.sin() * 0.5);
+						}
 					}
+					let mut out = [0u8; 1500];
+					let len = encoder.encode_float(&pcm, &mut out).unwrap();
+					let (toc, frame) = (out[0], &out[1..len]);
+					joined.push(toc);
+					if index + 1 < inputs.len() {
+						// Self-delimiting a one-frame packet puts the frame's length after the TOC.
+						assert_eq!(toc & 0x3, 0, "a 20 ms packet holds one frame");
+						match frame.len() {
+							len @ 0..252 => joined.push(len as u8),
+							len => {
+								let first = 252 + (len & 0x3);
+								joined.extend_from_slice(&[first as u8, ((len - first) >> 2) as u8]);
+							}
+						}
+					}
+					joined.extend_from_slice(frame);
 				}
-				let mut out = vec![0u8; 4000];
-				let len = encoder.encode_float(&pcm, &mut out).unwrap();
-				out.truncate(len);
-				out
+				joined
 			})
 			.collect();
-		let mapping = encoder.mapping();
 
 		let mut head = moq_mux::codec::opus::Config::new(RATE as u32, 2)
 			.encode()
@@ -266,8 +312,8 @@ mod tests {
 			.to_vec();
 		head[9] = channels as u8;
 		head[18] = 1;
-		head.extend_from_slice(&[mapping.streams, mapping.coupled]);
-		head.extend_from_slice(&mapping.table);
+		head.extend_from_slice(&[streams, coupled]);
+		head.extend_from_slice(table);
 		(head.into(), packets)
 	}
 

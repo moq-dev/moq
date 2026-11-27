@@ -39,14 +39,7 @@ impl Libopus {
 		let sample_rate = config.sample_rate;
 		let channels = config.layout.channels();
 		let frame_size = opus::frame_size(sample_rate, config.frame_duration)?;
-		// The same application and signal WebCodecs gets from `@moq/publish` for each kind. libopus
-		// has no default application, so an unknown kind takes the general-purpose one.
-		let (application, signal) = match config.kind {
-			Some(Kind::Voice) => (Application::Voip, Signal::Voice),
-			Some(Kind::Music) => (Application::Audio, Signal::Music),
-			None => (Application::Audio, Signal::Auto),
-		};
-		let dtx = config.kind == Some(Kind::Voice);
+		let (application, signal, dtx) = tuning(config.kind);
 
 		let inner = moq_opus::Encoder::new(sample_rate, opus::validate_channels(channels)?, application)
 			.map_err(|err| opus::error(err, "create"))?;
@@ -90,6 +83,17 @@ impl Libopus {
 		self.inner
 			.set_bitrate(bitrate as u32)
 			.map_err(|err| opus::error(err, "set bitrate"))
+	}
+}
+
+/// The application, signal, and discontinuous transmission WebCodecs gets from `@moq/publish`
+/// for `kind`. libopus has no default application, so an unknown kind takes the general-purpose
+/// one, and only voice turns on discontinuous transmission.
+fn tuning(kind: Option<Kind>) -> (Application, Signal, bool) {
+	match kind {
+		Some(Kind::Voice) => (Application::Voip, Signal::Voice, true),
+		Some(Kind::Music) => (Application::Audio, Signal::Music, false),
+		None => (Application::Audio, Signal::Auto, false),
 	}
 }
 
@@ -166,25 +170,19 @@ mod tests {
 		assert_eq!(backend.inner.bitrate().unwrap(), 32_000);
 	}
 
-	/// Each kind reaches libopus as the application, signal, and transmission `@moq/publish` asks
+	/// Each kind opens with the application, signal, and transmission `@moq/publish` asks
 	/// WebCodecs for.
 	#[test]
 	fn kind_tunes_libopus() {
-		let cases = [
-			(Some(Kind::Voice), Application::Voip, Signal::Voice, true),
-			(Some(Kind::Music), Application::Audio, Signal::Music, false),
-			(None, Application::Audio, Signal::Auto, false),
-		];
-		for (kind, application, signal, dtx) in cases {
-			let backend = Libopus::new(&Config {
+		for kind in [Some(Kind::Voice), Some(Kind::Music), None] {
+			Libopus::new(&Config {
 				kind,
 				..Config::default()
 			})
 			.unwrap();
-
-			assert_eq!(backend.inner.application().unwrap(), application, "{kind:?}");
-			assert_eq!(backend.inner.signal().unwrap(), signal, "{kind:?}");
-			assert_eq!(backend.inner.dtx().unwrap(), dtx, "{kind:?}");
 		}
+		assert_eq!(tuning(Some(Kind::Voice)), (Application::Voip, Signal::Voice, true));
+		assert_eq!(tuning(Some(Kind::Music)), (Application::Audio, Signal::Music, false));
+		assert_eq!(tuning(None), (Application::Audio, Signal::Auto, false));
 	}
 }

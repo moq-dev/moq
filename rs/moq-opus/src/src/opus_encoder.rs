@@ -1616,15 +1616,7 @@ pub unsafe fn opus_encode_native(
 			.as_mut_ptr()
 			.offset((((*st).encoder_buffer - total_buffer) * (*st).channels) as isize) as *mut opus_val16
 			as *const core::ffi::c_void,
-		((total_buffer * (*st).channels) as u64)
-			.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-			.wrapping_add(
-				(0 * pcm_buf.as_mut_ptr().offset_from(
-					&mut *((*st).delay_buffer)
-						.as_mut_ptr()
-						.offset((((*st).encoder_buffer - total_buffer) * (*st).channels) as isize),
-				) as i64) as u64,
-			),
+		((total_buffer * (*st).channels) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 	);
 	if (*st).mode == MODE_CELT_ONLY {
 		hp_freq_smth1 = ((silk_lin2log(60) as u32) << 8) as i32;
@@ -1964,15 +1956,7 @@ pub unsafe fn opus_encode_native(
 				.as_mut_ptr()
 				.offset((((*st).encoder_buffer - total_buffer - (*st).Fs / 400) * (*st).channels) as isize)
 				as *mut opus_val16 as *const core::ffi::c_void,
-			(((*st).channels * (*st).Fs / 400) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add(
-					(0 * tmp_prefill.as_mut_ptr().offset_from(
-						&mut *((*st).delay_buffer)
-							.as_mut_ptr()
-							.offset((((*st).encoder_buffer - total_buffer - (*st).Fs / 400) * (*st).channels) as isize),
-					) as i64) as u64,
-				),
+			(((*st).channels * (*st).Fs / 400) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	}
 	if (*st).channels * ((*st).encoder_buffer - (frame_size + total_buffer)) > 0 {
@@ -1982,14 +1966,7 @@ pub unsafe fn opus_encode_native(
 				.as_mut_ptr()
 				.offset(((*st).channels * frame_size) as isize) as *mut opus_val16 as *const core::ffi::c_void,
 			(((*st).channels * ((*st).encoder_buffer - frame_size - total_buffer)) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add(
-					(0 * ((*st).delay_buffer).as_mut_ptr().offset_from(
-						&mut *((*st).delay_buffer)
-							.as_mut_ptr()
-							.offset(((*st).channels * frame_size) as isize),
-					) as i64) as u64,
-				),
+				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 		memcpy(
 			&mut *((*st).delay_buffer)
@@ -1998,14 +1975,7 @@ pub unsafe fn opus_encode_native(
 				as *mut opus_val16 as *mut core::ffi::c_void,
 			&mut *pcm_buf.as_mut_ptr().offset(0 as isize) as *mut opus_val16 as *const core::ffi::c_void,
 			(((frame_size + total_buffer) * (*st).channels) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add(
-					(0 * (&mut *((*st).delay_buffer)
-						.as_mut_ptr()
-						.offset(((*st).channels * ((*st).encoder_buffer - frame_size - total_buffer)) as isize)
-						as *mut opus_val16)
-						.offset_from(&mut *pcm_buf.as_mut_ptr().offset(0 as isize)) as i64) as u64,
-				),
+				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	} else {
 		memcpy(
@@ -2014,15 +1984,7 @@ pub unsafe fn opus_encode_native(
 				.as_mut_ptr()
 				.offset(((frame_size + total_buffer - (*st).encoder_buffer) * (*st).channels) as isize)
 				as *mut opus_val16 as *const core::ffi::c_void,
-			(((*st).encoder_buffer * (*st).channels) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add(
-					(0 * ((*st).delay_buffer).as_mut_ptr().offset_from(
-						&mut *pcm_buf
-							.as_mut_ptr()
-							.offset(((frame_size + total_buffer - (*st).encoder_buffer) * (*st).channels) as isize),
-					) as i64) as u64,
-				),
+			(((*st).encoder_buffer * (*st).channels) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	}
 	if (*st).prev_HB_gain < Q15ONE || HB_gain < Q15ONE {
@@ -2188,13 +2150,7 @@ pub unsafe fn opus_encode_native(
 				memmove(
 					data.offset(ret as isize) as *mut core::ffi::c_void,
 					data.offset(nb_compr_bytes as isize) as *const core::ffi::c_void,
-					(redundancy_bytes as u64)
-						.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-						.wrapping_add(
-							(0 * data
-								.offset(ret as isize)
-								.offset_from(data.offset(nb_compr_bytes as isize)) as i64) as u64,
-						),
+					(redundancy_bytes as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 				);
 				nb_compr_bytes = nb_compr_bytes + redundancy_bytes;
 			}

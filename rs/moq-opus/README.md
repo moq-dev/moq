@@ -11,7 +11,7 @@ multistream API that `moq-audio` decodes surround with, and has published no
 release since 2024-11.
 
 Its public API is a small safe wrapper over what `moq-audio` calls: `Encoder`,
-`SurroundEncoder`, `Decoder` with its `Mapping`, and the `packet` helpers. The
+`Decoder` with its `Mapping`, and the `packet` helpers. The
 transpiled C functions stay private, so a safe implementation can replace them
 without breaking this API.
 
@@ -27,6 +27,11 @@ without breaking this API.
   three in `PLC.rs` on master).
 - Upstream's tests, which link C libopus, are not carried; `moq-audio` tests
   the decoder it uses.
+- No pointer subtraction across allocations. c2rust turned libopus's
+  `OPUS_COPY`/`OPUS_MOVE` type check, `0*((dst)-(src))`, into
+  `0 * dst.offset_from(src)`, which is undefined behavior when the two point
+  into different buffers, even multiplied by zero. All 66 of those terms are
+  removed; the copies' byte counts are unchanged.
 - The C API is private: the crate-root exports, `externs`, `varargs`, and the
   exported `*_ctl!` macros are crate-only, and a safe wrapper is public instead.
 - Formatted with the workspace's rustfmt, and the transpiled modules built with

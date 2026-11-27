@@ -6,8 +6,8 @@ The vendored c2rust crate `rs/moq-opus` is made safe where it is: moq-audio
 encodes and decodes Opus through it, and its codec logic compiles under
 `#![forbid(unsafe_code)]`. Output stays correct by the bar in the Plan, and
 neither moq-audio's public API nor `moq-opus`'s changes. `moq-opus` publishes
-only a safe API (`Encoder`, `SurroundEncoder`, `Decoder`, `Mapping`, `Error`,
-and `packet`) with the c2rust code private behind it, so this lands as a patch.
+only a safe API (`Encoder`, `Decoder`, `Mapping`, `Error`, and `packet`) with
+the c2rust code private behind it, so this lands as a patch.
 
 Not here: new Opus features (in-band FEC, DRED, libopus 1.5+ neural PLC or
 LACE), the browser side (`@moq/watch` decodes through WebCodecs), and the

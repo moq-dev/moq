@@ -1,9 +1,10 @@
 use crate::src::opus_defines::{
-	OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_VOIP, OPUS_AUTO, OPUS_GET_APPLICATION_REQUEST, OPUS_GET_BITRATE_REQUEST,
-	OPUS_GET_DTX_REQUEST, OPUS_GET_IN_DTX_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_GET_SIGNAL_REQUEST,
-	OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC,
-	OPUS_SIGNAL_VOICE,
+	OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_VOIP, OPUS_AUTO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_IN_DTX_REQUEST,
+	OPUS_GET_LOOKAHEAD_REQUEST, OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST,
+	OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC, OPUS_SIGNAL_VOICE,
 };
+#[cfg(test)]
+use crate::src::opus_defines::{OPUS_GET_APPLICATION_REQUEST, OPUS_GET_DTX_REQUEST, OPUS_GET_SIGNAL_REQUEST};
 use crate::src::opus_encoder::{
 	opus_encode_float, opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, OpusEncoder,
 };
@@ -111,7 +112,8 @@ impl Encoder {
 	}
 
 	/// The application the encoder was created with.
-	pub fn application(&self) -> Result<Application, Error> {
+	#[cfg(test)]
+	fn application(&self) -> Result<Application, Error> {
 		match self.get(OPUS_GET_APPLICATION_REQUEST)? {
 			OPUS_APPLICATION_VOIP => Ok(Application::Voip),
 			OPUS_APPLICATION_AUDIO => Ok(Application::Audio),
@@ -121,7 +123,8 @@ impl Encoder {
 	}
 
 	/// The signal hint.
-	pub fn signal(&self) -> Result<Signal, Error> {
+	#[cfg(test)]
+	fn signal(&self) -> Result<Signal, Error> {
 		match self.get(OPUS_GET_SIGNAL_REQUEST)? {
 			OPUS_SIGNAL_VOICE => Ok(Signal::Voice),
 			OPUS_SIGNAL_MUSIC => Ok(Signal::Music),
@@ -136,7 +139,8 @@ impl Encoder {
 	}
 
 	/// Whether discontinuous transmission is on.
-	pub fn dtx(&self) -> Result<bool, Error> {
+	#[cfg(test)]
+	fn dtx(&self) -> Result<bool, Error> {
 		Ok(self.get(OPUS_GET_DTX_REQUEST)? != 0)
 	}
 

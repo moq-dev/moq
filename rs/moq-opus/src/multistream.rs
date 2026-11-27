@@ -3,12 +3,8 @@ use crate::src::opus_multistream_decoder::{
 	opus_multistream_decode_float, opus_multistream_decoder_create, opus_multistream_decoder_ctl_impl,
 	opus_multistream_decoder_destroy, OpusMSDecoder,
 };
-use crate::src::opus_multistream_encoder::{
-	opus_multistream_encode_float, opus_multistream_encoder_destroy, opus_multistream_surround_encoder_create,
-	OpusMSEncoder,
-};
 use crate::varargs::varargs;
-use crate::{Application, Error};
+use crate::Error;
 
 /// How a multistream packet's Opus streams map to output channels (RFC 7845 §5.1.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,8 +87,9 @@ impl Decoder {
 
 	/// Decode `packet` into interleaved `pcm`, returning the samples per channel written.
 	///
-	/// An empty `packet` was lost: the decoder conceals exactly as many samples per
-	/// channel as `pcm` holds, which must then be a multiple of 2.5 ms. Otherwise
+	/// An empty `packet` was lost: the decoder conceals as many samples per channel
+	/// as `pcm` holds, a multiple of 2.5 ms, but at most 120 ms per call, so a longer
+	/// gap takes several calls, each advancing by the count returned. Otherwise
 	/// `pcm` must hold the whole packet, up to 120 ms.
 	pub fn decode_float(&mut self, packet: &[u8], pcm: &mut [f32]) -> Result<usize, Error> {
 		let len = i32::try_from(packet.len()).map_err(|_| Error::BadArg)?;
@@ -120,116 +117,32 @@ impl Drop for Decoder {
 	}
 }
 
-/// An Opus encoder for 1 to 8 channels in Vorbis order, as channel mapping family 1.
-pub struct SurroundEncoder {
-	inner: *mut OpusMSEncoder,
-	mapping: Mapping,
-}
-
-// SAFETY: as for `Decoder`.
-unsafe impl Send for SurroundEncoder {}
-
-impl SurroundEncoder {
-	/// Encode `channels` (1 to 8) interleaved in Vorbis order at `sample_rate`,
-	/// which is 8, 12, 16, 24, or 48 kHz.
-	pub fn new(sample_rate: u32, channels: u8, application: Application) -> Result<Self, Error> {
-		if !(1..=8).contains(&channels) {
-			return Err(Error::BadArg);
-		}
-		let sample_rate = i32::try_from(sample_rate).map_err(|_| Error::BadArg)?;
-		let (mut streams, mut coupled, mut table) = (0, 0, vec![0u8; channels.into()]);
-		let mut err = 0;
-		// SAFETY: every out-pointer is valid, and libopus writes `channels` entries
-		// of the table, all of it.
-		let inner = unsafe {
-			opus_multistream_surround_encoder_create(
-				sample_rate,
-				channels.into(),
-				1,
-				&mut streams,
-				&mut coupled,
-				table.as_mut_ptr(),
-				application.code(),
-				&mut err,
-			)
-		};
-		Error::check(err)?;
-		if inner.is_null() {
-			return Err(Error::AllocFail);
-		}
-		// Owned before the conversions, so a failure there still destroys it.
-		let mut encoder = Self {
-			inner,
-			mapping: Mapping {
-				streams: 0,
-				coupled: 0,
-				table,
-			},
-		};
-		encoder.mapping.streams = u8::try_from(streams).map_err(|_| Error::Internal)?;
-		encoder.mapping.coupled = u8::try_from(coupled).map_err(|_| Error::Internal)?;
-		Ok(encoder)
-	}
-
-	/// The streams each packet carries, which a decoder needs to read them.
-	pub fn mapping(&self) -> &Mapping {
-		&self.mapping
-	}
-
-	/// Encode one frame of interleaved `pcm` into `packet`, returning the packet's length.
-	///
-	/// The frame is `pcm.len()` divided by the channel count, and must be 2.5, 5,
-	/// 10, 20, 40, or 60 ms long.
-	pub fn encode_float(&mut self, pcm: &[f32], packet: &mut [u8]) -> Result<usize, Error> {
-		let channels = self.mapping.table.len();
-		if !pcm.len().is_multiple_of(channels) {
-			return Err(Error::BadArg);
-		}
-		let frame_size = i32::try_from(pcm.len() / channels).map_err(|_| Error::BadArg)?;
-		let max = i32::try_from(packet.len()).unwrap_or(i32::MAX);
-		// SAFETY: `inner` is live, and libopus reads `frame_size * channels` samples
-		// (all of `pcm`) and writes at most `max` bytes of `packet`.
-		let len =
-			unsafe { opus_multistream_encode_float(self.inner, pcm.as_ptr(), frame_size, packet.as_mut_ptr(), max) };
-		Ok(Error::check(len)? as usize)
-	}
-}
-
-impl Drop for SurroundEncoder {
-	fn drop(&mut self) {
-		// SAFETY: `inner` is live and nothing else aliases it.
-		unsafe { opus_multistream_encoder_destroy(self.inner) };
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::{Application, Encoder};
 
 	#[test]
-	fn surround_round_trips() {
-		let mut encoder = SurroundEncoder::new(48_000, 6, Application::Audio).unwrap();
-		let mapping = encoder.mapping().clone();
-		assert_eq!((mapping.streams, mapping.coupled, mapping.table.len()), (4, 2, 6));
+	fn stereo_round_trips() {
+		let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+		let mut decoder = Decoder::new(48_000, &Mapping::family0(2).unwrap()).unwrap();
+		decoder.set_gain(-256).unwrap();
 
-		let mut decoder = Decoder::new(48_000, &mapping).unwrap();
 		let mut packet = [0u8; 4000];
-		let len = encoder.encode_float(&[0.0; 960 * 6], &mut packet).unwrap();
-		let mut pcm = [0.0f32; 5760 * 6];
+		let len = encoder.encode_float(&[0.0; 960 * 2], &mut packet).unwrap();
+		let mut pcm = [0.0f32; 5760 * 2];
 		assert_eq!(decoder.decode_float(&packet[..len], &mut pcm).unwrap(), 960);
 
-		// A loss conceals as much as `pcm` holds.
-		assert_eq!(decoder.decode_float(&[], &mut pcm[..480 * 6]).unwrap(), 480);
+		// A loss conceals as much as `pcm` holds, up to 120 ms.
+		assert_eq!(decoder.decode_float(&[], &mut pcm[..480 * 2]).unwrap(), 480);
+		let mut long = [0.0f32; 9600 * 2];
+		assert_eq!(decoder.decode_float(&[], &mut long).unwrap(), 5760);
 		decoder.reset().unwrap();
 	}
 
 	#[test]
 	fn rejects_bad_arguments() {
 		assert_eq!(Mapping::family0(3).err(), Some(Error::BadArg));
-		assert_eq!(
-			SurroundEncoder::new(48_000, 9, Application::Audio).err(),
-			Some(Error::BadArg)
-		);
 		// More coupled streams than streams.
 		let mapping = Mapping {
 			streams: 1,

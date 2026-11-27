@@ -587,13 +587,7 @@ unsafe fn tf_analysis(
 			tmp.as_mut_ptr() as *mut core::ffi::c_void,
 			&mut *X.offset((tf_chan * N0 + ((*((*m).eBands).offset(i as isize) as i32) << LM)) as isize)
 				as *mut celt_norm as *const core::ffi::c_void,
-			(N as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-				.wrapping_add(
-					(0 * tmp.as_mut_ptr().offset_from(
-						&mut *X.offset((tf_chan * N0 + ((*((*m).eBands).offset(i as isize) as i32) << LM)) as isize),
-					) as i64) as u64,
-				),
+			(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 		);
 		L1 = l1_metric(tmp.as_mut_ptr(), N, if isTransient != 0 { LM } else { 0 }, bias);
 		best_L1 = L1;
@@ -601,9 +595,7 @@ unsafe fn tf_analysis(
 			memcpy(
 				tmp_1.as_mut_ptr() as *mut core::ffi::c_void,
 				tmp.as_mut_ptr() as *const core::ffi::c_void,
-				(N as u64)
-					.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-					.wrapping_add((0 * tmp_1.as_mut_ptr().offset_from(tmp.as_mut_ptr()) as i64) as u64),
+				(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 			);
 			haar1(tmp_1.as_mut_ptr(), N >> LM, (1) << LM);
 			L1 = l1_metric(tmp_1.as_mut_ptr(), N, LM + 1, bias);
@@ -1096,9 +1088,7 @@ unsafe fn dynalloc_analysis(
 	memcpy(
 		sig.as_mut_ptr() as *mut core::ffi::c_void,
 		mask.as_mut_ptr() as *const core::ffi::c_void,
-		(end as u64)
-			.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-			.wrapping_add((0 * sig.as_mut_ptr().offset_from(mask.as_mut_ptr()) as i64) as u64),
+		(end as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 	);
 	i = 1;
 	while i < end {
@@ -1412,23 +1402,12 @@ unsafe fn run_prefilter(
 		memcpy(
 			pre[c as usize] as *mut core::ffi::c_void,
 			prefilter_mem.offset((c * 1024) as isize) as *const core::ffi::c_void,
-			(1024_u64)
-				.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-				.wrapping_add(
-					(0 * (pre[c as usize]).offset_from(prefilter_mem.offset((c * 1024) as isize)) as i64) as u64,
-				),
+			(1024_u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 		);
 		memcpy(
 			(pre[c as usize]).offset(1024 as isize) as *mut core::ffi::c_void,
 			in_0.offset((c * (N + overlap)) as isize).offset(overlap as isize) as *const core::ffi::c_void,
-			(N as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-				.wrapping_add(
-					(0 * (pre[c as usize])
-						.offset(1024 as isize)
-						.offset_from(in_0.offset((c * (N + overlap)) as isize).offset(overlap as isize)) as i64)
-						as u64,
-				),
+			(N as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 		);
 		c += 1;
 		if !(c < CC) {
@@ -1531,13 +1510,7 @@ unsafe fn run_prefilter(
 		memcpy(
 			in_0.offset((c * (N + overlap)) as isize) as *mut core::ffi::c_void,
 			((*st).in_mem).as_mut_ptr().offset((c * overlap) as isize) as *const core::ffi::c_void,
-			(overlap as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-				.wrapping_add(
-					(0 * in_0
-						.offset((c * (N + overlap)) as isize)
-						.offset_from(((*st).in_mem).as_mut_ptr().offset((c * overlap) as isize)) as i64) as u64,
-				),
+			(overlap as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 		);
 		if offset != 0 {
 			comb_filter(
@@ -1576,39 +1549,19 @@ unsafe fn run_prefilter(
 		memcpy(
 			((*st).in_mem).as_mut_ptr().offset((c * overlap) as isize) as *mut core::ffi::c_void,
 			in_0.offset((c * (N + overlap)) as isize).offset(N as isize) as *const core::ffi::c_void,
-			(overlap as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-				.wrapping_add(
-					(0 * ((*st).in_mem)
-						.as_mut_ptr()
-						.offset((c * overlap) as isize)
-						.offset_from(in_0.offset((c * (N + overlap)) as isize).offset(N as isize)) as i64) as u64,
-				),
+			(overlap as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 		);
 		if N > COMBFILTER_MAXPERIOD {
 			memcpy(
 				prefilter_mem.offset((c * 1024) as isize) as *mut core::ffi::c_void,
 				(pre[c as usize]).offset(N as isize) as *const core::ffi::c_void,
-				(1024_u64)
-					.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-					.wrapping_add(
-						(0 * prefilter_mem
-							.offset((c * 1024) as isize)
-							.offset_from((pre[c as usize]).offset(N as isize)) as i64) as u64,
-					),
+				(1024_u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 			);
 		} else {
 			memmove(
 				prefilter_mem.offset((c * 1024) as isize) as *mut core::ffi::c_void,
 				prefilter_mem.offset((c * 1024) as isize).offset(N as isize) as *const core::ffi::c_void,
-				((1024 - N) as u64)
-					.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-					.wrapping_add(
-						(0 * prefilter_mem
-							.offset((c * 1024) as isize)
-							.offset_from(prefilter_mem.offset((c * 1024) as isize).offset(N as isize)) as i64)
-							as u64,
-					),
+				((1024 - N) as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 			);
 			memcpy(
 				prefilter_mem
@@ -1616,15 +1569,7 @@ unsafe fn run_prefilter(
 					.offset(1024 as isize)
 					.offset(-(N as isize)) as *mut core::ffi::c_void,
 				(pre[c as usize]).offset(1024 as isize) as *const core::ffi::c_void,
-				(N as u64)
-					.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-					.wrapping_add(
-						(0 * prefilter_mem
-							.offset((c * 1024) as isize)
-							.offset(1024 as isize)
-							.offset(-(N as isize))
-							.offset_from((pre[c as usize]).offset(1024 as isize)) as i64) as u64,
-					),
+				(N as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 			);
 		}
 		c += 1;
@@ -2320,9 +2265,7 @@ pub unsafe fn celt_encode_with_ec(
 		memcpy(
 			bandLogE2.as_mut_ptr() as *mut core::ffi::c_void,
 			bandLogE.as_mut_ptr() as *const core::ffi::c_void,
-			((C * nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * bandLogE2.as_mut_ptr().offset_from(bandLogE.as_mut_ptr()) as i64) as u64),
+			((C * nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	}
 	if LM > 0
@@ -2958,28 +2901,19 @@ pub unsafe fn celt_encode_with_ec(
 		memcpy(
 			&mut *oldBandE.offset(nbEBands as isize) as *mut opus_val16 as *mut core::ffi::c_void,
 			oldBandE as *const core::ffi::c_void,
-			(nbEBands as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add(
-					(0 * (&mut *oldBandE.offset(nbEBands as isize) as *mut opus_val16).offset_from(oldBandE) as i64)
-						as u64,
-				),
+			(nbEBands as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	}
 	if isTransient == 0 {
 		memcpy(
 			oldLogE2 as *mut core::ffi::c_void,
 			oldLogE as *const core::ffi::c_void,
-			((CC * nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * oldLogE2.offset_from(oldLogE) as i64) as u64),
+			((CC * nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 		memcpy(
 			oldLogE as *mut core::ffi::c_void,
 			oldBandE as *const core::ffi::c_void,
-			((CC * nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * oldLogE.offset_from(oldBandE) as i64) as u64),
+			((CC * nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	} else {
 		i = 0;
@@ -3182,9 +3116,7 @@ pub unsafe fn opus_custom_encoder_ctl_impl(st: *mut OpusCustomEncoder, request: 
 			memcpy(
 				&mut (*st).analysis as *mut AnalysisInfo as *mut core::ffi::c_void,
 				info as *mut AnalysisInfo as *const core::ffi::c_void,
-				(1_u64)
-					.wrapping_mul(::core::mem::size_of::<AnalysisInfo>() as u64)
-					.wrapping_add((0 * (&mut (*st).analysis as *mut AnalysisInfo).offset_from(info) as i64) as u64),
+				(1_u64).wrapping_mul(::core::mem::size_of::<AnalysisInfo>() as u64),
 			);
 			current_block = 10007731352114176167;
 		}
@@ -3193,9 +3125,7 @@ pub unsafe fn opus_custom_encoder_ctl_impl(st: *mut OpusCustomEncoder, request: 
 			memcpy(
 				&mut (*st).silk_info as *mut SILKInfo as *mut core::ffi::c_void,
 				info_0 as *mut SILKInfo as *const core::ffi::c_void,
-				(1_u64)
-					.wrapping_mul(::core::mem::size_of::<SILKInfo>() as u64)
-					.wrapping_add((0 * (&mut (*st).silk_info as *mut SILKInfo).offset_from(info_0) as i64) as u64),
+				(1_u64).wrapping_mul(::core::mem::size_of::<SILKInfo>() as u64),
 			);
 			current_block = 10007731352114176167;
 		}
