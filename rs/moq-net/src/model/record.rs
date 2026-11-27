@@ -411,13 +411,23 @@ impl Record {
 	}
 
 	/// The next key to inspect after `final_end` stopped at `end` from `start`: skips a whole
-	/// `Report::Withdrawable` run in one step so neither `walk` nor `fold` steps through a wide
-	/// stale gap one key at a time.
+	/// `Report::Withdrawable` run or `pending` run (stopping at any report within the pending run)
+	/// in one step so neither `walk` nor `fold` steps through a wide gap one key at a time.
 	fn next_after_stretch(&self, start: u64, end: u64) -> u64 {
-		match self.reported.get_key_value(&start) {
-			Some((run, Report::Withdrawable)) if end == start => run.end,
-			_ => end.max(start.saturating_add(1)),
+		if end > start {
+			return end;
 		}
+		if let Some((run, Report::Withdrawable)) = self.reported.get_key_value(&start) {
+			return run.end;
+		}
+		if let Some((run, _)) = self.pending.get_key_value(&start) {
+			return self
+				.reported
+				.overlapping(&(start..run.end))
+				.next()
+				.map_or(run.end, |(rep, _)| rep.start.max(start.saturating_add(1)));
+		}
+		start.saturating_add(1)
 	}
 
 	/// Forget what the record holds of `stretch` outside the reader's ranges, above the
@@ -1811,6 +1821,38 @@ mod test {
 			record.reported.get_key_value(&20),
 			Some((&(20..100), &Report::Final)),
 			"20..100 above floor-level withdrawable report must fold into one final stretch"
+		);
+	}
+
+	/// A wide local `pending` drop lying inside the delivered prefix must be skipped in one step
+	/// during debt folding (stopping only at any report inside it), leaving the pending keys
+	/// unfinalized while still folding final stretches past it.
+	#[test]
+	fn debt_fold_skips_wide_pending_gap_in_delivered_prefix() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		let wide_end = 1_000_000_000u64;
+		record.delivered.insert_run(0..wide_end + 100);
+		record.tell(0..10, Report::Final);
+		record
+			.pending
+			.insert(10..wide_end, Pending::own(Hole::drop(StreamError::Old)));
+		record.tell(wide_end + 10..wide_end + 20, Report::Final);
+		record.tell(wide_end + 30..wide_end + 40, Report::Final);
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+
+		assert_eq!(record.floor, 10, "floor must stop before pending drop");
+		assert!(
+			!record.told(10) && !record.told(wide_end - 1),
+			"pending keys stay unfinalized"
+		);
+		assert!(record.pending.contains_key(&10), "local pending drop stays queued");
+		assert_eq!(
+			record.reported.get_key_value(&wide_end),
+			Some((&(wide_end..wide_end + 100), &Report::Final)),
+			"final stretch above wide pending gap must fold under debt"
 		);
 	}
 }
