@@ -8,7 +8,7 @@
  * @module
  */
 import type { Credential } from "./auth.ts";
-import type * as Identity from "./identity.ts";
+import * as Identity from "./identity.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
@@ -203,14 +203,19 @@ export const WireRoute = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
 	default: { hops: [], cost: Cost.zero } as WireRoute,
 
-	/** Fill route defaults and saturate the static price at the wire ceiling. */
+	/**
+	 * Fill route defaults and saturate the static price at the wire ceiling. A plain JavaScript
+	 * caller can pass any string as a named identity, so its text is checked as `Identity.parse`
+	 * does, before a peer refuses it.
+	 */
 	normalize(route: Partial<WireRoute> = {}): WireRoute {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
+		const identity = typeof route.identity === "string" ? Identity.parse(route.identity) : route.identity;
 		const max = 2n ** 62n - 1n;
 		return {
-			identity: route.identity,
-			epoch: route.identity === undefined ? undefined : (route.epoch ?? 0n),
+			identity,
+			epoch: identity === undefined ? undefined : (route.epoch ?? 0n),
 			hops: route.hops ? [...route.hops] : [],
 			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,

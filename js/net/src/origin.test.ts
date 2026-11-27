@@ -3741,6 +3741,18 @@ test("public announcements saturate static costs and refuse invalid cost shapes"
 	origin.close();
 });
 
+// A plain JavaScript caller can skip `Identity.parse`, so the origin checks a named identity's
+// text before a peer refuses it.
+test("routes and claims refuse an unchecked identity a peer would refuse", () => {
+	const origin = new Producer();
+	for (const text of ["", "a".repeat(257)]) {
+		const identity = { id: text as Identity.Named, epoch: 0n };
+		expect(() => origin.route(Path.from("named"), { identity })).toThrow(RangeError);
+		expect(() => origin.claim(Path.from("named"), { identity })).toThrow(RangeError);
+	}
+	origin.close();
+});
+
 test("published names refuse navigation segments", () => {
 	const origin = new Producer();
 	try {
