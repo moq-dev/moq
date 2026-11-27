@@ -864,8 +864,13 @@ async fn locate(
 }
 
 /// The newest source group starting from `from` through `time`, with the read holding it: the
-/// group containing `time` when one does, and otherwise, as when that group ended whole before
-/// `time`, found by reading the source up from `from`.
+/// group containing `time` when one does.
+///
+/// Otherwise, as when that group ended whole before `time`, a read of the span newest first
+/// names a candidate, all but always the group wanted, and a read in key order from it through
+/// `time` proves nothing newer starts before `time`. Arrival order is not key order, so the
+/// candidate alone could name an older group, but reading from it costs only what lies past it,
+/// rather than the span's whole history.
 async fn newest(
 	track: &moq_net::track::Consumer,
 	from: u64,
@@ -879,14 +884,26 @@ async fn newest(
 	{
 		return Ok((group.start >= from).then_some((group, read)));
 	}
-	let subscription = Subscription::default()
-		.with_ranges([Range {
-			start: Start::Time(from),
-			end: Some(time),
-		}])
-		.with_order(Order::Ascending)
-		.with_priority(priority);
-	let mut read = track.subscribe(subscription).await?.ordered();
+	let span = |from: u64, order: Order| {
+		Subscription::default()
+			.with_ranges([Range {
+				start: Start::Time(from),
+				end: Some(time),
+			}])
+			.with_order(order)
+			.with_priority(priority)
+	};
+	let mut candidates = track.subscribe(span(from, Order::Descending)).await?;
+	let candidate = loop {
+		match candidates.recv_group().await? {
+			Some(group) if (from..=time).contains(&group.start) => break group.start,
+			Some(_) => {}
+			None => return Ok(None),
+		}
+	};
+	drop(candidates);
+
+	let mut read = track.subscribe(span(candidate, Order::Ascending)).await?.ordered();
 	let mut newest = None;
 	// A group given up on is no source group.
 	while let Some(group) = read.next_group().await? {

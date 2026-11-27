@@ -219,7 +219,13 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	let mut skips = Skips::default();
-	while let Some(mut group) = subscriber.recv_group().await? {
+	// A skip recording wakes this read, so one landing while the source pauses is named then.
+	while let Some(mut group) = kio::wait(|waiter| {
+		skips.recheck(&subscriber, sender);
+		subscriber.poll_recv_group(waiter)
+	})
+	.await?
+	{
 		let sink = match &mut decoder {
 			Some(sink) => sink,
 			None => decoder.insert(moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?),
@@ -259,8 +265,7 @@ struct Skips {
 	after: Option<(u64, u64)>,
 	/// The last run below a group not known skipped when that group arrived, as
 	/// `(from, pause, group)`. A skip travels apart from the group above it, so it may land
-	/// later: asked again as each frame arrives, and then left to a fill, which never declares
-	/// a group that exists.
+	/// later: asked again as each frame arrives and whenever the read for the next group wakes.
 	unproven: Option<(u64, u64, u64)>,
 }
 
@@ -520,12 +525,12 @@ mod tests {
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(200 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
 
-		// A skip landing after the group above it is named with the next group.
+		// A skip landing after the group above it, while the source pauses, is named at once.
 		track.skip_groups(150 * FRAME + 1..200 * FRAME);
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(150 * FRAME + 1..200 * FRAME));
 		let mut next = track.append_group(at(250)).unwrap();
 		write(&mut next, 250, 2);
 		next.finish().unwrap();
-		assert_eq!(next_seen(&mut listener).await, Seen::Skip(150 * FRAME + 1..200 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(200 * FRAME + 1..250 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(250 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
