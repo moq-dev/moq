@@ -13411,6 +13411,7 @@ impl TrackServe {
 			max_delay: subscription.max_age(),
 			ranges: vec![lite::Range::OPEN],
 			order: subscription.order,
+			meta: false,
 		};
 		// One that can't go out leaves no room, and fails as it would have.
 		msg.encode_bytes(self.subscriber.version)
@@ -13800,6 +13801,7 @@ impl Establish {
 			max_delay: self.max_age,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
+			meta: false,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -16854,6 +16856,7 @@ impl kio::Task for SubFillRun {
 							end: Some(lite::Anchor::Absolute(end_pos)),
 						}],
 						order: crate::track::Order::Ascending,
+						meta: false,
 					};
 					tracing::debug!(
 						broadcast = %self.serve.subscriber.log_path(&self.serve.path),

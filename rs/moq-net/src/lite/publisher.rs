@@ -2670,6 +2670,7 @@ impl Request for SubscribeServe {
 						stamp,
 						outcomes: Default::default(),
 						object_records: ietf && track.info().ietf().is_some(),
+						meta: msg.meta,
 					};
 
 					let latest = match shared.version {
@@ -3432,6 +3433,7 @@ impl OneShotFetch {
 								outcomes,
 								object_records,
 								reliable_reset: session.reliable_reset(),
+								meta: msg.meta,
 							};
 							let rank = match &send_group {
 								Some(_) => Rank::Group,
@@ -3727,8 +3729,10 @@ impl Request for FetchServe {
 							writer,
 							shared.version,
 							batched.frame.timestamp,
-							batched.inflated,
-							batched.frame.payload.len() as u64,
+							Body::Payload {
+								size: batched.frame.payload.len() as u64,
+								inflated: batched.inflated,
+							},
 							*stamp,
 							clock,
 						)?;
@@ -3766,8 +3770,10 @@ impl Request for FetchServe {
 									writer,
 									shared.version,
 									next.timestamp,
-									next.inflated,
-									next.size,
+									Body::Payload {
+										size: next.size,
+										inflated: next.inflated,
+									},
 									*stamp,
 									clock,
 								)?;
@@ -5108,11 +5114,14 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	version: Version,
 	timestamp: crate::Timestamp,
-	inflated: Option<u64>,
-	size: u64,
+	body: Body,
 	stamp: Option<Stamp>,
 	clock: &mut lite::Clock,
 ) -> Result<(), Error> {
+	let (size, inflated, payload) = match body {
+		Body::Payload { size, inflated } => (size, inflated, size),
+		Body::Meta { size } => (size, None, 0),
+	};
 	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
 	let length_first = version.has_length_first();
 	if length_first {
@@ -5134,8 +5143,31 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if !length_first {
 		writer.buffer_varint(size)?;
 	}
-	writer.frame(size);
+	writer.frame(payload);
 	Ok(())
+}
+
+/// What follows a FRAME's header on a Group Stream.
+#[derive(Clone, Copy, Debug)]
+enum Body {
+	/// The payload of `size` bytes, after its `Inflated Size` when the group goes out
+	/// compressed (lite-07).
+	Payload { size: u64, inflated: Option<u64> },
+	/// Nothing: a metadata subscription's FRAME is its header alone, its `Payload Length`
+	/// naming the frame's plain size, so a compressed frame is never inflated to send it.
+	Meta { size: u64 },
+}
+
+impl Body {
+	/// What follows the header of a frame of `size` stored bytes, `inflated` once plain.
+	fn new(meta: bool, size: u64, inflated: Option<u64>) -> Self {
+		match meta {
+			true => Self::Meta {
+				size: inflated.unwrap_or(size),
+			},
+			false => Self::Payload { size, inflated },
+		}
+	}
 }
 
 /// How a lite hop stamps a track's frames and a datagram track's datagrams.
@@ -5687,6 +5719,8 @@ struct Subscription {
 	/// Whether the session negotiated the `ietf` extension and a moq-transport publisher made
 	/// the track, so its group streams carry object records.
 	object_records: bool,
+	/// Whether the subscriber asked for each frame's header alone (lite-07 `Meta`).
+	meta: bool,
 }
 
 /// Each group keeps its own steering cursor, without a session or send-group owner.
@@ -5707,6 +5741,8 @@ struct GroupContext {
 	/// ([reliable_reset](crate::transport::poll::Session::reliable_reset)), so a reset group
 	/// stream accounts for its group and no SUBSCRIBE_DROP names it.
 	reliable_reset: bool,
+	/// Whether each FRAME goes out as its header alone (lite-07 `Meta`).
+	meta: bool,
 }
 
 impl GroupContext {
@@ -5774,6 +5810,7 @@ impl Subscription {
 			outcomes: self.outcomes.clone(),
 			object_records: self.object_records,
 			reliable_reset: self.version.has_reliable_reset() && self.session.reliable_reset(),
+			meta: self.meta,
 		}
 	}
 
@@ -7411,6 +7448,7 @@ impl CoverageBench {
 			stamp: None,
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 		let mut drops = drops;
 		drops.reverse();
@@ -7527,6 +7565,7 @@ impl UpdateBench {
 			stamp: None,
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 		let mut this = Self {
 			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
@@ -8023,8 +8062,11 @@ impl GroupServe {
 											writer,
 											self.ctx.version,
 											batched.frame.timestamp,
-											batched.inflated,
-											batched.frame.payload.len() as u64,
+											Body::new(
+												self.ctx.meta,
+												batched.frame.payload.len() as u64,
+												batched.inflated,
+											),
 											self.ctx.stamp,
 											&mut self.clock,
 										)
@@ -8033,7 +8075,7 @@ impl GroupServe {
 									break 'serve Err(err);
 								}
 								let payload = std::mem::take(&mut batched.frame.payload);
-								if !payload.is_empty() {
+								if !payload.is_empty() && !self.ctx.meta {
 									*chunk = Some(payload);
 								}
 								*batch_pos += 1;
@@ -8093,8 +8135,7 @@ impl GroupServe {
 													writer,
 													self.ctx.version,
 													next.timestamp,
-													next.inflated,
-													next.size,
+													Body::new(self.ctx.meta, next.size, next.inflated),
 													self.ctx.stamp,
 													&mut self.clock,
 												)
@@ -8102,7 +8143,11 @@ impl GroupServe {
 										if let Err(err) = buffered {
 											break 'serve Err(err);
 										}
-										*frame = Some(next);
+										// A metadata FRAME is its header: the frame's bytes are
+										// never read, so nothing waits for them.
+										if !self.ctx.meta {
+											*frame = Some(next);
+										}
 									}
 									Poll::Ready(Ok(None)) => match records.take() {
 										Some(mut records) => match records.end(writer, &self.group) {
@@ -8621,6 +8666,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -8667,6 +8713,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -8713,6 +8760,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		}
 	}
 
@@ -8766,6 +8814,156 @@ mod serve_group_test {
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");
+		}
+	}
+
+	/// A metadata subscription's Group Stream carries each frame's header alone: its plain
+	/// size plus one and its timestamp delta, with no payload, so an empty frame's 1 stays
+	/// apart from GROUP_END's 0. A compressed frame names its declared plain size and is
+	/// served from its stored slice, never inflated.
+	#[kio::test]
+	async fn lite07_meta_serves_each_frame_header_alone() {
+		for compression in [crate::track::Compression::None, crate::track::Compression::Deflate] {
+			let log = Log::default();
+			let mut subscription = lite07_subscription(SinkSession::new(log.clone()));
+			subscription.meta = true;
+			let pool = crate::cache::Pool::unbounded();
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info {
+					pool: pool.clone(),
+					..Default::default()
+				}),
+				"test",
+				crate::track::Info::timed().with_compression(compression),
+			);
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let big = vec![b'a'; 300];
+			group
+				.write_frame(Timestamp::from_millis(2).unwrap(), big.clone())
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(3).unwrap(), b"".as_slice())
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(4).unwrap(), b"hello".as_slice())
+				.unwrap();
+			group.finish_at(5).unwrap();
+			let used = pool.used();
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			subscription
+				.serve_group(0, 0, handle, track.consume().peek_group(0).unwrap())
+				.await
+				.unwrap();
+			assert_eq!(pool.used(), used, "{compression:?}: a header read inflated nothing");
+
+			let (bytes, fin) = first_stream(&log);
+			assert!(fin, "{compression:?}: no FIN");
+			// 301 as a two-byte varint, then each delta: 2ms, then 1ms for the empty frame (length
+			// 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame at 4.
+			let tail: &[u8] = &[0x81, 0x2d, 4, 1, 2, 6, 2, 0, 1];
+			assert!(bytes.ends_with(tail), "{compression:?}: {bytes:?}");
+			assert!(
+				!bytes.windows(5).any(|w| w == b"hello"),
+				"{compression:?}: a payload went out"
+			);
+		}
+	}
+
+	/// A metadata Group Stream's frames, read without payloads: each plain size and timestamp,
+	/// and the End its GROUP_END names.
+	fn read_meta_group(bytes: &[u8]) -> (u64, Vec<u64>, Vec<u64>, Option<u64>) {
+		use crate::coding::Decode;
+		let version = Version::Lite07;
+		let mut r = crate::coding::Decoder::new(bytes, version.into());
+		assert_eq!(r.varint().unwrap(), 0, "a group stream");
+		let header = lite::Group::decode(&mut r, version).unwrap();
+		let (mut sizes, mut times, mut end) = (Vec::new(), Vec::new(), None);
+		let mut ts = header.key;
+		while !r.is_empty() {
+			match r.varint().unwrap() {
+				0 => end = Some(times.iter().copied().max().unwrap_or(header.key) + r.varint().unwrap()),
+				length => {
+					ts = ts
+						.checked_add_signed(crate::coding::varint::unzigzag(r.varint().unwrap()))
+						.unwrap();
+					times.push(ts);
+					sizes.push(length - 1);
+				}
+			}
+		}
+		(header.key, sizes, times, end)
+	}
+
+	/// Metadata subscriptions across the Rust/JS boundary: JS reads a Rust publisher's metadata
+	/// Group Stream, and a JS publisher serves a Rust-encoded metadata SUBSCRIBE with one Rust
+	/// reads, each frame's header alone, compressed or not.
+	#[kio::test]
+	#[ignore = "requires Bun; run by just test interop"]
+	async fn lite07_meta_interop() {
+		#[derive(serde::Deserialize)]
+		struct Read {
+			key: String,
+			sizes: Vec<u64>,
+			times: Vec<String>,
+			end: Option<String>,
+		}
+		for compression in [crate::track::Compression::None, crate::track::Compression::Deflate] {
+			let log = Log::default();
+			let mut subscription = lite07_subscription(SinkSession::new(log.clone()));
+			subscription.meta = true;
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed().with_compression(compression),
+			);
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'a'; 300])
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(3).unwrap(), b"".as_slice())
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(4).unwrap(), b"hello".as_slice())
+				.unwrap();
+			group.finish_at(5).unwrap();
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			subscription
+				.serve_group(0, 0, handle, track.consume().peek_group(0).unwrap())
+				.await
+				.unwrap();
+			let (bytes, _) = first_stream(&log);
+			let input = serde_json::json!({ "mode": "read", "bytes": bytes });
+			let read: Read = serde_json::from_slice(&crate::test_interop::bun("meta", input)).unwrap();
+			assert_eq!(read.key, "0");
+			assert_eq!(read.sizes, [300, 0, 5], "{compression:?}");
+			assert_eq!(read.times, ["2", "3", "4"], "{compression:?}");
+			assert_eq!(read.end.as_deref(), Some("5"), "{compression:?}");
+
+			let subscribe = lite::Subscribe {
+				id: 0,
+				broadcast: crate::Path::from_static("room"),
+				instance: None,
+				node: None,
+				track: "video".into(),
+				priority: 0,
+				max_delay: None,
+				ranges: vec![lite::Range::OPEN],
+				order: crate::track::Order::Descending,
+				meta: true,
+			};
+			let bytes = subscribe.encode_bytes(Version::Lite07).unwrap();
+			let compression = match compression {
+				crate::track::Compression::None => serde_json::Value::Null,
+				crate::track::Compression::Deflate => "deflate".into(),
+			};
+			let input = serde_json::json!({ "mode": "serve", "bytes": bytes.to_vec(), "compression": compression });
+			let served: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("meta", input)).unwrap();
+			assert_eq!(
+				read_meta_group(&served),
+				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
+				"{compression}"
+			);
 		}
 	}
 
@@ -8906,6 +9104,7 @@ mod serve_group_test {
 				stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 				outcomes: Default::default(),
 				object_records: false,
+				meta: false,
 			};
 			let track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -8980,6 +9179,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 		let track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -9050,6 +9250,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9100,6 +9301,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9167,6 +9369,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9340,6 +9543,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9390,6 +9594,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9439,6 +9644,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9487,6 +9693,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 
 		let track = track::Producer::new(
@@ -9586,6 +9793,7 @@ mod serve_group_test {
 			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			outcomes: Default::default(),
 			object_records: false,
+			meta: false,
 		};
 		let start_range = if version.has_ranges() {
 			lite::Range {
@@ -12996,6 +13204,7 @@ mod serve_group_test {
 				stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
 				outcomes: outcomes.clone(),
 				object_records: false,
+				meta: false,
 			};
 			let bounds = Bounds::new(&[lite::Range::span(Some(start_group), 0, None, None)], None);
 			Self {
@@ -13965,6 +14174,7 @@ mod tests {
 						priority: 0,
 						max_delay: Some(Duration::ZERO),
 						ranges: vec![lite::Range::span(None, 0, None, None)],
+						meta: false,
 					};
 					// On lite-07, a clean subscriber FIN on SUBSCRIBE means "no further updates;
 					// deliver what was requested", so only Reset cancels a waiting SUBSCRIBE.
@@ -14028,6 +14238,7 @@ mod tests {
 				priority: 0,
 				max_delay: Some(Duration::ZERO),
 				ranges: vec![lite::Range::span(None, 0, None, None)],
+				meta: false,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
@@ -14179,6 +14390,7 @@ mod tests {
 			priority,
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			meta: false,
 		}
 	}
 
@@ -14521,6 +14733,7 @@ mod tests {
 						// Lite01/02 carry no max age.
 						max_delay: (version != Version::Lite01).then_some(Duration::from_secs(60)),
 						ranges: vec![lite::Range::span(start, 0, None, None)],
+						meta: false,
 					};
 					let mut serve =
 						SubscribeServe::start(&publisher.shared, msg, "video", broadcast.broadcast().consume(), false)
@@ -14655,6 +14868,7 @@ mod tests {
 			max_delay: Some(Duration::ZERO),
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
+			meta: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -14784,6 +14998,7 @@ mod tests {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(3600)),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			meta: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -15324,6 +15539,7 @@ mod tests {
 				priority: 0,
 				max_delay: Some(Duration::ZERO),
 				ranges: vec![lite::Range::span(None, 0, None, None)],
+				meta: false,
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -15437,6 +15653,7 @@ mod tests {
 				priority: 0,
 				max_delay: Some(Duration::ZERO),
 				ranges: vec![lite::Range::span(None, 0, None, None)],
+				meta: false,
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -15505,6 +15722,7 @@ mod tests {
 			priority: 0,
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			meta: false,
 		};
 		let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 		let log = session.log.clone();
@@ -15668,6 +15886,7 @@ mod tests {
 			priority,
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			meta: false,
 		};
 		let mut script = Vec::new();
 		msg.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)

@@ -278,7 +278,7 @@ moving only the wire into `m2`, leaving both in `m3`).
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 - [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - wire rename and 256-byte UTF-8 ceiling on Identity freeze into lite-07
-- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - Meta byte on SUBSCRIBE and payload-less FRAME freeze into lite-07
+- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - relays forward metadata demand upstream; its Meta byte and payload-less FRAME are already on lite-07
 - [The lite-07 draft's TRACKS SYNCED matches relays](/quest/m2/tracks-synced-draft.md) - the draft stops saying a relay sends SYNCED before its upstream syncs
 - [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - Rust, JS, and C/binding metadata subscriber API lands before the cut so the C ABI does not break right after 0.22
 
