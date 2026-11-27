@@ -6266,6 +6266,7 @@ mod test {
 	/// says its route failed: a group it closed short reads on from the route replacing it.
 	/// Mirrors the JS `a short group after its settled copy aborts`.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_short_group_waits_for_a_replacement_after_its_settled_copy_fails() {
 		let routes = Producer::new();
 		let front = logical(&routes);
