@@ -3688,7 +3688,7 @@ impl Reader {
 		delivered.reopen(self.window().held());
 	}
 
-	fn backfill_gaps(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
+	fn backfill_gaps(&mut self, delivered: &mut Delivered, waiter: &kio::Waiter) {
 		if self.resumed.is_none() {
 			return;
 		}
@@ -3731,6 +3731,9 @@ impl Reader {
 				placed.insert(*key, at);
 			}
 			self.resolve(&placed);
+			// What the starts placed hold of the history a fold took unjudged is owed before the
+			// walk below judges the gaps.
+			self.reopen_folded(delivered);
 		}
 		let Some(resumed_by) = self.resumed.take() else {
 			return;
@@ -9388,6 +9391,47 @@ mod test {
 		})
 		.unwrap();
 		assert_eq!(drain(&mut sub, false), [2], "group 2 holds time 3");
+	}
+
+	/// A time start an edit adds under the serving copy's resume point, over history the
+	/// reader's budget folded before any range held it, reads the groups the route holds there:
+	/// placed at its time, it owes what the fold took, which the backfill then asks for.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_added_time_start_over_folded_history_below_the_resume_point_reads_it() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let latest = Subscription::default().with_ranges([track::Range::from(crate::track::Start::LATEST)]);
+		let mut sub = logical.consume().subscribe(latest).now_or_never().unwrap().unwrap();
+		write(&a, 10);
+		assert_eq!(drain(&mut sub, false), [10]);
+		write(&a, 12);
+		assert_eq!(drain(&mut sub, false), [12]);
+		let b = copy();
+		for key in [7, 10, 12] {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		write(&b, 13);
+		assert_eq!(drain(&mut sub, false), [13]);
+
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: crate::track::Start::Time(5),
+					end: Some(9),
+				},
+			)],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(drain(&mut sub, false), [7]);
 	}
 
 	/// A live join an edit adds with a Min Age reaching under the serving copy's resume point

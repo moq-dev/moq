@@ -1225,7 +1225,12 @@ class Reader implements ResumeSource {
 			const end = ranges[Number(key)]?.end;
 			placed[Number(key)] = { start: time, end: end === undefined ? undefined : end + 1n, floored: true };
 		}
-		if (placed.length > 0) this.#resolve(placed);
+		if (placed.length > 0) {
+			this.#resolve(placed);
+			// What the starts placed hold of the history a fold took unjudged is owed before the walk
+			// below judges the gaps.
+			this.#reopenFolded(delivered);
+		}
 		this.#resumed = false;
 		if (resumed === undefined) return;
 		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
