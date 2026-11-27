@@ -2275,7 +2275,7 @@ async fn keyframe_decides_where_parameter_sets_live() {
 					if first.is_none()
 						&& let std::task::Poll::Ready(snapshot) = published.poll_next(&waiter)
 					{
-						first = snapshot.unwrap();
+						first = snapshot.unwrap().map(|timed| timed.value);
 					}
 				}
 				let first = first.expect("the keyframe publishes the catalog");

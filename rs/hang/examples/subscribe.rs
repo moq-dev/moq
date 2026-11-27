@@ -93,7 +93,11 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 	// Read the catalog to discover available tracks.
 	let mut catalog = moq_mux::catalog::hang::Consumer::<()>::new(broadcast.track(hang::Catalog::DEFAULT_NAME)?);
 
-	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
+	let info = catalog
+		.next()
+		.await?
+		.ok_or_else(|| anyhow::anyhow!("no catalog"))?
+		.value;
 
 	// Find the first video track.
 	let (name, config) = info

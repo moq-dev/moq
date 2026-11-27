@@ -225,7 +225,7 @@ fn flapping(c: &mut Criterion) {
 		};
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
 		let current = loop {
-			let snapshot = catalogs.next().await.unwrap().unwrap();
+			let snapshot = catalogs.next().await.unwrap().unwrap().value;
 			if !snapshot.video.renditions.is_empty() {
 				break names(&snapshot);
 			}
@@ -240,7 +240,7 @@ fn flapping(c: &mut Criterion) {
 			source.publish(size(pictures[edits % pictures.len()]));
 			runtime.block_on(async {
 				loop {
-					let snapshot = catalogs.next().await.unwrap().unwrap();
+					let snapshot = catalogs.next().await.unwrap().unwrap().value;
 					let next = names(&snapshot);
 					if next != current {
 						current = next;
