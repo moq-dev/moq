@@ -7779,3 +7779,51 @@ test("a wired front publisher coalesces skips reported before their preceding gr
 		source.close();
 	}
 });
+
+// Keeping [0, 0] active while hopping a second disjoint range prunes queued skips from retired
+// ranges so they never accumulate or leak to the logical reader.
+test("multi-range hopping prunes retired skips even when [0, 0] stays active", () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	front.serve(handle);
+	const g0 = producer.createGroup(0n);
+	g0.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
+	g0.finish();
+	for (let i = 1n; i <= 20n; i++) {
+		const base = i * 10n;
+		for (const offset of [0n, 5n]) {
+			const k = base + offset;
+			const g = producer.createGroup(k);
+			g.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(k)) });
+			g.finishAt(k + 5n);
+			producer.skipGroups(k + 1n, k + 5n);
+		}
+	}
+	const sub = front.consumer.track("video").subscribe({
+		ranges: [
+			{ start: 0n, end: 0n },
+			{ start: 10n, end: 19n },
+		],
+	});
+	try {
+		for (let i = 1n; i <= 20n; i++) {
+			const base = i * 10n;
+			sub.update({
+				ranges: [
+					{ start: 0n, end: 0n },
+					{ start: base, end: base + 9n },
+				],
+			});
+			expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: base + 1n, end: base + 5n, skip: true });
+		}
+		sub.update({ ranges: [{ start: 0n, end: 0n }] });
+		expect(hooks.tryDrop(sub)).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+	}
+});

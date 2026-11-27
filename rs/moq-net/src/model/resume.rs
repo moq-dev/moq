@@ -60,7 +60,7 @@ use crate::{Error, Result, StreamError, group, stats, track};
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
 use super::subscription::{
-	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window,
+	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window, minus,
 };
 use super::track::Failure;
 use crate::ledger;
@@ -2531,6 +2531,7 @@ impl Reader {
 						self.resolve(&resolved);
 					}
 				}
+				self.evict_outside_skips();
 			}
 		}
 
@@ -3484,11 +3485,26 @@ impl Reader {
 				given_up.push((run, hole, received));
 			}
 		}
+		let cover = self
+			.window()
+			.is_settled()
+			.then(|| self.window.groups().cloned())
+			.flatten();
+		let mut revoked = Vec::new();
 		for run in superseded {
 			self.remove_drop(run);
 		}
 		for (run, hole, received) in given_up {
 			if !Error::Stream(hole.error()).retryable() {
+				if hole == track::Hole::Skip {
+					let (keep, excluded) = self.split_skip(run, cover.as_ref());
+					for part in keep {
+						self.received.remove(part.clone());
+						self.drops.insert(part, track::Hole::Skip);
+					}
+					revoked.extend(excluded);
+					continue;
+				}
 				match received {
 					true => self.received.insert(run.clone()),
 					false => self.received.remove(run.clone()),
@@ -3496,16 +3512,18 @@ impl Reader {
 				self.drops.insert(run, hole);
 			}
 		}
+		if !revoked.is_empty() {
+			self.revoke_skips(revoked);
+			revoked = Vec::new();
+		}
 		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
 		// each poll reports one run, so such a pass would cost the queue squared to drain it,
 		// and a new reader can be handed one run per cached group and per gap between them.
 		// Declared skips are deduplicated against `record` (what was actually reported to the
 		// logical reader) rather than `delivered`, so budget-retired delivery prefixes below the
 		// reader's start never discard an unreported skip on a later widening. Out-of-range
-		// skips are evicted from `self.drops` and untold on copies so range hops never grow the
-		// queue; on a later widen, the copies rescan (or ask upstream again if the cache evicted
-		// them, since a cache only makes things faster).
-		self.evict_outside_skips();
+		// skips are pruned when bounds or active ranges change and clipped on insertion above
+		// rather than scanning excluded real drops on every poll.
 		let (start, end) = self.groups;
 		while let Some((run, hole)) = self
 			.drops
@@ -3558,18 +3576,31 @@ impl Reader {
 				passed.push(run.clone());
 				return None;
 			}
-			let clipped = run.start.max(start)..run.end.min(window.end);
 			let open = match err {
-				track::Hole::Skip => record.find_untold_gap(clipped, |gap| feeding.gaps(&gap).next())?,
-				track::Hole::Drop { .. } => delivered
-					.gaps(clipped)
-					.into_iter()
-					.find_map(|gap| feeding.gaps(&gap).next())?,
+				track::Hole::Skip => {
+					let (keep, excluded) = Self::split_skip_with(run.clone(), window.clone(), cover.as_ref());
+					revoked.extend(excluded);
+					keep.into_iter()
+						.find_map(|part| record.find_untold_gap(part, |gap| feeding.gaps(&gap).next()))?
+				}
+				track::Hole::Drop { .. } => {
+					let clipped = run.start.max(start)..run.end.min(window.end);
+					delivered
+						.gaps(clipped)
+						.into_iter()
+						.find_map(|gap| feeding.gaps(&gap).next())?
+				}
 			};
 			Some((open, err.clone()))
 		});
 		for run in passed {
 			self.remove_drop(run);
+		}
+		if !revoked.is_empty() {
+			for run in &revoked {
+				self.remove_drop(run.clone());
+			}
+			self.revoke_skips(revoked);
 		}
 		let Some((open, err)) = next else {
 			return Poll::Pending;
@@ -3591,32 +3622,112 @@ impl Reader {
 		}
 	}
 
-	/// Evict any queued declared skips (or parts of skips) outside `self.groups` and untell them
-	/// on existing copies so range hops never strand entries in `self.drops`.
+	/// Revoke `ranges` on every copy and arm a drop rescan so a reused copy (or one whose bounds
+	/// are restored before its next poll) still replays cached skips in those ranges.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn revoke_skips(&mut self, ranges: impl IntoIterator<Item = std::ops::Range<u64>>) {
+		let mut any = false;
+		for run in ranges {
+			if !run.is_empty() {
+				self.untell(run);
+				any = true;
+			}
+		}
+		if any {
+			for copy in &mut self.copies {
+				if let Sub::Ready(sub) = &mut copy.sub {
+					sub.rescan_drops();
+				}
+			}
+		}
+	}
+
+	/// Split a skip run against `self.groups` and optional settled active `cover`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn split_skip(
+		&self,
+		run: std::ops::Range<u64>,
+		cover: Option<&Cover>,
+	) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
+		let window = self.groups.0..self.groups.1.unwrap_or(u64::MAX);
+		Self::split_skip_with(run, window, cover)
+	}
+
+	/// Split `run` into active parts inside `window` (and `cover` when settled) and excluded parts.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn split_skip_with(
+		run: std::ops::Range<u64>,
+		window: std::ops::Range<u64>,
+		cover: Option<&Cover>,
+	) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
+		if run.is_empty() {
+			return (Vec::new(), Vec::new());
+		}
+		let in_window = run.start.max(window.start)..run.end.min(window.end);
+		if in_window.is_empty() {
+			return (Vec::new(), vec![run]);
+		}
+		let mut excluded = Vec::new();
+		if run.start < in_window.start {
+			excluded.push(run.start..in_window.start);
+		}
+		let keep = match cover {
+			Some(cover) => {
+				let inclusive = in_window.start..=in_window.end - 1;
+				for gap in minus(inclusive.clone(), cover) {
+					excluded.push(*gap.start()..*gap.end() + 1);
+				}
+				cover
+					.within(*inclusive.start(), *inclusive.end())
+					.map(|part| *part.start()..*part.end() + 1)
+					.collect()
+			}
+			None => vec![in_window.clone()],
+		};
+		if in_window.end < run.end {
+			excluded.push(in_window.end..run.end);
+		}
+		(keep, excluded)
+	}
+
+	/// Evict any queued declared skips (or parts of skips) outside `self.groups` or the settled
+	/// active ranges and revoke them on existing copies so range hops never strand entries in
+	/// `self.drops`. Called only when cursor bounds or requested ranges change.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn evict_outside_skips(&mut self) {
-		let (start, end) = self.groups;
+		if self.drops.is_empty() {
+			return;
+		}
+		let window = self.groups.0..self.groups.1.unwrap_or(u64::MAX);
+		let cover = self.window.is_settled().then(|| self.window.groups()).flatten();
 		let mut outside = Vec::new();
-		if start > 0 {
-			for (run, hole) in self.drops.overlapping(&(0..start)) {
+		if cover.is_some() {
+			for (run, hole) in self.drops.iter() {
 				if *hole == track::Hole::Skip {
-					outside.push(run.start..run.end.min(start));
+					let (_, excluded) = Self::split_skip_with(run.clone(), window.clone(), cover);
+					outside.extend(excluded);
+				}
+			}
+		} else {
+			if window.start > 0 {
+				for (run, hole) in self.drops.overlapping(&(0..window.start)) {
+					if *hole == track::Hole::Skip {
+						outside.push(run.start..run.end.min(window.start));
+					}
+				}
+			}
+			if window.end < u64::MAX {
+				for (run, hole) in self.drops.overlapping(&(window.end..u64::MAX)) {
+					if *hole == track::Hole::Skip {
+						outside.push(run.start.max(window.end)..run.end);
+					}
 				}
 			}
 		}
-		if let Some(cap) = end
-			&& cap < u64::MAX
-		{
-			for (run, hole) in self.drops.overlapping(&(cap..u64::MAX)) {
-				if *hole == track::Hole::Skip {
-					outside.push(run.start.max(cap)..run.end);
-				}
-			}
-		}
-		for run in outside {
+		for run in &outside {
 			self.remove_drop(run.clone());
-			self.untell(run);
 		}
+		self.revoke_skips(outside);
 	}
 
 	/// Untell every unforwarded declared skip currently in `self.drops` on existing copies and
@@ -3628,17 +3739,7 @@ impl Reader {
 			.iter()
 			.filter_map(|(run, hole)| (*hole == track::Hole::Skip).then_some(run.clone()))
 			.collect();
-		if skips.is_empty() {
-			return;
-		}
-		for run in skips {
-			self.untell(run);
-		}
-		for copy in &mut self.copies {
-			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.rescan_drops();
-			}
-		}
+		self.revoke_skips(skips);
 	}
 
 	fn mark_reporting(&mut self) {
@@ -16551,6 +16652,132 @@ mod test {
 		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
 		routes.serve(a.consume());
 		// A's reused subscription must still emit `[6, 10)`.
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((6..10, track::Hole::Skip))
+		);
+		drop(held);
+		g0.finish().unwrap();
+	}
+
+	/// Keeping `[0, 0]` active while hopping a second disjoint range across sparse skips prunes
+	/// skips from retired ranges so `Reader::drops` stays bounded and never forwards retired skips.
+	#[test]
+	#[cfg(feature = "async")]
+	fn multi_range_hopping_keeps_front_drop_queue_bounded() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		a.received();
+		routes.serve(a.consume());
+
+		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
+		g0.write_frame(ts(0), &b"x"[..]).unwrap();
+		g0.finish().unwrap();
+		for i in 1..=50u64 {
+			let base = i * 10;
+			for offset in [0u64, 5] {
+				let k = base + offset;
+				let mut g = a.create_group(group::Info { start: k }).unwrap();
+				g.write_frame(ts(k), &b"x"[..]).unwrap();
+				g.finish_at(k + 5).unwrap();
+				a.skip_groups(k + 1..k + 5);
+			}
+		}
+		let mut sub = logical
+			.consume()
+			.subscribe(Subscription::default().with_ranges([
+				track::Range {
+					start: track::Start::Time(0),
+					end: Some(0),
+				},
+				track::Range {
+					start: track::Start::Time(10),
+					end: Some(19),
+				},
+			]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		for i in 1..=50u64 {
+			let base = i * 10;
+			sub.update(Subscription::default().with_ranges([
+				track::Range {
+					start: track::Start::Time(0),
+					end: Some(0),
+				},
+				track::Range {
+					start: track::Start::Time(base),
+					end: Some(base + 9),
+				},
+			]))
+			.unwrap();
+			assert_eq!(
+				sub.poll_drop(&kio::Waiter::noop()),
+				Poll::Ready((base + 1..base + 5, track::Hole::Skip))
+			);
+			assert_eq!(
+				sub.queued_drops(),
+				1,
+				"retired range skips must be pruned even when [0, 0] keeps cursor start at 0"
+			);
+		}
+		// Retire the second range: no skips remain in range or queued.
+		sub.update(Subscription::default().with_ranges([track::Range {
+			start: track::Start::Time(0),
+			end: Some(0),
+		}]))
+		.unwrap();
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		assert_eq!(sub.queued_drops(), 0);
+	}
+
+	/// Narrowing past a queued skip on A revokes it and arms a drop rescan; if the front switches
+	/// to B, restores the original bounds before polling A, and then returns to A, A's reused
+	/// subscription still replays the cached skip.
+	#[test]
+	#[cfg(feature = "async")]
+	fn narrow_revoked_skip_survives_route_switch_and_bounds_restore_before_return() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast.clone(), "sparse", crate::track::Info::timed());
+		a.received();
+		let b = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		b.received();
+		routes.serve(a.consume());
+
+		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
+		g0.write_frame(ts(0), &b"x"[..]).unwrap();
+
+		let mut sub = subscribe(&logical, HOUR);
+		let Poll::Ready(Ok(Some(held))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("expected group 0");
+		};
+		assert_eq!(held.start, 0);
+		a.skip_groups(1..5);
+		let mut g5 = a.create_group(group::Info { start: 5 }).unwrap();
+		g5.write_frame(ts(5), &b"x"[..]).unwrap();
+		g5.finish_at(10).unwrap();
+		a.skip_groups(6..10);
+
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((1..5, track::Hole::Skip))
+		);
+		// Narrow past `[6, 10)` (pruning & revoking it while on A), switch to B, restore `0..`
+		// BEFORE polling A again, then return to A.
+		sub.set_range(10..);
+		assert_eq!(sub.queued_drops(), 0);
+		routes.serve(b.consume());
+		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
+		sub.set_range(0..);
+		routes.serve(a.consume());
 		assert_eq!(
 			sub.poll_drop(&kio::Waiter::noop()),
 			Poll::Ready((6..10, track::Hole::Skip))

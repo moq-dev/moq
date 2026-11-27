@@ -1077,6 +1077,7 @@ class Reader implements ResumeSource {
 	 * replaced ranges, not its last ones. Mirrors the Rust `Reader::sync`.
 	 */
 	#follow(): void {
+		let prune = false;
 		const subscription = this.#shell.subscription.peek();
 		if (subscription !== this.#mirrored) {
 			this.#mirrored = subscription;
@@ -1098,15 +1099,18 @@ class Reader implements ResumeSource {
 					if (copy.from && sameRanges(copy.from, ranges)) this.#resolve(copy.resolved ?? []);
 				}
 			}
+			prune = true;
 		}
 		const cursor = this.#shell.cursor.peek();
-		if (cursor === this.#bounded) return;
-		const passed = this.#bounded.start;
-		this.#bounded = cursor;
-		this.#evictOutsideSkips(cursor);
-		for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
-		if (cursor.start < passed) this.#backfill(cursor.start, passed);
-		if (this.#ended) this.#letGo(this.#delivered);
+		if (cursor !== this.#bounded) {
+			const passed = this.#bounded.start;
+			this.#bounded = cursor;
+			prune = true;
+			for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
+			if (cursor.start < passed) this.#backfill(cursor.start, passed);
+			if (this.#ended) this.#letGo(this.#delivered);
+		}
+		if (prune) this.#evictOutsideSkips();
 	}
 
 	/**
@@ -1722,32 +1726,61 @@ class Reader implements ResumeSource {
 			}
 		}
 		const cursor = this.#shell.cursor.peek();
+		const window = this.#window();
 		this.#drops = this.#drops.filter((run) =>
 			run.skip ? this.#shell.untold(run.start, run.end).length > 0 : !delivered.covers(run.start, run.end),
 		);
-		this.#evictOutsideSkips(cursor);
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
 			if (copy === serving || !this.#feeds(copy)) continue;
 			const start = max(cursor.start, copy.floor ?? 0n);
 			insertRun(feeding, start, copyEnd(copy) ?? UNBOUNDED);
 		}
+		const revoked: Run[] = [];
 		for (const run of this.#drops) {
+			if (run.skip) {
+				const split = this.#splitSkip(run.start, run.end, cursor, window);
+				for (const part of split.outside) revoked.push(part);
+				for (const part of split.keep) {
+					for (const gap of this.#shell.untold(part.start, part.end)) {
+						const [open] =
+							gap.start < passing
+								? [{ start: gap.start, end: min(gap.end, passing) }]
+								: runGaps(feeding, gap.start, gap.end);
+						if (open) {
+							for (const out of revoked) {
+								this.#drops = removeRun(this.#drops, out.start, out.end);
+								this.untell(out.start, out.end, true);
+							}
+							this.#drops = removeRun(this.#drops, open.start, open.end);
+							return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
+						}
+					}
+				}
+				continue;
+			}
 			const from = max(run.start, cursor.start);
 			const end = min(run.end, cursor.end ?? run.end);
 			if (from >= end) continue;
-			const gaps = run.skip ? this.#shell.untold(from, end) : delivered.gaps(from, end);
-			for (const gap of gaps) {
+			for (const gap of delivered.gaps(from, end)) {
 				const [open] =
 					gap.start < passing
 						? [{ start: gap.start, end: min(gap.end, passing) }]
 						: runGaps(feeding, gap.start, gap.end);
 				if (open) {
+					for (const out of revoked) {
+						this.#drops = removeRun(this.#drops, out.start, out.end);
+						this.untell(out.start, out.end, true);
+					}
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
 					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}
+		}
+		for (const out of revoked) {
+			this.#drops = removeRun(this.#drops, out.start, out.end);
+			this.untell(out.start, out.end, true);
 		}
 		return undefined;
 	}
@@ -1757,6 +1790,14 @@ class Reader implements ResumeSource {
 		// A route failing is no verdict: another route may still deliver the group, and one it
 		// failed while buffered is handed out to continue through its recovery.
 		if (routeFailed(dropped.error)) return;
+		if (dropped.skip) {
+			const split = this.#splitSkip(dropped.start, dropped.end, this.#shell.cursor.peek(), this.#window());
+			for (const part of split.keep) {
+				this.#drops = insertDrop(this.#drops, part.start, part.end, { ...dropped, ...part, received: false });
+			}
+			for (const part of split.outside) this.untell(part.start, part.end, true);
+			return;
+		}
 		// A stale run the copy holds came from its upstream, which a new subscription may supersede.
 		const received =
 			dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
@@ -2263,9 +2304,32 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end, rescan);
 	}
 
-	// Evict queued declared skips (or parts of skips) outside `cursor` and untell them on copies
-	// so range hops never accumulate stranded entries in `#drops`.
-	#evictOutsideSkips(cursor: { start: bigint; end?: bigint }): void {
+	// Split a declared skip against `cursor` and settled active `window` ranges.
+	#splitSkip(
+		start: bigint,
+		end: bigint,
+		cursor: { start: bigint; end?: bigint },
+		window: Window,
+	): { keep: Run[]; outside: Run[] } {
+		const from = max(start, cursor.start);
+		const to = cursor.end === undefined ? end : min(end, cursor.end);
+		if (from >= to) return { keep: [], outside: [{ start, end }] };
+		const keep = window.settled ? window.runs(from, to) : [{ start: from, end: to }];
+		const outside: Run[] = [];
+		if (start < from) outside.push({ start, end: from });
+		if (window.settled) {
+			for (const gap of runGaps(keep, from, to)) outside.push(gap);
+		}
+		if (to < end) outside.push({ start: to, end });
+		return { keep, outside };
+	}
+
+	// Evict queued declared skips (or parts of skips) outside cursor bounds or settled active
+	// ranges, revoking them on copies with a rescan so range hops never strand entries in `#drops`.
+	#evictOutsideSkips(): void {
+		if (this.#drops.length === 0) return;
+		const cursor = this.#shell.cursor.peek();
+		const window = this.#window();
 		const outside: Run[] = [];
 		const kept: DropRun[] = [];
 		for (const run of this.#drops) {
@@ -2273,18 +2337,14 @@ class Reader implements ResumeSource {
 				kept.push(run);
 				continue;
 			}
-			const from = max(run.start, cursor.start);
-			const end = cursor.end === undefined ? run.end : min(run.end, cursor.end);
-			if (from >= end) {
-				outside.push({ start: run.start, end: run.end });
-				continue;
+			const split = this.#splitSkip(run.start, run.end, cursor, window);
+			for (const part of split.outside) outside.push(part);
+			for (const part of split.keep) {
+				kept.push(part.start === run.start && part.end === run.end ? run : { ...run, ...part });
 			}
-			if (run.start < from) outside.push({ start: run.start, end: from });
-			if (end < run.end) outside.push({ start: end, end: run.end });
-			kept.push(from === run.start && end === run.end ? run : { ...run, start: from, end });
 		}
 		this.#drops = kept;
-		for (const run of outside) this.untell(run.start, run.end);
+		for (const run of outside) this.untell(run.start, run.end, true);
 	}
 
 	absorbSkips(delivered: Delivered, key: bigint): void {
