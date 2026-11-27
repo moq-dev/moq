@@ -864,7 +864,8 @@ A metadata frame is not the frame: it never satisfies a payload reader, never fi
 A subscriber that moves to the payload opens a payload subscription of its own, starting at its first missing frame with a Position or Joined `Start` (see [SUBSCRIBE](#subscribe)), so it is sent no frame it already holds.
 
 A relay serves a metadata subscription from a payload copy where that copy proves its upstream would answer the same way, as it would a payload subscription.
-It asks its upstream for whatever else the subscription covers with a payload subscription whose payloads it drops for its metadata readers, or, where its upstream session can carry the mode, SHOULD ask with a metadata subscription instead, so the payload crosses no hop that no reader needs it on.
+It asks its upstream for whatever else the subscription covers with a metadata subscription, so the payload crosses no hop that no reader needs it on.
+Only where its upstream session cannot carry the mode, such as an earlier version, does it ask with a payload subscription instead, dropping the payloads for its metadata readers.
 A relay never serves a payload reader from what a metadata subscription delivered.
 
 ## Unidirectional Streams
@@ -2176,7 +2177,7 @@ A receiver MUST check it against its limits before inflating, and MUST treat a p
 **Payload**:
 An application-specific payload.
 
-On a [metadata subscription](#metadata)'s Group Stream, a FRAME carries its `Payload Length` and `Timestamp Delta` alone, with no `Inflated Size` and no `Payload`.
+On a [metadata subscription](#metadata)'s Group Stream, a FRAME carries no `Inflated Size` and no `Payload`.
 Its `Payload Length` is the frame's size once inflated, plus one, so an empty frame still reads 1 and GROUP_END keeps 0.
 
 ## GROUP_END {#group-end}
@@ -2306,7 +2307,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - SUBSCRIBE_DROP names a span of starts, from `Group Start` up to an exclusive `Group End`, in place of an inclusive `Group End`. An empty or inverted span is a PROTOCOL_VIOLATION.
 - Added stream error code `SKIP` (0x3A) on SUBSCRIBE_DROP for starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped start. A publisher never skips a start it dropped, but for the starts of a GROUP_END a reset may have cut, and a skip never overrides a Group that arrived. A relay caches a skip as the final answer for its starts. A reset that may cut a GROUP_END names its inner starts again with SUBSCRIBE_DROP (SKIP). A gap between starts is not a skip, since Groups may be created out of order; a start never had and never declared skipped is named with OLD or NOT_FOUND.
 - A subscriber waits out no grace period: every start is accounted for, so one nothing accounts for is still owed.
-- Added `Meta` to SUBSCRIBE: a metadata subscription (0x1), fixed for its life, whose Group Streams carry each FRAME's `Payload Length`, the size once inflated plus one, and `Timestamp Delta` alone, with no `Inflated Size` or payload. A relay serves one from a payload copy, a metadata subscription upstream, or a payload subscription upstream whose payloads it drops, and never serves a payload reader from metadata.
+- Added `Meta` to SUBSCRIBE: a metadata subscription (0x1), fixed for its life, whose FRAMEs carry no `Inflated Size` or payload, their `Payload Length` the size once inflated plus one. A relay serves one from a payload copy or a metadata subscription upstream, from a payload subscription whose payloads it drops only where its upstream cannot carry the mode, and never serves a payload reader from metadata.
 - Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, stays open for an update while the subscriber's send half is open; the publisher never FINs first while it is open.

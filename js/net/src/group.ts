@@ -1306,7 +1306,8 @@ export class Consumer {
 				if (group.#quiet?.latched() instanceof Error) group.#quiet = undefined;
 			}
 		};
-		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
+		hooks.readGroupFrame = (group, compressed, from = 0, header = false) =>
+			group.#readFrame(from, compressed, true, header);
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		hooks.refreshGroup = (group) => group.#state.charge?.touch();
 		hooks.onShedRead = (group, notify) => {
@@ -1622,7 +1623,12 @@ export class Consumer {
 		return read.chunks ?? makeFrameConsumer(read.index, read.frame);
 	}
 
-	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
+	async #readFrame(
+		from: number,
+		compressed = false,
+		streaming = false,
+		header = false,
+	): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
 			const verdict = this.#verdict.peek();
 			if (verdict) {
@@ -1641,6 +1647,8 @@ export class Consumer {
 					continue;
 				}
 				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
+				// A header read never takes the payload, so none is in flight for a failure to tear.
+				if (read.chunks && header) this.#streamed = undefined;
 				return read;
 			}
 

@@ -5805,9 +5805,9 @@ test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame s
 			await w.u53(2);
 			await msg.encode(w, version);
 		});
-		const writing = s.writer.write(bytes);
+		// The write may yield to the budget first, so close only once the transport took it.
+		await s.writer.write(bytes);
 		s.writer.close();
-		await writing;
 		const responses = [];
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(s.reader, version);

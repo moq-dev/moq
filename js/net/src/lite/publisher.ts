@@ -3244,7 +3244,7 @@ export class Publisher {
 					closed?.catch(() => {});
 					break;
 				}
-				pendingRead ??= hooks.readGroupFrame(group, compress);
+				pendingRead ??= hooks.readGroupFrame(group, compress, 0, options.meta);
 				closed ??= stream.closed.then(() => undefined);
 				let disposeStop: Dispose | undefined;
 				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;

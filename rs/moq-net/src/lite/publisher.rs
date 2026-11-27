@@ -5119,8 +5119,8 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	clock: &mut lite::Clock,
 ) -> Result<(), Error> {
 	let (size, inflated, payload) = match body {
-		Body::Payload { size, inflated } => (size, inflated, size),
-		Body::Meta { size } => (size, None, 0),
+		Body::Payload { size, inflated } => (size, inflated, true),
+		Body::Meta { size } => (size, None, false),
 	};
 	// Lite-07 leads with the size plus one, leaving 0 for GROUP_END.
 	let length_first = version.has_length_first();
@@ -5143,7 +5143,10 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if !length_first {
 		writer.buffer_varint(size)?;
 	}
-	writer.frame(payload);
+	// A metadata header delivers no frame: only a payload counts toward the delivered frames.
+	if payload {
+		writer.frame(size);
+	}
 	Ok(())
 }
 
@@ -9144,6 +9147,39 @@ mod serve_group_test {
 			assert_eq!(sent, (sent_frames * FRAME) as u64, "budget {:?}", *budget.read());
 			assert_eq!((bytes - before.0, frames - before.1), (sent, sent_frames as u64));
 		}
+	}
+
+	/// A metadata subscription's headers deliver no frame: serving one bills no frames or bytes.
+	#[kio::test]
+	async fn meta_egress_bills_no_frames() {
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let billed = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.filter(|(_, role, _)| *role == crate::stats::Role::Publisher)
+				.map(|(_, _, traffic)| (traffic.bytes, traffic.frames))
+				.fold((0, 0), |(bytes, frames), (b, f)| (bytes + b, frames + f))
+		};
+		let log = Log::default();
+		let mut subscription = lite07_subscription(SinkSession::new(log.clone()));
+		subscription.meta = true;
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, vec![b'x'; 1000]).unwrap();
+		group.write_frame(Timestamp::ZERO, b"".as_slice()).unwrap();
+		group.finish().unwrap();
+		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
+		let consumer = track.consume().peek_group(0).unwrap().with_meter(meter);
+		let before = billed();
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
+		assert_eq!(billed(), before);
 	}
 
 	/// A group left open after its last frame bills that frame once the transport acknowledges

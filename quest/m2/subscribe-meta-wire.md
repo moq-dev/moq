@@ -22,8 +22,12 @@ Metadata section, the pinned bytes in `rs/moq-net/fixtures/lite.json`, and
 both publishers serving a metadata SUBSCRIBE from any track they publish or
 hold, a compressed frame named by its declared size without inflating it.
 Until this lands, a relay of ours serves a metadata reader from its payload
-copy with an ordinary payload subscription upstream, which the draft allows:
-the payload costs every hop above the last one.
+copy with an ordinary payload subscription upstream: the payload costs every
+hop above the last one, and over a lite-07 upstream this breaks the draft's
+rule that a relay asks for what it cannot prove with a metadata subscription.
+Both libraries write the payload-less FRAME but only tests read it, so the
+ingest decoder here is also the first library check of its layout before the
+cut.
 
 Still standing (maintainer, 2026-11-25 and 2026-11-26, see the history of
 this file and of [subscribe-meta.md](/quest/m2/subscribe-meta.md)):
