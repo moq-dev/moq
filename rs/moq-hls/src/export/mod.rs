@@ -3,7 +3,7 @@
 //! A [`Broadcaster`] subscribes to one broadcast's catalog and each rendition's media track,
 //! reading only each group's first frame timestamp, which the transport carries. Playlists and
 //! manifests are a pure function of those timestamps and the catalog's `sync.interval`,
-//! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
+//! and media bytes move only when an HTTP client requests a segment, which fetches exactly the
 //! groups that segment holds from the relay cache and transmuxes them to CMAF. The media
 //! subscriptions that index each group count toward no stats session, so a source whose origin
 //! is metered counts its catalog and the media clients fetch, not media nobody requested. A broadcast whose catalog declares no
@@ -2422,6 +2422,99 @@ mod tests {
 		drop((video, audio, catalog, broadcast));
 	}
 
+	/// The `tfdt` base decode time of a fragment, in its track's timescale.
+	fn tfdt(fragment: &bytes::Bytes) -> u64 {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				return moof.traf[0].tfdt.as_ref().expect("a tfdt").base_media_decode_time;
+			}
+		}
+		panic!("no moof in fragment");
+	}
+
+	/// A segment whose first keyframe lands past its line, a little late or resuming after a pause
+	/// that a long GOP overran, keeps its grid line in HLS but is timed by its media everywhere else:
+	/// its DASH `S@t` is its `tfdt`, the `$Time$` URL the manifest advertises fetches it, and its
+	/// wall-clock time is its first sample's.
+	#[tokio::test]
+	async fn a_segment_is_timed_by_its_media() {
+		let origin = produce_origin();
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		settle().await;
+		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
+		let mut video = video(&catalog, broadcast.broadcast(), "video0", video_config());
+		// Segment 1 starts 50 ms late; the GOP from 4 s overruns segment 3 and segment 4 resumes
+		// 1.3 s past its line; 12 s is the live edge.
+		for millis in [0, 2_050, 4_000, 9_300, 10_000, 12_000] {
+			video.write(frame(millis * 1_000, true)).unwrap();
+		}
+
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
+		until_listed(&rendition, 6).await;
+
+		let snapshot = rendition.snapshot();
+		let listed: Vec<_> = snapshot
+			.segments
+			.iter()
+			.map(|segment| (segment.segment, segment.duration.as_millis(), segment.gap))
+			.collect();
+		assert_eq!(
+			listed,
+			[
+				(0, 2_000, false),
+				(1, 2_000, false),
+				(2, 2_000, false),
+				(3, 2_000, true),
+				(4, 2_000, false),
+				(5, 2_000, false)
+			],
+			"HLS keeps the grid"
+		);
+		let first = snapshot.segments[0].program_date_time.expect("a clock");
+		let late = snapshot.segments[1].program_date_time.expect("a clock");
+		let resumed = snapshot.segments[4].program_date_time.expect("a clock");
+		assert_eq!(late.checked_duration_since(first), Some(Duration::from_millis(2_050)));
+		assert_eq!(
+			resumed.checked_duration_since(first),
+			Some(Duration::from_millis(9_300))
+		);
+
+		let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
+		for s in [
+			"<S t=\"0\" d=\"2050\"/>",
+			"<S t=\"2050\" d=\"1950\"/>",
+			"<S t=\"4000\" d=\"5300\"/>",
+			"<S t=\"9300\" d=\"700\"/>",
+			"<S t=\"10000\" d=\"2000\"/>",
+		] {
+			assert!(manifest.contains(s), "{s} in {manifest}");
+		}
+
+		let timescale = rendition.muxer().unwrap().timescale().as_u64();
+		for (time, segment) in [(2_050, 1), (9_300, 4)] {
+			let fetched = rendition
+				.listed_segment_at(time)
+				.await
+				.unwrap()
+				.expect("the advertised $Time$ resolves");
+			assert_eq!(fetched, rendition.listed_segment(segment).await.unwrap().unwrap());
+			assert_eq!(tfdt(&fetched), time * timescale / 1_000, "S@t is the tfdt");
+		}
+		assert!(
+			rendition.listed_segment_at(2_000).await.unwrap().is_none(),
+			"the grid line names no media"
+		);
+
+		drop((video, catalog, broadcast));
+	}
+
 	// The catalog root clock times EXT-X-PROGRAM-DATE-TIME and the DASH availabilityStartTime.
 	#[tokio::test]
 	async fn root_clock_times_playlists_and_manifest() {
@@ -3705,7 +3798,12 @@ mod tests {
 
 		/// Write the group at `pts_ms` with a single keyframe declaring a `width`x`height`
 		/// picture in band.
-		fn sized(&mut self, pts_ms: u64, (width, height): (u16, u16)) {
+		fn sized(&mut self, pts_ms: u64, size: (u16, u16)) {
+			self.sized_until(pts_ms, size, None);
+		}
+
+		/// [`sized`](Self::sized), declaring a GROUP_END at `end_ms` when given.
+		fn sized_until(&mut self, pts_ms: u64, (width, height): (u16, u16), end_ms: Option<u64>) {
 			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
@@ -3716,7 +3814,10 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.finish().unwrap();
+			match end_ms {
+				Some(end) => group.finish_at(end).unwrap(),
+				None => group.finish().unwrap(),
+			};
 		}
 
 		/// Write the `index`th GOP at `2 * index` seconds: one GOP per grid line.
@@ -4222,27 +4323,92 @@ mod tests {
 		));
 	}
 
-	// A peek picks the segment `next` yields: if its media expires in between, `next` fails rather
+	// A group whose GROUP_END reaches the next line completes its segment at once, so a pause after
+	// it leaves nothing waiting for the content to resume. One ending short of the line waits, since
+	// a later group may still join its segment.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_end_lists_its_segment_before_a_pause() {
+		let test = Groups::with(&["video0"], &[]);
+		let video0 = test.publish("video0");
+		let ended = |start: u64, end: u64| {
+			let mut group = video0.track.create_group(moq_net::group::Info { start }).unwrap();
+			let frame = vp8_frame(start * 1_000, true);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group.finish_at(end).unwrap();
+		};
+		// The first group too: its keyframe declares the catalog's picture size, so it is no resize
+		// waiting for a catalog update.
+		ended(0, 2_000);
+		test.listed("video0", 0).await;
+		ended(2_000, 4_000);
+		let snapshot = test.listed("video0", 1).await;
+		assert_eq!(snapshot.segments.len(), 2, "both segments, with no group after them");
+		assert!(!snapshot.finished);
+
+		ended(4_000, 5_000);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(test.rendition("video0").snapshot().segments.len(), 2);
+	}
+
+	// A segment's bytes never depend on whether its last group's GROUP_END or its successor arrives
+	// first: the last sample runs to the declared end either way.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_end_times_the_last_sample_whatever_arrives_first() {
+		let mut bytes = Vec::new();
+		for end_first in [true, false] {
+			let test = Groups::with(&["video0"], &[]);
+			let mut video0 = test.publish("video0");
+			let mut group = video0.open(0);
+			let frame = vp8_frame(1_960_000, false);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+			if end_first {
+				group.finish_at(2_000).unwrap();
+				video0.at(2_100);
+			} else {
+				video0.at(2_100);
+				kio::clock::sleep(Duration::from_millis(100)).await;
+				group.finish_at(2_000).unwrap();
+			}
+			test.listed("video0", 0).await;
+			let segment = test.rendition("video0").listed_segment(0).await.unwrap().unwrap();
+			bytes.push(segment);
+		}
+		assert_eq!(bytes[0], bytes[1]);
+	}
+
+	// A peek picks the segment `next` yields: if its media is lost in between, `next` fails rather
 	// than yield a later segment than the caller reserved for.
 	#[tokio::test(start_paused = true)]
 	async fn a_peeked_segment_is_never_skipped() {
 		let test = Groups::with(&["video0"], &[]);
-		let mut video0 = Gops {
-			track: test
-				.broadcast
-				.create_track("video0", timed().with_max_age(Duration::from_secs(1)))
-				.unwrap(),
-		};
-		video0.at(0);
+		let mut video0 = test.publish("video0");
+		let mut group = video0.track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let frame = vp8_frame(0, true);
+		hang::container::Frame {
+			timestamp: frame.timestamp,
+			payload: frame.payload,
+		}
+		.write_to(&mut group)
+		.unwrap();
+		let lost = group.finish().unwrap();
 		video0.at(2_000);
 		test.listed("video0", 0).await;
 
 		let mut cursor = test.rendition("video0").segments();
 		assert_eq!(cursor.peek().await.unwrap().unwrap().segment, 0);
-		// Newer groups age segment 0's out of the source.
+		lost.abort(moq_net::Error::Cancel).unwrap();
 		video0.at(4_000);
-		video0.at(6_000);
-		test.listed("video0", 2).await;
+		test.listed("video0", 1).await;
 		assert!(matches!(
 			cursor.next().await,
 			Err(crate::Error::SegmentUnavailable { segment: 0 })
@@ -4688,8 +4854,16 @@ mod tests {
 	// The catalog and the media are separate tracks, so a resize's first group can reach the
 	// retiring instance before the catalog update declaring it. Its keyframe's size says it is the
 	// replacement's, so it is listed under the new init rather than muxed under the old.
+	//
+	// Its GROUP_END reaching the next line doesn't list it under the old init first either.
 	#[tokio::test(start_paused = true)]
 	async fn a_resizes_first_group_ahead_of_the_catalog_is_the_replacements() {
+		for end in [None, Some(8_000)] {
+			resize_ahead_of_the_catalog(end).await;
+		}
+	}
+
+	async fn resize_ahead_of_the_catalog(end: Option<u64>) {
 		let mut test = Groups::with(&["video0"], &[]);
 		let mut media = test.publish("video0");
 		for sequence in 0..3 {
@@ -4698,7 +4872,7 @@ mod tests {
 		test.listed("video0", 1).await;
 		let old = test.rendition("video0");
 		// Group 3 opens segment 3 at 640x480 before the catalog says so.
-		media.sized(6_000, (640, 480));
+		media.sized_until(6_000, (640, 480), end);
 		kio::clock::sleep(Duration::from_millis(100)).await;
 		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
 		config.coded_width = Some(640);
@@ -4711,7 +4885,11 @@ mod tests {
 		let snapshot = test.listed("video0", 4).await;
 		assert_eq!(numbers(&snapshot), [0, 1, 2, 3, 4]);
 		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
-		assert_eq!(tags, [old.tag(), old.tag(), old.tag(), new.tag(), new.tag()]);
+		assert_eq!(
+			tags,
+			[old.tag(), old.tag(), old.tag(), new.tag(), new.tag()],
+			"GROUP_END {end:?}"
+		);
 		let breaks: Vec<_> = snapshot.segments.iter().map(|s| s.discontinuity).collect();
 		assert_eq!(breaks, [false, false, false, true, false]);
 	}
