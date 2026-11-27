@@ -132,7 +132,7 @@ windows-test:
     set -euo pipefail
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
-    run just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    run just rs test -p kio -p hang -p moq-tokio -p moq-sock -p moq-relay
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
     finish
 
@@ -169,7 +169,7 @@ macos-test:
     set -euo pipefail
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
-    run just rs test -p hang -p moq-tokio -p moq-sock
+    run just rs test -p kio -p hang -p moq-tokio -p moq-sock
     # AVFoundation, the reader behind QuickTime Player and Safari, lists a finished MP4's chapters.
     run just rs test -p moq-mux --lib -E 'test(=container::mp4::tests::apple_lists_the_chapters)'
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
@@ -302,6 +302,8 @@ coroutines:
     #!/usr/bin/env bash
     set -euo pipefail
     source sh/checks.sh
+    run bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
     run bash sh/rs/coroutines.sh moq-net -- --no-default-features
     run bash sh/rs/coroutines.sh moq-json -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-json --no-deps --no-default-features
@@ -394,10 +396,28 @@ doctest *args:
 # Needs nightly with miri and rust-src; executes only in Nightly. See sh/rs/miri.sh
 # for what runs and why it splits in two.
 
-# Run moq-net's, moq-sock's, and moq-uring's hand-written in-memory unsafe under Miri.
+# Run kio's and moq-net's hand-written in-memory unsafe under Miri.
 [positional-arguments]
 miri *args:
     bash sh/rs/miri.sh "$@"
+
+# Run kio's thread-spawning unit tests under Miri across many scheduler seeds (nightly with miri). Random schedules, not exhaustive: a pass is evidence, not proof.
+miri-seeds seeds="8":
+    bash sh/rs/miri-seeds.sh {{ seeds }}
+
+# Run kio's library tests under ThreadSanitizer (nightly with rust-src, Linux). Observes the schedules that happen to run: a pass is evidence, not proof.
+tsan:
+    bash sh/rs/tsan.sh
+
+# Run kio's suite under each adversarial sim schedule with the lost-wakeup probe. Each run draws a fresh seed and prints it on failure.
+sweep:
+    for schedule in random pct; do KIO_SIM_PROBE=1 KIO_SIM_SCHEDULE=$schedule just rs test -p kio || exit 1; done
+
+# Prove rs/kio/src/log.rs's Verus proof. Needs Verus: run it in `nix develop .#verus`
+# (Linux only). The `verify` package builds kio's sources with `vstd`, which kio itself
+# never depends on.
+verify:
+    cargo verus verify --locked --manifest-path rs/kio/verify/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}/verus"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, each datagram checked against QUIC's rules, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:

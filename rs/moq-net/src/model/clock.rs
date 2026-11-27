@@ -57,13 +57,12 @@ pub(super) fn anchor() -> (crate::time::Instant, Duration) {
 	(instant, offset(wall, jitter))
 }
 
-/// Wall time since 2020-01-01T00:00:00Z, less the jitter.
+/// Wall time since [`EPOCH`](crate::time::EPOCH), less the jitter.
 ///
-/// Counting from 50 years after the Unix epoch keeps the value ~1.5e12 ms smaller,
-/// trimming a byte or two off the first frame's varint. Saturates to zero on a wall
-/// clock set before 2020 (an unsynced clock), since only a non-negative start matters.
+/// Saturates to zero on a wall clock set before 2020 (an unsynced clock), since only a
+/// non-negative start matters.
 fn offset(wall: kio::clock::Wall, jitter: Duration) -> Duration {
-	wall.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+	wall.saturating_duration_since(crate::time::EPOCH)
 		.saturating_sub(jitter)
 }
 

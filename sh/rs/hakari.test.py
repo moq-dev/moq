@@ -48,7 +48,7 @@ class EdgesTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("trybuild", result.stderr)
                     self.assertIn("workspace-hack", result.stderr)
-                    # A new UI crate is safe without having to add a per-crate exclusion.
+                    # A new UI crate is safe without having to copy kio-macros' exclusion.
                     manifest.write_text(safe)
                     result = subprocess.run(["python3", "sh/rs/hakari.py"], cwd=root, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
