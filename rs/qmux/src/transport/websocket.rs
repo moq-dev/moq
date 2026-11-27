@@ -148,7 +148,12 @@ impl<T: WsStream> Transport for WsTransport<T> {
 				Message::Binary(data) if data.is_empty() => {}
 				Message::Binary(data) if data.len() > self.recv_limit => return Poll::Ready(Err(Error::FrameTooLarge)),
 				Message::Binary(data) => return Poll::Ready(Ok(self.record(&data))),
-				Message::Close(_) => return Poll::Ready(Err(Error::Closed)),
+				// tungstenite queued the Close reply and refuses any other write now, so a due
+				// Ping would fail the flush that sends the reply.
+				Message::Close(_) => {
+					self.ping_due = false;
+					return Poll::Ready(Err(Error::Closed));
+				}
 				// QMux rides binary messages only; text means the peer speaks something else.
 				Message::Text(_) => return Poll::Ready(Err(Error::ProtocolViolation)),
 				// tungstenite queues a Pong reply when it reads a Ping; the next flush sends it.

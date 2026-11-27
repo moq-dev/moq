@@ -1610,6 +1610,36 @@ describe("Session integration (scripted peer)", () => {
 			}
 		});
 
+		test("a short negotiated idle timeout is probed before it expires", async () => {
+			// The peer negotiates 30ms and answers every probe, but says nothing unprompted.
+			const clock = new Manual();
+			const installed = clock.install();
+			try {
+				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
+				peer.send({ type: "transport_parameters", params: peerParams({ maxIdleTimeout: 30n }) });
+				await session.ready;
+
+				let answered = 0;
+				for (let i = 0; i < 40; i++) {
+					await clock.advance(Duration.millis(5));
+					await settle();
+					const pings = peer.received().flatMap((f) => (f.type === "ping_request" ? [f.sequence] : []));
+					for (const sequence of pings.slice(answered)) {
+						peer.send({ type: "ping_response", sequence });
+					}
+					answered = pings.length;
+					await settle();
+				}
+
+				expect(answered).toBeGreaterThan(0);
+				expect(peer.has("connection_close")).toBe(false);
+				session.close();
+				expect(await session.closed).toEqual({ closeCode: 0, reason: "" });
+			} finally {
+				installed.close();
+			}
+		});
+
 		test("a silent peer idle-closes even while our own writes land", async () => {
 			// The dead-peer case: nothing ever arrives again, but the socket still
 			// accepts everything we send. Our own keep-alive pings advance the send

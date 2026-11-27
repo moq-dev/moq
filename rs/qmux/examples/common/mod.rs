@@ -34,9 +34,10 @@ pub fn payload(seed: usize) -> Vec<u8> {
 		.collect()
 }
 
-/// On QMux02, open a stream, write a prefix and some more, and reset it with RESET_STREAM_AT
-/// keeping only the prefix, which the peer reads before the reset. Both fit the peer's stream
-/// window, so the reset comes while the prefix may still be buffered.
+/// On QMux02, open a stream, write a prefix, and reset it with RESET_STREAM_AT keeping all of
+/// it, which the peer reads before the reset. The prefix fits the peer's stream window, so the
+/// reset comes while some of it may still be buffered. Only the prefix is written: bytes past it
+/// may reach the peer's reader before the reset does, and the mux tests cover dropping them.
 pub async fn send_reset_at(session: &Session, version: Version) -> anyhow::Result<()> {
 	if version != Version::QMux02 {
 		return Ok(());
@@ -46,15 +47,10 @@ pub async fn send_reset_at(session: &Session, version: Version) -> anyhow::Resul
 		.context("timed out opening the reset stream")??;
 	let data = payload(RESET_SEED);
 	let mut prefix = Bytes::copy_from_slice(&data[..RESET_PREFIX]);
-	let mut rest = Bytes::copy_from_slice(&data[RESET_PREFIX..RESET_PREFIX + 1024]);
 	while !prefix.is_empty() {
 		send.write_buf(&mut prefix).await?;
 	}
-	let offset = send.offset();
-	while !rest.is_empty() {
-		send.write_buf(&mut rest).await?;
-	}
-	send.reset_at(&offset, RESET_CODE);
+	send.reset_at(&send.offset(), RESET_CODE);
 	Ok(())
 }
 

@@ -1361,10 +1361,10 @@ export class Session implements WebTransport {
 		this.#idleTimer = undefined;
 		const timeoutMs = this.#effectiveIdleTimeoutMs();
 		if (timeoutMs === 0n) return;
-		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
-		// but not so frequent it burns CPU on otherwise-quiet sessions.
+		// Poll at a sixth of the timeout, so a probe goes out by half of it and the peer has
+		// the rest to answer. No floor: a coarser period lets a short timeout expire unprobed.
 		const timeout = Duration.millis(Number(timeoutMs));
-		const timer = interval(Duration.millis(Math.max(50, Number(timeoutMs) / 6)));
+		const timer = interval(Duration.millis(Number(timeoutMs) / 6));
 		timer.setMissedTickBehavior(MissedTickBehavior.Delay);
 		this.#idleTimer = timer;
 		void this.#idleLoop(timer, timeout);

@@ -13,13 +13,19 @@ struct Mock {
 	sent: Vec<Message>,
 	/// The socket has no room, so writes and flushes wait.
 	full: bool,
+	/// The peer sent a Close, after which tungstenite refuses writes.
+	closed: bool,
 }
 
 impl Stream for Mock {
 	type Item = WsResult;
 
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<WsResult>> {
-		self.rx.poll_next_unpin(cx)
+		let next = self.rx.poll_next_unpin(cx);
+		if let Poll::Ready(Some(Ok(Message::Close(_)))) = &next {
+			self.closed = true;
+		}
+		next
 	}
 }
 
@@ -34,6 +40,11 @@ impl Sink<Message> for Mock {
 	}
 
 	fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+		if self.closed {
+			return Err(tungstenite::Error::Protocol(
+				tungstenite::error::ProtocolError::SendAfterClosing,
+			));
+		}
 		self.sent.push(message);
 		Ok(())
 	}
@@ -60,6 +71,7 @@ fn transport(
 			rx,
 			sent: Vec::new(),
 			full: false,
+			closed: false,
 		},
 		moq_net::transport::Address::Uri,
 	);
@@ -152,6 +164,21 @@ async fn a_ping_due_on_a_full_socket_goes_out_once_it_drains() {
 	assert!(transport.poll_ready(&kio::Waiter::noop()).is_ready());
 	assert!(transport.poll_flush(&kio::Waiter::noop()).is_ready());
 	assert_eq!(pings(&transport), 1);
+}
+
+/// A peer's Close read on the step a Ping comes due still flushes cleanly, sending the Close
+/// reply tungstenite queued rather than failing on a Ping it refuses.
+#[tokio::test(start_paused = true)]
+async fn a_close_drops_a_due_ping() {
+	let (peer, mut transport) = transport(Some(KEEP_ALIVE), 16382);
+	kio::clock::sleep(Duration::from_millis(15)).await;
+	peer.unbounded_send(Ok(Message::Close(None))).unwrap();
+	assert!(matches!(try_recv(&mut transport), Poll::Ready(Err(Error::Closed))));
+	assert!(matches!(
+		transport.poll_flush(&kio::Waiter::noop()),
+		Poll::Ready(Ok(()))
+	));
+	assert_eq!(pings(&transport), 0);
 }
 
 /// Without a keep-alive, a silent but open peer just leaves `recv` pending.
