@@ -571,6 +571,16 @@ impl Connection {
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
 		self.0.state.lock().inner.set_limits(limits)
 	}
+
+	/// See [`moq_quic::connection::Connection::set_keep_alive`]
+	pub fn set_keep_alive(&self, keep_alive: moq_quic::KeepAlive) -> Result<(), moq_quic::KeepAliveError> {
+		self.0.state.lock().inner.set_keep_alive(keep_alive)
+	}
+
+	/// See [`moq_quic::connection::Connection::poll_stale`]
+	pub fn poll_stale(&self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		self.0.state.lock().inner.poll_stale(waiter, stale)
+	}
 }
 
 /// Open a stream in `dir`, or wait for the peer to allow another

@@ -169,6 +169,20 @@ class Landed implements Frame {
 	}
 }
 
+// A metadata copy's frame: its header alone, an empty payload with the declared plain size
+// beside it, as a metadata subscription delivers it.
+class Header implements Frame {
+	readonly payload = EMPTY;
+	readonly timestamp: Timestamp;
+	readonly size: number;
+	readonly arrived: Instant;
+	constructor(timestamp: Timestamp, size: number, arrived: Instant) {
+		this.timestamp = timestamp;
+		this.size = size;
+		this.arrived = arrived;
+	}
+}
+
 // Refuse a frame whose timestamp the track's timeline refuses, or that names another group's key.
 function checkTimed(track: TrackInfo | undefined, start: bigint, frame: Frame) {
 	if (track) rescaleIn(track, frame.timestamp, start);
@@ -283,6 +297,9 @@ export class Producer {
 	// keeps its mirrors open for the duplicate that takes over to tee into.
 	#holds = 0;
 
+	// A metadata copy, holding each frame's header alone (see `hooks.metaGroup`).
+	#meta = false;
+
 	constructor(start: bigint) {
 		if (checkKey(start) >= RESERVED) throw new RangeError(`group start out of range: ${start}`);
 		this.#state = new GroupState(start);
@@ -292,6 +309,8 @@ export class Producer {
 
 	static {
 		hooks.bindGroupCompression = (group, compressed) => {
+			// A metadata copy holds no payload to compress, whatever its track declares.
+			if (group.#meta) return;
 			const state = group.#state;
 			if (state.compressed === compressed) return;
 			if (state.compressed !== undefined)
@@ -386,6 +405,14 @@ export class Producer {
 			state.total.set(start);
 		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
+		hooks.metaGroup = (group) => {
+			const state = group.#state;
+			if (state.total.peek() !== 0 || state.closed.peek() !== undefined || state.compressed !== undefined)
+				throw new Error("group already started");
+			group.#meta = true;
+		};
+		hooks.groupMeta = (group) => group.#meta;
+		hooks.writeGroupHeader = (group, timestamp, size) => group.#writeHeader(timestamp, size);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
 		hooks.groupProgress = (group, fn) => {
@@ -548,6 +575,7 @@ export class Producer {
 	 * written until this one finishes.
 	 */
 	createFrame(info: FrameInfo): FrameProducer {
+		if (this.#meta) throw new Error("a metadata group holds no payload");
 		const { size, timestamp } = info;
 		if (!Number.isSafeInteger(size) || size < 0) throw new RangeError("invalid frame size");
 		const frame = { payload: EMPTY, timestamp };
@@ -605,25 +633,14 @@ export class Producer {
 	}
 
 	#writeFrame(frame: Frame, inflated?: number) {
+		if (this.#meta) throw new Error("a metadata group holds no payload");
 		// A plain frame written whole is the writer's own buffer, at any size. A compressed one
 		// is sent whole, so its slice must fit: a received one as declared, a local one encoded.
 		const size = frame.payload.byteLength;
 		if (this.#state.flate && (inflated === undefined ? !encodable(size) : size > MAX_FRAME_BYTES))
 			throw new FrameTooLarge();
 		if ((inflated ?? 0) > MAX_FRAME_BYTES) throw new FrameTooLarge();
-		// Held in the track's timescale, rounded down, as Rust's `write_frame` holds it: two starts
-		// within one unit tie, as they do once on the wire.
-		const track = this.#state.track;
-		if (track) {
-			const rescaled = rescaleIn(track, frame.timestamp, this.#state.start);
-			// An unscaled timestamp is a key, which may lie past what a number holds.
-			const moved =
-				rescaled.scale !== frame.timestamp.scale ||
-				(rescaled.scale === undefined
-					? rescaled.key !== frame.timestamp.key
-					: rescaled.value !== frame.timestamp.value);
-			if (moved) frame = { payload: frame.payload, timestamp: rescaled };
-		}
+		frame = this.#rescale(frame);
 		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
@@ -634,6 +651,30 @@ export class Producer {
 			frame = this.#state.flate.push(frame, inflated);
 		}
 		this.#append(frame, commits);
+	}
+
+	// Write the header of a frame of `size` plain bytes into a metadata copy: no payload, so it
+	// costs the cache only its slot.
+	#writeHeader(timestamp: Timestamp, size: number) {
+		if (!this.#meta) throw new Error("a payload group takes no header alone");
+		const frame = this.#rescale({ payload: EMPTY, timestamp });
+		const commits = this.#admit(frame);
+		this.#append(new Header(frame.timestamp, size, now()), commits);
+	}
+
+	// `frame` held in the track's timescale, rounded down, as Rust's `write_frame` holds it: two
+	// starts within one unit tie, as they do once on the wire.
+	#rescale(frame: Frame): Frame {
+		const track = this.#state.track;
+		if (!track) return frame;
+		const rescaled = rescaleIn(track, frame.timestamp, this.#state.start);
+		// An unscaled timestamp is a key, which may lie past what a number holds.
+		const moved =
+			rescaled.scale !== frame.timestamp.scale ||
+			(rescaled.scale === undefined
+				? rescaled.key !== frame.timestamp.key
+				: rescaled.value !== frame.timestamp.value);
+		return moved ? { payload: frame.payload, timestamp: rescaled } : frame;
 	}
 
 	// Check that the next frame may be written, returning what records its admission.
@@ -1318,7 +1359,8 @@ export class Consumer {
 				if (group.#quiet?.latched() instanceof Error) group.#quiet = undefined;
 			}
 		};
-		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
+		hooks.readGroupFrame = (group, compressed, from = 0, header = false) =>
+			group.#readFrame(from, compressed, true, header);
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		hooks.refreshGroup = (group) => group.#state.charge?.touch();
 		hooks.onShedRead = (group, notify) => {
@@ -1489,9 +1531,13 @@ export class Consumer {
 	}
 
 	// Take the next frame whole, or as chunks when it is a chunked frame `streaming` reads, or
-	// one still being written that a `collect` read gathers itself. A plain whole read leaves an
-	// incomplete frame buffered.
-	#readBufferedFrame(compressed = false, take: "whole" | "collect" | "stream" = "whole"): ReadGroupFrame | undefined {
+	// one still being written that a `collect` read gathers itself. A `header` read takes a chunked
+	// frame without its payload, so no payload is in flight for a failure to tear. A plain whole
+	// read leaves an incomplete frame buffered.
+	#readBufferedFrame(
+		compressed = false,
+		take: "whole" | "collect" | "stream" | "header" = "whole",
+	): ReadGroupFrame | undefined {
 		const frames = this.#bufferedFrames();
 		const closed = this.#state.closed.peek();
 		if (closed instanceof StreamError && closed.code === StreamCode.Evicted) {
@@ -1502,11 +1548,11 @@ export class Consumer {
 		const front = frames.first;
 		if (!front) return undefined;
 		if (front instanceof Chunked) {
-			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
+			if (take === "stream" || take === "header" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
 				const index = this.#state.index++;
 				this.#delivered = index + 1;
-				this.#streamed = front;
+				if (take !== "header") this.#streamed = front;
 				this.#refresh();
 				this.#state.charge?.touch();
 				return { index, frame: front, chunks: makeFrameConsumer(index, front) };
@@ -1533,7 +1579,7 @@ export class Consumer {
 		this.#delivered = index + 1;
 		this.#refresh();
 		this.#state.charge?.touch();
-		return { index, frame, inflated: slice?.inflated };
+		return { index, frame, inflated: buffered instanceof Header ? buffered.size : slice?.inflated };
 	}
 
 	/** True once no further frames can be read: this handle or the group has closed, and every buffered frame is read. */
@@ -1635,7 +1681,12 @@ export class Consumer {
 		return read.chunks ?? makeFrameConsumer(read.index, read.frame);
 	}
 
-	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
+	async #readFrame(
+		from: number,
+		compressed = false,
+		streaming = false,
+		header = false,
+	): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
 			const verdict = this.#verdict.peek();
 			if (verdict) {
@@ -1646,14 +1697,14 @@ export class Consumer {
 			// A whole read streams a frame still being written into its own buffer, rather
 			// than waiting for it whole while the group sheds its head.
 			const delivered = this.#delivered;
-			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
+			const read = this.#readBufferedFrame(compressed, header ? "header" : streaming ? "stream" : "collect");
 			if (read) {
 				if (read.index < from) {
 					if (read.chunks) this.#streamed = undefined;
 					this.#delivered = delivered;
 					continue;
 				}
-				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
+				if (read.chunks && !streaming && !header) return this.#join(read.index, read.chunks);
 				return read;
 			}
 

@@ -549,6 +549,62 @@ test("urlAuth cannot reach a supplied transport, which never dials the URL", asy
 	);
 });
 
+test("a keep-alive refuses a connect that would dial WebTransport, before dialing", async () => {
+	let dialed = false;
+	function StubWebTransport() {
+		dialed = true;
+	}
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	try {
+		const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+		await expect(connect(url, { keepAlive })).rejects.toThrow("would dial WebTransport");
+		expect(dialed).toBe(false);
+	} finally {
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a supplied transport that refuses the keep-alive is closed", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	let closed = false;
+	void pair.client.closed.then(() => {
+		closed = true;
+	});
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	await expect(connect(url, { transport: pair.client, keepAlive })).rejects.toThrow("WebTransport cannot");
+	await settle();
+	expect(closed).toBe(true);
+});
+
+test("accept reads a qmux session's protocol once the keep-alive waits for its parameters", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	// The server side as a qmux session whose parameters have not arrived: no protocol yet, and
+	// a keep-alive refused until they do.
+	let ready = false;
+	const params = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server, "protocol", { get: () => (ready ? ALPN_06 : "") });
+	Object.defineProperty(pair.server, "ready", { value: params.promise });
+	Object.assign(pair.server, {
+		stale: false,
+		keepAlive() {
+			if (!ready) throw new Error("keep-alive needs the peer's transport parameters; await ready");
+		},
+		staleChanged: () => new Promise(() => {}),
+	});
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	const accepting = accept({ url, transport: pair.server, keepAlive });
+	const connecting = connect(url, { transport: pair.client });
+	await settle();
+	ready = true;
+	params.resolve();
+	const [server, client] = await Promise.all([accepting, connecting]);
+	expect(server.version).toBe(client.version);
+	expect(server.liveness?.peek()).toBe("live");
+	client.abort();
+	server.abort();
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);

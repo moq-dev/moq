@@ -1040,6 +1040,12 @@ impl Window {
 		all.into_iter().chain(runs.into_iter().flatten())
 	}
 
+	/// The groups the ranges placed so far hold, as [`Self::holds`] judges, even while an anchor
+	/// still waits.
+	pub fn held(&self) -> &Cover {
+		&self.groups
+	}
+
 	/// The groups in range, `None` while a live join waits on a first group and every group is.
 	pub fn groups(&self) -> Option<&Cover> {
 		(!self.is_pending()).then_some(&self.groups)

@@ -1236,6 +1236,7 @@ impl LiteSample {
 				priority: 2,
 				max_delay: Some(std::time::Duration::from_secs(10)),
 				ranges: vec![lite::Range::OPEN],
+				meta: false,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1438,6 +1439,7 @@ impl Default for Messages {
 					end: None,
 					..lite::Range::OPEN
 				}],
+				meta: false,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
@@ -1616,6 +1618,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			max_delay: Some(std::time::Duration::ZERO),
 			ranges: vec![lite::Range::OPEN],
 			order: track::Order::Descending,
+			meta: false,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),

@@ -26,6 +26,7 @@ import {
 	hasGroupOrder,
 	hasGroupSpan,
 	hasJudgedDrop,
+	hasMeta,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
@@ -1066,6 +1067,32 @@ async function encodeOrder(w: Writer, version: Version, order: Order) {
 	await w.u8(order === "ascending" ? 1 : 0);
 }
 
+/**
+ * Decode SUBSCRIBE's trailing `Meta` byte, lite-07's only: 1 for headers alone, 0 for the payload,
+ * anything else malformed. An earlier wire always asks for the payload.
+ */
+async function decodeMeta(r: Reader, version: Version): Promise<boolean> {
+	if (!hasMeta(version)) return false;
+	const meta = await r.u8();
+	switch (meta) {
+		case 0:
+			return false;
+		case 1:
+			return true;
+		default:
+			throw new ProtocolViolation(`unknown meta: ${meta}`);
+	}
+}
+
+/** The inverse of {@link decodeMeta}, throwing for a metadata subscription on a wire without one. */
+async function encodeMeta(w: Writer, version: Version, meta: boolean) {
+	if (hasMeta(version)) {
+		await w.u8(meta ? 1 : 0);
+	} else if (meta) {
+		throw new Error("a metadata subscription needs moq-lite-07");
+	}
+}
+
 /** The error for a requested range the wire cannot carry: one asking for nothing. */
 export const EMPTY_RANGE = "empty subscription range cannot be encoded";
 
@@ -1294,6 +1321,13 @@ export class Subscribe {
 	 */
 	ranges?: WireRange[];
 
+	/**
+	 * Whether each frame is delivered as its header alone, without its payload, for the
+	 * subscription's whole life. Lite-07+: an earlier wire cannot carry it, so encoding one there
+	 * throws rather than asking for the payload.
+	 */
+	meta: boolean;
+
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -1307,6 +1341,7 @@ export class Subscribe {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
+		meta?: boolean;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -1320,6 +1355,7 @@ export class Subscribe {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
+		this.meta = props.meta ?? false;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -1344,6 +1380,7 @@ export class Subscribe {
 				await encodeSpan(w, version, this, this.ranges, this);
 				break;
 		}
+		await encodeMeta(w, version, this.meta);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -1368,6 +1405,7 @@ export class Subscribe {
 				const span = await decodeSpan(r, version);
 				// Each range carries its own priority and order, which the subscription runs at as a whole.
 				if (span.ranges) ({ priority, order } = subscriptionPolicy(span.ranges));
+				const meta = await decodeMeta(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -1377,6 +1415,7 @@ export class Subscribe {
 					order,
 					maxDelay,
 					...span,
+					meta,
 				});
 			}
 		}

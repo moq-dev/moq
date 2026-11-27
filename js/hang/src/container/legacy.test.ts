@@ -125,6 +125,59 @@ test("Legacy Producer starts nothing inside the span of a group a cut ended", as
 	]);
 });
 
+test("Legacy Producer starts a keyframe inside a cut group's span at its end", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	producer.cut(Duration.micros(40_000));
+	// Past the newest frame but inside the span the cut ended whole, as Rust's producer moves it.
+	producer.encode(new Uint8Array([1]), Duration.micros(30_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(50_000), false);
+	producer.finish();
+
+	expect(await groups(subscriber)).toEqual([
+		{ start: 0n, end: 40_000n, frames: [0, 20_000] },
+		{ start: 40_000n, end: 70_000n, frames: [40_000, 50_000] },
+	]);
+});
+
+test("Legacy Producer cuts a moved keyframe's group at its source end", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	producer.cut(Duration.micros(40_000));
+	// Moved to 40 ms, past where this 5 ms packet ends on the source timeline.
+	producer.encode(new Uint8Array([1]), Duration.micros(30_000), true);
+	// Below the keyframe's source timestamp is still below a frame of the group.
+	expect(() => producer.cut(Duration.micros(25_000))).toThrow();
+	producer.cut(Duration.micros(35_000));
+	producer.encode(new Uint8Array([1]), Duration.micros(60_000), true);
+	producer.finish();
+
+	expect(await groups(subscriber)).toEqual([
+		{ start: 0n, end: 40_000n, frames: [0, 20_000] },
+		{ start: 40_000n, end: undefined, frames: [40_000] },
+		{ start: 60_000n, end: 80_000n, frames: [60_000] },
+	]);
+});
+
+test("Legacy Producer refuses a source end below a later frame of a moved keyframe's group", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.cut(Duration.micros(40_000));
+	// Moved to 40 ms; the frame after it presents at its own 37 ms.
+	producer.encode(new Uint8Array([1]), Duration.micros(30_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(37_000), false);
+	expect(() => producer.cut(Duration.micros(35_000))).toThrow();
+	producer.cut(Duration.micros(42_000));
+	producer.finish();
+});
+
 test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
 	for (const [scale, at] of [
 		[Time.Timescale.MICRO, 33_001],

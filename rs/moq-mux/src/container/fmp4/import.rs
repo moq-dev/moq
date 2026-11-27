@@ -89,6 +89,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// open group belongs to an older one rolls, so every track segments identically.
 	segment: u64,
 
+	// An audio-only import's open segment closes once any track's `span` carries a join, since
+	// nothing in the container says where a segment ends.
+	join: crate::container::Join,
+
 	dropped_metadata: u64,
 
 	// A seek or discontinuity waiting for the fragment still publishing.
@@ -138,6 +142,11 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// The segment this track's open group belongs to. A mismatch with `Import::segment` rolls the
 	// group, which is what keeps audio on the same boundaries as video.
 	segment: Option<u64>,
+
+	// Where this track's media in an audio-only import's open segment starts and ends, on the
+	// catalog clock. Measured per track, so one lagging another never holds the segment open, and
+	// the end bounds its group when the segment closes.
+	span: Option<(Timestamp, Timestamp)>,
 
 	output: Output<E>,
 }
@@ -212,9 +221,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 
 	/// Close the open group, so the next fragment opens one at `pending_start` or its own timestamp.
-	fn close(&mut self) -> crate::Result<()> {
+	/// `end` is where its media stops, when known, which the bitrate estimate divides by.
+	fn close(&mut self, end: Option<Timestamp>) -> crate::Result<()> {
 		self.open = false;
-		self.estimator.cut(None);
+		self.estimator.cut(end);
 		self.publish_estimate()?;
 		if let Some(group) = self.group.take() {
 			group.finish()?;
@@ -225,7 +235,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// Close the open group and finish the track, or abort both with the cause when that fails.
 	fn finish(&mut self) -> crate::Result<()> {
 		// The importer keeps its own clone, whose appends the end refuses.
-		if let Err(err) = self.close().and_then(|()| Ok(self.track.clone().finish().map(drop)?)) {
+		if let Err(err) = self
+			.close(None)
+			.and_then(|()| Ok(self.track.clone().finish().map(drop)?))
+		{
 			if let Some(group) = self.group.take() {
 				let _ = group.abort(err.reason());
 			}
@@ -313,6 +326,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			input: crate::container::Input::Open,
 			pending_cut: false,
 			segment: 0,
+			join: crate::container::Join::default(),
 			dropped_metadata: 0,
 			deferred: Deferred::default(),
 		}
@@ -611,6 +625,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					last_decode_time: None,
 					sample_duration: None,
 					segment: None,
+					span: None,
 					output,
 				},
 			);
@@ -1090,9 +1105,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		if !has_video {
-			// Audio-only and unsegmented: nothing in the container says where a segment ends, so
-			// fall back to a group per fragment. Bounded, unlike one group for the whole source.
-			return true;
+			// Audio-only: a segment rolls once it carries a join (see `settle`), never per fragment,
+			// which with ffmpeg's `-frag_duration` is a group per packet.
+			return false;
 		}
 
 		// A video keyframe starts a segment, but only once the current segment already has its
@@ -1143,6 +1158,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if self.starts_segment(&moof, has_video, len.unwrap_or(usize::MAX)) {
 			self.segment += 1;
 			self.pending_cut = false;
+			self.reset_audio();
 		}
 		let mut resolver = sample::Resolver::new(self.moof_span, len.unwrap_or(usize::MAX));
 		resolver.streaming();
@@ -1186,6 +1202,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// The moov declared every track, so any track's anchored fragment releases the catalog.
 			let offset = self.timebase.anchor(run.earliest)?;
 			anchored = true;
+			if !has_video {
+				let start = offset.apply(run.earliest)?;
+				let end = offset.apply(run.end)?;
+				track.span = Some(match track.span {
+					Some((start, reached)) => (start, crate::container::later(reached, end)),
+					None => (start, end),
+				});
+			}
 			let placement = Placement {
 				offset,
 				new_segment: track.segment != Some(self.segment),
@@ -2005,6 +2029,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn apply_seek(&mut self, seek: Seek) -> Result<()> {
+		self.reset_audio();
 		for track in self.text.values_mut() {
 			match seek {
 				Seek::Start(start) => {
@@ -2023,7 +2048,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				Seek::Start(start) => producer.seek(start)?,
 				Seek::Own => producer.cut(None)?,
 			}, passthrough => {
-				passthrough.close()?;
+				passthrough.close(None)?;
 				if let Seek::Start(start) = seek {
 					passthrough.pending_start = Some(start);
 				}
@@ -2048,7 +2073,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Forget the open audio-only segment, whose groups close some other way.
+	fn reset_audio(&mut self) {
+		for track in self.tracks.values_mut() {
+			track.span = None;
+		}
+	}
+
 	fn apply_discontinuity(&mut self) {
+		// An audio-only segment never continues across a new timeline, so a group never spans one.
+		if !self.tracks.values().any(|track| track.kind == Kind::Video) {
+			self.reset_audio();
+			self.pending_cut = true;
+		}
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;
 			track.discontinuity = true;
@@ -2064,7 +2101,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Apply the controls deferred while a fragment was publishing, in the order HLS issues them.
+	///
+	/// An audio-only segment that now carries a join closes here, at the end of the fragment that
+	/// filled it, so the relay sees each group finish without waiting for the next fragment.
 	fn settle(&mut self) -> Result<()> {
+		let full = self
+			.tracks
+			.values()
+			.filter_map(|track| track.span)
+			.any(|(start, end)| self.join.full(start, end));
+		if full {
+			self.pending_cut = true;
+			// Each group ends where its own media does, which the catalog's bitrate divides by.
+			for track in self.tracks.values_mut() {
+				let end = track.span.take().map(|(_, end)| end);
+				media!(&mut track.output, producer => producer.cut(end)?, passthrough => passthrough.close(end)?);
+			}
+		}
 		let Deferred { seek, discontinuity } = std::mem::take(&mut self.deferred);
 		if discontinuity {
 			self.apply_discontinuity();
@@ -2172,6 +2225,12 @@ mod tests {
 	}
 
 	fn initialized(passthrough: bool) -> (Import, u32, moq_net::cache::Pool) {
+		let (import, ids, pool) = initialized_tracks(passthrough, 1);
+		(import, ids[0], pool)
+	}
+
+	/// An import of `count` copies of the test file's audio track, returning their ids.
+	fn initialized_tracks(passthrough: bool, count: u32) -> (Import, Vec<u32>, moq_net::cache::Pool) {
 		use mp4_atom::Decode;
 		let mut info = moq_net::broadcast::Info::new();
 		info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(1024 * 1024));
@@ -2184,19 +2243,42 @@ mod tests {
 		let mut moov = Moov::decode(&mut data).unwrap();
 		moov.trak.retain(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun");
 		let id = moov.trak[0].tkhd.track_id;
+		let ids: Vec<u32> = (0..count).map(|i| id + 100 * i).collect();
+		for &copy in &ids[1..] {
+			let mut trak = moov.trak[0].clone();
+			trak.tkhd.track_id = copy;
+			moov.trak.push(trak);
+			if let Some(mvex) = moov.mvex.as_mut()
+				&& let Some(trex) = mvex.trex.iter().find(|trex| trex.track_id == id).cloned()
+			{
+				mvex.trex.push(mp4_atom::Trex { track_id: copy, ..trex });
+			}
+		}
 		import.init(moov).unwrap();
-		(import, id, pool)
+		(import, ids, pool)
 	}
 
 	// Only the headers are supplied. The declared mdat may never finish.
 	fn media_header(id: u32, decode_time: u64, offsets: &[usize], size: u32, len: Option<usize>) -> Vec<u8> {
+		media_header_lasting(id, decode_time, 1024, offsets, size, len)
+	}
+
+	/// A [`media_header`] whose samples each last `duration` ticks.
+	fn media_header_lasting(
+		id: u32,
+		decode_time: u64,
+		duration: u32,
+		offsets: &[usize],
+		size: u32,
+		len: Option<usize>,
+	) -> Vec<u8> {
 		let mut moof = Moof {
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
 					track_id: id,
 					default_sample_size: Some(size),
-					default_sample_duration: Some(1024),
+					default_sample_duration: Some(duration),
 					..Default::default()
 				},
 				tfdt: Some(mp4_atom::Tfdt {
@@ -2664,6 +2746,117 @@ mod tests {
 		}
 	}
 
+	/// A group the join closes ends where its last fragment's media does, so the bitrate estimate
+	/// divides its bytes by all of its media rather than by the time between its first and last
+	/// fragments, a fifth short at five fragments a group.
+	#[test]
+	fn audio_only_bitrate_counts_the_last_fragment() {
+		const SIZE: usize = 64;
+		for passthrough in [false, true] {
+			let (mut import, id, _) = initialized(passthrough);
+			let mut bytes = 0;
+			// 50 fragments of 1024 samples at 44.1 kHz: past the estimator's one second window.
+			for fragment in 0..50 {
+				let header = media_header(id, fragment * 1024, &[0], SIZE as u32, Some(SIZE));
+				import.decode(&header).unwrap();
+				import.decode(&[0xA5; SIZE]).unwrap();
+				// Passthrough republishes each fragment whole, its header included.
+				bytes += SIZE + if passthrough { header.len() } else { 0 };
+			}
+			let bitrate = match &import.tracks[&id].output {
+				Output::Audio(producer) => producer.estimate().bitrate,
+				Output::Passthrough(output) => output.estimator.estimate().bitrate,
+				_ => unreachable!(),
+			};
+			let expected = (bytes * 8) as u64 * 44_100 / (50 * 1024);
+			assert_eq!(bitrate, Some(expected), "passthrough: {passthrough}");
+		}
+	}
+
+	/// A fragment overlapping the group the join closed publishes its sample at that group's end,
+	/// past where the fragment itself ends. When another audio track then fills the join, the
+	/// first track's group closes past that sample rather than failing the import.
+	#[test]
+	fn an_overlapping_splice_closes_with_another_track() {
+		const SIZE: usize = 64;
+		let (mut import, ids, _) = initialized_tracks(false, 2);
+		let (a, b) = (ids[0], ids[1]);
+		let mut consumer = replay(&import.tracks[&a].output);
+		let mut fragment = |id: u32, decode_time: u64, duration: u32| {
+			import
+				.decode(&media_header_lasting(
+					id,
+					decode_time,
+					duration,
+					&[0],
+					SIZE as u32,
+					Some(SIZE),
+				))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+		};
+		// 100 ms at 44.1 kHz fills the join and closes the group at its end.
+		fragment(a, 0, 4410);
+		// Overlaps that group, so its sample publishes at 4410, past this fragment's end.
+		fragment(a, 2000, 1000);
+		// The other track fills the join that started at 2000.
+		fragment(b, 2000, 4410);
+		let _finished = import.finish().unwrap();
+
+		assert_eq!(groups(&mut consumer), [(0, Some(1)), (start(&consumer, 4410), Some(1))]);
+	}
+
+	/// Each audio track's group fills from its own first fragment, so one track lagging another's
+	/// clock never holds the shared segment open past a join.
+	#[test]
+	fn a_lagging_track_fills_its_own_join() {
+		const SIZE: usize = 64;
+		let (mut import, ids, _) = initialized_tracks(false, 2);
+		let (a, b) = (ids[0], ids[1]);
+		let mut consumer = replay(&import.tracks[&b].output);
+		let mut fragment = |id: u32, decode_time: u64| {
+			import
+				.decode(&media_header(id, decode_time, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+		};
+		// Ten seconds ahead of the other track.
+		fragment(a, 441_000);
+		for i in 0..5 {
+			fragment(b, i * 1024);
+		}
+		// Five fragments carry 116 ms of the lagging track, so its group is already closed.
+		assert_eq!(groups(&mut consumer), [(0, Some(5))]);
+	}
+
+	/// Audio-only fragments of one 23 ms sample, as ffmpeg's `-frag_duration` writes them, share a
+	/// group until it carries 100 ms, and the fragment that fills it closes it at once.
+	#[test]
+	fn audio_only_fragments_share_a_group_until_it_fills() {
+		const SIZE: usize = 64;
+		for passthrough in [false, true] {
+			let (mut import, id, _) = initialized(passthrough);
+			let mut consumer = replay(&import.tracks[&id].output);
+			for fragment in 0..5 {
+				import
+					.decode(&media_header(id, fragment * 1024, &[0], SIZE as u32, Some(SIZE)))
+					.unwrap();
+				import.decode(&[0xA5; SIZE]).unwrap();
+			}
+			// Five fragments carry 116 ms, so the group is already closed.
+			assert_eq!(groups(&mut consumer), [(0, Some(5))], "passthrough: {passthrough}");
+			for fragment in 5..7 {
+				import
+					.decode(&media_header(id, fragment * 1024, &[0], SIZE as u32, Some(SIZE)))
+					.unwrap();
+				import.decode(&[0xA5; SIZE]).unwrap();
+			}
+			let _finished = import.finish().unwrap();
+			let second = start(&consumer, 5 * 1024);
+			assert_eq!(groups(&mut consumer), [(second, Some(2))], "passthrough: {passthrough}");
+		}
+	}
+
 	#[test]
 	fn truncated_sample_fails_its_group_and_finishes_the_track() {
 		const SIZE: usize = 64;
@@ -2674,17 +2867,22 @@ mod tests {
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE]).unwrap();
+			// This fragment brings the group to 100 ms, so the next opens a group of its own.
 			import
-				.decode(&media_header(id, 1024, &[0], SIZE as u32, Some(SIZE)))
+				.decode(&media_header(id, 4_410, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+			import
+				.decode(&media_header(id, 5_512, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE / 2]).unwrap();
 			// In place, so the tracks can be inspected after the failure.
 			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
-			let second = start(&consumer, 1024);
+			let second = start(&consumer, 5_512);
 			assert_eq!(
 				groups(&mut consumer),
-				[(0, Some(1)), (second, None)],
+				[(0, Some(2)), (second, None)],
 				"passthrough: {passthrough}"
 			);
 			let finished = match &import.tracks[&id].output {

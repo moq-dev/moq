@@ -741,6 +741,14 @@ fn copy_failed(copy: &track::Consumer) -> bool {
 	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if err.retryable())
 }
 
+/// Whether the copy's route failed, even after its declared end settled, which ends its readers
+/// cleanly: a group it closed short may hold more on the route replacing it. Only a session
+/// ending counts then: a subscription reset alone leaves the route serving, and nothing
+/// replaces it. Mirrors the JS `routeLost`.
+fn route_lost(copy: &track::Consumer) -> bool {
+	copy_failed(copy) || copy.aborted().is_some_and(|err| err.closing())
+}
+
 /// A route's copy, as one reader reads it.
 struct Copy {
 	generation: u64,
@@ -1379,16 +1387,23 @@ impl Subscriber {
 	/// Forget the gaps in `delivered` below each group past the reader's budget, as
 	/// [`Self::forget_past`] does; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
-		let budget = self.reader().budget();
-		self.forget_past(delivered, budget, None);
+		let terms = {
+			let mut reader = self.reader();
+			let budget = reader.budget();
+			track::FoldTerms {
+				budget,
+				ranges: reader.window().groups().cloned(),
+			}
+		};
+		self.forget_past(delivered, terms, None);
 	}
 
-	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	/// `delivered` this is, judged on the newest copy that answered, but never past a group a
-	/// replaced copy the reader still reads holds unread: as one cursor keeps what it owes,
-	/// since a late group there may be fresh by its own successor on that copy. Nor past `keep`,
-	/// an outer reader's own such group.
-	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
+	/// Forget the gaps in `delivered` below each group past the budget of `terms`, an outer
+	/// reader's whose `delivered` this is, judged on the newest copy that answered, but never
+	/// past a group a replaced copy the reader still reads holds unread: as one cursor keeps what
+	/// it owes, since a late group there may be fresh by its own successor on that copy. Nor past
+	/// `keep`, an outer reader's own such group.
+	pub(super) fn forget_past(&self, delivered: &mut Delivered, terms: track::FoldTerms, keep: Option<u64>) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
 			Sub::Ready(sub) => Some((copy, sub)),
@@ -1415,7 +1430,7 @@ impl Subscriber {
 			.filter_map(|(_, sub)| unread(sub))
 			.chain(keep)
 			.min();
-		newest.forget_past_budget(delivered, budget, kept);
+		newest.forget_past_budget(delivered, terms, kept);
 	}
 
 	/// Poll for the track's declared exclusive end.
@@ -3009,11 +3024,14 @@ impl Reader {
 		&mut self,
 		ordered: bool,
 		parks: bool,
-		delivered: &Delivered,
+		delivered: &mut Delivered,
 		waiter: &kio::Waiter,
 	) -> Option<Poll<std::result::Result<Option<Candidate>, Failure>>> {
 		self.sync(waiter);
 		self.groups_read = true;
+		// Before any copy's group is judged against it, not when the read settles: one may have
+		// landed under an update another handle made since the last read.
+		self.reopen_folded(delivered);
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
 		let widest = self.mirrored.widest();
@@ -3067,6 +3085,10 @@ impl Reader {
 						if held_back {
 							held = true;
 							break;
+						}
+						// A range a copy placed this pass may hold a group a fold counted handed out.
+						if delivered.is_unjudged(key) && self.window().holds(key) {
+							self.reopen_folded(delivered);
 						}
 						// A copy resolves a time start against the groups it holds, which may place
 						// it below where the reader's window did: the window decides.
@@ -3676,7 +3698,14 @@ impl Reader {
 	/// for again below it. A gap past the reader's budget was already forgotten as handed out.
 	/// A time start the resume point raised is asked from its time, so the backfill places it
 	/// at the group holding it, as the route would for a plain reader.
-	fn backfill_gaps(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
+	/// Take back what a fold of the logical record `delivered` counted as handed out before any
+	/// range held it, which the ranges placed so far now owe, even while another still waits on
+	/// its anchor.
+	fn reopen_folded(&mut self, delivered: &mut Delivered) {
+		delivered.reopen(self.window().held());
+	}
+
+	fn backfill_gaps(&mut self, delivered: &mut Delivered, waiter: &kio::Waiter) {
 		if self.resumed.is_none() {
 			return;
 		}
@@ -3713,6 +3742,9 @@ impl Reader {
 				placed.insert(*key, at);
 			}
 			self.resolve(&placed);
+			// What the starts placed hold of the history a fold took unjudged is owed before the
+			// walk below judges the gaps.
+			self.reopen_folded(delivered);
 		}
 		let Some(resumed_by) = self.resumed.take() else {
 			return;
@@ -3887,8 +3919,8 @@ impl Recover {
 			// Stalled poll after switch-back advanced `self.generation` before the old
 			// bare FIN arrived, the copy will not deliver frames past `range_end`.
 			Cause::Cut => return true,
-			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
-			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
+			Cause::Stalled if copy_failed(&self.copy) => return true,
+			Cause::Closed if route_lost(&self.copy) || self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -4052,8 +4084,9 @@ impl Recover {
 			let serving = match (serving, cause) {
 				(Some(serving), _) => serving,
 				// Nothing replaced a copy that closed the group, as when its track parks, so its
-				// close stands.
-				(None, Cause::Closed) => return Poll::Ready(Err(Error::NotFound)),
+				// close stands, unless its route failed: then it waits for a route as a failed
+				// copy does, unless none will come.
+				(None, Cause::Closed) if done || !route_lost(&self.copy) => return Poll::Ready(Err(Error::NotFound)),
 				(None, Cause::Cut) if staged.is_none() || done => return Poll::Ready(Err(Error::Evicted)),
 				(None, Cause::Cut) => return Poll::Pending,
 				// Nothing serves: a failed copy waits for a route, unless none will come.
@@ -4071,7 +4104,7 @@ impl Recover {
 					Cause::Stalled => return Poll::Pending,
 					// Its route failed, or the front stages the copy to replace it, so that one
 					// may hold more, unless none will come.
-					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => {
+					Cause::Closed if (route_lost(&self.copy) || staged.is_some()) && !done => {
 						return Poll::Pending;
 					}
 					// It serves on with no front to replace it, so its close stands.
@@ -6272,6 +6305,59 @@ mod test {
 				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
 			}
 		}
+	}
+
+	/// A copy whose end settled aborts cleanly for its readers, but its session ending still
+	/// says its route failed: a group it closed short reads on from the route replacing it. A
+	/// subscription reset alone leaves the route serving, so the close stands. Mirrors the JS
+	/// `a short group after its settled copy aborts`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_waits_for_a_replacement_after_its_settled_copy_fails() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, HOUR);
+		let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+		short.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		let finished = a.finish().unwrap();
+		short.finish().unwrap();
+		finished.abort(Error::Stream(crate::StreamError::Cancel)).unwrap();
+		assert_eq!(
+			read(&mut reading),
+			None,
+			"a subscription reset leaves the close standing"
+		);
+
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, HOUR);
+		let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+		short.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		let finished = a.finish().unwrap();
+		short.finish().unwrap();
+		finished.abort(SessionError::Internal.into()).unwrap();
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"waits for the route replacing it"
+		);
+
+		let b = copy();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		for (ms, frame) in [(0, b"a"), (1, b"b")] {
+			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		whole.finish_at(2).unwrap();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
 	}
 
 	/// A replacement that holds none of a short group is asked for the rest, which continues
@@ -9497,6 +9583,47 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [2], "group 2 holds time 3");
 	}
 
+	/// A time start an edit adds under the serving copy's resume point, over history the
+	/// reader's budget folded before any range held it, reads the groups the route holds there:
+	/// placed at its time, it owes what the fold took, which the backfill then asks for.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_added_time_start_over_folded_history_below_the_resume_point_reads_it() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let latest = Subscription::default().with_ranges([track::Range::from(crate::track::Start::LATEST)]);
+		let mut sub = logical.consume().subscribe(latest).now_or_never().unwrap().unwrap();
+		write(&a, 10);
+		assert_eq!(drain(&mut sub, false), [10]);
+		write(&a, 12);
+		assert_eq!(drain(&mut sub, false), [12]);
+		let b = copy();
+		for key in [7, 10, 12] {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		write(&b, 13);
+		assert_eq!(drain(&mut sub, false), [13]);
+
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: crate::track::Start::Time(5),
+					end: Some(9),
+				},
+			)],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(drain(&mut sub, false), [7]);
+	}
+
 	/// A live join an edit adds with a Min Age reaching under the serving copy's resume point
 	/// starts at the group holding its live edge minus the Min Age, which the copy's cache
 	/// holds, as the copy resolved it before its resume point raised it.
@@ -11347,6 +11474,45 @@ mod test {
 		write(&b, 4);
 		assert_eq!(drain(&mut sub, false), [4]);
 		assert_eq!(sub.delivered_runs(), 1);
+	}
+
+	/// A range added behind a resumed reader caught up at the live edge hands out the older
+	/// group its route delivers after the update, though the reader's budget folded that gap
+	/// before any range held it.
+	#[test]
+	fn a_range_added_behind_a_caught_up_resumed_read_hands_out_what_arrives_later() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let latest = Subscription::default().with_ranges([track::Range::from(crate::track::Start::LATEST)]);
+		let mut sub = logical.consume().subscribe(latest).now_or_never().unwrap().unwrap();
+		write(&a, 5);
+		assert_eq!(drain(&mut sub, false), [5]);
+		write(&a, 6);
+		write(&a, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(1, track::Range::groups(3..=3))],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing held there yet");
+		write(&a, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
+
+		// Nor when another handle updates the ranges and the group lands before the reader
+		// reads again.
+		let ranges = [
+			track::Range::from(crate::track::Start::LATEST),
+			track::Range::groups(3..=4),
+		];
+		sub.control().update(sub.subscription().with_ranges(ranges)).unwrap();
+		write(&a, 4);
+		assert_eq!(drain(&mut sub, false), [4]);
 	}
 
 	/// Across route changes, an endless track with groups missing remembers only the gaps

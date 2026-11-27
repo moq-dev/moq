@@ -18,6 +18,7 @@ pub use declared::ReorderError;
 mod decode;
 mod group;
 mod input;
+mod join;
 mod producer;
 mod source;
 #[cfg(test)]
@@ -25,17 +26,20 @@ pub(crate) mod test_util;
 mod text;
 mod ttml;
 
+pub mod cts;
 pub mod flv;
 pub mod fmp4;
 pub mod legacy;
 pub mod loc;
 pub mod mkv;
 pub mod mp4;
+pub mod raw;
 pub mod ts;
 
 pub use consumer::{Consumer, DELAY_MAX, Delay, Playout};
 pub use group::GroupConsumer;
 pub(crate) use input::Input;
+pub use join::Join;
 pub use producer::{Finished, Guard, Producer};
 pub(crate) use source::{ExportSource, Resume};
 
@@ -251,6 +255,22 @@ pub trait Container {
 	/// The media role, when this format represents an audio or video track.
 	fn kind(&self) -> Kind {
 		Kind::Data
+	}
+
+	/// Refuse a format this build can read but not write, before a producer is built for it.
+	///
+	/// A catalog checks this before advertising a rendition, so a consumer never sees one whose
+	/// first write would fail.
+	fn writable(&self) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
+	/// Refuse a frame this format has no encoding for, by default any frame of an unwritable format.
+	///
+	/// A [`Producer`] checks each frame on entry, before it cuts a group or buffers anything, so a
+	/// refused frame leaves the open group and the buffered frames as they were.
+	fn check(&self, _frame: &Frame) -> Result<(), Self::Error> {
+		self.writable()
 	}
 
 	/// Write any format-specific endpoint before the producer closes the group.

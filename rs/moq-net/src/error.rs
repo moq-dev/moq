@@ -516,9 +516,15 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
-	/// The underlying connection reached its transport idle deadline.
+	/// The underlying connection reached its transport idle deadline, or a
+	/// [`KeepAlive`](crate::transport::KeepAlive)'s hard limit.
 	#[error("transport idle timeout")]
 	IdleTimeout,
+
+	/// The transport refused the session's [`KeepAlive`](crate::transport::KeepAlive), so the
+	/// session never opened.
+	#[error("keep-alive: {0}")]
+	KeepAlive(crate::transport::KeepAliveError),
 }
 
 impl Error {
@@ -600,6 +606,21 @@ impl Error {
 		self.retry() != Retry::Never
 	}
 
+	/// Whether the session carrying the request is ending, rather than one stream failing on a
+	/// session that serves on: only then does another route take over. Mirrors `closing` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn closing(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Stream(StreamError::Session(_) | StreamError::GoingAway)
+		)
+	}
+
 	/// Whether a source lost its route to the content: only another route continues it.
 	pub(crate) fn unroutable(&self) -> bool {
 		self.retry() == Retry::Reroute
@@ -665,7 +686,7 @@ impl From<&Error> for SessionError {
 			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Expired => Self::Expired,
-			Error::Unsupported => Self::Unsupported,
+			Error::Unsupported | Error::KeepAlive(_) => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
@@ -765,6 +786,7 @@ impl From<&Error> for StreamError {
 			// No stream code says so: an unknown stream type, a request only moq-transport
 			// can make, or a fault on our own side.
 			Error::Unsupported
+			| Error::KeepAlive(_)
 			| Error::UnsupportedExtension
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId

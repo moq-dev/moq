@@ -75,7 +75,7 @@ pub struct Transcoder {
 	source: moq_net::broadcast::Consumer,
 	output: moq_net::broadcast::Producer,
 	config: Config,
-	derived: moq_mux::catalog::Producer,
+	derived: catalog::Derived,
 	// Consumers asking for a rung before (or after) it exists queue here.
 	dynamic: moq_net::broadcast::Requests,
 	active: active::Producer,
@@ -93,7 +93,7 @@ impl Transcoder {
 	) -> Result<Self, Error> {
 		// The catalog starts empty and fills in during `run`, exactly like a
 		// media importer that hasn't seen parameter sets yet.
-		let derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default())?;
+		let derived = catalog::Derived::new(&mut output, config.source.clone())?;
 		let dynamic = output.requests();
 
 		Ok(Self {
@@ -137,7 +137,7 @@ impl Transcoder {
 				let Some(snapshot) = next else {
 					return Err(Error::NoSource);
 				};
-				match catalog::choose_source(&snapshot.video, &mut decoders).await {
+				match catalog::choose_source(&snapshot.value.video, &mut decoders).await {
 					Ok((name, config)) => {
 						let resolving = pipeline::timescale(source, hang::catalog::Reference::track(&config, &name));
 						tokio::select! {
@@ -161,7 +161,7 @@ impl Transcoder {
 		};
 		// A closed source may keep its catalog open, so neither a snapshot nor the timescale ends the
 		// wait on their own.
-		let (source_name, source_config, scale, snapshot) = tokio::select! {
+		let (source_name, source_config, scale, mut snapshot) = tokio::select! {
 			result = prologue => result?,
 			() = source.closed() => return Err(moq_net::Error::Cancel.into()),
 		};
@@ -182,11 +182,7 @@ impl Transcoder {
 		// Publish the derivative catalog before any encoder exists, so subscribers
 		// can pick a rung immediately. Commit so a catalog that cannot be published fails
 		// here rather than serving rungs nobody can discover.
-		{
-			let mut guard = derived.modify(derived.next_timestamp())?;
-			catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
-			guard.commit()?;
-		}
+		derived.publish(&mut snapshot, ladder.rungs())?;
 
 		// Serve rung requests and follow source catalog updates until the source ends.
 		let mut tasks = tokio::task::JoinSet::new();
@@ -215,15 +211,13 @@ impl Transcoder {
 					}
 				},
 				update = catalogs.next(), if !ended => match update {
-					Ok(Some(snapshot)) => {
+					Ok(Some(mut snapshot)) => {
 						moving = None;
-						if let Some(next) = ladder.follow(&snapshot.video).await {
+						if let Some(next) = ladder.follow(&snapshot.value.video).await {
 							let scale = Box::pin(pipeline::timescale(source, next.track()));
 							moving = Some(Moving { next, scale, snapshot: snapshot.clone() });
 						}
-						let mut guard = derived.modify(derived.next_timestamp())?;
-						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
-						guard.commit()?;
+						derived.publish(&mut snapshot, ladder.rungs())?;
 					}
 					// The source is ending: so does the derivative catalog, but a rung mid-group
 					// still finishes it, and a rung finishes its track once its source track does.
@@ -240,13 +234,12 @@ impl Transcoder {
 					}
 				},
 				scale = Moving::scale(&mut moving) => {
-					let Moving { next, snapshot, .. } = moving.take().expect("resolved a move");
+					let Moving { next, mut snapshot, .. } = moving.take().expect("resolved a move");
 					match scale {
+						// Republished just past the snapshot that asked for the move.
 						Ok(scale) => {
 							ladder.adopt(next, scale).await;
-							let mut guard = derived.modify(derived.next_timestamp())?;
-							catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
-							guard.commit()?;
+							derived.publish(&mut snapshot, ladder.rungs())?;
 						}
 						// Keep serving the ladder that works; the next snapshot tries again.
 						Err(err) => tracing::warn!(%err, "could not resolve the new source's timescale"),
@@ -281,7 +274,7 @@ struct Moving {
 	next: pipeline::Move,
 	scale: std::pin::Pin<Box<dyn Future<Output = Result<moq_net::Timescale, Error>> + Send>>,
 	/// The source catalog snapshot to publish the moved ladder with.
-	snapshot: moq_mux::catalog::hang::Catalog,
+	snapshot: moq_json::Timed<moq_mux::catalog::hang::Catalog>,
 }
 
 impl Moving {
@@ -298,7 +291,7 @@ impl Drop for Transcoder {
 	fn drop(&mut self) {
 		// The owner exists before `run` is polled. A cancelled prologue must end the
 		// already registered catalog too. Abort preserves an earlier clean finish or error.
-		self.derived.clone().abort(moq_net::Error::Cancel);
+		self.derived.abort(moq_net::Error::Cancel);
 	}
 }
 
@@ -396,16 +389,183 @@ mod tests {
 		source
 	}
 
+	/// A source whose catalog is written by hand: a [`moq_mux::catalog::Producer`] refuses to change
+	/// its `sync.clock` once published, which is exactly what a misbehaving publisher does.
+	struct RawSource {
+		broadcast: moq_net::broadcast::Producer,
+		catalog: moq_net::track::Producer,
+		_track: moq_net::track::Producer,
+		updates: u64,
+	}
+
+	impl RawSource {
+		fn new() -> Self {
+			let broadcast = moq_net::broadcast::Info::default().produce();
+			let catalog = broadcast
+				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+				.unwrap();
+			let track = broadcast
+				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			Self {
+				broadcast,
+				catalog,
+				_track: track,
+				updates: 0,
+			}
+		}
+
+		/// Publish a catalog advertising `clock` and a picture of `width` x `height`.
+		fn publish(&mut self, clock: Option<hang::catalog::Clock>, width: u32, height: u32) {
+			let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+				inline: true,
+				profile: 0x42,
+				constraints: 0,
+				level: 30,
+			});
+			video.coded_width = Some(width);
+			video.coded_height = Some(height);
+			video.bitrate = Some(1_000_000);
+			video.framerate = Some(30.0);
+
+			let mut catalog = hang::Catalog::<()>::default();
+			catalog.video.insert("video", video).unwrap();
+			catalog.sync.clock = clock;
+
+			self.updates += 1;
+			let at = Self::stamp(self.updates);
+			let mut group = self.catalog.append_group(at).unwrap();
+			group.write_frame(at, catalog.to_json().unwrap()).unwrap();
+			group.finish().unwrap();
+		}
+
+		/// The timestamp of the `update`th catalog published, counting from one.
+		fn stamp(update: u64) -> moq_net::Timestamp {
+			moq_net::Timestamp::from_millis(update).unwrap()
+		}
+	}
+
+	/// A `sync.clock` whose PTS zero is `secs` after the moq epoch, long before any host's now.
+	fn clock_at(secs: u64) -> hang::catalog::Clock {
+		hang::catalog::Clock::new(moq_net::Timestamp::from_micros(secs * 1_000_000).unwrap()).unwrap()
+	}
+
+	/// Run a transcoder over `source` and follow its derived catalog.
+	fn follow_raw(
+		source: &RawSource,
+	) -> (
+		tokio::task::JoinHandle<Result<(), Error>>,
+		moq_mux::catalog::hang::Consumer<()>,
+	) {
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: Some(moq_net::path::Relative::new(".").unwrap()),
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = Transcoder::new(source.broadcast.consume(), output, config).unwrap();
+		let track = consumer.track(hang::Catalog::DEFAULT_NAME).unwrap();
+		let transcoder = tokio::spawn(transcoder.run());
+		(transcoder, moq_mux::catalog::hang::Consumer::<()>::new(track))
+	}
+
+	/// A source catalog with no `sync.clock` is mirrored as is, with no wall clock invented for the
+	/// derivative, and the transcoder keeps following the source when the source later declares one:
+	/// the derivative already published under none.
+	#[tokio::test]
+	async fn a_clockless_source_yields_a_clockless_derivative() {
+		let mut source = RawSource::new();
+		source.publish(None, 640, 360);
+		let (transcoder, mut catalogs) = follow_raw(&source);
+
+		let derived = await_catalog(&mut catalogs, |snapshot| !snapshot.video.renditions.is_empty()).await;
+		assert_eq!(derived.sync.clock, None, "the derivative invented a clock");
+
+		// The source declares one later, and then resizes: the resize is the proof the run lives.
+		source.publish(Some(clock_at(1_000_000)), 640, 360);
+		source.publish(Some(clock_at(1_000_000)), 320, 180);
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.get("video").and_then(|v| v.coded_width) == Some(320)
+		})
+		.await;
+		assert_eq!(derived.sync.clock, None, "a published clock does not change");
+		assert!(!transcoder.is_finished(), "the clock change ended the transcoder");
+		transcoder.abort();
+	}
+
+	/// A source clock adopted at the start is mirrored, and a later change or removal of it keeps the
+	/// one the derivative published under without ending the transcoder.
+	#[tokio::test]
+	async fn a_clock_changed_after_publishing_keeps_the_first() {
+		let first = clock_at(1_000_000);
+		let mut source = RawSource::new();
+		source.publish(Some(first), 640, 360);
+		let (transcoder, mut catalogs) = follow_raw(&source);
+
+		let derived = await_catalog(&mut catalogs, |snapshot| !snapshot.video.renditions.is_empty()).await;
+		assert_eq!(derived.sync.clock, Some(first), "the source's clock is mirrored");
+
+		source.publish(Some(clock_at(2_000_000)), 480, 270);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.get("video").and_then(|v| v.coded_width) == Some(480)
+		})
+		.await;
+		source.publish(None, 320, 180);
+		let derived = await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.get("video").and_then(|v| v.coded_width) == Some(320)
+		})
+		.await;
+		assert_eq!(derived.sync.clock, Some(first));
+		assert!(!transcoder.is_finished(), "the clock change ended the transcoder");
+		transcoder.abort();
+	}
+
+	/// The derivative republishes the source's media timestamps, so each catalog change is stamped
+	/// where the source stamped it, whatever clock (if any) the source advertises: never on the
+	/// derivative's own clock, whose reading has nothing to do with the source's media.
+	#[tokio::test(start_paused = true)]
+	async fn catalog_changes_keep_the_source_timestamps() {
+		let width = |width| {
+			move |snapshot: &hang::Catalog<()>| {
+				snapshot.video.renditions.get("video").and_then(|v| v.coded_width) == Some(width)
+			}
+		};
+		for clock in [None, Some(clock_at(1_000_000))] {
+			let mut source = RawSource::new();
+			source.publish(clock, 640, 360);
+			let (transcoder, mut catalogs) = follow_raw(&source);
+
+			let first = await_timed(&mut catalogs, width(640)).await;
+			assert_eq!(first.at, RawSource::stamp(1), "{clock:?}: the first catalog moved");
+
+			source.publish(clock, 320, 180);
+			let resized = await_timed(&mut catalogs, width(320)).await;
+			assert_eq!(resized.at, RawSource::stamp(2), "{clock:?}: the resize moved");
+			transcoder.abort();
+		}
+	}
+
 	/// Read derived catalog snapshots until one satisfies `ready`, so a test
 	/// doesn't race the transcoder's own catalog writes.
 	async fn await_catalog(
 		catalogs: &mut moq_mux::catalog::hang::Consumer<()>,
 		ready: impl Fn(&moq_mux::catalog::hang::Catalog) -> bool,
 	) -> moq_mux::catalog::hang::Catalog {
+		await_timed(catalogs, ready).await.value
+	}
+
+	/// [`await_catalog`], with the timestamp the update was published at.
+	async fn await_timed(
+		catalogs: &mut moq_mux::catalog::hang::Consumer<()>,
+		ready: impl Fn(&moq_mux::catalog::hang::Catalog) -> bool,
+	) -> moq_json::Timed<moq_mux::catalog::hang::Catalog> {
 		loop {
-			let snapshot = catalogs.next().await.unwrap().unwrap();
-			if ready(&snapshot) {
-				return snapshot;
+			let next = catalogs.next().await.unwrap().unwrap();
+			if ready(&next.value) {
+				return next;
 			}
 		}
 	}
@@ -1206,7 +1366,7 @@ mod tests {
 		// The catalog track exists from the start but may open empty; the rung
 		// appears once the transcoder has read the source catalog.
 		let derived = loop {
-			let snapshot = catalogs.next().await.unwrap().unwrap();
+			let snapshot = catalogs.next().await.unwrap().unwrap().value;
 			if snapshot.video.renditions.contains_key("video/120p") {
 				break snapshot;
 			}
@@ -2212,6 +2372,100 @@ mod tests {
 			frames += 1;
 		}
 		assert_eq!(frames, 2, "group 1 lost frames");
+
+		transcoder.abort();
+	}
+
+	/// A rung declares the starts its source skipped between media-timed groups, across a pause
+	/// past a whole group's End and past a lost group, so a lite-07 reader of the rung never waits
+	/// on them, and ends each group where its source group ended.
+	#[tokio::test(start_paused = true)]
+	async fn a_rung_skips_what_its_source_skips() {
+		const FRAME: u64 = 33_333;
+		let source = source_catalog(320, 240);
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		let mut write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
+			encoder.cut().unwrap();
+			for index in frames {
+				encoder.encode(&gray_frame(&gray, index * FRAME)).unwrap();
+				while let Some(encoded) = encoder.receive().unwrap() {
+					hang::container::Frame {
+						timestamp: encoded.timestamp,
+						payload: encoded.payload,
+					}
+					.write_to(group)
+					.unwrap();
+				}
+			}
+		};
+		let at = |index: u64| moq_net::Timestamp::from_micros(index * FRAME).unwrap();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog);
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let viewer = subscribe(&consumer, "video/120p").await;
+		let mut source_demand = source._track.demand();
+		while !source_demand.wanted_changed().await.unwrap() {}
+		let rung = consumer.track("video/120p").unwrap();
+		let mut edge = rung.clone();
+		let mut reach = async |group: u64| {
+			while edge.largest().await.map(|position| position.group) != Some(group) {}
+		};
+
+		// Two frames, then a pause: the group ends whole two seconds before the next one starts.
+		let mut first = source._track.append_group(at(0)).unwrap();
+		write(&mut first, 0..2);
+		first.finish_at(2 * FRAME).unwrap();
+		reach(0).await;
+		let mut lost = source._track.append_group(at(60)).unwrap();
+		write(&mut lost, 60..62);
+		reach(60 * FRAME).await;
+		lost.abort(moq_net::Error::Old).unwrap();
+		let mut last = source._track.append_group(at(150)).unwrap();
+		write(&mut last, 150..152);
+		last.finish().unwrap();
+		reach(150 * FRAME).await;
+
+		assert!(viewer.is_skipped(1..60 * FRAME), "the pause after the whole group");
+		assert!(viewer.is_skipped(60 * FRAME + 1..150 * FRAME), "past the lost group");
+		assert!(
+			!viewer.is_skipped(60 * FRAME..60 * FRAME + 1),
+			"the lost group is still a group"
+		);
+
+		let mut whole = rung.fetch_group(0, None).await.unwrap();
+		while whole.read_frame().await.unwrap().is_some() {}
+		assert_eq!(
+			whole.end(),
+			Some(2 * FRAME),
+			"the rung's group ends where its source's did"
+		);
 
 		transcoder.abort();
 	}

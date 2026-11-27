@@ -34,6 +34,10 @@ pub struct Subscribe<'a> {
 	/// Which pending group to send first. Lite07+ only; earlier wires decode as
 	/// [`Order::Descending`] and cannot ask for anything else.
 	pub order: Order,
+	/// Whether each frame is delivered as its header alone, without its payload, for the
+	/// subscription's whole life. Lite07+ only: an earlier wire cannot carry it, so
+	/// encoding one there fails rather than asking for the payload.
+	pub meta: bool,
 }
 
 impl Subscribe<'_> {
@@ -49,6 +53,7 @@ impl Subscribe<'_> {
 			max_delay: self.max_delay,
 			ranges: self.ranges,
 			order: self.order,
+			meta: self.meta,
 		}
 	}
 }
@@ -241,6 +246,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 				(priority, order, max_delay, ranges)
 			}
 		};
+		let meta = decode_meta(r, version)?;
 		Ok(Self {
 			id,
 			broadcast,
@@ -251,6 +257,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			max_delay,
 			ranges,
 			order,
+			meta,
 		})
 	}
 
@@ -273,14 +280,37 @@ impl<'a> Message<'a> for Subscribe<'a> {
 				encode_ranges(w, version, &self.ranges)?;
 			}
 		}
-
-		Ok(())
+		encode_meta(w, version, self.meta)
 	}
 }
 
 /// `ranges` at `policy`, the one an older wire carries for the whole subscription.
 fn stamped(ranges: Vec<Range>, policy: Policy) -> Vec<Range> {
 	ranges.into_iter().map(|range| range.with_policy(policy)).collect()
+}
+
+/// Decode SUBSCRIBE's trailing `Meta` byte, lite-07's only: 1 for headers alone, 0 for the
+/// payload, anything else malformed. An earlier wire always asks for the payload.
+fn decode_meta(r: &mut Decoder<'_>, version: Version) -> Result<bool, DecodeError> {
+	if !version.has_meta() {
+		return Ok(false);
+	}
+	match r.u8()? {
+		0 => Ok(false),
+		1 => Ok(true),
+		_ => Err(DecodeError::InvalidValue),
+	}
+}
+
+/// Encode the inverse of [`decode_meta`], failing for a metadata subscription on a wire
+/// that cannot carry one.
+fn encode_meta(w: &mut Encoder<'_>, version: Version, meta: bool) -> Result<(), EncodeError> {
+	if version.has_meta() {
+		w.u8(meta.into());
+	} else if meta {
+		return Err(EncodeError::Version);
+	}
+	Ok(())
 }
 
 /// What lite03-06 send for no `Subscriber Max Age` limit, which their bare milliseconds can't
@@ -1866,6 +1896,7 @@ mod test {
 				end: absolute(10, 0),
 				..Range::OPEN
 			}],
+			meta: false,
 		}
 	}
 
@@ -2120,8 +2151,8 @@ mod test {
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let wire = encode(&msg, Version::Lite07).unwrap();
 		// The count, priority 0 and descending, then type 2, group 7, frame 0, then type 2,
-		// group 10, frame 0.
-		assert!(wire.ends_with(&[1, 0x80, 0, 2, 7, 0, 2, 10, 0]), "{wire:?}");
+		// group 10, frame 0, then a payload `Meta`.
+		assert!(wire.ends_with(&[1, 0x80, 0, 2, 7, 0, 2, 10, 0, 0]), "{wire:?}");
 
 		// Group 0 works cleanly without underflow: [Position(0, 0), Position(1, 0)) and
 		// even an empty [None, Position(0, 0)).
@@ -2146,8 +2177,8 @@ mod test {
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let framed = encode(&msg, Version::Lite07).unwrap();
 		// The policy, then type 2, start 7, frame 4, then type 2, start 9, frame 3, which it
-		// stops before.
-		assert!(framed.ends_with(&[1, 0x80, 0, 2, 7, 4, 2, 9, 3]), "{framed:?}");
+		// stops before, then a payload `Meta`.
+		assert!(framed.ends_with(&[1, 0x80, 0, 2, 7, 4, 2, 9, 3, 0]), "{framed:?}");
 		assert_eq!(range_size(&msg.ranges[0], Version::Lite07.into()), Some(8));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
@@ -2156,8 +2187,8 @@ mod test {
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let position = encode(&msg, Version::Lite07).unwrap();
-		// The policy, then type 2, start 7, frame 4, then no end.
-		assert!(position.ends_with(&[1, 0x80, 0, 2, 7, 4, 0]), "{position:?}");
+		// The policy, then type 2, start 7, frame 4, then no end, then a payload `Meta`.
+		assert!(position.ends_with(&[1, 0x80, 0, 2, 7, 4, 0, 0]), "{position:?}");
 		assert_eq!(
 			range_size(&msg.ranges[0], Version::Lite07.into()),
 			Some(6),
@@ -2166,9 +2197,10 @@ mod test {
 
 		let decode = |tail: &[u8]| {
 			let mut wire = position.clone();
-			wire.truncate(position.len() - 7);
+			wire.truncate(position.len() - 8);
 			wire.extend_from_slice(&[1, 0x80, 0]);
 			wire.extend_from_slice(tail);
+			wire.push(0);
 			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
 		};
 		assert!(decode(&[2, 7, 4, 0]).is_ok());
@@ -2350,9 +2382,9 @@ mod test {
 
 		msg.ranges = vec![Range::OPEN];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last: a count of one, the policy, then two anchors of type 0.
-		let at = buf.len() - 5;
-		assert_eq!(&buf[at..], [1, 0x80, 0, 0, 0]);
+		// The list is last before `Meta`: a count of one, the policy, then two anchors of type 0.
+		let at = buf.len() - 6;
+		assert_eq!(&buf[at..], [1, 0x80, 0, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -2363,8 +2395,9 @@ mod test {
 		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a start
 		// or an end; type 3 is Live and type 4 Joined, each a start only; type 5 is assigned to
 		// nothing, as a start or an end. Each closes the session with a PROTOCOL_VIOLATION.
-		let starts = [5].map(|kind| (2, kind));
-		let ends = [3, 4, 5].map(|kind| (1, kind));
+		// Each anchor's type counts back from the end, past the trailing `Meta`.
+		let starts = [5].map(|kind| (3, kind));
+		let ends = [3, 4, 5].map(|kind| (2, kind));
 		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
 			let at = buf.len() - back;
@@ -2373,6 +2406,25 @@ mod test {
 			assert!(matches!(err, DecodeError::InvalidValue), "{back} {kind}");
 			let session = crate::SessionError::from(&crate::Error::Decode(err));
 			assert!(matches!(session, crate::SessionError::ProtocolViolation));
+		}
+	}
+
+	/// Lite-07's trailing `Meta` byte roundtrips, any value but 0 or 1 is a PROTOCOL_VIOLATION,
+	/// and an older wire, which has none, refuses to carry a metadata subscription.
+	#[test]
+	fn meta_is_lite07s_trailing_byte() {
+		let mut msg = subscribe_sample();
+		msg.meta = true;
+		assert!(roundtrip(&msg, Version::Lite07).meta);
+		let mut buf = encode(&msg, Version::Lite07).unwrap();
+		assert_eq!(buf.last(), Some(&1));
+		*buf.last_mut().unwrap() = 2;
+		let err = crate::coding::decode_from(&mut buf.as_slice(), Version::Lite07, Subscribe::decode_msg).unwrap_err();
+		assert!(matches!(err, DecodeError::InvalidValue));
+		let session = crate::SessionError::from(&crate::Error::Decode(err));
+		assert!(matches!(session, crate::SessionError::ProtocolViolation));
+		for version in [Version::Lite05, Version::Lite06] {
+			assert!(matches!(encode(&msg, version), Err(EncodeError::Version)), "{version}");
 		}
 	}
 
@@ -2524,11 +2576,11 @@ mod test {
 		}
 
 		// The count, the policy, the type, group, frame, and max age plus one, then the end's
-		// type and time, 251 and 9000 each in two bytes.
+		// type and time, 251 and 9000 each in two bytes, then a payload `Meta`.
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![joined(5, 0, Some(ms(250)))];
 		let buf = encode(&msg, Version::Lite07).unwrap();
-		let tail = [1, 0x80, 0, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28];
+		let tail = [1, 0x80, 0, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0];
 		assert_eq!(&buf[buf.len() - tail.len()..], tail);
 
 		// An end can't be a join, placed or not.

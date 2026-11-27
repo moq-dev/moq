@@ -46,7 +46,6 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 	const broadcast = publication.broadcast;
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const requests = track.requests();
-	let closed = false;
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			await answered;
@@ -61,9 +60,7 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 					fill.dropGroups(key, (key / 1_000n + 1n) * 1_000n);
 					continue;
 				}
-				const group = fill.accept(key);
-				if (!group && closed) break;
-				write(defined(group), key, "old");
+				write(defined(fill.accept(key)), key, "old");
 			}
 			fill.close();
 		}
@@ -78,7 +75,6 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 		// The publisher's end of the transport, for steering delivery.
 		server: pair.server,
 		close() {
-			closed = true;
 			remote.close();
 			requests.close();
 			broadcast.close();

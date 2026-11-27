@@ -34,7 +34,7 @@ and do not keep it open; release the handle with `Close` on the calling goroutin
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
 `Fmp4ContainerFormat()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
-`media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
+`media.NewGroupConsumer` and the track's catalog `Rendition`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
 
 ```bash
@@ -93,14 +93,18 @@ import (
 )
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
-// opusInit, packet, pts (90 kHz ticks), and rgba come from your encoder or capture source.
+// opusInit, packets, pts (90 kHz ticks), and rgba come from your encoder or capture source.
 // Hidden until the catalog is filled; keep the route reachable while publishing.
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
 broadcast := route.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusInit})
-timestamp := moq.TimestampFromScale(960, 48_000) // 20 ms on the Opus sample clock
-_ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
-_ = audio.Cut() // audio has no keyframes, so this is what gives it groups
+for i, packet := range packets { // 20 ms of Opus each
+    timestamp := moq.TimestampFromScale(uint64(i)*960, 48_000) // on the Opus sample clock
+    _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
+    if i%5 == 4 {
+        _ = audio.Cut() // five packets fill a 100 ms group: audio has no keyframes, so cuts give it groups
+    }
+}
 
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
@@ -127,7 +131,7 @@ shows which module holds each.
 - **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A call (`Request`, `Next`, `ReadFrame`, `Server.Accept`) aborts alone and leaves its object usable; a range loop over a consumer's stream cancels the stream when its context ends, while `Claim.All` and `Server.All` leave the claim advertised and the listener open.
 - **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, `Route`, and `Claim`), and its consumers then fail with `moq.ErrClosed`. A `Route` or `Claim` the collector reclaims is retracted, so keep it reachable while it should stay announced, or end it with `Cancel()`.
 - **Bandwidth ownership.** An encoder you manage can reserve a share of the session's bandwidth. Reuse its reservation when the ceiling changes; before abandoning or replacing it, call `Update(0)` to return its share and automatic probe ceiling without waiting for garbage collection. The track can stay subscribed and the reservation can be reused.
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or less often to batch frames into fewer groups.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after the frame that brings a group to about 100 ms, so a relay keeps one stream (group) per 100 ms rather than one per packet. Frames forward as they are written either way.
 - **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `Start: media.DecodeStartLatest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.

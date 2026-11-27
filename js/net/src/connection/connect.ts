@@ -17,6 +17,7 @@ import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { checkCost, DEFAULT_TIMEOUT, exchangeSetup, handsOff, type Link, link } from "./handshake.ts";
+import * as KeepAlive from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
@@ -327,6 +328,13 @@ export interface ConnectProps {
 	viewers?: Viewers;
 
 	/**
+	 * Probe a quiet peer and report it through the session's `liveness` before closing on it.
+	 * WebTransport cannot probe, so the connect throws wherever it would dial WebTransport (any
+	 * browser that supports it) or is handed one as `transport`. See {@link KeepAlive.KeepAlive}.
+	 */
+	keepAlive?: KeepAlive.KeepAlive;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -354,6 +362,8 @@ type SessionProps = {
 	implementation: string;
 	/** The PROBE target to send a peer that advertised `Increase`. */
 	probeTarget?: Getter<number>;
+	/** The peer's liveness, under a keep-alive. */
+	liveness?: Getter<KeepAlive.Liveness>;
 } & Link;
 
 /**
@@ -402,6 +412,7 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	// Fail before dialing; the session checks again when it attaches.
 	if (props.auth) vacant(props.auth);
 	checkCost(props.cost);
+	KeepAlive.check(props);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 
 	// Resolves on abort or timeout so every in-flight transport tears itself down.
@@ -522,7 +533,14 @@ async function connectInner(
 	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
-		return [await connectTransport(url, transport, wiring(dial), offered.setup), dial];
+		let liveness: Getter<KeepAlive.Liveness> | undefined;
+		try {
+			liveness = props.keepAlive && (await KeepAlive.start(transport, props.keepAlive));
+		} catch (err) {
+			transport.close();
+			throw err;
+		}
+		return [await connectTransport(url, transport, { ...wiring(dial), liveness }, offered.setup), dial];
 	}
 
 	const websocketUrl = fallbackDial?.url ?? url;
@@ -555,7 +573,19 @@ async function connectInner(
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
 	const won = websocket && fallbackDial ? fallbackDial : dial;
-	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
+	let liveness: Getter<KeepAlive.Liveness> | undefined;
+	try {
+		liveness = props.keepAlive && (await KeepAlive.start(session as WebTransport, props.keepAlive));
+	} catch (err) {
+		session.close();
+		throw err;
+	}
+	const connection = await connectTransport(
+		url,
+		session as WebTransport,
+		{ ...wiring(won), liveness },
+		offered.setup,
+	);
 	if (websocket) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);

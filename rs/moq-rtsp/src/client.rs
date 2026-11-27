@@ -243,7 +243,10 @@ impl Client {
 						};
 						let config = aac::config(params.extra_data())?;
 						let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio));
-						Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
+						Track::Aac {
+							import: Box::new(aac::Import::new(track, reserved.clone(), config)?),
+							join: moq_mux::container::Join::default(),
+						}
 					}
 				};
 				ingest.streams[*index] = Some(Stream {
@@ -352,7 +355,11 @@ enum Kind {
 
 enum Track {
 	Video(Box<Video>),
-	Aac(Box<aac::Import>),
+	Aac {
+		import: Box<aac::Import>,
+		/// Where the open group closes.
+		join: moq_mux::container::Join,
+	},
 }
 
 impl Track {
@@ -363,7 +370,7 @@ impl Track {
 				Video::H264 { import, .. } => import.finish().map(drop),
 				Video::H265 { import, .. } => import.finish().map(drop),
 			},
-			Self::Aac(import) => import.finish().map(drop),
+			Self::Aac { import, .. } => import.finish().map(drop),
 		}
 	}
 
@@ -373,7 +380,7 @@ impl Track {
 				Video::H264 { import, .. } => import.abort(err),
 				Video::H265 { import, .. } => import.abort(err),
 			},
-			Self::Aac(import) => import.abort(err),
+			Self::Aac { import, .. } => import.abort(err),
 		}
 	}
 }
@@ -853,13 +860,15 @@ impl Ingest {
 
 	/// Publish one depacketized item under its stream's video `params`.
 	fn publish(&mut self, item: CodecItem, params: Option<&VideoParameters>) -> Result<()> {
-		let (stream_id, timestamp, data, changed, loss) = match &item {
+		// An audio frame's length in clock units, so the frame that fills a group closes it.
+		let (stream_id, timestamp, data, changed, loss, length) = match &item {
 			CodecItem::VideoFrame(frame) => (
 				frame.stream_id(),
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
 				frame.loss(),
+				None,
 			),
 			CodecItem::AudioFrame(frame) => (
 				frame.stream_id(),
@@ -868,6 +877,7 @@ impl Ingest {
 				false,
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
+				Some(frame.frame_length().get()),
 			),
 			_ => return Ok(()),
 		};
@@ -926,7 +936,7 @@ impl Ingest {
 				}
 				video.decode(frames)?;
 			}
-			Track::Aac(import) => {
+			Track::Aac { import, join } => {
 				if !stream.started {
 					// Audio waits for the first keyframe too.
 					if self.video && !self.started {
@@ -935,8 +945,14 @@ impl Ingest {
 					stream.started = true;
 				}
 				import.decode(data, Some(pts))?;
-				// Each packet its own group (one QUIC stream), so relays forward it at once.
-				import.cut(None)?;
+				// Each packet forwards as it is written; its group closes once it carries a join.
+				let length = moq_net::Timestamp::from_scale(length.map_or(0, u64::from), u64::from(rate));
+				let end = length
+					.and_then(|length| pts.checked_add(length))
+					.map_err(moq_mux::Error::from)?;
+				if let Some(end) = join.fill(pts, end) {
+					import.cut(Some(end))?;
+				}
 			}
 		}
 		Ok(())
@@ -1029,7 +1045,12 @@ mod tests {
 		let mut updates = catalog.consume().unwrap();
 		within("the catalog", async {
 			loop {
-				let snapshot = updates.next().await.expect("catalog update").expect("catalog open");
+				let snapshot = updates
+					.next()
+					.await
+					.expect("catalog update")
+					.expect("catalog open")
+					.value;
 				if snapshot.video.renditions.len() == video && snapshot.audio.renditions.len() == audio {
 					return snapshot;
 				}
@@ -2269,7 +2290,10 @@ mod tests {
 		let config = aac::config(fake::AAC_CONFIG).unwrap();
 		let mut ingest = Ingest {
 			streams: vec![Some(Stream {
-				track: Track::Aac(Box::new(aac::Import::new(track, catalog.reserve(), config).unwrap())),
+				track: Track::Aac {
+					import: Box::new(aac::Import::new(track, catalog.reserve(), config).unwrap()),
+					join: moq_mux::container::Join::default(),
+				},
 				last: None,
 				started: false,
 				held: None,

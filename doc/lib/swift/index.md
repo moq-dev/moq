@@ -37,7 +37,7 @@ broadcast and does not keep it open. `ContainerProducer` takes chunks split anyw
 so a raw byte stream needs no other importer.
 `.fmp4()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
-`Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
+`Media.GroupConsumer(group:rendition:)`; frames carry container media time as they land.
 
 ```swift ignore
 dependencies: [
@@ -76,7 +76,7 @@ let route = try session.publish.route(path: "my-stream.hang", hidden: true)
 let broadcast = route.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus(), data: opusInit))
 try audio.writeFrame(packet, timestamp: Timestamp(value: 20, scale: 1_000))
-try audio.cut() // audio has no keyframes, so this is what gives it groups
+try audio.cut() // once a group holds 100 ms: audio has no keyframes, so cuts give it groups
 
 let video = try Video.Producer(
     catalog: Media.CatalogProducer(broadcast: broadcast),
@@ -102,7 +102,7 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after the frame that brings a group to about 100 ms, so a relay keeps one stream (group) per 100 ms rather than one per packet. Frames forward as they are written either way.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `Media.TrackConsumer`, `Audio.Consumer`, and `Video.Consumer` yield `Read` cases in order: `.frame`, a `.gap` where media was lost, or an `.end` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: .latest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.

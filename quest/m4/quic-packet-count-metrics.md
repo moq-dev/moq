@@ -9,7 +9,7 @@ UDP packets sent/received, ACK and PING counts, bytes-per-packet efficiency, and
 Decided 2026-11-26 (maintainer, `/quest-plan` of the `moq-quic` audit + user packet-count tracking request):
 
 - ✅ Goal confirmed across `moq-quic` sim tests/benches, `moq-bench`, and `scale-sim` (rejected: `moq-quic` tests/benches only; drop).
-- ✅ No separate keep-alive quest: native `moq-quic` already resets `Timer::KeepAlive` on every sent/received packet (including ACK-only) and `Timer::Idle` on every received packet, and [keep-alive](/quest/m1/keep-alive.md) (PR #9698) owns `{ soft, hard }` keep-alive; add a zero-PING assertion for active one-way and bidirectional sessions here (rejected: also changing QMux's 1 s `QX_PING` probe now).
+- ✅ No separate keep-alive quest: native `moq-quic` already resets `Timer::KeepAlive` on every sent/received packet (including ACK-only) and `Timer::Idle` on every received packet, and [keep-alive](https://github.com/moq-dev/moq/pull/9698) owns `{ soft, hard }` keep-alive; add a zero-PING assertion for active one-way and bidirectional sessions here (rejected: also changing QMux's 1 s `QX_PING` probe now).
 - Joins `m4` as test, benchmark, and `moq-bench` reporting infrastructure after the 0.22 cut.
 
 Guidance:

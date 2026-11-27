@@ -213,7 +213,8 @@ client = moq.Client(
   `Gap`, or `End`. An encoder end is not iterator EOF; media can resume after it.
 - `await media.GroupConsumer.fetch(broadcast, id, rendition, start, *, options=None)`
   fetches and decodes exactly one group of a catalog rendition.
-- `media.GroupConsumer(group, container)` decodes a raw group, such as one from
+- `media.GroupConsumer(group, id, rendition)` decodes a raw group with a catalog rendition's
+  container and role, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.
 

@@ -1,11 +1,11 @@
-# [M] Concurrent tests run under many Miri schedules and ThreadSanitizer
+# [S] moq-net's concurrent tests run under many Miri schedules and ThreadSanitizer
 
 ## Goal
 
-Nightly runs kio's and moq-net's multi-threaded tests under Miri across many
-scheduler seeds, and their whole library test suites under ThreadSanitizer.
-A data race or an ordering bug in the locks, atomics, wakers, and kio's
-lock-free log fails Nightly, with no change to the code under test.
+Nightly runs moq-net's multi-threaded tests under Miri across many scheduler
+seeds, and its whole library test suite under ThreadSanitizer. A data race or
+an ordering bug in its locks, atomics, and wakers fails Nightly, with no change
+to the code under test.
 
 ## Plan
 
@@ -17,20 +17,25 @@ moq-net). Milestone m4.
   because it never found a race and needed a `cfg(loom)` shim around every
   primitive; Shuttle needs the same shims. These two run the tests as they
   are, so there is nothing to keep in sync.
-- Miri: `sh/rs/miri.sh` runs each test once. Add a pass over the tests that
-  spawn threads with `-Zmiri-many-seeds`, each seed a different schedule and
-  a different weak-memory outcome. Choose the seed count from the measured
-  time, and widen the moq-net filter past `model::frame`, `model::group`, and
-  `path` where a module shares state across threads.
-- ThreadSanitizer: a `just rs tsan` recipe builds std with the sanitizer
-  (`-Zsanitizer=thread -Zbuild-std`) and runs the kio and moq-net library
-  tests at near-native speed, reaching the tests Miri ignores for foreign
-  calls or cost. A suppression needs a comment naming the false positive.
+
+Decided 2026-11-27 (maintainer, /quest-plan on kio's follow-ups): ✅ narrow
+to moq-net (rejected: drop the quest). kio's half shipped in
+[kixel-ai/kio#25](https://github.com/kixel-ai/kio/pull/25), in kio's own
+post-merge CI; moq-net's locks and wakers still get neither tool. Resized
+from M to S, since that PR's recipes are the pattern to copy.
+
+- Copy kio's `miri-seeds` and `tsan` recipes from its
+  [justfile](https://github.com/kixel-ai/kio/blob/main/justfile): 8 seeds over
+  an exact list of the tests that spawn threads, failing when a name stops
+  matching, and a TSan run of the library tests with `-Zbuild-std` and an
+  explicit `--target`.
+- Today `sh/rs/miri.sh` runs each test once, `rs/justfile` has only `miri`,
+  Nightly runs `rs miri` alone, and nothing runs TSan. Widen the Miri pass past
+  `model::frame`, `model::group`, and `path` where a module shares state
+  across threads (`grep -rln 'thread::spawn\|new_multi_thread' rs/moq-net/src`).
+  Choose the seed count from the measured time.
+- A TSan suppression needs a comment naming the false positive.
 - Both are random, not exhaustive: a pass is evidence, not a proof. Say so in
-  the recipe's doc line.
-- Miri's GenMC mode would explore every schedule without shims, but does not
-  support `cargo miri test` today. It is not part of this quest.
-  [Its own quest](https://github.com/kixel-ai/kio/blob/main/quest/m2/miri-genmc.md)
-  moved to `kixel-ai/kio` and waits on that.
+  the recipes' doc lines.
 
 Public API: none. Wire: none.

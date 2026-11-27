@@ -290,8 +290,9 @@ impl Drop for State {
 	fn drop(&mut self) {
 		// The session dispatcher owns this state and can be dropped at any await. A
 		// session that ended with an error already aborted these with it; what
-		// remains was cancelled with the dispatcher.
-		self.abort(&Error::Cancel);
+		// remains was cancelled with the dispatcher, which ends the session: a route replacing
+		// it continues what these copies closed short.
+		self.abort(&SessionError::Cancel.into());
 	}
 }
 
@@ -16865,7 +16866,7 @@ mod stitch_tests {
 		drop(h);
 
 		assert!(
-			matches!(group.read_frame().await, Err(Error::Cancel)),
+			matches!(group.read_frame().await, Err(Error::Session(SessionError::Cancel))),
 			"a waiting fill head must be cancelled, not left parked"
 		);
 	}

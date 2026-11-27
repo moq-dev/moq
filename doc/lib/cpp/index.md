@@ -121,7 +121,7 @@ A decoder reads everything the track still holds unless a live player sets `star
 the cached backlog.
 A gap breaks continuity. An encoder end is not stream EOF: following frames before its
 endpoint are the old encoder's drain; the first at or past it starts fresh. For arrival-order reads, decode each group
-from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
+from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, rendition)` (the catalog rendition);
 frames carry container media time as they land.
 Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several imports
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to

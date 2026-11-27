@@ -310,9 +310,9 @@ test("a joined start round-trips on lite-07", async () => {
 	]);
 
 	// The count, the range's priority and order, the type, group, frame, and max age plus one, then
-	// the end's type and time, 251 and 9000 each in two bytes.
+	// the end's type and time, 251 and 9000 each in two bytes, then a payload `Meta`.
 	const buf = await encodeMessage(version, new Subscribe({ ...props, ranges: [joined(5n, 0, 250)] }));
-	expect([...buf.slice(buf.length - 11)]).toEqual([1, 0x80, 0, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28]);
+	expect([...buf.slice(buf.length - 12)]).toEqual([1, 0x80, 0, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0]);
 
 	// An end can't be a join, placed or not.
 	await expect(

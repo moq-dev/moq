@@ -29,12 +29,20 @@ deployed `main`'s Worker from `90eca02d19` as version
 first counted run, so every counted run reads B2 with the resume as a ranged
 `fetch`.
 
-## Waiting
+Count the scheduled Nightly runs on `main` from 2026-11-26
+(`gh run list --workflow nightly.yml --branch main --event schedule`); done
+when seven show no `disabling binary cache 'https://nix.moq.dev'` line. Count
+only runs whose Nix jobs got past their Nix setup step, so a run cancelled
+before it substitutes anything never counts as clean. `gh run view <run>
+--log` refuses a run of Nightly's size, so list the run's jobs whose Nix step
+succeeded (`gh api repos/moq-dev/moq/actions/runs/<run>/jobs`) and fetch each
+with `gh run view --job <id> --log`. `wrangler tail` shows only Worker logs
+and cannot confirm this.
 
-- moq-dev/moq: a week of scheduled Nightly runs on `main` from 2026-11-26
-  (`gh run list --workflow nightly.yml --branch main --event schedule`). Grep
-  each job's log for `disabling binary cache 'https://nix.moq.dev'`; done when
-  seven runs show none. Count only runs whose Nix jobs got past their Nix
-  setup step, so a run cancelled before it substitutes anything never counts
-  as clean. `wrangler tail` shows only Worker logs and cannot
-  confirm this.
+Clean so far (1 of 7): [run 45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463) (2026-11-26), 111 jobs past Nix setup,
+1,700 path copies from `nix.moq.dev` across them, no disable line. For comparison, the
+2026-11-24 run (before the deploy) had one job with the line.
+
+## Scheduled
+
+- 2026-12-03 - the seventh counted run (2026-12-02) finishes the day before

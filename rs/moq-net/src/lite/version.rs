@@ -413,6 +413,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE carries a `Meta` byte, and a metadata subscription's FRAMEs their
+	/// header alone. Added in lite-07; an earlier subscription always carries the payload.
+	pub(crate) fn has_meta(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// The timescale the wire carries for a track with `timescale`, or `None` when its
 	/// frames or datagrams carry no timestamp.
 	///

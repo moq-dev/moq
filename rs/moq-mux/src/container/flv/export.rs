@@ -709,8 +709,10 @@ impl<S: Stream> Export<S> {
 	/// Whether rendition `name`, carried in `container`, is free to continue a failed track among
 	/// `tracks`: none reads it, and none left it after it failed.
 	fn unread(&self, tracks: &[FlvTrack], name: &str, container: &Container) -> bool {
-		matches!(container, Container::Legacy | Container::Loc)
-			&& !self.replaced.contains(name)
+		matches!(
+			container,
+			Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+		) && !self.replaced.contains(name)
 			&& !tracks.iter().any(|track| track.name == name)
 	}
 
@@ -812,7 +814,11 @@ impl<S: Stream> Export<S> {
 			// rank order so a catalog with nothing FLV carries fails on its best one.
 			let mut ranked: Vec<_> = catalog.video.ranked().collect();
 			ranked.sort_by_key(|(_, config)| {
-				video_flavor(config).is_err() || !matches!(config.container, Container::Legacy | Container::Loc)
+				video_flavor(config).is_err()
+					|| !matches!(
+						config.container,
+						Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+					)
 			});
 			ranked
 		};
@@ -861,7 +867,11 @@ impl<S: Stream> Export<S> {
 			// rank order so a catalog with nothing FLV carries fails on its best one.
 			let mut ranked: Vec<_> = catalog.audio.ranked().collect();
 			ranked.sort_by_key(|(_, config)| {
-				audio_flavor(config).is_err() || !matches!(config.container, Container::Legacy | Container::Loc)
+				audio_flavor(config).is_err()
+					|| !matches!(
+						config.container,
+						Container::Legacy | Container::Loc | Container::Raw | Container::Cts
+					)
 			});
 			ranked
 		};
@@ -1129,7 +1139,7 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -
 
 fn ensure_legacy(container: &Container, kind: &'static str, name: &str) -> crate::Result<()> {
 	match container {
-		Container::Legacy | Container::Loc => Ok(()),
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts => Ok(()),
 		Container::Cmaf { .. } => Err(Error::UnsupportedContainer {
 			kind,
 			name: name.to_string(),

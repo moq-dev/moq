@@ -15,7 +15,7 @@ import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
 import { checkName } from "./util/utf8.ts";
-import { registerWire, trackOf, wireOf } from "./wire.ts";
+import { type Broadcast, type Produced, registerWire, trackOf, wireOf } from "./wire.ts";
 
 export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
 
@@ -43,6 +43,12 @@ class BroadcastState {
 	tracks = new Map<string, track.Producer>();
 	// The on-demand producer for each name, shared by every subscription and info lookup until it closes.
 	requests = new Map<string, track.Producer>();
+	// The same for each name's metadata copy, kept apart so no payload reader is ever handed one.
+	// Only filled while `meta` is set.
+	metaRequests = new Map<string, track.Producer>();
+	// Whether its request handler fills a metadata copy apart from the payload one; see
+	// `hooks.serveMeta`. Otherwise a metadata reader takes the payload copy's headers.
+	meta = false;
 	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Requests`;
@@ -60,10 +66,11 @@ class BroadcastState {
 	pool = new cache.Pool({ expiry: cache.DEFAULT_EXPIRY });
 }
 
-// A new track of the broadcast, caching into its pool.
-function createProducer(state: BroadcastState, name: string): track.Producer {
+// A new track of the broadcast, caching into its pool: its metadata copy when `meta`.
+function createProducer(state: BroadcastState, name: string, meta = false): track.Producer {
 	const producer = new track.Producer(name);
 	hooks.poolTrack(producer, state.pool);
+	if (meta) hooks.metaTrack(producer);
 	return producer;
 }
 
@@ -198,21 +205,28 @@ function closeState(state: BroadcastState) {
 	state.closers.clear();
 }
 
-// The producer already serving `name`, evicting entries that can no longer serve it.
-function lookup(state: BroadcastState, name: string): track.Producer | undefined {
-	const inserted = state.tracks.get(name);
+// The producer already serving `name`, or its metadata copy when `meta`, evicting entries that can
+// no longer serve it. The application inserts payload tracks alone.
+function lookup(state: BroadcastState, name: string, meta = false): track.Producer | undefined {
+	const inserted = meta ? undefined : state.tracks.get(name);
 	if (inserted) {
 		if (!(hooks.trackReleased(inserted).peek() instanceof Error)) return inserted;
 		state.tracks.delete(name);
 	}
 
-	const requested = state.requests.get(name);
+	const requests = requestsOf(state, meta);
+	const requested = requests.get(name);
 	if (requested) {
 		if (hooks.trackReleased(requested).peek() === undefined) return requested;
-		state.requests.delete(name);
+		requests.delete(name);
 	}
 
 	return undefined;
+}
+
+// The on-demand producers for payload copies, or for metadata copies when `meta`.
+function requestsOf(state: BroadcastState, meta: boolean): Map<string, track.Producer> {
+	return meta ? state.metaRequests : state.requests;
 }
 
 // The producer serving `name`, or a new one with a request queued for it.
@@ -222,15 +236,19 @@ function lookup(state: BroadcastState, name: string): track.Producer | undefined
 // lookup fans out from one request instead of opening another. Whoever serves it closes it once
 // unused (the consuming wire tears the upstream down when its last subscriber leaves), which evicts
 // the entry so a later subscribe requests the track again.
-function logical(state: BroadcastState, name: string): { producer: track.Producer; requested: boolean } {
+//
+// A metadata reader (`meta`) gets a logical track of its own only where the handler fills one
+// (`state.meta`), and the payload one otherwise, whose headers it takes.
+function logical(state: BroadcastState, name: string, meta = false): { producer: track.Producer; requested: boolean } {
 	if (state.closed.peek() !== undefined) {
 		throw new Error("broadcast is closed");
 	}
 
-	const existing = lookup(state, name);
+	const copy = meta && state.meta;
+	const existing = lookup(state, name, copy);
 	if (existing) return { producer: existing, requested: false };
 
-	const producer = createProducer(state, name);
+	const producer = createProducer(state, name, copy);
 	if (!state.served) {
 		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
@@ -240,28 +258,34 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 
 	const lookups = new Lookups();
 	state.lookups.set(producer, lookups);
-	state.requests.set(name, producer);
+	const requests = requestsOf(state, copy);
+	requests.set(name, producer);
 	void hooks.trackReleased(producer).then(() => {
-		if (state.requests.get(name) === producer) state.requests.delete(name);
+		if (requests.get(name) === producer) requests.delete(name);
 	});
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, pending: state.pending, lookups }));
+		requested.push(hooks.makeRequest({ name, producer, pending: state.pending, lookups, meta: copy }));
 	});
 
 	return { producer, requested: true };
 }
 
-function subscribe(state: BroadcastState, name: string, options?: track.Subscription): track.Subscriber {
-	return logical(state, name).producer.subscribe(options);
+function subscribe(state: BroadcastState, name: string, options?: track.Subscription, meta = false): track.Subscriber {
+	return logical(state, name, meta).producer.subscribe(options);
 }
 
 // A lookup counts as the track's demand until `hold` aborts (without one, until the answer), before
 // and after acceptance, as a Rust `Resolving` does while held. An unanswered request stays open for its handler; after
 // acceptance, the last holder of a request a lookup opened releases it.
-async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
+async function resolveTrackInfo(
+	state: BroadcastState,
+	name: string,
+	hold?: AbortSignal,
+	meta = false,
+): Promise<track.Info> {
 	hold?.throwIfAborted();
-	const { producer, requested } = logical(state, name);
+	const { producer, requested } = logical(state, name, meta);
 	const lookups = state.lookups.get(producer);
 	if (lookups && requested) lookups.opened = true;
 	const unhold = hooks.holdTrack(producer);
@@ -297,8 +321,8 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string): track.Position | undefined {
-	const producer = lookup(state, name);
+function largest(state: BroadcastState, name: string, meta = false): track.Position | undefined {
+	const producer = lookup(state, name, meta && state.meta);
 	return producer && hooks.cachedLargest(producer);
 }
 
@@ -313,11 +337,12 @@ async function fetchGroup(
 	name: string,
 	key: bigint,
 	options: track.FetchGroupOptions = {},
+	meta = false,
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
 	const range: track.Range = { start: key, end: key };
 	if (options.priority !== undefined) range.priority = options.priority;
-	const subscriber = subscribe(state, name, { ranges: [range], placed: new Map([[0, key]]) });
+	const subscriber = subscribe(state, name, { ranges: [range], placed: new Map([[0, key]]) }, meta);
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);
 	try {
@@ -385,14 +410,27 @@ function changed(subscriber: track.Subscriber): Promise<void> {
 	});
 }
 
-// Remove and return the request queued for `name`, if no handler has taken it yet.
+// Remove and return the payload request queued for `name`, if no handler has taken it yet.
 function takeQueued(state: BroadcastState, name: string): track.Request | undefined {
-	const queued = state.requested.peek().find((request) => request.name === name);
+	const queued = state.requested.peek().find((request) => request.name === name && !request.meta);
 	if (!queued) return undefined;
 	state.requested.mutate((requests) => {
 		requests.splice(requests.indexOf(queued), 1);
 	});
 	return queued;
+}
+
+// What a metadata reader resolves names through where the handler fills metadata copies apart
+// (`state.meta`): undefined elsewhere, where it reads the payload copies through `view` itself.
+function metaView(state: BroadcastState, view: Produced): () => Broadcast | undefined {
+	const meta: Produced = {
+		...view,
+		subscribe: (name, options) => subscribe(state, name, options, true),
+		resolveTrackInfo: (name, hold) => resolveTrackInfo(state, name, hold, true),
+		largest: (name) => largest(state, name, true),
+		fetchGroup: (name, key, options) => fetchGroup(state, name, key, options, true),
+	};
+	return () => (state.meta ? meta : undefined);
 }
 
 // Serve `producer` as the broadcast's track for its name, listed with `info`.
@@ -418,7 +456,7 @@ export class Producer {
 	#path = Path.empty();
 
 	constructor() {
-		registerWire(this, {
+		const view: Produced = {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
@@ -431,7 +469,8 @@ export class Producer {
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => listTracks(this.#state.listing, owner),
 			lister: () => makeLister(this.#state.listing),
-		});
+		};
+		registerWire(this, { ...view, meta: metaView(this.#state, view) });
 	}
 
 	static {
@@ -585,7 +624,7 @@ export class Consumer {
 			this.#state.unheld = true;
 		}
 		this.#state.consumers++;
-		registerWire(this, {
+		const view: Produced = {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
@@ -598,7 +637,8 @@ export class Consumer {
 			requestedDatagrams: () => requestedDatagrams(this.#state),
 			tracks: (owner) => this.#tracks(owner),
 			lister: () => makeLister(this.#state.listing),
-		});
+		};
+		registerWire(this, { ...view, meta: metaView(this.#state, view) });
 	}
 
 	static {
@@ -614,6 +654,9 @@ export class Consumer {
 			target.#unlisted = true;
 		};
 		hooks.unlisted = (target) => target.#unlisted;
+		hooks.serveMeta = (target) => {
+			target.#state.meta = true;
+		};
 		hooks.resolveHeld = (target, name, hold) => {
 			const state = target.#state;
 			if (state.closed.peek() !== undefined) return undefined;

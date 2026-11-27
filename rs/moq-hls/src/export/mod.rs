@@ -1059,6 +1059,25 @@ mod tests {
 		assert!(renditions.get(Kind::Video, "known").is_some());
 	}
 
+	// A CTS group has no defined place on the segment grid, so its rendition is skipped like an
+	// unknown container rather than served in whatever order its groups arrive.
+	#[tokio::test]
+	async fn a_cts_rendition_is_not_served() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let mut cts = video_config();
+		cts.container = hang::catalog::Container::Cts;
+		let mut raw = video_config();
+		raw.container = hang::catalog::Container::Raw;
+		let mut catalog = joined();
+		catalog.video.renditions.insert("cts".to_string(), cts);
+		catalog.video.renditions.insert("raw".to_string(), raw);
+		let renditions = renditions::Producer::spawned(Config::default().window);
+		renditions.sync(&source, &catalog);
+		assert!(renditions.get(Kind::Video, "cts").is_none());
+		assert!(renditions.get(Kind::Video, "raw").is_some());
+	}
+
 	// A publisher's estimator republishes the catalog every time its measured bitrate or jitter
 	// moves, writing those two fields and nothing else. That must not churn the rendition:
 	// rebuilding resets the playlist window, the cached init segment and EXT-X-MEDIA-SEQUENCE,

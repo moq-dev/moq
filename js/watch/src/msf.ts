@@ -17,6 +17,8 @@ function bytesToHex(bytes: Uint8Array): string {
 interface ContainerInfo {
 	container: Catalog.Container;
 	description?: string;
+	// The decoded initData: the codec config itself, except under CMAF.
+	init?: Uint8Array;
 }
 
 // `packaging` declares how the bytes are framed, not an optional capability, so every value maps to
@@ -40,9 +42,13 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 			if (!track.initData || !initBytes) return undefined;
 			return { container: { kind: "cmaf", init: track.initData }, description: undefined };
 		case "loc":
-			return { container: { kind: "loc" }, description };
+			return { container: { kind: "loc" }, description, init: initBytes };
 		case "legacy":
-			return { container: { kind: "legacy" }, description };
+			return { container: { kind: "legacy" }, description, init: initBytes };
+		case "raw":
+			return { container: { kind: "raw" }, description, init: initBytes };
+		case "cts":
+			return { container: { kind: "cts" }, description, init: initBytes };
 		default:
 			return undefined;
 	}
@@ -81,24 +87,43 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 	};
 }
 
+// What an AAC AudioSpecificConfig or Opus OpusHead in `init` decodes to, as moq-mux derives it.
+// Undefined for another codec or a config that doesn't parse.
+function codecAudio(
+	codec: string,
+	init: Uint8Array | undefined,
+): { sampleRate: number; numberOfChannels: number } | undefined {
+	if (!init) return undefined;
+	if (Util.Aac.objectType(codec) !== undefined) return Util.Aac.parseConfig(init);
+	if (codec !== "opus") return undefined;
+	try {
+		// Opus decodes at 48 kHz, whatever rate the OpusHead says the source had.
+		const numberOfChannels = Util.Opus.channelCount(init);
+		return numberOfChannels > 0 ? { sampleRate: Util.Opus.DEFAULT_SAMPLE_RATE, numberOfChannels } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 	if (!track.codec) return undefined;
 
-	const channels = (() => {
-		if (!track.channelConfig) return DEFAULT_NUMBER_OF_CHANNELS;
-		const parsed = Number.parseInt(track.channelConfig, 10);
-		return Number.isFinite(parsed) ? parsed : DEFAULT_NUMBER_OF_CHANNELS;
-	})();
-
 	const info = toContainer(track);
 	if (!info) return undefined;
-	const { container, description } = info;
+	const { container, description, init } = info;
+
+	const parsed = track.channelConfig ? Number.parseInt(track.channelConfig, 10) : Number.NaN;
+	const channels = Number.isFinite(parsed) ? parsed : undefined;
+	// MSF leaves samplerate and channelConfig optional, so read what's missing from the codec config
+	// before guessing: raw, cts, and legacy time each packet from the rate. A CMAF init stays unread
+	// here, since its parser loads lazily and its fragments carry their own sample durations.
+	const derived = track.samplerate == null || channels === undefined ? codecAudio(track.codec, init) : undefined;
 	return {
 		codec: track.codec,
 		container,
 		description,
-		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
-		numberOfChannels: u53(channels),
+		sampleRate: u53(track.samplerate ?? derived?.sampleRate ?? DEFAULT_SAMPLE_RATE),
+		numberOfChannels: u53(channels ?? derived?.numberOfChannels ?? DEFAULT_NUMBER_OF_CHANNELS),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 		// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
 		warmup: track.codec === "opus" ? u53(Util.Opus.WARMUP) : undefined,

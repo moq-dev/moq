@@ -4,6 +4,7 @@ import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Goaway } from "../connection/goaway.ts";
+import type { Liveness } from "../connection/keep_alive.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -63,6 +64,9 @@ export class Connection implements Session {
 
 	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
+
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	readonly liveness: Getter<Liveness> | undefined;
 
 	/** Our tokens, which requests carry; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
@@ -132,6 +136,7 @@ export class Connection implements Session {
 		handle,
 		early = [],
 		peerImplementation,
+		liveness,
 		linkCost,
 		priority = 0,
 	}: {
@@ -165,11 +170,14 @@ export class Connection implements Session {
 		early?: Reader[];
 		/** The implementation the peer's SETUP advertised, read before the session starts. */
 		peerImplementation?: string;
+		/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+		liveness?: Getter<Liveness>;
 		/** What crossing this link costs, which the SETUP exchange settled. Defaults to free. */
 		linkCost?: Cost;
 		/** This link's rank, which every route the peer sends carries. Defaults to 0. */
 		priority?: number;
 	}) {
+		this.liveness = liveness;
 		this.url = url;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);

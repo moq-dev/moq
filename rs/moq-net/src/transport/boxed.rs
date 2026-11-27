@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Poll, ready};
 
@@ -15,7 +15,8 @@ use bytes::{Buf, Bytes};
 
 use super::open::{self, Dir, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Limits, LimitsError, Probe, ReceiveWindow, Wire};
+use super::{Address, CloseKind, KeepAliveError, Limits, LimitsError, Probe, ReceiveWindow, Wire};
+use super::{KeepAlive, Liveness};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -34,6 +35,7 @@ impl Session {
 		let inner: Arc<Shared<dyn ErasedSession>> = Arc::new(Shared {
 			paused: AtomicU64::new(0),
 			slots: Mutex::default(),
+			keep_alive: AtomicBool::new(false),
 			session,
 		});
 		Self {
@@ -114,6 +116,11 @@ impl Session {
 		Arc::downgrade(&self.inner)
 	}
 
+	/// Whether a keep-alive started on this transport.
+	pub(crate) fn keeps_alive(&self) -> bool {
+		self.inner.keep_alive.load(Ordering::Relaxed)
+	}
+
 	/// How this side closed the transport.
 	pub(crate) fn closing(&self) -> &std::sync::Arc<crate::session::Closing> {
 		&self.closing
@@ -149,6 +156,8 @@ pub(super) struct Shared<S: ?Sized> {
 	paused: AtomicU64,
 	/// The slots of the streams this session shapes the credit of; see [`Pacing::allowance`].
 	slots: Mutex<Slots>,
+	/// Whether a keep-alive started, so the session reports its peer's liveness.
+	keep_alive: AtomicBool,
 	session: S,
 }
 
@@ -824,6 +833,8 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn reliable_reset(&self) -> bool;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
+	fn set_keep_alive(&self, keep_alive: KeepAlive) -> Result<(), KeepAliveError>;
+	fn poll_liveness(&self, waiter: &kio::Waiter, last: Liveness) -> Poll<Liveness>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -973,6 +984,14 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
+	}
+
+	fn set_keep_alive(&self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
+		poll::Session::set_keep_alive(self, keep_alive)
+	}
+
+	fn poll_liveness(&self, waiter: &kio::Waiter, last: Liveness) -> Poll<Liveness> {
+		poll::Session::poll_liveness(self, waiter, last)
 	}
 }
 
@@ -1267,6 +1286,16 @@ impl poll::Session for Session {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		self.inner.session.set_limits(limits)
+	}
+
+	fn set_keep_alive(&self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
+		self.inner.session.set_keep_alive(keep_alive)?;
+		self.inner.keep_alive.store(true, Ordering::Relaxed);
+		Ok(())
+	}
+
+	fn poll_liveness(&self, waiter: &kio::Waiter, last: Liveness) -> Poll<Liveness> {
+		self.inner.session.poll_liveness(waiter, last)
 	}
 }
 

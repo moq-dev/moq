@@ -1111,8 +1111,9 @@ impl SubscriptionCleanup {
 impl Drop for SubscriptionCleanup {
 	fn drop(&mut self) {
 		// A session that ended with an error already aborted these with it; what
-		// remains was cancelled with the driver.
-		self.abort(&Error::Cancel);
+		// remains was cancelled with the driver, which ends the session: a route replacing
+		// it continues what these copies closed short.
+		self.abort(&crate::SessionError::Cancel.into());
 	}
 }
 
@@ -1714,7 +1715,7 @@ impl GroupRecv {
 				// GROUP_END without blocking or allocating; if more bytes are still on the wire,
 				// STOP_SENDING reaches the live publisher stream and it re-sends the cut span.
 				if self.subscriber.version.has_group_span()
-					&& let Some(end) = ingest.try_drain_end(&mut self.reader, group.compressed())
+					&& let Some(end) = ingest.try_drain_end(&mut self.reader, group.compressed(), group.is_meta())
 					&& group.check_end(end).is_ok()
 				{
 					reading.account(hdr.key..end, self.subscriber.runtime.now());
@@ -2075,7 +2076,8 @@ impl FrameIngest {
 				}
 				IngestPhase::Inflated { size, timestamp } => {
 					let (size, timestamp) = (*size, *timestamp);
-					// Only a compressed Track carries it, and only lite-07 can mark one.
+					// Only a compressed Track carries it, and only lite-07 can mark one. A
+					// metadata copy's FRAME carries none, its length being the plain size.
 					let inflated = match group.compressed() {
 						true => {
 							let boundary = size.is_none() && !self.framing.stamped();
@@ -2086,13 +2088,12 @@ impl FrameIngest {
 						}
 						false => None,
 					};
-					self.phase = match size {
-						Some(size) => {
-							let header = self.header(group, timestamp, inflated, size)?;
-							IngestPhase::Admit { header }
-						}
-						None => IngestPhase::Size { timestamp, inflated },
+					let Some(size) = size else {
+						self.phase = IngestPhase::Size { timestamp, inflated };
+						continue;
 					};
+					let header = self.header(group, timestamp, inflated, size)?;
+					self.phase = IngestPhase::Admit { header };
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
@@ -2108,6 +2109,13 @@ impl FrameIngest {
 					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Length) else {
 						unreachable!()
 					};
+					if group.is_meta() {
+						// A metadata FRAME is its header alone: no payload follows it.
+						group.write_header(header)?;
+						self.phase = self.next_frame();
+						ready!(budget.poll_yield(waiter));
+						continue;
+					}
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed. No wire timestamp (pre-lite-05) means an untimed
@@ -2149,6 +2157,7 @@ impl FrameIngest {
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		compressed: bool,
+		meta: bool,
 	) -> Option<u64> {
 		if self.records.is_some() || !self.framing.length_first {
 			return None;
@@ -2161,7 +2170,8 @@ impl FrameIngest {
 				if header.info.timestamp.scale().is_some() {
 					max_ts = max_ts.max(header.info.timestamp.value());
 				}
-				header.info.size
+				// A metadata FRAME paused to admit has no payload behind it to skip.
+				if meta { 0 } else { header.info.size }
 			}
 			other @ (IngestPhase::Inflated { timestamp, .. } | IngestPhase::Size { timestamp, .. }) => {
 				if let Some(ts) = timestamp {
@@ -2208,7 +2218,8 @@ impl FrameIngest {
 							return None;
 						};
 					}
-					skip = size;
+					// A metadata FRAME has no payload to skip.
+					skip = if meta { 0 } else { size };
 					self.phase = IngestPhase::Length;
 				}
 				IngestPhase::GroupEnd => {
@@ -3028,6 +3039,7 @@ impl kio::Task for SourceServe {
 						identity: self.identity.clone(),
 						node: self.node,
 						name: request.name().to_string(),
+						meta: request.meta(),
 					};
 					// One machine per track serves its lone subscription and any number
 					// of fetches concurrently.
@@ -3513,6 +3525,67 @@ mod tests {
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
 
+	/// A metadata group dropped while its ingest waits to admit a header still finds the
+	/// GROUP_END buffered behind it: no payload follows that header, so the drain skips none.
+	#[test]
+	fn a_paused_metadata_frame_drains_to_its_group_end() {
+		/// The rest of the stream in one read, then its FIN.
+		struct Once(Option<bytes::Bytes>);
+		impl crate::transport::poll::Chunks for Once {
+			type Error = Error;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+				Poll::Ready(Ok(self.0.take()))
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let version = Version::Lite07;
+		let info = crate::track::Info::default();
+		// Untimed headers each declaring 4 MiB, more than the whole stream holds, so skipping one
+		// header's declared size would swallow the GROUP_END. More headers than the pace window
+		// holds, then a GROUP_END and the FIN.
+		let headers = 400_000;
+		let mut header = Vec::new();
+		crate::coding::Encoder::new(&mut header, version.into())
+			.varint((4 << 20) + 1)
+			.unwrap();
+		let mut stream = header.repeat(headers);
+		stream.extend_from_slice(&[0, 0]);
+		let mut reader = crate::coding::Reader::new(
+			crate::transport::poll::Buffered::new(Once(Some(bytes::Bytes::from(stream)))),
+			version,
+		);
+		let track = crate::track::Producer::new_meta(Arc::new(crate::broadcast::Info::default()), "test", info.clone());
+		let producer = track.create_group(crate::group::Info { start: 0 }).unwrap();
+		let _idle = producer.consume();
+		let mut group = crate::recv::Group::new(producer);
+		let mut ingest = FrameIngest::new(
+			lite::Framing::new(&info, version),
+			false,
+			0,
+			lite::Clock::new(version, 0),
+		);
+		let waiter = kio::Waiter::noop();
+		let mut written = 0;
+		loop {
+			let polled = ingest.poll(&mut reader, &mut group, &waiter);
+			assert!(polled.is_pending(), "{polled:?}");
+			if group.frame_count() == written {
+				break;
+			}
+			written = group.frame_count();
+		}
+		assert!(matches!(ingest.phase, IngestPhase::Admit { .. }), "paused to admit");
+		assert!(
+			ingest.try_drain_end(&mut reader, false, true).is_some(),
+			"the GROUP_END was lost"
+		);
+	}
+
 	/// A burst's answers naming the same largest position keep it ended if any says so, in
 	/// either order: a later one from a copy yet to see the end can't reopen the group.
 	#[test]
@@ -3872,6 +3945,47 @@ mod tests {
 			};
 			assert_eq!(read, placed, "max {max:?}, retuned from {retuned_from:?}");
 		}
+	}
+
+	/// A live join answered under the max it was first asked with, before the update retuning
+	/// it wider goes out, places no reader waiting with the wider max, so that join goes out on
+	/// a probe of its own. Mirrors the JS `a join answered before its retune goes out is probed`.
+	#[kio::test]
+	async fn a_join_answered_before_its_retune_is_probed() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let asked = |max: Duration| lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Some(Duration::ZERO),
+				max: Some(max),
+			}),
+			end: None,
+		};
+		active.live = lite::LiveRanges::new(Version::Lite07, &[asked(Duration::ZERO)]);
+		active.starts = [(0, Some(20))].into();
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
+		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		serving.received();
+		serving.anchored();
+		active.report_starts(&serving);
+
+		// The retune goes out after the answer to the first max.
+		let wider = asked(Duration::from_millis(100));
+		active.live = lite::LiveRanges::new(Version::Lite07, &[wider]);
+		let join = track::JoinAsk {
+			min: Some(Duration::ZERO),
+			end: None,
+			budget: Duration::from_millis(100),
+			since: 0,
+		};
+		let (probes, _) = join_probes(Some(&active), &[join], &[wider]);
+		assert_eq!(
+			probes,
+			[join_probe(&join)],
+			"an answer under 0 ms places no reader at 100 ms"
+		);
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -6240,6 +6354,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".to_string(),
+				meta: false,
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
@@ -6315,6 +6430,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
@@ -6424,6 +6540,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
@@ -6512,6 +6629,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
@@ -6925,6 +7043,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let waiter = kio::Waiter::noop();
 		let copy = crate::track::Producer::new(
@@ -7399,6 +7518,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".to_string(),
+				meta: false,
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
@@ -7480,6 +7600,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let serve_loop = ServeLoop::new(
@@ -7555,6 +7676,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let serve_loop = ServeLoop::new(
@@ -7629,6 +7751,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
@@ -7745,6 +7868,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
@@ -7816,6 +7940,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".to_string(),
+				meta: false,
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let serving = ServeLoop::new(
@@ -7987,6 +8112,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".to_string(),
+				meta: false,
 			},
 			request,
 		);
@@ -8060,6 +8186,7 @@ mod tests {
 					identity: None,
 					node: None,
 					name: "video".into(),
+					meta: false,
 				};
 				let info = track::Info::default().with_timescale(None);
 				let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
@@ -8144,6 +8271,7 @@ mod tests {
 					identity: None,
 					node: None,
 					name: "video".to_string(),
+					meta: false,
 				},
 				request,
 			);
@@ -8198,6 +8326,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".to_string(),
+			meta: false,
 		};
 		(waiting, TrackServeRun::new(serve, request))
 	}
@@ -8650,6 +8779,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".to_string(),
+				meta: false,
 			},
 			request,
 		);
@@ -8696,6 +8826,7 @@ mod tests {
 					identity: None,
 					node: None,
 					name: "video".to_string(),
+					meta: false,
 				},
 				request,
 			);
@@ -8923,6 +9054,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".to_string(),
+				meta: false,
 			},
 			request,
 		);
@@ -8976,6 +9108,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "catalog.json".to_string(),
+			meta: false,
 		};
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -9045,6 +9178,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "audio".to_string(),
+			meta: false,
 		};
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -9114,6 +9248,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "audio".to_string(),
+				meta: false,
 			};
 
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -9213,6 +9348,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "audio".to_string(),
+			meta: false,
 		};
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -9279,6 +9415,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "audio".to_string(),
+				meta: false,
 			};
 
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -9402,6 +9539,7 @@ mod tests {
 					identity: None,
 					node: None,
 					name: "catalog.json".to_string(),
+					meta: false,
 				},
 				session,
 				producer,
@@ -9478,6 +9616,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".into(),
+				meta: false,
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
@@ -9552,6 +9691,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".into(),
+				meta: false,
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
@@ -9628,6 +9768,7 @@ mod tests {
 				identity: None,
 				node: None,
 				name: "video".into(),
+				meta: false,
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
@@ -9722,6 +9863,7 @@ mod tests {
 					identity: None,
 					node: None,
 					name: "video".into(),
+					meta: false,
 				};
 				let waiter = kio::Waiter::noop();
 				let broadcast = crate::broadcast::Info::new().produce();
@@ -9842,6 +9984,7 @@ mod tests {
 			identity: None,
 			node: None,
 			name: "video".into(),
+			meta: false,
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
@@ -12258,7 +12401,7 @@ struct SubStream {
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
 	join_ticks: std::collections::BTreeMap<u64, u64>,
-	/// The narrowest max age each live join range was asked under before its answer, or each
+	/// The narrowest max age each live join range was asked under up to its answer, or each
 	/// placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups
 	/// that max expired, so the answer places only readers within it.
 	join_budgets: std::collections::BTreeMap<u64, Duration>,
@@ -12348,6 +12491,8 @@ impl SubStream {
 					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
 						let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
 						let budget = asked.min(crate::track::budget(max));
+						// Kept with it, so a retune wider after it lands still finds the answer narrower.
+						self.join_budgets.insert(id, budget);
 						entry.insert(serving.answer_join(min, through(range.end), start, budget));
 					}
 					continue;
@@ -13064,6 +13209,10 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
 			crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
 		};
 		let source = subscriber.origin.create_source(path.clone(), validity);
+		// A metadata reader gets a copy of its own, filled by a metadata subscription.
+		if subscriber.version.has_meta() {
+			source.serve_meta();
+		}
 		// The handler exists before the requester sees the source, so a track it
 		// asks for before the serve machine first runs queues instead of failing
 		// `NotFound`. Accepted before the push, so the requester holds the source
@@ -13163,6 +13312,9 @@ struct TrackServe {
 	/// The node to ask for (lite-07), or none to let the peer select.
 	node: Option<crate::route::NodeId>,
 	name: String,
+	/// Whether this serves the track's metadata copy, asking with a metadata subscription
+	/// (lite-07 `Meta`) for each frame's header alone.
+	meta: bool,
 }
 
 impl TrackServe {
@@ -13428,6 +13580,7 @@ impl TrackServe {
 			max_delay: subscription.max_age(),
 			ranges: vec![lite::Range::OPEN],
 			order: subscription.policy().order,
+			meta: self.meta,
 		};
 		// One that can't go out leaves no room, and fails as it would have.
 		msg.encode_bytes(self.subscriber.version)
@@ -13817,6 +13970,7 @@ impl Establish {
 			max_delay: self.max_age,
 			ranges: self.ranges.clone(),
 			order: policy.order,
+			meta: self.serve.meta,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -16879,6 +17033,7 @@ impl kio::Task for SubFillRun {
 							..lite::Range::OPEN
 						}],
 						order: crate::track::Order::Ascending,
+						meta: self.serve.meta,
 					};
 					tracing::debug!(
 						broadcast = %self.serve.subscriber.log_path(&self.serve.path),

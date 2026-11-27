@@ -203,6 +203,13 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) throw new Error("audio track ended early");
+			// The reader saw media go missing, such as groups a relay shed behind newer ones. Fail
+			// here, as the other clients do, so the cell names the hole rather than tone.py's gap.
+			if (next.kind === "gap") {
+				throw new Error(
+					`audio gap after ${decoded} samples, at ${next.timestamp.asMicros()}us for ${next.duration.asMicros()}us`,
+				);
+			}
 			if (next.kind !== "frame") continue;
 			const timestamp = Math.floor(next.frame.timestamp.asMicros());
 			if (timestamp <= last) continue;

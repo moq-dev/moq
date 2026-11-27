@@ -22357,6 +22357,10 @@ rec {
             features = [ "async" ];
           }
           {
+            name = "moq-json";
+            packageId = "moq-json";
+          }
+          {
             name = "moq-mux";
             packageId = "moq-mux";
           }
@@ -59778,15 +59782,6 @@ rec {
             name = "itertools";
             packageId = "itertools 0.13.0";
             target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
-          }
-          {
-            name = "kio";
-            packageId = "kio";
-            features = [
-              "manual"
-              "serde"
-              "sim"
-            ];
           }
           {
             name = "libc";

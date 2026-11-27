@@ -850,6 +850,10 @@ async function servedSubscription(
 		// qmux one has, which `reliable` on the result controls and logs. `"plain"` is a qmux peer
 		// without RESET_STREAM_AT, whose resets may lose the prefix.
 		reliable?: boolean | "plain";
+		// Ask for each frame's header alone (lite-07 `Meta`), which `servedGroup` then reads.
+		meta?: boolean;
+		// The track's compression, none when unset.
+		compression?: "deflate";
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -881,7 +885,7 @@ async function servedSubscription(
 		broadcast = publish(origin, Path.from("test"));
 	}
 	// Unset is no publisher limit: these fixtures serve superseded groups.
-	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null };
+	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null, compression: options.compression };
 	let track = options.pending ? undefined : defined(broadcast.createTrack("video", info));
 	for (const key of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
@@ -926,6 +930,7 @@ async function servedSubscription(
 	// than only for what reached the wire. It reports failures by tearing down, never by
 	// rejecting.
 	msg.ranges = options.ranges;
+	msg.meta = options.meta ?? false;
 	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
@@ -1016,6 +1021,8 @@ async function servedSubscription(
 			const header = await GroupMessage.decode(reader, version);
 
 			const payloads: string[] = [];
+			// A metadata subscription's frames carry their plain sizes, and no payload.
+			const sizes: number[] = [];
 			const times: bigint[] = [];
 			let end: bigint | undefined;
 			let endDelta: bigint | undefined;
@@ -1037,9 +1044,11 @@ async function servedSubscription(
 				times.push(ts);
 				if (highest === undefined || ts > highest) highest = ts;
 				const size = length ?? (await reader.u53());
-				payloads.push(new TextDecoder().decode(await reader.read(size)));
+				if (options.meta) sizes.push(size);
+				else payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			const served = { key: header.key, frameStart: header.frameStart, payloads };
+			if (options.meta) return { ...served, sizes, times, end, endDelta };
 			return lengthFirst ? { ...served, times, end, endDelta } : served;
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
@@ -1499,6 +1508,31 @@ test("lite-07 ends a finished group with GROUP_END and a closed one with a bare 
 		await sub.close();
 	}
 });
+
+// A metadata subscription's Group Stream carries each frame's header alone: its plain size plus one
+// and its timestamp delta, with no payload, so an empty frame stays apart from GROUP_END. A compressed
+// frame names its declared plain size. Mirrors the Rust `lite07_meta_serves_each_frame_header_alone`.
+for (const compression of [undefined, "deflate"] as const) {
+	test(`lite-07 serves a metadata subscription each frame's header alone (${compression ?? "plain"})`, async () => {
+		const sub = await servedSubscription({ version: Version.DRAFT_07, ranges: [{}], meta: true, compression });
+		try {
+			const group = sub.track.createGroup(0n);
+			group.writeFrame(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
+			group.writeFrame(textFrame("", Timestamp.fromMillis(3)));
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(4)));
+			group.finishAt(5n);
+			expect(await sub.servedGroup()).toMatchObject({
+				key: 0n,
+				payloads: [],
+				sizes: [300, 0, 5],
+				times: [2n, 3n, 4n],
+				end: 5n,
+			});
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // A lite-07 GROUP_END's End is a delta from the highest frame timestamp the stream carried: B-frames
 // send timestamps backwards, so the highest is not the last.
@@ -3637,6 +3671,8 @@ type Served = {
 	key: bigint;
 	frameStart: number;
 	payloads: string[];
+	// A metadata subscription's plain frame sizes, in place of its payloads.
+	sizes?: number[];
 	times?: bigint[];
 	end?: bigint;
 	endDelta?: bigint;
@@ -6001,9 +6037,9 @@ test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame s
 			await w.u53(2);
 			await msg.encode(w, version);
 		});
-		const writing = s.writer.write(bytes);
+		// The write may yield to the budget first, so close only once the transport took it.
+		await s.writer.write(bytes);
 		s.writer.close();
-		await writing;
 		const responses = [];
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(s.reader, version);

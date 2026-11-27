@@ -77,7 +77,8 @@ window.pending = () => progress.filter((received) => received.at === undefined);
 // Read every group the subscription hands out until it ends. Frames are read concurrently with
 // the next group, since a group waiting on its frames must not hold back the groups after it. A
 // group that ends early for any reason but going stale is fetched, as a reader that still wants
-// it would: the relay reset its stream to make room, and a fetch rides a stream the page opens.
+// it would: the relay reset its stream to make room. A lite-06 fetch rides a stream the page opens,
+// while a lite-07 one is a one-shot subscription whose group competes for the same cap.
 async function read(
 	track: Track,
 	consumer: Moq.Track.Consumer,

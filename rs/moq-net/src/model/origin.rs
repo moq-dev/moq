@@ -4570,7 +4570,7 @@ struct Asked {
 /// machine uses.
 struct TrackIo {
 	/// Queues just this track when a resource it watches changes.
-	ready: Arc<crate::util::QueueWake<Arc<str>>>,
+	ready: Arc<crate::util::QueueWake<track::Key>>,
 	park: kio::Park,
 	logical: Logical,
 	/// Whether anyone reads the logical track.
@@ -4890,9 +4890,9 @@ enum FrontStep {
 	Assigned(Box<track::Request>),
 	Resolved(Result<broadcast::Consumer, Error>),
 	SourceClosed(u64),
-	Info(Arc<str>, u64, Result<track::Info, Error>),
-	Ended(Arc<str>, u64, Result<(), Error>, bool),
-	Demand(Arc<str>),
+	Info(track::Key, u64, Result<track::Info, Error>),
+	Ended(track::Key, u64, Result<(), Error>, bool),
+	Demand(track::Key),
 	Holders,
 	/// The broadcast closed: nobody can hold it again.
 	Closed,
@@ -4945,8 +4945,8 @@ struct FrontServe {
 	/// The watch generation the last selection saw.
 	seen: u64,
 	deadline: crate::time::Deadline,
-	ready: kio::Queue<Arc<str>>,
-	tracks: HashMap<Arc<str>, TrackIo>,
+	ready: kio::Queue<track::Key>,
+	tracks: HashMap<track::Key, TrackIo>,
 	upstream: Option<FrontUpstream>,
 	next_source: u64,
 	/// The identity and epoch each source's route served when it was asked: what its
@@ -4967,6 +4967,15 @@ struct FrontServe {
 	path: Path,
 	broadcast: broadcast::Producer,
 	shared: SendCell<kio::Shared<OriginState>>,
+}
+
+/// The copy of `key` a front's source serves: its metadata copy where it keeps one apart,
+/// and otherwise its payload copy, whose headers a metadata reader takes.
+fn source_track(source: &broadcast::Consumer, key: &track::Key) -> Result<track::Consumer, Error> {
+	match key.meta {
+		true => source.track_meta(&key.name),
+		false => source.track(&key.name),
+	}
 }
 
 impl FrontServe {
@@ -5455,7 +5464,7 @@ impl kio::Task for FrontServe {
 							let Some(io) = self.tracks.get_mut(&name) else { continue };
 							io.ready.wake_by_ref();
 							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
-							match self.sources.get(&source).map(|s| s.track(&name)) {
+							match self.sources.get(&source).map(|s| source_track(s, &name)) {
 								Some(Ok(lookup)) => {
 									// Subscribe before the query exposes upstream demand, and query
 									// that same identity even if the broadcast changes meanwhile.
@@ -5495,7 +5504,7 @@ impl kio::Task for FrontServe {
 							}
 							io.ready.wake_by_ref();
 							let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
-							let lookup = match self.sources.get(&source).map(|s| s.track(&name)) {
+							let lookup = match self.sources.get(&source).map(|s| source_track(s, &name)) {
 								Some(Ok(lookup)) => lookup,
 								// Refused before any lookup, as a query would be: the front judges
 								// it the same way, so a held fetch is not left waiting on it.
@@ -5716,7 +5725,10 @@ impl kio::Task for FrontServe {
 			let event = match step {
 				FrontStep::Assigned(request) => {
 					let request = *request;
-					let name: Arc<str> = request.name().into();
+					let name = track::Key {
+						name: request.name().into(),
+						meta: request.meta(),
+					};
 					let track_ready = crate::util::QueueWake::new(name.clone(), self.ready.clone());
 					track_ready.wake_by_ref();
 					let routes = super::resume::Producer::new();
@@ -8772,6 +8784,9 @@ impl Consumer {
 			frames: Default::default(),
 			edges: Default::default(),
 		});
+		// Each route's source decides which copy a metadata reader gets; the front keeps
+		// the two apart either way.
+		broadcast.serve_meta();
 		let request = kio::Producer::new(PendingFront {
 			resolved: None,
 			epoch,

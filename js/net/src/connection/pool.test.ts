@@ -94,6 +94,8 @@ test("urlAuth: false is the default carrier, so it shares; true needs a private 
 	expect(second.origin.peek()).toBe(first.origin.peek());
 
 	expect(() => new Connection({ url, share: true, urlAuth: true })).toThrow("urlAuth cannot be shared");
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	expect(() => new Connection({ url, share: true, keepAlive })).toThrow("keepAlive cannot be shared");
 
 	first.close();
 	second.close();

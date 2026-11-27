@@ -1055,6 +1055,7 @@ impl<E: catalog::Catalog> Import<E> {
 				resync: Resync::new(pid.as_u16(), ".aac"),
 				burst: std::time::Duration::ZERO,
 				last: None,
+				group: AudioGroup::default(),
 			})),
 			// Legacy broadcast audio, carried verbatim. Both MP2 stream types
 			// (0x03 MPEG-1, 0x04 MPEG-2 half rate) share one parser; sample rate and
@@ -1079,6 +1080,7 @@ impl<E: catalog::Catalog> Import<E> {
 						Stream::Opus(Box::new(OpusStream {
 							import: opus::Import::new(track, self.reserve(), config)?,
 							last: None,
+							group: AudioGroup::default(),
 						}))
 					}
 					Err(err) => self.uncarried(
@@ -1150,6 +1152,7 @@ impl<E: catalog::Catalog> Import<E> {
 			tail_pes: PesStarts::default(),
 			resync: Resync::new(pid.as_u16(), descriptor.track_suffix),
 			last: None,
+			group: AudioGroup::default(),
 		}))
 	}
 
@@ -3339,6 +3342,14 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// lost, so the producer refuses them until a keyframe opens the next group. Left open,
 	/// the group would close a GOP later at that keyframe, with an end past its content.
 	fn lost(&mut self) -> Result<()> {
+		// An audio group closes at its last intact frame, so recovered frames open a fresh group
+		// rather than join the audio from before the loss.
+		match self {
+			Stream::Aac(stream) => stream.close_group()?,
+			Stream::Legacy(stream) => stream.close_group()?,
+			Stream::Opus(stream) => stream.close_group()?,
+			_ => {}
+		}
 		self.desync();
 		match self {
 			Stream::H264 { import, .. } => import.cut(None)?,
@@ -3760,6 +3771,44 @@ impl From<&legacy::Descriptor> for SyncWord {
 /// AAC needs the first ADTS header before it can build a [`aac::Import`]
 /// (the sample rate and channel layout aren't in the PMT), so creation is
 /// deferred until the first frame arrives.
+/// An audio stream's open group. It spans PES until one brings it to a join, closing at that PES's
+/// end: the transport sends a track's newest group first, so splitting a PES across groups would
+/// deliver its oldest frames last.
+#[derive(Default)]
+struct AudioGroup {
+	join: crate::container::Join,
+	/// Where the open group starts and where its last frame stops, while one is open.
+	open: Option<(Timestamp, Timestamp)>,
+}
+
+impl AudioGroup {
+	/// A frame from `start` to `end` joined the open group, or opened one.
+	fn extend(&mut self, start: Timestamp, end: Timestamp) {
+		let start = self.open.map_or(start, |(start, _)| start);
+		self.open = Some((start, end));
+	}
+
+	/// Close the open group whatever it holds, returning where its content stops.
+	fn take(&mut self) -> Option<Timestamp> {
+		self.open.take().map(|(_, end)| end)
+	}
+
+	/// Close the open group at a PES end once it carries a join, returning where its content stops.
+	fn fill(&mut self) -> Option<Timestamp> {
+		let (start, end) = self.open?;
+		if self.join.full(start, end) { self.take() } else { None }
+	}
+
+	/// At a PES end, close the open group once it carries a join, or whatever it holds after an
+	/// error, returning where its content stops.
+	fn close<T>(&mut self, result: &Result<T>) -> Option<Timestamp> {
+		match result {
+			Ok(_) => self.fill(),
+			Err(_) => self.take(),
+		}
+	}
+}
+
 struct AacStream<E: CatalogExt = ()> {
 	import: Option<aac::Import>,
 	/// The AudioSpecificConfig `import` was built with. A program config element in a later frame
@@ -3791,26 +3840,28 @@ struct AacStream<E: CatalogExt = ()> {
 	burst: std::time::Duration,
 	/// The PTS of the last frame `import` published: see [`forward`].
 	last: Option<Timestamp>,
+	group: AudioGroup,
 }
 
 impl<E: CatalogExt> AacStream<E> {
 	fn write(&mut self, pending: Pending, batched: bool) -> Result<u64> {
-		// The frames a PES completes share one group, closed once the PES is spent, even by an
-		// error. The transport sends a track's newest group first, so a group per frame would
-		// deliver a multi-frame PES newest first, its oldest frame waiting behind the rest.
-		let mut open = None;
-		let result = self.split(pending, batched, &mut open);
+		// The frames a PES completes share a group (see `AudioGroup`), closed once the PES is spent
+		// if the group carries a join, and by an error whatever it holds.
+		let mut group = std::mem::take(&mut self.group);
+		let result = self.split(pending, batched, &mut group);
+		let end = group.close(&result);
+		self.group = group;
 		// A failed cut is a publishing failure, which outranks the split's own error.
-		if let (Some(end), Some(import)) = (open, &mut self.import) {
+		if let (Some(end), Some(import)) = (end, &mut self.import) {
 			import.cut(Some(end))?;
 		}
 		result
 	}
 
-	/// Publish the frames `pending` completes into one group, leaving `open` at where its last frame
-	/// stops while it is open. A frame without a PTS is stamped by the producer, which checks only
-	/// where groups start, so it keeps a group of its own, as every frame once did.
-	fn split(&mut self, pending: Pending, batched: bool, open: &mut Option<Timestamp>) -> Result<u64> {
+	/// Publish the frames `pending` completes into the open group, extending `group` to where its
+	/// last frame stops. A frame without a PTS is stamped by the producer, which checks only where
+	/// groups start, so it keeps a group of its own, as every frame once did.
+	fn split(&mut self, pending: Pending, batched: bool, group: &mut AudioGroup) -> Result<u64> {
 		let pes_base = on_clock(pending.pts, pending.offset)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -3956,7 +4007,7 @@ impl<E: CatalogExt> AacStream<E> {
 					name = import.name(),
 					"AAC format changed mid-stream, starting a new track"
 				);
-				if let Some(end) = open.take() {
+				if let Some(end) = group.take() {
 					import.cut(Some(end))?;
 				}
 				// The ended track retires with its handle, since the rest publishes under a new name.
@@ -4015,16 +4066,17 @@ impl<E: CatalogExt> AacStream<E> {
 
 			forward(&mut self.last, pts)?;
 			if pts.is_none()
-				&& let Some(end) = open.take()
+				&& let Some(end) = group.take()
 			{
 				import.cut(Some(end))?;
 			}
 			import.decode(block, pts)?;
 			// Count only completed frames; input gaps and unfinished tails are not a media burst.
 			burst += std::time::Duration::from_nanos((1024_u64 * 1_000_000_000).div_ceil(header.sample_rate as u64));
+			let start = pts;
 			pts = advance_pts(pts, 1024, header.sample_rate)?;
-			match pts {
-				Some(end) => *open = Some(end),
+			match start.zip(pts) {
+				Some((start, end)) => group.extend(start, end),
 				None => import.cut(None)?,
 			}
 			self.resync.published(unvouched);
@@ -4059,6 +4111,8 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
+		// The open group ends where its last frame does, not where the next clock picks up.
+		self.close_group()?;
 		self.desync();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
@@ -4067,7 +4121,8 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn seek(&mut self, start: u64) -> Result<()> {
-		// A seek is a discontinuity like any other.
+		// A seek is a discontinuity like any other, and the producer's seek closes the open group.
+		self.group.take();
 		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(start)?;
@@ -4075,8 +4130,16 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(())
 	}
 
+	/// Close the open group where its last frame stops.
+	fn close_group(&mut self) -> Result<()> {
+		if let (Some(end), Some(import)) = (self.group.take(), &mut self.import) {
+			import.cut(Some(end))?;
+		}
+		Ok(())
+	}
+
 	/// The partial frame will never see its end, and whatever vouched for the next frame
-	/// boundary no longer applies.
+	/// boundary no longer applies. The open group keeps its end for the caller to close it at.
 	fn desync(&mut self) {
 		self.burst = std::time::Duration::ZERO;
 		self.tail.clear();
@@ -4109,6 +4172,8 @@ impl<E: CatalogExt> AacStream<E> {
 		if self.import.is_none() {
 			self.reserved.take();
 		}
+		// The last group ends where its last frame does, rather than at an end estimated from cadence.
+		self.close_group()?;
 		if let Some(import) = &mut self.import {
 			import.finish_in_place()?;
 		}
@@ -4129,6 +4194,7 @@ struct OpusStream {
 	import: opus::Import,
 	/// The PTS of the last packet `import` published: see [`forward`].
 	last: Option<Timestamp>,
+	group: AudioGroup,
 }
 
 impl OpusStream {
@@ -4145,25 +4211,39 @@ impl OpusStream {
 			// doesn't stall the timeline for the rest of the PES.
 			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
 			forward(&mut self.last, pts)?;
-			self.import.decode(packet, pts)?;
-			published += 1;
 			// The producer stamps a packet without a PTS and checks only where groups start, so it
 			// keeps a group of its own.
-			if pts.is_none() {
-				self.import.cut(None)?;
+			if pts.is_none()
+				&& let Some(end) = self.group.take()
+			{
+				self.import.cut(Some(end))?;
+			}
+			self.import.decode(packet, pts)?;
+			published += 1;
+			match pts.zip(advance_pts(base, elapsed, 48_000)?) {
+				Some((start, end)) => self.group.extend(start, end),
+				None => self.import.cut(None)?,
 			}
 		}
-		// One group per PES, at its known end: see `AacStream::write`. A failed decode ends the
-		// import, so there is no open group to close on that path.
-		if published > 0
-			&& let Some(end) = advance_pts(base, elapsed, 48_000)?
-		{
+		// Grouped as `AacStream::write` does. A failed decode ends the import, so there is no open
+		// group to close on that path.
+		if let Some(end) = self.group.fill() {
 			self.import.cut(Some(end))?;
 		}
 		Ok(published)
 	}
 
+	/// Close the open group where its last packet stops.
+	fn close_group(&mut self) -> Result<()> {
+		if let Some(end) = self.group.take() {
+			self.import.cut(Some(end))?;
+		}
+		Ok(())
+	}
+
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
+		// The open group ends where its last packet does, not where the next clock picks up.
+		self.close_group()?;
 		if published {
 			self.import.discontinuity()?;
 		}
@@ -4171,10 +4251,13 @@ impl OpusStream {
 	}
 
 	fn seek(&mut self, start: u64) -> Result<()> {
+		self.group.take();
 		Ok(self.import.seek(start)?)
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		// The last group ends where its last packet does, rather than at an end estimated from cadence.
+		self.close_group()?;
 		Ok(self.import.finish_in_place()?)
 	}
 
@@ -4429,24 +4512,27 @@ struct LegacyStream<E: CatalogExt = ()> {
 	resync: Resync,
 	/// The PTS of the last frame `import` published: see [`forward`].
 	last: Option<Timestamp>,
+	group: AudioGroup,
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
 	fn write(&mut self, pending: Pending) -> Result<u64> {
-		// One group per PES, closed even by an error: see `AacStream::write`.
-		let mut open = None;
-		let result = self.split(pending, &mut open);
+		// Grouped as `AacStream::write` does.
+		let mut group = std::mem::take(&mut self.group);
+		let result = self.split(pending, &mut group);
+		let end = group.close(&result);
+		self.group = group;
 		// A failed cut is a publishing failure, which outranks the split's own error.
-		if let (Some(end), Some(import)) = (open, &mut self.import) {
+		if let (Some(end), Some(import)) = (end, &mut self.import) {
 			import.cut(Some(end))?;
 		}
 		result
 	}
 
-	/// Publish the frames `pending` completes into one group, leaving `open` at where its last frame
-	/// stops while it is open. A frame without a PTS is stamped by the producer, which checks only
-	/// where groups start, so it keeps a group of its own, as every frame once did.
-	fn split(&mut self, pending: Pending, open: &mut Option<Timestamp>) -> Result<u64> {
+	/// Publish the frames `pending` completes into the open group, extending `group` to where its
+	/// last frame stops. A frame without a PTS is stamped by the producer, which checks only where
+	/// groups start, so it keeps a group of its own, as every frame once did.
+	fn split(&mut self, pending: Pending, group: &mut AudioGroup) -> Result<u64> {
 		let mut published = 0;
 		let pes_base = on_clock(pending.pts, pending.offset)?;
 
@@ -4602,7 +4688,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					name = import.name(),
 					"audio format changed mid-stream, starting a new track"
 				);
-				if let Some(end) = open.take() {
+				if let Some(end) = group.take() {
 					import.cut(Some(end))?;
 				}
 				// The ended track retires with its handle, since the rest publishes under a new name.
@@ -4633,14 +4719,15 @@ impl<E: CatalogExt> LegacyStream<E> {
 
 			forward(&mut self.last, pts)?;
 			if pts.is_none()
-				&& let Some(end) = open.take()
+				&& let Some(end) = group.take()
 			{
 				import.cut(Some(end))?;
 			}
 			import.decode(&data[offset..end], pts)?;
+			let start = pts;
 			pts = advance_pts(pts, header.samples, header.sample_rate)?;
-			match pts {
-				Some(end) => *open = Some(end),
+			match start.zip(pts) {
+				Some((start, end)) => group.extend(start, end),
 				None => import.cut(None)?,
 			}
 			self.resync.published(unvouched);
@@ -4666,6 +4753,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
+		// The open group ends where its last frame does, not where the next clock picks up.
+		self.close_group()?;
 		self.desync();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
@@ -4674,7 +4763,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn seek(&mut self, start: u64) -> Result<()> {
-		// A seek is a discontinuity like any other.
+		// A seek is a discontinuity like any other, and the producer's seek closes the open group.
+		self.group.take();
 		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(start)?;
@@ -4682,8 +4772,16 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(())
 	}
 
+	/// Close the open group where its last frame stops.
+	fn close_group(&mut self) -> Result<()> {
+		if let (Some(end), Some(import)) = (self.group.take(), &mut self.import) {
+			import.cut(Some(end))?;
+		}
+		Ok(())
+	}
+
 	/// The partial frame will never see its end, and whatever vouched for the next frame
-	/// boundary no longer applies.
+	/// boundary no longer applies. The open group keeps its end for the caller to close it at.
 	fn desync(&mut self) {
 		self.tail.clear();
 		self.tail_pts = None;
@@ -4719,6 +4817,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 		if self.import.is_none() {
 			self.reserved.take();
 		}
+		// The last group ends where its last frame does, rather than at an end estimated from cadence.
+		self.close_group()?;
 		if let Some(import) = &mut self.import {
 			import.finish_in_place()?;
 		}
@@ -5367,7 +5467,8 @@ pub(super) mod test {
 			.await
 			.expect("the cue track publishes the initial catalog")
 			.unwrap()
-			.unwrap();
+			.unwrap()
+			.value;
 		assert!(
 			first.video.renditions.is_empty() && first.audio.renditions.is_empty(),
 			"only the extension lists a track"
@@ -7466,7 +7567,8 @@ pub(super) mod test {
 			.await
 			.expect("the catalog waits on a track that cannot resolve")
 			.unwrap()
-			.unwrap();
+			.unwrap()
+			.value;
 		assert_eq!(first.video.renditions.len(), 1);
 		assert!(first.audio.renditions.is_empty());
 
@@ -7482,7 +7584,8 @@ pub(super) mod test {
 				.await
 				.expect("the AAC track never joined")
 				.unwrap()
-				.unwrap();
+				.unwrap()
+				.value;
 			if let Some(audio) = update.audio.renditions.values().next() {
 				break audio.clone();
 			}
@@ -10467,10 +10570,11 @@ pub(super) mod test {
 		import_refused(&mux.out);
 	}
 
-	/// Each PES is one group in presentation order, so the transport, which sends a track's
-	/// newest group first, cannot deliver a PES's frames newest first.
+	/// A PES never splits across groups, so the transport, which sends a track's newest group
+	/// first, cannot deliver a PES's frames newest first: a group closes at the end of the PES that
+	/// brings it to 100 ms, here every second 64 ms PES, though the join falls inside it.
 	#[tokio::test(start_paused = true)]
-	async fn aac_pes_is_one_group() {
+	async fn aac_groups_close_at_a_pes_end() {
 		const AAC_PID: u16 = 0x0060;
 		// 1024 samples at 48 kHz, in 90 kHz ticks.
 		const AAC_FRAME: u64 = 1024 * 90_000 / 48_000;
@@ -10478,10 +10582,10 @@ pub(super) mod test {
 			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
 			..Default::default()
 		};
-		for pes in 0..2u8 {
+		for pes in 0..5u8 {
 			let mut payload = Vec::new();
 			for i in 0..3 {
-				payload.extend_from_slice(&adts_frame(17, 0xA0 | (pes << 4) | i));
+				payload.extend_from_slice(&adts_frame(17, (0x10 * (pes + 1)) | i));
 			}
 			let cc = mux.cc(AAC_PID);
 			let pts = 90_000 + u64::from(pes) * 3 * AAC_FRAME;
@@ -10507,7 +10611,64 @@ pub(super) mod test {
 			}
 			groups.push(fills);
 		}
-		assert_eq!(groups, [vec![0xA0, 0xA1, 0xA2], vec![0xB0, 0xB1, 0xB2]]);
+		assert_eq!(
+			groups,
+			[
+				vec![0x10, 0x11, 0x12, 0x20, 0x21, 0x22],
+				vec![0x30, 0x31, 0x32, 0x40, 0x41, 0x42],
+				vec![0x50, 0x51, 0x52],
+			]
+		);
+	}
+
+	/// A continuity break closes the open group at its last intact frame, though it holds under
+	/// 100 ms, so the PES recovered after it opens a fresh group rather than joining stale audio.
+	#[tokio::test(start_paused = true)]
+	async fn aac_group_closes_at_a_continuity_break() {
+		const AAC_PID: u16 = 0x0060;
+		// 1024 samples at 48 kHz, in 90 kHz ticks.
+		const AAC_FRAME: u64 = 1024 * 90_000 / 48_000;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
+		for pes in 0..3u8 {
+			let mut payload = Vec::new();
+			for i in 0..3 {
+				payload.extend_from_slice(&adts_frame(17, (0x10 * (pes + 1)) | i));
+			}
+			// A packet lost before the second PES, while the open group holds 64 ms.
+			if pes == 1 {
+				mux.cc(AAC_PID);
+			}
+			let cc = mux.cc(AAC_PID);
+			let pts = 90_000 + u64::from(pes) * 3 * AAC_FRAME;
+			mux.out.extend_from_slice(&audio_pes_packet(AAC_PID, cc, pts, &payload));
+		}
+		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
+
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let subscription = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			})])
+			.with_order(moq_net::track::Order::Ascending);
+		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+		let mut groups = Vec::new();
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
+			let mut fills = Vec::new();
+			while let Some(mut frame) = group.next_frame().await.unwrap() {
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
+				fills.extend(frame.payload.first().copied());
+			}
+			groups.push(fills);
+		}
+		assert_eq!(
+			groups,
+			[vec![0x10, 0x11, 0x12], vec![0x20, 0x21, 0x22, 0x30, 0x31, 0x32]],
+			"{groups:x?}"
+		);
 	}
 
 	/// A frame without a PTS is stamped by the producer, which checks only where groups start, so
@@ -10652,7 +10813,8 @@ pub(super) mod test {
 				.unwrap();
 			import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 			let waiter = kio::Waiter::noop();
-			let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			let std::task::Poll::Ready(Ok(Some(moq_json::Timed { value: first, .. }))) = updates.poll_next(&waiter)
+			else {
 				panic!("the catalog waited for a rate measurement");
 			};
 			assert_eq!(first.ext.mpegts.mux_rate, None);
@@ -10670,7 +10832,7 @@ pub(super) mod test {
 				latest = Some(update);
 			}
 			assert_eq!(
-				latest.map(|update| update.ext.mpegts.mux_rate),
+				latest.map(|update| update.value.ext.mpegts.mux_rate),
 				cbr.then_some(Some(3_760_000)),
 				"a window's rate arrives as an update, a variable one publishes nothing"
 			);
@@ -10697,7 +10859,7 @@ pub(super) mod test {
 			.unwrap();
 		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 		let waiter = kio::Waiter::noop();
-		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+		let std::task::Poll::Ready(Ok(Some(moq_json::Timed { value: first, .. }))) = updates.poll_next(&waiter) else {
 			panic!("a measured catalog waited for a window");
 		};
 		assert_eq!(first.ext.mpegts.mux_rate, Some(3_000_000));
@@ -11067,7 +11229,9 @@ pub(super) mod test {
 		let mut header = vec![0, 0, 1, 0xbd, 0, 8 + body.len() as u8, 0x80, 0x80, 5];
 		header.extend_from_slice(&pes_timestamp(2, 90_000));
 		import.decode(&pes_fragment(PID, true, 0, &header)).unwrap();
-		let std::task::Poll::Ready(Ok(Some(first))) = published.poll_next(&kio::Waiter::noop()) else {
+		let std::task::Poll::Ready(Ok(Some(moq_json::Timed { value: first, .. }))) =
+			published.poll_next(&kio::Waiter::noop())
+		else {
 			panic!("the known config and final clock release the catalog at the header");
 		};
 		let name = first.audio.renditions.keys().next().unwrap();

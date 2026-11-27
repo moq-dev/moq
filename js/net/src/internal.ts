@@ -10,7 +10,7 @@ import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
-import type { Delivered } from "./delivered.ts";
+import type { Delivered, Judged } from "./delivered.ts";
 import type { Edit, Prefs, Subscriptions } from "./demand.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
@@ -303,6 +303,17 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 }
 
 /** A half-open run of group keys, `[start, end)`. */
+/**
+ * What a fold of a reader's handed-out record judges by: the reader's budget, and the groups its
+ * ranges hold, undefined while a range is still being placed. A gap no range holds was never
+ * judged, so a range added later owes it again (see `Delivered.foldBelow`). Mirrors the Rust
+ * `track::FoldTerms`.
+ */
+export interface FoldTerms {
+	budget: Budget;
+	ranges: Judged | undefined;
+}
+
 export interface Run {
 	start: bigint;
 	end: bigint;
@@ -551,7 +562,7 @@ export interface ReadGroupFrame {
 	index: number;
 	/** The frame, holding its DEFLATE slice on a compressed read. */
 	frame: Frame;
-	/** The stored slice's declared plain size, on compressed reads. */
+	/** The declared plain size: a stored slice's on compressed reads, and a metadata copy's on every read. */
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
@@ -719,11 +730,11 @@ export interface ResumeSource {
 	/** Forget the gaps in `delivered` below each group past the budget, as {@link forgetPast} does. */
 	forgetPastBudget(delivered: Delivered): void;
 	/**
-	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	 * `delivered` this is, judged on the newest copy, but never past a group a replaced copy still
-	 * feeding the reader holds unread, nor past `keep`. Mirrors the Rust `Subscriber::forget_past`.
+	 * Forget the gaps in `delivered` below each group past the budget of `terms`, an outer reader's
+	 * whose `delivered` this is, judged on the newest copy, but never past a group a replaced copy
+	 * still feeding the reader holds unread, nor past `keep`. Mirrors the Rust `Subscriber::forget_past`.
 	 */
-	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void;
+	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
 	lowestBuffered(delivered: Delivered): bigint | undefined;
 	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
@@ -827,6 +838,8 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 	/** Whether a metadata-only lookup opened this request, if its broadcast supports them. */
 	lookups?: { opened: boolean };
+	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. */
+	meta?: boolean;
 }
 
 /**
@@ -904,6 +917,11 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
+	/**
+	 * Make a new track a metadata copy, before it holds any group: each group it creates holds
+	 * frame headers alone (see {@link metaGroup}). Assigned by `track.ts`.
+	 */
+	metaTrack: (producer: Producer) => void;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -1153,6 +1171,8 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/** How many runs the subscriber holds for its fills: asked, given up, heads, and adopted verdicts. */
+	fillRuns: (subscriber: Subscriber) => number;
 	/**
 	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
 	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
@@ -1290,12 +1310,12 @@ export const hooks: {
 	 */
 	taking: (subscriber: Subscriber) => (key: bigint) => boolean;
 	/**
-	 * Forget the gaps in another reader's `delivered` below each group past `budget`, the budget of
-	 * the reader whose `delivered` this is, which a front's copy, its ranges raised to a resume point,
-	 * cannot judge by its own, forgetting no gap at or above `keep`. Mirrors the Rust
+	 * Forget the gaps in another reader's `delivered` below each group past the budget of `terms`,
+	 * the terms of the reader whose `delivered` this is, which a front's copy, its ranges raised to a
+	 * resume point, cannot judge by its own, forgetting no gap at or above `keep`. Mirrors the Rust
 	 * `Subscriber::forget_past_budget`.
 	 */
-	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget, keep?: bigint) => void;
+	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, terms: FoldTerms, keep?: bigint) => void;
 	/**
 	 * The lowest group the subscriber holds unread that another reader's `delivered` lacks, in its
 	 * range and window, on any copy it reads. Mirrors the Rust `track::Subscriber::lowest_unread`
@@ -1361,6 +1381,11 @@ export const hooks: {
 	 * `track::Subscriber::hole_end`.
 	 */
 	holeEnd: (subscriber: Subscriber, key: bigint, dropped: boolean) => bigint | undefined;
+	/**
+	 * The abort that closed the subscriber's track after its declared end settled, which its
+	 * readers saw as a clean end. Mirrors the Rust crate-private `track::Consumer::aborted`.
+	 */
+	trackAborted: (subscriber: Subscriber) => Error | undefined;
 	/** The error the subscriber's track gave `key` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, key: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
@@ -1440,6 +1465,20 @@ export const hooks: {
 	 */
 	skipGroupFrames: (group: GroupConsumer) => void;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
+	/**
+	 * Make a new group a metadata copy, before its first frame: it holds each frame's header alone,
+	 * which {@link writeGroupHeader} writes, and refuses a payload. It stores no compressed stream,
+	 * whatever its track declares. Assigned by `group.ts`.
+	 */
+	metaGroup: (group: GroupProducer) => void;
+	/** Whether a group is a metadata copy; see {@link metaGroup}. Assigned by `group.ts`. */
+	groupMeta: (group: GroupProducer) => boolean;
+	/**
+	 * Write the header of a frame of `size` plain bytes at `timestamp` into a metadata copy, as a
+	 * metadata subscription delivers it: an empty payload, which readers get with `size` as its
+	 * declared plain size. Throws on a payload group. Assigned by `group.ts`.
+	 */
+	writeGroupHeader: (group: GroupProducer, timestamp: Timestamp, size: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
 	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
@@ -1525,8 +1564,16 @@ export const hooks: {
 	succeedGroup: (next: GroupProducer, failed: GroupProducer) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
-	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
-	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
+	/**
+	 * Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating.
+	 * A `header` read takes the frame's header alone, leaving no payload in flight to tear on a route failure.
+	 */
+	readGroupFrame: (
+		group: GroupConsumer,
+		compressed: boolean,
+		from?: number,
+		header?: boolean,
+	) => Promise<ReadGroupFrame | undefined>;
 	/** Notify the owning track when a reader reaches its shed front. */
 	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
@@ -1546,6 +1593,13 @@ export const hooks: {
 	 * until `hold` aborts; undefined with no such copy. Assigned by `broadcast.ts`.
 	 */
 	resolveHeld: (broadcast: BroadcastConsumer, name: string, hold?: AbortSignal) => Promise<Info> | undefined;
+	/**
+	 * Serve a broadcast's metadata lookups from a metadata copy apart from the payload one, which
+	 * its request handler fills with frame headers alone: set only by a handler that can, a lite-07
+	 * session asking upstream with a metadata subscription. Mirrors the Rust `serve_meta`; assigned
+	 * by `broadcast.ts`.
+	 */
+	serveMeta: (broadcast: BroadcastConsumer) => void;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
@@ -1593,6 +1647,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	metaTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1778,6 +1835,9 @@ export const hooks: {
 	tryDrop: () => {
 		throw new Error("track.ts not loaded");
 	},
+	fillRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
 	askUnproven: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1874,6 +1934,9 @@ export const hooks: {
 	staleHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
+	trackAborted: () => {
+		throw new Error("track.ts not loaded");
+	},
 	givenUp: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1959,6 +2022,15 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	writeGroupFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	metaGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupMeta: () => {
+		throw new Error("group.ts not loaded");
+	},
+	writeGroupHeader: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupCacheBytes: () => {
@@ -2070,6 +2142,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	resolveHeld: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	serveMeta: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	keepRequest: () => {

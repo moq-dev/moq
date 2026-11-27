@@ -1810,17 +1810,17 @@ test("a reset without its code ends the group", async () => {
 });
 
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
-// leaves the stream open forever. A drop accounts for its group, so the subscription's end waits
-// for that stream at most the grace: a stale drop before or after its header, or a final one before
-// it, even with a stale drop of the group after the final one and an update after both. A final
-// drop after it ends the read at once.
+// leaves the stream open forever. The publisher names every group whose stream it resets without a
+// reliable reset in a drop, which accounts for the group, so the stream holds the subscription's end
+// no longer, before or after its header: the end waits out no timer. A final drop ends the group
+// through the track at once; a stale one leaves it arriving, as the track's contract says, until
+// the stream's own end or the track's release.
 test.each([
 	["stale", "before"],
 	["stale", "after"],
 	["final", "before"],
-	["final then stale", "before"],
-	["final then stale", "both before"],
-] as const)("a drop lets the end give up on a stream that never ends (%s drop %s its header)", async (kind, order) => {
+	["final", "after"],
+] as const)("a drop lets go of a stream whose reset was lost (%s drop %s its header)", async (kind, order) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1836,38 +1836,37 @@ test.each([
 
 		const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
 		const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
-		const stale = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) };
-		if (order !== "after") {
-			await respond(request, version, order === "both before" ? [drop, stale] : [drop]);
+		if (order === "before") {
+			await respond(request, version, [drop]);
 			await drainReactions();
 		}
 		const lost = handStream(version);
 		lost.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
-		const group = await track.recvGroup();
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		if (order === "after") await respond(request, version, [drop]);
-		if (kind === "final then stale" && order === "before") await respond(request, version, [stale]);
-		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
-		await drainReactions();
-		// An update reopens neither drop.
-		if (kind === "final then stale") {
-			track.update(everyRange({}, { priority: 1 }));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
+		let group: GroupConsumer | undefined;
+		if (order === "after") {
+			group = await track.recvGroup();
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+			await respond(request, version, [drop]);
 			await drainReactions();
+			if (kind === "final") expect(await group?.closed).toMatchObject({ code: error });
+			else expect(group?.closed.peek()).toBeUndefined();
 		}
 
 		let fin = false;
 		void request.finished.then(() => {
 			fin = true;
 		});
-		await clock.advance(GRACE.div(2));
-		expect(fin).toBe(false);
-		await clock.advance(GRACE);
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
+		await drainReactions();
 		expect(fin).toBe(true);
-		// The publisher's FIN in reply ends the track at once, without another grace.
+
+		// The publisher's FIN in reply releases the track, which cuts a group the stale drop left
+		// arriving, and with it the read of a stream that never ends.
 		request.inbound.close();
-		expect(await track.recvGroup()).toBeUndefined();
-		expect(await track.closed).toBeNull();
+		await running;
+		if (kind === "stale" && order === "after")
+			expect(await group?.closed).toMatchObject({ code: StreamCode.Cancel });
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1876,9 +1875,9 @@ test.each([
 });
 
 // Lite-07: a Group Stream can wait unread on a copy of its group still arriving, as a recovery's does
-// on the copy its subscription shares. A final drop that lands during that wait accounts for the
-// group, so a stream whose reset the browser then loses holds the end at most the grace.
-test("a drop during a duplicate wait lets the end give up on a stream that never ends", async () => {
+// on the copy its subscription shares. A drop that lands during that wait lets go of the stream,
+// whose reset the browser may lose, so the subscription's end waits out no timer.
+test("a drop during a duplicate wait lets go of a stream whose reset was lost", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -1903,24 +1902,74 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		await drainReactions();
 
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
 		await respond(request, version, [
 			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
 			{ end: new SubscribeEnd(1n) },
 		]);
 		await drainReactions();
-
-		let fin = false;
-		void request.finished.then(() => {
-			fin = true;
-		});
-		await clock.advance(GRACE.div(2));
-		expect(fin).toBe(false);
-		await clock.advance(GRACE);
 		expect(fin).toBe(true);
 	} finally {
 		track.close();
 		subscriber.close();
 		installed.close();
+	}
+});
+
+// Lite-07: a stream a drop overtook holds no end, even once it takes the group from another
+// subscription's copy that failed while it waited: the drop already named this stream's group on
+// the wire, so its reset, which a browser can lose, may be all that is left of it.
+test("a stream a drop overtook holds no end after it takes a failed copy's group", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { track: Producer; tail: { reading: boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+		if (!entry) throw new Error("no subscription");
+
+		// Another subscription's copy of group 0, still arriving, then a stale drop, then this
+		// subscription's stream of the group, which the drop overtook and which waits on that copy.
+		const other = hooks.receiveGroup(entry.track, { start: 0n, offset: 0 });
+		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
+		await drainReactions();
+		const lost = handStream(version);
+		lost.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
+		await drainReactions();
+
+		// That copy fails, so this stream takes the group, and still holds no end.
+		other.abort(new StreamError(StreamCode.Cancel));
+		await drainReactions();
+		expect(entry.tail.reading).toBe(false);
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
+		await drainReactions();
+		expect(fin).toBe(true);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		subscriber.close();
 	}
 });
 
@@ -2012,50 +2061,6 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		await running;
 		await drainReactions();
 		expect(fin).toBe(true);
-	} finally {
-		track.close();
-		subscriber.close();
-		installed.close();
-	}
-});
-
-// Lite-07: a stale drop is final, so a stream it excused stays excused through an update: the end
-// waits for it no longer than the grace, as a browser may have lost its reset.
-test("a stream a stale drop excused stays excused after an update", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version, 1000);
-		const request = await opened(1);
-		await request.reading;
-		await respond(request, version, [{ start: answer(version, 0n) }]);
-
-		const slow = handStream(version);
-		slow.write(await liteFrame(0, new Uint8Array([1])));
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), slow.reader);
-		const group = await track.recvGroup();
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
-		// SUBSCRIBE_END starts the end's grace, and the update then widens the live join's max.
-		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
-		await drainReactions();
-		track.update(
-			everyRange(
-				{ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }] },
-				{ priority: 0 },
-			),
-		);
-		await drainReactions();
-
-		await clock.advance(GRACE.mul(3));
-		await request.finished;
-		slow.finish();
-		await running;
 	} finally {
 		track.close();
 		subscriber.close();
@@ -3443,6 +3448,45 @@ test("a range added past the feed start keeps it declared", async () => {
 		expect(declared.at(-1)).toBe(10n);
 	} finally {
 		hooks.startTrack = startTrack;
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A live join answered under the max it was first asked with, before the update retuning it wider
+// went out, places no reader waiting with the wider max, so that join goes out on a probe of its
+// own. Mirrors the Rust `a_join_answered_before_its_retune_is_probed`.
+test("a join answered before its retune goes out is probed", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const asked = (max: Duration) => ({ ranges: [{ start: { live: { min: Duration.ZERO, max } } }] });
+	const track = broadcast.track("video").subscribe(asked(Duration.ZERO));
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		// The reader waits on its join and widens its max, and the answer to the first max lands
+		// before the retune goes out.
+		const reading = track.recvGroup().catch(() => undefined);
+		track.update(asked(Duration.millis(100)));
+		await respond(request, version, [
+			{ start: answer(version, 20n, 0n, { position: { group: 20n, frame: 1 }, ended: false }) },
+		]);
+		const retune = await SubscribeUpdate.decode(sent, version);
+		expect(retune.retune).toEqual([[0n, 100]]);
+		// Without the probe nothing more goes out, and the reader waits on its join for good.
+		const probe = await SubscribeUpdate.decode(sent, version);
+		expect(probe.ranges).toEqual([{ start: { live: { min: 0, max: 100 } } }]);
+		track.close();
+		await reading;
+	} finally {
 		track.close();
 		broadcast.close();
 		subscriber.close();

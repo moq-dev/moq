@@ -5,6 +5,7 @@ export type {
 	AcceptOptions,
 	BidirectionalStream,
 	Config,
+	KeepAlive,
 	SendStream,
 	SendStreamOptions,
 	SendStreamStats,
