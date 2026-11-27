@@ -9559,6 +9559,15 @@ impl group::Expiry for FetchExpiry {
 		self.reading.release();
 	}
 
+	fn aged(&self, budget: Duration, _: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
+		if !self.cache.wakes().watch_landing(self.key, waiter) {
+			return false;
+		}
+		let state = self.state.read();
+		let budget = clamp_max_delay(budget, state.max_age_bound());
+		state.poll_drifted(self.key, &Servable::ALL, budget, Some(&self.superseded), waiter)
+	}
+
 	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> Option<Duration> {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.key, waiter) {
@@ -9604,6 +9613,27 @@ impl group::Expiry for GroupExpiry {
 
 	fn ended(&self) {
 		self.reading.release();
+	}
+
+	/// As [`Self::is_expired`], under `budget` rather than the subscription's.
+	fn aged(&self, budget: Duration, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
+		if !self.cache.wakes().watch_landing(self.key, waiter) {
+			return false;
+		}
+		let servable = match &self.successors {
+			Successors::Cursor(published) => {
+				let mut servable = Servable::ALL;
+				let _ = published.poll(waiter, |current| {
+					servable = current.servable.clone();
+					Poll::<()>::Pending
+				});
+				servable
+			}
+			Successors::Reader(live) => Servable::within(recover.and_then(|recover| recover.window(waiter)), live),
+		};
+		let state = self.state.read();
+		let budget = clamp_max_delay(budget, state.max_age_bound());
+		state.poll_drifted(self.key, &servable, budget, Some(&self.superseded), waiter)
 	}
 
 	/// A group nothing ever landed above has no successor, so neither clock can convict it:
@@ -13793,6 +13823,19 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.waiting_keys(keys),
+		}
+	}
+
+	/// The ranges covering group `key`, by key, each with how long it keeps the group worth
+	/// delivering once superseded: a range not yet placed may cover any group up to its end.
+	pub(crate) fn covering(&mut self, key: u64) -> Vec<(u64, Duration)> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				let window = &cursor.filter.window;
+				window.covering(key, |id| window.range(id))
+			}
+			Inner::Resume(resume, _) => resume.covering(key),
 		}
 	}
 
