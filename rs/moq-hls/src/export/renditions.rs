@@ -175,6 +175,9 @@ impl kio::Task for Hold {
 			let Ok(track) = broadcast.track(&self.track) else {
 				return Poll::Ready(());
 			};
+			// Demand the export makes for itself rather than for a client, so a metered source
+			// counts no viewer for it.
+			let track = track.unmetered();
 			let subscribing = track.subscribe(moq_net::track::Subscription::default()).into_inner();
 			self.state = Holding::Subscribing {
 				_broadcast: broadcast,
@@ -982,6 +985,50 @@ mod tests {
 			end(&producer);
 			assert!(producer.state.read().waiting.is_empty(), "the hold outlived the set");
 		}
+	}
+
+	/// A track held while the catalog has no join interval is the export's own demand, so a
+	/// metered source counts no subscription, and no viewer, for it.
+	#[tokio::test(start_paused = true)]
+	async fn a_held_track_counts_no_viewer() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let route = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		let track = route
+			.broadcast()
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+		let consumer = origin.consume().with_stats(
+			registry
+				.tier(moq_net::stats::Tier::default())
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer"))),
+		);
+		let resolved = consumer.request("live", None).await.expect("the broadcast resolves");
+		let source = moq_mux::Source::new(consumer, resolved);
+		let mut catalog = Catalog::default();
+		let video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let producer = Producer::spawned(Duration::from_secs(30));
+		let _cursor = producer.subscribe();
+		producer.sync(&source, &catalog);
+		for _ in 0..20 {
+			tokio::task::yield_now().await;
+		}
+		assert!(track.subscription().is_some(), "the track was not held");
+		let subscriptions: u64 = registry
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.map(|(_, _, traffic)| traffic.subscriptions_started + traffic.broadcasts_started)
+			.sum();
+		assert_eq!(subscriptions, 0, "the hold counted a viewer");
 	}
 
 	#[test]
