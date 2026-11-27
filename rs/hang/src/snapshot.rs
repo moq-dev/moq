@@ -209,10 +209,7 @@ mod tests {
 		let arrival = report.renditions["hd"].arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp, moq_net::Timestamp::from_millis(30_000).unwrap());
 		assert_eq!(
-			arrival
-				.wall
-				.checked_duration_since(moq_net::time::EPOCH)
-				.unwrap(),
+			arrival.wall.checked_duration_since(moq_net::time::EPOCH).unwrap(),
 			Duration::from_millis(175_184_640_000)
 		);
 		assert_eq!(report.renditions["hd"].stalled, Duration::from_millis(120));

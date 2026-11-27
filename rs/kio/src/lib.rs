@@ -27,7 +27,7 @@
 //! [`clock`] is the time those waits run on: logical instants, wall time,
 //! deadlines, timers, and a deterministic simulator for tests.
 //!
-//! With the `model` feature, [`model`] checks a pure state machine by visiting every
+//! With the `model` feature, `kio::model` checks a pure state machine by visiting every
 //! state it can reach, printing the shortest trace to a broken rule.
 //!
 //! Every wait is a `poll_*` method first. The `async` feature adds the `async fn` that

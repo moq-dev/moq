@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sourced: put a rustup nightly's cargo and rustc first on PATH, for the Nightly lanes
 # that need unstable flags (Miri, ThreadSanitizer). COMPONENTS names what the caller
 # needs from it, for the hint when it is missing.

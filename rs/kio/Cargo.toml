@@ -99,11 +99,7 @@ harness = false
 # Not the workspace's lints: Verus sets the cfgs below when it proves `src/log.rs`
 # (see verify/), and kio denies bare `#[allow]`, so a stale suppression can't linger.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [
-    "cfg(verus_only)",
-    "cfg(verus_keep_ghost)",
-    "cfg(verus_keep_ghost_body)",
-] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_only)", "cfg(verus_keep_ghost)", "cfg(verus_keep_ghost_body)"] }
 
 [lints.clippy]
 # Every suppression says why, so the next lint audit can judge it.

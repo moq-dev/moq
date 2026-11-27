@@ -279,8 +279,7 @@ fn search<M: Explore>(init: M, rules: bool, goal: impl Fn(&M, bool) -> bool) -> 
 			return Search::Found(trace(&init, &nodes, index, None));
 		}
 		if rules
-			&& quiet
-			&& let Err(rule) = state.quiet()
+			&& quiet && let Err(rule) = state.quiet()
 		{
 			return broken(&init, &nodes, index, None, rule);
 		}
