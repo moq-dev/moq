@@ -1680,6 +1680,17 @@ impl TrackState {
 		self.answers_joins && self.outcome.end().is_none() && !self.outcome.is_final()
 	}
 
+	/// Whether a read through `window` still waits on where one of its live joins starts: a
+	/// lite-07 publisher may answer a range after the end it declared, up to finishing the
+	/// track, and the copy's tail settles only once every range it asked is answered. Judged
+	/// under the lock an answer takes, so a read parked here is woken by it, and one that
+	/// ends past it finds every answer recorded when it syncs.
+	fn awaits_answer(&self, window: &Window) -> bool {
+		self.answers_joins
+			&& window.is_reaching()
+			&& matches!(&self.outcome, Outcome::Ending(end) if matches!(end.tail, TailState::Pending(_)))
+	}
+
 	/// [`Holdings::containing`] on a lite-07 copy, which holds only part of the track, for a
 	/// reader within `budget`. It places a time only where it can prove what its upstream would
 	/// answer: at a group held there, at a group held before it once every key between is
@@ -2547,7 +2558,7 @@ impl TrackState {
 		}
 
 		// TODO once we have drop notifications, check if index == final_key.
-		if self.is_complete() {
+		if self.is_complete() && !self.awaits_answer(window) {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = self.outcome.aborted() {
 			Poll::Ready(Err(err.clone()))
@@ -2613,7 +2624,7 @@ impl TrackState {
 		if let Some(cap) = cap
 			&& cap <= next_key
 		{
-			if closed || self.final_key().is_some() {
+			if closed || self.final_key().is_some() && !self.awaits_answer(window) {
 				return Poll::Ready(end());
 			}
 			return Poll::Pending;
@@ -2637,7 +2648,10 @@ impl TrackState {
 		// ends the arrival path too. Cached in-range groups were returned above,
 		// so an aborted track drains what finished first.
 		// This is the cursor the ordered reader uses.
-		if closed || self.is_complete() || self.final_key().is_some_and(|fin| next_key >= fin) {
+		if closed
+			|| !self.awaits_answer(window)
+				&& (self.is_complete() || self.final_key().is_some_and(|fin| next_key >= fin))
+		{
 			return Poll::Ready(end());
 		}
 		Poll::Pending
@@ -26881,6 +26895,71 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_ordered_read_takes_a_join_answered_as_the_track_ends() {
 		let mut ordered = answered_and_ended_mid_read(Order::Ascending, Subscriber::ordered, |ordered, waiter| {
+			ordered.poll_next_item(waiter).is_pending()
+		});
+		assert_eq!(items(&mut ordered), ["group 10", "group 11", "group 12"]);
+	}
+
+	/// A lite-07 copy holding a whole burst for a live join still waiting on its upstream,
+	/// whose publisher declares the end before answering the join, as the draft lets it: each
+	/// range's SUBSCRIBE_START may come as late as the track's finish. The read is not over at
+	/// that end, and the answer wakes it.
+	#[cfg(feature = "async")]
+	fn ended_before_answered<R>(
+		order: Order,
+		open: impl FnOnce(Subscriber) -> R,
+		poll: impl FnOnce(&mut R, &kio::Waiter) -> bool,
+	) -> R {
+		let lag = Some(Duration::from_secs(1));
+		let join = Subscription::default()
+			.with_order(order)
+			.with_ranges([Range::from(Start::Live { min: lag, max: None })]);
+		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(30)));
+		producer.received();
+		producer.anchored();
+		producer.proven();
+		producer.answers_joins();
+		// The SUBSCRIBE asked from the live edge, so where its feed starts waits on the answer.
+		producer.request_start(None).unwrap();
+		let mut reader = open(producer.subscribe(join));
+		for key in 10..13 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(Timestamp::unscaled(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		producer.skip_groups(0..10);
+		producer.finish_at(Position::group(13)).unwrap();
+		let (woken, waiter) = Flag::waiter();
+		assert!(poll(&mut reader, &waiter), "the end leaves the join waiting on its answer");
+		producer.answer_join(lag, None, Some(10), Duration::MAX);
+		producer.start_resolved(10).unwrap();
+		assert!(woken.take(), "the answer wakes the read");
+		producer.finish_shared().unwrap();
+		reader
+	}
+
+	/// An arrival read whose live join is answered after the end its publisher declared first
+	/// reads the join's groups before it ends.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_arrival_read_takes_a_join_answered_after_the_end() {
+		let mut reader = ended_before_answered(
+			Order::Descending,
+			|reader| reader,
+			|reader, waiter| reader.poll_recv_group(waiter).is_pending(),
+		);
+		assert_eq!(drain_groups(&mut reader), [12, 11, 10]);
+		assert!(matches!(
+			reader.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// The ordered read of the same order reads the join's groups in key order before it ends.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_takes_a_join_answered_after_the_end() {
+		let mut ordered = ended_before_answered(Order::Ascending, Subscriber::ordered, |ordered, waiter| {
 			ordered.poll_next_item(waiter).is_pending()
 		});
 		assert_eq!(items(&mut ordered), ["group 10", "group 11", "group 12"]);
