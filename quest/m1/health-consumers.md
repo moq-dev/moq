@@ -21,8 +21,7 @@ grade's limits are re-measured against browser reporters.
 - Re-measure the thresholds in `rs/hang/src/health.rs` against the numbers
   the browser reporters publish (`<moq-publish stats>` and
   `<moq-watch echo>`).
-- Publish `hang::health` and `Hang.Health` again (the unused-API sweep made
-  both private until a consumer reads them), carrying `Sample.interval`,
-  `Sample.age`, and `Thresholds.stale` as durations rather than bare
-  milliseconds in JS, and restore the Health section of
-  `doc/concept/stats.md` that the sweep removed.
+
+## Required
+
+- [Publish hang health again](/quest/m0/hang-health-public.md) - the public grade every consumer here reads

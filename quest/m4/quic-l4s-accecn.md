@@ -21,10 +21,6 @@ Guidance:
 
 Public API: additive (optional ECN/L4S mode on `#[non_exhaustive]` config; `moq-congestion` `Ce` fields). Wire: none (standard RFC 9000 `ACK_ECN` + RFC 9330/9331 `ECT(1)`).
 
-## Required
-
-- [ACK, ECN, `ACK_FREQUENCY`, and `ReceiveTimestamps` fixes](/quest/m1/quic-ack-and-ecn-fixes.md) - fixes `newly_acked` packet counting and path-scoped ECN validation first
-
 ## Related
 
 - [Realtime congestion control](/quest/m5/quic-realtime.md) - SCReAMv2 and BBR3 delay-bound candidates that benefit from L4S CE fractions

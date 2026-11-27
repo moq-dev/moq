@@ -133,6 +133,7 @@ import {
 	hasProbeRtt,
 	hasRanges,
 	hasRefresh,
+	hasRouteCost,
 	hasRoutes,
 	hasSetupStream,
 	hasSkip,
@@ -154,6 +155,14 @@ const datagramBudget = new Budget();
 // one is dropped and counted rather than stalling the receive queue, which would hold up other
 // tracks' datagrams behind their ends.
 const HELD_DATAGRAMS = 32;
+
+/** Our price and rank for a session's link. */
+export interface Link {
+	/** What crossing it costs, winning over the peer's SETUP price; unset takes the peer's. */
+	cost?: Cost;
+	/** Its rank, which every route through it carries at most. */
+	priority: number;
+}
 
 // What a subscription has set up so far, so a revocation (or abandonment) can reach it at
 // any stage.
@@ -435,6 +444,11 @@ export class Subscriber {
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Received>;
 
+	// Our price and rank for this link; see {@link Link}.
+	#link: Link;
+	// What crossing this link adds to a route's cost, settled once known.
+	#linkCost?: Promise<Cost>;
+
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
 	// Shared signal set once `#quic.closed` settles so per-fetch waits can subscribe and dispose
@@ -456,6 +470,7 @@ export class Subscriber {
 	 * @param goaway - Settles when the peer sends GOAWAY
 	 * @param grant - The union of our tokens' grants, which bounds what we subscribe to
 	 * @param limits - How many live requests the peer may hold
+	 * @param link - Our price and rank for this link
 	 *
 	 * @internal
 	 */
@@ -469,8 +484,10 @@ export class Subscriber {
 		grant?: Getter<Grant | undefined>,
 		limits: Limits = LIMITS,
 		auth?: AuthSession,
+		link: Link = { cost: Cost.link, priority: 0 },
 	) {
 		this.#quic = quic;
+		this.#link = link;
 		void quic?.closed?.then(
 			() => this.#quicClosed.set(true),
 			() => this.#quicClosed.set(true),
@@ -491,11 +508,35 @@ export class Subscriber {
 				consumes: this.#consumes,
 				slots: this.#announces,
 				drained: (route) => this.#drained(route),
+				cost: () => this.#cost(),
+				priority: link.priority,
 				goaway,
 				grant,
 				send: (msg) => stream.send(msg),
 			});
 		}
+	}
+
+	// What crossing this link adds to a route's cost: our own price, else the one the peer's
+	// SETUP declares, else 1. A version whose announcements carry no cost charges nothing.
+	// Waits for the peer's SETUP only when we set no price. Mirrors `poll_link_cost` in rs/moq-net.
+	#cost(): Promise<Cost> {
+		this.#linkCost ??= (async () => {
+			if (!hasRouteCost(this.version)) return Cost.zero;
+			if (this.#link.cost !== undefined) return this.#link.cost;
+			const peerSetup = this.#peerSetup;
+			if (!peerSetup) throw new Error("no peer SETUP to price the link");
+			// A transport that closes before the SETUP arrives ends the wait too, so a claim handler
+			// waiting on it never holds up the session's teardown.
+			let setup = peerSetup.peek();
+			while (setup === undefined) {
+				if (this.#quicClosed.peek()) throw new Error("session closed before the peer's SETUP");
+				await untilAborted(Promise.resolve(Signal.race(peerSetup, this.#quicClosed)), this.#closed.signal);
+				setup = peerSetup.peek();
+			}
+			return setup.cost ?? Cost.link;
+		})();
+		return this.#linkCost;
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -679,6 +720,7 @@ export class Subscriber {
 							epoch: 0n,
 							hops: [UNKNOWN_HOP],
 							cost: Cost.zero,
+							priority: this.#link.priority,
 						});
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
@@ -891,7 +933,18 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route = this.#drained({ instance, epoch, hops: fullHops, cost: cost ?? Cost.zero });
+				// What the peer advertised plus this link's price, ranked at this link's priority. The
+				// price may wait on the peer's SETUP, which this reader stops waiting for once closed.
+				const link = await race([this.#cost(), announced.closed]);
+				if (link instanceof Error) throw link;
+				if (typeof link !== "bigint") break;
+				const route = this.#drained({
+					instance,
+					epoch,
+					hops: fullHops,
+					cost: Cost.charged(cost ?? Cost.zero, link),
+					priority: this.#link.priority,
+				});
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });

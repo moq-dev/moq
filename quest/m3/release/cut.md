@@ -99,7 +99,7 @@ paragraphs, and the cut gate template with its decision:
   ready once the cycle's API breaks, wire changes, and the cut gate in m3
   have merged, and it has no `## Waiting`, since the maintainer opens the
   wire phase before that. [m5](/quest/m5/README.md) and m6 require it: the
-  gate that holds later work while m9's lab stays open. The hygiene audits
+  gate that holds later work. The hygiene audits
   and the vendor sync's children recur behind it in m4. Its PR re-creates it
   at the same path and keeps the m5 and m6 links, so the gate holds the next
   cycle too; m5's quests reach m4 in the shift, which is when they can start.

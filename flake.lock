@@ -96,11 +96,11 @@
         "token-max": "token-max"
       },
       "locked": {
-        "lastModified": 1795664159,
-        "narHash": "sha256-7Jr5K3avL+ew201Rsy0xctHYcKQCAAvUGVOzkk1a9MA=",
+        "lastModified": 1795723351,
+        "narHash": "sha256-HKNemeY0ivchWxtlZt/+mowohXR8UOdMd8H6doj0zzA=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "95296188d5c17d0a96d6da5b2f30b39223cd8943",
+        "rev": "d6bba97706420e409ba235b86212bff172af7a6c",
         "type": "github"
       },
       "original": {
