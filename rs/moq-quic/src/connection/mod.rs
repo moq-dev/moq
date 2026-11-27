@@ -2815,7 +2815,8 @@ impl Connection {
 	/// of its `soft`, then check again half a `soft` after the latest
 	///
 	/// Ack-eliciting packets on a dead path stay in flight, and PTO probes back off exponentially,
-	/// so this bounds the gap between probes: a path that heals is heard within half a `soft`.
+	/// so this bounds the gap between probes: a path that heals is heard within half a `soft`, even
+	/// with the congestion window full.
 	fn probe(&mut self, now: Instant) {
 		let Some(liveness) = &self.liveness else {
 			return;
@@ -2827,6 +2828,10 @@ impl Connection {
 			None => {
 				trace!("sending keep-alive probe");
 				self.ping();
+				// Exempt from congestion control, as a PTO's probe is: a dead path leaves the window
+				// full of packets nothing acknowledges, and the backed-off PTO can fall past `hard`.
+				let space = &mut self.spaces[self.highest_space];
+				space.loss_probes = space.loss_probes.max(1);
 				self.timers.set(Timer::KeepAlive, now.saturating_add(after));
 			}
 		}

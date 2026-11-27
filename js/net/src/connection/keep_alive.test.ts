@@ -8,11 +8,26 @@ const CONFIG: KeepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
 class FakeProbing {
 	stale = false;
 	config?: KeepAlive;
+	#ready = Promise.withResolvers<void>();
+	readonly ready = this.#ready.promise;
+	#params = false;
 	#changed = Promise.withResolvers<void>();
 	#closed = Promise.withResolvers<void>();
 	readonly closed = this.#closed.promise;
 
+	constructor(ready = true) {
+		if (ready) this.params();
+	}
+
+	/** The peer's transport parameters arrive, settling `ready`. */
+	params() {
+		this.#params = true;
+		this.#ready.resolve();
+	}
+
+	// Like qmux, refused until the peer's parameters arrive.
 	keepAlive(config: KeepAlive) {
+		if (!this.#params) throw new Error("keep-alive needs the peer's transport parameters; await ready");
 		this.config = config;
 	}
 
@@ -41,7 +56,7 @@ const turn = yieldNow;
 
 test("liveness follows the transport's stale signal until it closes", async () => {
 	const probing = new FakeProbing();
-	const liveness = start(probing as unknown as WebTransport, CONFIG);
+	const liveness = await start(probing as unknown as WebTransport, CONFIG);
 	expect(probing.config).toBe(CONFIG);
 	expect(liveness.peek()).toBe("live");
 
@@ -59,17 +74,27 @@ test("liveness follows the transport's stale signal until it closes", async () =
 	expect(liveness.peek()).toBe("live");
 });
 
-test("a session already quiet past soft starts stale", () => {
+test("a session already quiet past soft starts stale", async () => {
 	const probing = new FakeProbing();
 	// The transport marks a long-quiet session stale as soon as the keep-alive starts.
 	probing.keepAlive = (config) => {
 		probing.config = config;
 		probing.stale = true;
 	};
-	expect(start(probing as unknown as WebTransport, CONFIG).peek()).toBe("stale");
+	expect((await start(probing as unknown as WebTransport, CONFIG)).peek()).toBe("stale");
 });
 
-test("a transport that cannot probe its peer refuses the keep-alive", () => {
+test("a keep-alive started before the peer's parameters arrive waits for them", async () => {
+	const probing = new FakeProbing(false);
+	const started = start(probing as unknown as WebTransport, CONFIG);
+	await turn();
+	expect(probing.config).toBeUndefined();
+	probing.params();
+	expect((await started).peek()).toBe("live");
+	expect(probing.config).toBe(CONFIG);
+});
+
+test("a transport that cannot probe its peer refuses the keep-alive", async () => {
 	const webtransport = { closed: new Promise(() => {}) } as unknown as WebTransport;
-	expect(() => start(webtransport, CONFIG)).toThrow("WebTransport cannot");
+	await expect(start(webtransport, CONFIG)).rejects.toThrow("WebTransport cannot");
 });

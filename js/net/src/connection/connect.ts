@@ -533,7 +533,13 @@ async function connectInner(
 	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
-		const liveness = props.keepAlive && KeepAlive.start(transport, props.keepAlive);
+		let liveness: Getter<KeepAlive.Liveness> | undefined;
+		try {
+			liveness = props.keepAlive && (await KeepAlive.start(transport, props.keepAlive));
+		} catch (err) {
+			transport.close();
+			throw err;
+		}
 		return [await connectTransport(url, transport, { ...wiring(dial), liveness }, offered.setup), dial];
 	}
 
@@ -569,7 +575,7 @@ async function connectInner(
 	const won = websocket && fallbackDial ? fallbackDial : dial;
 	let liveness: Getter<KeepAlive.Liveness> | undefined;
 	try {
-		liveness = props.keepAlive && KeepAlive.start(session as WebTransport, props.keepAlive);
+		liveness = props.keepAlive && (await KeepAlive.start(session as WebTransport, props.keepAlive));
 	} catch (err) {
 		session.close();
 		throw err;

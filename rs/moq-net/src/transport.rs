@@ -351,6 +351,7 @@ impl KeepAlive {
 /// Evidence about the whole session, never one track: a quiet track on a live session stays
 /// live.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Liveness {
 	/// The peer was heard within `soft`.
 	#[default]

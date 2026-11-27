@@ -122,7 +122,7 @@ async function acceptInner(
 		publish: props.publish,
 		client: false,
 		implementation: props.implementation ?? IMPLEMENTATION,
-		liveness: props.keepAlive && KeepAlive.start(transport, props.keepAlive),
+		liveness: props.keepAlive && (await KeepAlive.start(transport, props.keepAlive)),
 		...link(props),
 	};
 

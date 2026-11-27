@@ -27,6 +27,7 @@ export type Liveness = "live" | "stale";
 
 /** The part of a qmux session that runs a keep-alive, read without loading `@moq/qmux`. */
 interface Probing {
+	readonly ready: Promise<void>;
 	keepAlive(config: KeepAlive): void;
 	readonly stale: boolean;
 	staleChanged(): Promise<void>;
@@ -46,16 +47,19 @@ export function check(props: { keepAlive?: KeepAlive; transport?: unknown }): vo
 }
 
 /**
- * Start `config` on `quic`, returning the peer's liveness.
+ * Start `config` on `quic` once the peer's transport parameters arrive, returning the peer's
+ * liveness.
  *
  * @throws On a transport that cannot probe its peer, as WebTransport cannot, or values the
  * transport refuses.
  */
-export function start(quic: WebTransport, config: KeepAlive): Getter<Liveness> {
+export async function start(quic: WebTransport, config: KeepAlive): Promise<Getter<Liveness>> {
 	if (!("keepAlive" in quic)) {
 		throw new Error("keep-alive needs a transport that can probe its peer, which WebTransport cannot");
 	}
 	const probing = quic as unknown as Probing;
+	// A qmux session refuses a keep-alive until it knows the negotiated idle timeout.
+	await probing.ready;
 	probing.keepAlive(config);
 
 	// An already-open session may have gone quiet past `soft`, which `keepAlive` reports at once.

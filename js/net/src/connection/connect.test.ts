@@ -565,6 +565,18 @@ test("a keep-alive refuses a connect that would dial WebTransport, before dialin
 	}
 });
 
+test("a supplied transport that refuses the keep-alive is closed", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	let closed = false;
+	void pair.client.closed.then(() => {
+		closed = true;
+	});
+	const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+	await expect(connect(url, { transport: pair.client, keepAlive })).rejects.toThrow("WebTransport cannot");
+	await settle();
+	expect(closed).toBe(true);
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);

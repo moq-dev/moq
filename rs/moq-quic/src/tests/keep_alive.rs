@@ -178,6 +178,77 @@ fn busy_session_pays_nothing() {
 	assert_eq!(busy_pings(true), busy_pings(false));
 }
 
+/// How long after healing an `outage` a client blackholed mid-send hears its peer again (`SOFT` if
+/// it never does): the dead path fills its congestion window with packets nothing acknowledges,
+/// and its PTO probes back off further apart than `soft`
+fn full_window_heal(outage: Duration) -> Duration {
+	let (mut pair, client_ch, server_ch) = connect();
+	pair.drive();
+	pair.latency = Duration::from_millis(10);
+	let throttled = || {
+		let mut link = Link::default();
+		link.bottleneck = Some(Bottleneck::timed(125_000, Duration::from_millis(50)));
+		link
+	};
+	pair.to_server = throttled();
+	pair.to_client = throttled();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	let chunk = [0u8; 1000];
+	let mut accepted = None;
+	// Keep the stream backlogged throughout, so the window stays full while the path is dead.
+	let mut send = |pair: &mut Pair| {
+		let _ = pair.client_send(client_ch, s).try_write(&mut &chunk[..]);
+		if accepted.is_none() {
+			accepted = pair.server_streams(server_ch).accept(Dir::Uni);
+		}
+		if let Some(id) = accepted {
+			let mut recv = pair.server_recv(server_ch, id);
+			let mut chunks = recv.read().unwrap();
+			while let Poll::Ready(Ok(Some(_))) = chunks.try_next(usize::MAX) {}
+			chunks.finalize();
+		}
+	};
+	let busy = pair.time.saturating_add(SOFT);
+	run(&mut pair, busy, |pair, _| send(pair));
+
+	pair.to_server = collapsed();
+	pair.to_client = collapsed();
+	let blackholed = pair.time;
+	run(&mut pair, blackholed.saturating_add(outage), |pair, _| send(pair));
+	assert!(pair.client_conn_mut(client_ch).is_stale());
+
+	pair.to_server = throttled();
+	pair.to_client = throttled();
+	let healed = pair.time;
+	let mut live = None;
+	run(&mut pair, healed.saturating_add(SOFT), |pair, at| {
+		send(pair);
+		if live.is_none() && !pair.client_conn_mut(client_ch).is_stale() {
+			live = Some(at);
+		}
+	});
+	assert!(!pair.client_conn_mut(client_ch).is_closed());
+	live.map_or(SOFT, |live| live - healed)
+}
+
+/// The keep-alive's probe leaves with a full window, so a busy session turns live within half a
+/// `soft` of healing instead of waiting for the next backed-off PTO, perhaps past `hard`
+#[test]
+fn full_window_still_probes_after_healing() {
+	let _guard = subscribe();
+	// Outages from just past `soft` to just short of `hard`, landing between backed-off PTOs.
+	for ms in (3_000..9_000).step_by(500) {
+		let after = full_window_heal(Duration::from_millis(ms));
+		assert!(
+			after <= SOFT / 2 + Duration::from_millis(100),
+			"live {after:?} after healing a {ms} ms outage"
+		);
+	}
+}
+
 /// A `hard` past the negotiated idle timeout would never be reached, so it is refused
 #[test]
 fn refuses_hard_past_the_idle_timeout() {
