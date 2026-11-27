@@ -59,6 +59,16 @@ test("liveness follows the transport's stale signal until it closes", async () =
 	expect(liveness.peek()).toBe("live");
 });
 
+test("a session already quiet past soft starts stale", () => {
+	const probing = new FakeProbing();
+	// The transport marks a long-quiet session stale as soon as the keep-alive starts.
+	probing.keepAlive = (config) => {
+		probing.config = config;
+		probing.stale = true;
+	};
+	expect(start(probing as unknown as WebTransport, CONFIG).peek()).toBe("stale");
+});
+
 test("a transport that cannot probe its peer refuses the keep-alive", () => {
 	const webtransport = { closed: new Promise(() => {}) } as unknown as WebTransport;
 	expect(() => start(webtransport, CONFIG)).toThrow("WebTransport cannot");

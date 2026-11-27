@@ -29,8 +29,8 @@ impl KeepAlive {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeepAliveError {
-	/// `soft` is zero or longer than `hard`
-	#[error("keep-alive needs a soft limit above zero and no longer than its hard limit")]
+	/// `soft` is too short to halve into a probe interval, or longer than `hard`
+	#[error("keep-alive needs a soft limit of at least 2 ns and no longer than its hard limit")]
 	Order,
 	/// `hard` is longer than the negotiated idle timeout, which would close the connection first
 	#[error("keep-alive hard limit {hard:?} is longer than the idle timeout {idle:?}")]
@@ -57,7 +57,8 @@ impl Liveness {
 	/// Start `config` on a connection whose idle timeout is `idle`, last hearing from the peer at
 	/// `heard`
 	pub(crate) fn new(config: KeepAlive, idle: Option<Duration>, heard: Instant) -> Result<Self, KeepAliveError> {
-		if config.soft.is_zero() || config.soft > config.hard {
+		// Half of `soft` is the probe interval, which must not round to zero and rearm at once.
+		if (config.soft / 2).is_zero() || config.soft > config.hard {
 			return Err(KeepAliveError::Order);
 		}
 		if let Some(idle) = idle
@@ -128,10 +129,14 @@ mod tests {
 	fn refuses_an_unordered_or_too_long_keep_alive() {
 		let ms = Duration::from_millis;
 		let idle = Some(ms(10_000));
-		assert_eq!(
-			Liveness::new(KeepAlive::new(Duration::ZERO, ms(1)), idle, at(0)).unwrap_err(),
-			KeepAliveError::Order
-		);
+		// Half of a 1 ns soft limit rounds to a zero probe interval.
+		for soft in [Duration::ZERO, Duration::from_nanos(1)] {
+			assert_eq!(
+				Liveness::new(KeepAlive::new(soft, ms(1)), idle, at(0)).unwrap_err(),
+				KeepAliveError::Order
+			);
+		}
+		Liveness::new(KeepAlive::new(Duration::from_nanos(2), ms(1)), idle, at(0)).unwrap();
 		assert_eq!(
 			Liveness::new(KeepAlive::new(ms(3), ms(2)), idle, at(0)).unwrap_err(),
 			KeepAliveError::Order

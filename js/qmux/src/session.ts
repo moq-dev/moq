@@ -1241,16 +1241,17 @@ export class Session implements WebTransport {
 	 * all of `soft` passes, and the session closes once `hard` does. Any frame the peer sends counts
 	 * as hearing it, so a busy session sends no probe. Replaces any keep-alive already running.
 	 *
-	 * Throws before {@link ready} resolves, on qmux-00, which has no QX_PING, on a `soft` that is
-	 * zero or longer than `hard`, and on a `hard` longer than the negotiated idle timeout, which
+	 * Throws before {@link ready} resolves, on qmux-00, which has no QX_PING, on a `soft` under
+	 * 2 ns or longer than `hard`, and on a `hard` longer than the negotiated idle timeout, which
 	 * stays in force as a backstop.
 	 */
 	keepAlive(config: KeepAlive): void {
 		if (this.#closed) throw this.#closed;
 		if (!this.#paramsReceived) throw new Error("keep-alive needs the peer's transport parameters; await ready");
 		if (!usesRecords(this.#version)) throw new Error("qmux-00 has no QX_PING to probe the peer with");
-		if (config.soft.isZero() || config.soft.gt(config.hard)) {
-			throw new RangeError("keep-alive needs a soft limit above zero and no longer than its hard limit");
+		// Mirrors Rust, where half of a 1 ns `soft` rounds to a zero probe interval.
+		if (config.soft.lt(Duration.nanos(2)) || config.soft.gt(config.hard)) {
+			throw new RangeError("keep-alive needs a soft limit of at least 2 ns and no longer than its hard limit");
 		}
 		const idle = this.#effectiveIdleTimeoutMs();
 		if (idle !== 0n && config.hard.gt(Duration.millis(Number(idle)))) {

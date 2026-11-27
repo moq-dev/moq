@@ -962,6 +962,7 @@ describe("Session integration (scripted peer)", () => {
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
 		expect(() => session.keepAlive({ soft: Duration.secs(3), hard: Duration.secs(2) })).toThrow(RangeError);
+		expect(() => session.keepAlive({ soft: Duration.nanos(1), hard: Duration.secs(2) })).toThrow(RangeError);
 		expect(() => session.keepAlive({ soft: Duration.secs(2), hard: Duration.secs(31) })).toThrow(RangeError);
 		session.keepAlive(keepAlive);
 		session.close();

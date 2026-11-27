@@ -286,6 +286,7 @@ export class Connection {
 	readonly error: Signals.Getter<Error | undefined>;
 	readonly failure: Signals.Getter<Error | undefined>;
 	static readonly isWebTransportSupported: () => boolean;
+	readonly liveness: Signals.Getter<Connection.Liveness | undefined>;
 	readonly origin: Signals.Getter<Origin.Table | undefined>;
 	readonly probe: Signals.Getter<Connection.Probe | undefined>;
 	stats(): Promise<Connection.Stats | undefined>;

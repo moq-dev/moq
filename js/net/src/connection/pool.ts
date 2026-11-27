@@ -205,6 +205,9 @@ export class Connection {
 	/** Receive estimates while observed, or undefined while disconnected; peek does not request them. */
 	readonly probe: Getter<ProbeType | undefined>;
 
+	/** The current session's liveness under {@link ConnectionProps.keepAlive}, or undefined without one or while disconnected. */
+	readonly liveness: Getter<LivenessType | undefined>;
+
 	/**
 	 * The send-side bandwidth allocator for the current URL, or undefined
 	 * while disabled or URL-less.
@@ -302,6 +305,10 @@ export class Connection {
 		this.viewers = this.#viewers;
 		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
+		this.liveness = this.#signals.computed((effect) => {
+			const liveness = effect.get(this.#established)?.liveness;
+			return liveness && effect.get(liveness);
+		});
 
 		// Key on the serialized URL: URL objects use identity equality, and an equivalent
 		// instance must not release and redial.
@@ -592,6 +599,9 @@ function refuse(props?: ConnectionProps): void {
 	}
 	if (props.cost !== undefined) {
 		throw new Error("cost cannot be shared; pass share: false");
+	}
+	if (props.keepAlive !== undefined) {
+		throw new Error("keepAlive cannot be shared; pass share: false");
 	}
 }
 

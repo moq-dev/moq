@@ -58,7 +58,8 @@ export function start(quic: WebTransport, config: KeepAlive): Getter<Liveness> {
 	const probing = quic as unknown as Probing;
 	probing.keepAlive(config);
 
-	const liveness = new Signal<Liveness>("live");
+	// An already-open session may have gone quiet past `soft`, which `keepAlive` reports at once.
+	const liveness = new Signal<Liveness>(probing.stale ? "stale" : "live");
 	let closed = false;
 	const end = () => {
 		closed = true;
