@@ -1515,11 +1515,12 @@ describe("Session integration (scripted peer)", () => {
 					},
 				);
 
-				// Exactly at the deadline the session is still open; one tick past it closes.
-				await clock.advance(Duration.millis(150));
+				// Just short of the deadline the session is still open; the deadline closes it, as
+				// in Rust.
+				await clock.advance(Duration.millis(149));
 				await settle();
 				expect(settled).toBe(false);
-				await clock.advance(Duration.millis(50));
+				await clock.advance(Duration.millis(1));
 
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
@@ -1610,24 +1611,38 @@ describe("Session integration (scripted peer)", () => {
 			}
 		});
 
-		test("a short negotiated idle timeout is probed before it expires", async () => {
-			// The peer negotiates 30ms and answers every probe, but says nothing unprompted.
+		test("a short negotiated idle timeout is probed in time for a slow answer", async () => {
+			// The peer negotiates 30ms and says nothing unprompted, answering each probe 22ms
+			// late. Our one write, the first send after the peer's last frame, comes 4ms in and
+			// sets the deadline to 34ms: only a probe sent right at a third of the timeout gets
+			// its answer back by then.
 			const clock = new Manual();
 			const installed = clock.install();
 			try {
 				const { session, peer } = connect({ idleTimeout: Duration.millis(120) });
 				peer.send({ type: "transport_parameters", params: peerParams({ maxIdleTimeout: 30n }) });
 				await session.ready;
+				const writer = (await session.createUnidirectionalStream()).getWriter();
+				await settle();
+				peer.send({ type: "max_data", max: 2_000_000n });
+				await settle();
 
+				const delay = 22;
+				const due: { sequence: bigint; at: number }[] = [];
+				let seen = 0;
 				let answered = 0;
-				for (let i = 0; i < 40; i++) {
-					await clock.advance(Duration.millis(5));
+				for (let ms = 1; ms <= 200; ms++) {
+					await clock.advance(Duration.millis(1));
+					if (ms === 4) await writer.write(new Uint8Array([1]));
 					await settle();
 					const pings = peer.received().flatMap((f) => (f.type === "ping_request" ? [f.sequence] : []));
-					for (const sequence of pings.slice(answered)) {
-						peer.send({ type: "ping_response", sequence });
+					for (const sequence of pings.slice(seen)) due.push({ sequence, at: ms + delay });
+					seen = pings.length;
+					while (due.length > 0 && due[0].at <= ms) {
+						peer.send({ type: "ping_response", sequence: due[0].sequence });
+						due.shift();
+						answered++;
 					}
-					answered = pings.length;
 					await settle();
 				}
 
