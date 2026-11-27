@@ -223,6 +223,15 @@ interface Asked {
 	placed: ReadonlyMap<number, bigint>;
 }
 
+// How the copy recorded one live join range's answer, which places a reader only within both.
+// Mirrors the Rust `JoinAnswered`.
+interface JoinAnswered {
+	// The join tick it was recorded at: a reader that began waiting later takes a newer answer.
+	tick: number;
+	// The narrowest max in milliseconds the range was asked under before its answer.
+	budget: number;
+}
+
 interface SubscribeEntry {
 	datagrams?: DatagramEntry;
 	/** Release the stream demand held by readers of the legacy datagram track. */
@@ -252,9 +261,9 @@ interface SubscribeEntry {
 	// Where each live range's SUBSCRIBE_START says it starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
-	// The tick the copy recorded each live join range's answer at, by Range ID (see
-	// `hooks.answerJoin`): one with none is still unanswered.
-	joinTicks: Map<bigint, number>;
+	// How the copy recorded each live join range's answer, by Range ID (see `hooks.answerJoin`):
+	// one with none is still unanswered.
+	joinAnswers: Map<bigint, JoinAnswered>;
 	// The narrowest max in milliseconds each live join range was asked under before its answer, or
 	// each placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups that max
 	// expired, so the answer places only readers within it.
@@ -1854,7 +1863,7 @@ export class Subscriber {
 			askedPlaced: asked.placed,
 			live,
 			starts: new Map(),
-			joinTicks: new Map(),
+			joinAnswers: new Map(),
 			joinBudgets: new Map(),
 			sent: 0,
 			stream: { kind: "setup" },
@@ -2203,7 +2212,7 @@ export class Subscriber {
 				askedPlaced: new Map(),
 				live,
 				starts: new Map(),
-				joinTicks: new Map(),
+				joinAnswers: new Map(),
 				joinBudgets: new Map(),
 				sent: 0,
 				stream: { kind: "setup" },
@@ -2603,7 +2612,7 @@ export class Subscriber {
 			askedPlaced: new Map(),
 			live,
 			starts: new Map(),
-			joinTicks: new Map(),
+			joinAnswers: new Map(),
 			joinBudgets: new Map(),
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
@@ -3369,7 +3378,7 @@ export class Subscriber {
 					const joined = range.start?.joined;
 					// Every max a placed join was ever asked under, answered or not: a retune keeps its
 					// answer, which proves history only if none was finite.
-					const recorded = live !== undefined ? !entry.joinTicks.has(id) : joined !== undefined;
+					const recorded = live !== undefined ? !entry.joinAnswers.has(id) : joined !== undefined;
 					if (!recorded) continue;
 					const max = (live ?? joined)?.max ?? null;
 					entry.joinBudgets.set(id, Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max)));
@@ -3381,7 +3390,7 @@ export class Subscriber {
 				);
 				edit = edited;
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
-				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
+				for (const id of entry.joinAnswers.keys()) if (!entry.live.get(id)) entry.joinAnswers.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
 				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
 				if (capOf(entry.live) !== entry.staleCap) entry.staleCap = undefined;
@@ -3467,10 +3476,11 @@ export class Subscriber {
 			const at = entry.starts.get(id);
 			if (range.start?.live !== undefined) {
 				// Recorded once, as it arrives: a reader that began waiting since takes only a newer answer.
-				if (!entry.joinTicks.has(id)) {
+				if (!entry.joinAnswers.has(id)) {
 					const { min, max } = range.start.live;
 					const budget = Math.min(entry.joinBudgets.get(id) ?? NO_MAX_DELAY, wireBudget(max));
-					entry.joinTicks.set(id, hooks.answerJoin(entry.track, min, through(range.end), at, budget));
+					const tick = hooks.answerJoin(entry.track, min, through(range.end), at, budget);
+					entry.joinAnswers.set(id, { tick, budget });
 				}
 				continue;
 			}
@@ -4144,14 +4154,14 @@ export function joinProbes(
 	for (const join of joins) {
 		const key = joinKey(join.min, join.end);
 		const answers = (id: bigint) => {
+			// Answered: as the copy recorded it, which is what places its readers.
+			const answer = entry.joinAnswers.get(id);
+			if (answer) return answer.tick > join.since && answer.budget >= join.budget;
 			const asked = entry.joinBudgets.get(id) ?? NO_MAX_DELAY;
 			const live = entry.live.get(id)?.start?.live;
 			const now = live === undefined ? 0 : wireBudget(live.max);
 			// The publisher may answer under the max asked before a retune since.
-			const wide = Math.min(asked, now) >= join.budget;
-			const tick = entry.joinTicks.get(id);
-			if (tick === undefined) return !entry.starts.has(id) && wide;
-			return tick > join.since && wide;
+			return !entry.starts.has(id) && Math.min(asked, now) >= join.budget;
 		};
 		// Each live range asking the join, with whether it is a probe.
 		const live: [bigint, boolean][] = [];

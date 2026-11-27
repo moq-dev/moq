@@ -3583,7 +3583,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: None,
@@ -3956,7 +3956,7 @@ mod tests {
 				finishing: None,
 				parked: false,
 				starts: Default::default(),
-				join_ticks: Default::default(),
+				join_answers: Default::default(),
 				join_budgets: Default::default(),
 				declared: None,
 				end: None,
@@ -4484,7 +4484,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: None,
@@ -4542,7 +4542,23 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4000)), (1, Some(4000))].into(),
-			join_ticks: [(0, 13), (1, 14)].into(),
+			join_answers: [
+				(
+					0,
+					JoinAnswered {
+						tick: 13,
+						budget: Duration::ZERO,
+					},
+				),
+				(
+					1,
+					JoinAnswered {
+						tick: 14,
+						budget: Duration::from_millis(120),
+					},
+				),
+			]
+			.into(),
 			join_budgets: [(0, Duration::ZERO), (1, Duration::from_millis(120))].into(),
 			declared: None,
 			end: None,
@@ -4612,7 +4628,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: [(0, Duration::from_millis(120))].into(),
 			declared: None,
 			end: None,
@@ -4626,6 +4642,71 @@ mod tests {
 			probes,
 			[join_probe(&join)],
 			"an answer under 120 ms places no reader at 300 ms"
+		);
+		assert!(reasked.is_empty());
+	}
+
+	/// A demand range answered before any update, under the max it was first asked with, then
+	/// retuned wider, still places only readers within that first max, as the copy recorded it.
+	/// So a reader waiting with the wider max is probed rather than left on an answer that never
+	/// places it. A viewer whose first SUBSCRIBE asks max 0 and whose playout delay then settles
+	/// at 100 ms does this when the SUBSCRIBE_START beats the retune.
+	#[kio::test]
+	async fn a_join_answered_before_a_retune_wider_is_probed() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let join = track::JoinAsk {
+			min: Some(Duration::ZERO),
+			end: None,
+			budget: Duration::from_millis(100),
+			since: 12,
+		};
+		// Asked at max 0 and answered under it at tick 13, then retuned to the reader's 100 ms.
+		let demand = join_probe(&join);
+		let sub = SubStream {
+			order: crate::track::Order::Descending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			stale_cap: None,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(Version::Lite07, &[demand]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			probe_ids: Default::default(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: Some(Some(4000)),
+			went_live: false,
+			finishing: None,
+			parked: false,
+			starts: [(0, Some(4000))].into(),
+			join_answers: [(
+				0,
+				JoinAnswered {
+					tick: 13,
+					budget: Duration::ZERO,
+				},
+			)]
+			.into(),
+			join_budgets: Default::default(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+
+		let (probes, reasked) = join_probes(Some(&sub), &[join], &[demand]);
+		assert_eq!(
+			probes,
+			[join_probe(&join)],
+			"an answer recorded under max 0 places no reader at 100 ms"
 		);
 		assert!(reasked.is_empty());
 	}
@@ -4682,7 +4763,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeEnd { group: 10, error: None }),
@@ -4803,7 +4884,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: None,
@@ -4875,7 +4956,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeEnd { group: 10, error: None }),
@@ -6528,7 +6609,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: None,
@@ -12162,6 +12243,15 @@ fn wire_span(mut subscription: Subscription) -> Subscription {
 	span
 }
 
+/// How the copy recorded one live join range's answer, which places a reader only within both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JoinAnswered {
+	/// The join tick it was recorded at: a reader that began waiting later takes a newer answer.
+	tick: u64,
+	/// The narrowest max age the range was asked under before its answer, as a budget.
+	budget: Duration,
+}
+
 /// The at-most-one live upstream subscription: its control stream plus the params
 /// echoed in every SUBSCRIBE_UPDATE.
 struct SubStream {
@@ -12228,9 +12318,9 @@ struct SubStream {
 	/// Where each live range's SUBSCRIBE_START says its delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
-	/// The tick the copy recorded each live join range's answer at, by Range ID (see
+	/// How the copy recorded each live join range's answer, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
-	join_ticks: std::collections::BTreeMap<u64, u64>,
+	join_answers: std::collections::BTreeMap<u64, JoinAnswered>,
 	/// The narrowest max age each live join range was asked under before its answer, or each
 	/// placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups
 	/// that max expired, so the answer places only readers within it.
@@ -12318,10 +12408,11 @@ impl SubStream {
 				Some(lite::Anchor::Live { min, max }) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a
 					// newer answer.
-					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
+					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_answers.entry(id) {
 						let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
 						let budget = asked.min(crate::track::budget(max));
-						entry.insert(serving.answer_join(min, through(range.end), start, budget));
+						let tick = serving.answer_join(min, through(range.end), start, budget);
+						entry.insert(JoinAnswered { tick, budget });
 					}
 					continue;
 				}
@@ -12524,7 +12615,7 @@ impl SubStream {
 		// Before a retune moves it: the publisher may answer under the max age asked until then.
 		for (id, range) in self.live.iter() {
 			let unanswered = match range.start {
-				Some(lite::Anchor::Live { max, .. }) if !self.join_ticks.contains_key(&id) => Some(max),
+				Some(lite::Anchor::Live { max, .. }) if !self.join_answers.contains_key(&id) => Some(max),
 				// Every max a placed join was ever asked under, answered or not: a retune keeps its
 				// answer, which proves history only if none was finite.
 				Some(lite::Anchor::Joined { max, .. }) => Some(max),
@@ -12538,7 +12629,7 @@ impl SubStream {
 		let (edit, added) = self.live.edit_keyed(&keyed, |id| (kind_of(id), stale.contains(&id)))?;
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
-		self.join_ticks.retain(|id, _| live.get(*id).is_some());
+		self.join_answers.retain(|id, _| live.get(*id).is_some());
 		self.join_budgets.retain(|id, _| live.get(*id).is_some());
 		if self.started.is_some() {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
@@ -12633,23 +12724,22 @@ fn join_probes(
 	for join in joins {
 		let key = Some((join.min, join.end));
 		// Each live range asking the join, with whether it is a probe and whether it answers:
-		// answered after every waiting reader began, or still to answer, under a max age as wide
-		// as theirs, now and before any retune since: the publisher may answer under the max asked
-		// until then.
+		// answered after every waiting reader began under a max age as wide as theirs, as the copy
+		// recorded it and places readers by, or still to answer under one as wide, now and before
+		// any retune since: the publisher may answer under the max asked until then.
 		let answers = |id: u64| {
 			let Some(active) = active else {
 				return false;
 			};
+			if let Some(answer) = active.join_answers.get(&id) {
+				return answer.tick > join.since && answer.budget >= join.budget;
+			}
 			let asked = active.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
 			let now = match active.live.get(id).and_then(|range| range.start) {
 				Some(lite::Anchor::Live { max, .. }) => crate::track::budget(max),
 				_ => Duration::ZERO,
 			};
-			let wide = asked.min(now) >= join.budget;
-			match active.join_ticks.get(&id) {
-				Some(tick) => *tick > join.since && wide,
-				None => !active.starts.contains_key(&id) && wide,
-			}
+			!active.starts.contains_key(&id) && asked.min(now) >= join.budget
 		};
 		let live: Vec<(u64, bool)> = active
 			.into_iter()
@@ -13865,7 +13955,7 @@ impl Establish {
 			finishing: None,
 			parked: self.parked,
 			starts: Default::default(),
-			join_ticks: Default::default(),
+			join_answers: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
 			end: None,

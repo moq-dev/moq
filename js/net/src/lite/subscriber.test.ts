@@ -97,8 +97,26 @@ test("a join range retuned wider before its answer is probed", () => {
 		live: new LiveRanges(Version.DRAFT_07, [demand]),
 		// Asked at 120 ms, then retuned to the reader's 300 ms, still unanswered.
 		joinBudgets: new Map([[0n, 120]]),
-		joinTicks: new Map(),
+		joinAnswers: new Map(),
 		starts: new Map(),
+		fillIds: new Set(),
+		probeIds: new Set(),
+	} as unknown as Parameters<typeof joinProbes>[0];
+	expect(joinProbes(entry, [join], [demand])).toEqual({ probes: [demand], reasked: [] });
+});
+
+// A demand range answered before any update, under the max it was first asked with, then retuned
+// wider, still places only readers within that first max, as the copy recorded it, so a reader
+// waiting with the wider max is probed. Mirrors the Rust `a_join_answered_before_a_retune_wider_is_probed`.
+test("a join answered before a retune wider is probed", () => {
+	const join = { min: 0, end: undefined, budget: 100, since: 12 };
+	const demand = { start: { live: { min: 0, max: 100 } } };
+	const entry = {
+		live: new LiveRanges(Version.DRAFT_07, [demand]),
+		// Asked at max 0 and answered under it at tick 13, then retuned to the reader's 100 ms.
+		joinBudgets: new Map(),
+		joinAnswers: new Map([[0n, { tick: 13, budget: 0 }]]),
+		starts: new Map([[0n, 4000n]]),
 		fillIds: new Set(),
 		probeIds: new Set(),
 	} as unknown as Parameters<typeof joinProbes>[0];
@@ -114,7 +132,7 @@ test("time probes leave room for a join", () => {
 	const entry = {
 		live: new LiveRanges(Version.DRAFT_07, []),
 		joinBudgets: new Map(),
-		joinTicks: new Map(),
+		joinAnswers: new Map(),
 		starts: new Map(),
 		fillIds: new Set(),
 		probeIds: new Set(),
