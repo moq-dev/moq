@@ -795,10 +795,10 @@ struct Copy {
 	/// Whether it may still deliver a group the reader lacks, as [`Reader::let_go`] last
 	/// judged: a drop under its bound waits for it.
 	feeds: bool,
-	/// The track's [`track::Consumer::evicted`] count when [`Reader::backfill_gaps`] last left
-	/// it a group the reader lacks to drain, so an eviction since, or letting the copy go, asks
-	/// the serving route again.
-	drains: Option<u64>,
+	/// The groups [`Reader::backfill_gaps`] left it to drain that the reader still lacks, each
+	/// one it held then: once one no longer drains here, or the copy is let go, the serving
+	/// route is asked for it after all (see [`Reader::rescan_drains`]).
+	drains: BTreeSet<u64>,
 }
 
 // Boxed: a copy holds one for its whole life, and neither arm should pad every copy.
@@ -1089,6 +1089,30 @@ impl Copy {
 				.checked_add(within)
 				.is_some_and(|at| self.track.poll_wall(at, waiter).is_ready())
 		})
+	}
+
+	/// Whether this copy drains group `key` for a reader from the local floor `start` within
+	/// `budget`: replaced and still read, holding the group's head under its cap and inside its
+	/// own ranges, and its read `taking` still offers it. A copy that failed or spent its drain
+	/// budget delivers nothing more, even while a read still leases it, and one holding a group
+	/// without its head may give that group up, so neither drains. Nor does one still
+	/// unanswered, whose ranges are not placed yet. Parks `waiter` until the budget passes.
+	fn may_drain(
+		&self,
+		key: u64,
+		taking: Option<&track::Taking<'_>>,
+		start: u64,
+		budget: Duration,
+		waiter: &kio::Waiter,
+	) -> bool {
+		self.replaced
+			&& self.done.is_none()
+			&& !self.expired(budget, waiter)
+			&& self.start(start) <= key
+			&& self.end().is_some_and(|end| key < end)
+			&& taking.is_some_and(|taking| taking.may_take(key))
+			&& !copy_failed(&self.track)
+			&& self.track.peek_group(key).is_some_and(|group| group.first_frame() == 0)
 	}
 
 	/// How a reader still needs this copy, once replaced.
@@ -2569,7 +2593,7 @@ impl Reader {
 			let capped = copy.cap.take().is_some();
 			copy.since = None;
 			copy.done = None;
-			copy.drains = None;
+			copy.drains.clear();
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// boundary, is the capped copies' to deliver.
 			copy.floor = copy.floor.max(boundary);
@@ -2617,7 +2641,7 @@ impl Reader {
 			since: None,
 			lease: Arc::new(()),
 			feeds: true,
-			drains: None,
+			drains: BTreeSet::new(),
 		});
 		self.learn_end(None);
 	}
@@ -2749,7 +2773,7 @@ impl Reader {
 					waits = true;
 					self.copies.push(copy);
 				}
-				Some(Retains::No) => gave_up |= copy.drains.is_some(),
+				Some(Retains::No) => gave_up |= copy.drains.iter().any(|key| !delivered.contains(*key)),
 			}
 		}
 		// A copy let go with a group a walk left it to drain gave that group up by its own
@@ -3015,6 +3039,7 @@ impl Reader {
 	) -> Option<Poll<std::result::Result<Option<Candidate>, Failure>>> {
 		self.sync(waiter);
 		self.groups_read = true;
+		self.rescan_drains(delivered, waiter);
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
 		let widest = self.mirrored.widest();
@@ -3154,13 +3179,7 @@ impl Reader {
 			// fill let go while that copy still fed it would otherwise leave it unasked.
 			let ran_short =
 				copy.replaced && !copy.fills && matches!(copy.done, Some(Ok(_))) && self.window.end().is_some();
-			// A group the switch left this copy to drain may be gone from its cache since: the
-			// serving route is asked for it after all, as a cursor on the track would ask again.
-			let lost = copy.replaced && copy.drains.is_some_and(|at| copy.track.evicted() != at);
-			let rearm = (late && serving && copy.floor.is_some()) || failed || ran_short || lost;
-			if lost {
-				self.copies[index].drains = None;
-			}
+			let rearm = (late && serving && copy.floor.is_some()) || failed || ran_short;
 			// A walk of the whole route: one an edit queued for its own ranges starts above what
 			// this copy was left to drain.
 			if rearm && !matches!(self.resumed, Some(Resumed::Route)) {
@@ -3668,10 +3687,40 @@ impl Reader {
 			done: None,
 			lease: Arc::new(()),
 			feeds: true,
-			drains: None,
+			drains: BTreeSet::new(),
 		};
 		// The last copy stays the newest route's own.
 		self.copies.insert(self.copies.len() - 1, copy);
+	}
+
+	/// Re-arm a walk of the whole route once a group a walk left a copy to drain, which the
+	/// reader still lacks, no longer drains there: evicted, given up as stale, or its copy
+	/// failed or spent its budget. The serving route is then asked for it after all, as a cursor
+	/// on the track would ask again. Costs the groups left to drain, each one a copy holds.
+	fn rescan_drains(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
+		let (start, budget) = (self.groups.0, self.mirrored.widest());
+		let mut lost = false;
+		for copy in &mut self.copies {
+			copy.drains.retain(|key| !delivered.contains(*key));
+			if copy.drains.is_empty() {
+				continue;
+			}
+			let stopped = {
+				let taking = match &copy.sub {
+					Sub::Ready(sub) => Some(sub.taking()),
+					Sub::Pending(_) => None,
+				};
+				(copy.drains.iter()).any(|key| !copy.may_drain(*key, taking.as_ref(), start, budget, waiter))
+			};
+			if stopped {
+				copy.drains.clear();
+				lost = true;
+			}
+		}
+		// A walk of the whole route: one an edit queued for its own ranges starts above the group.
+		if lost && !matches!(self.resumed, Some(Resumed::Route)) {
+			self.resumed = Some(Resumed::Route);
+		}
 	}
 
 	/// Ask the serving route for the groups below its copy's resume point that the reader
@@ -3743,18 +3792,10 @@ impl Reader {
 		}
 		.unwrap_or(resumed);
 		let from = from.max(self.groups.0);
-		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
-		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
-		// spent its drain budget delivers nothing more, even while a read still leases it, and
-		// one holding a group without its head may give that group up, so neither counts. Nor
-		// does one still unanswered, whose ranges are not placed yet.
+		// A group a replaced copy drains (see [`Copy::may_drain`]) is that copy's: the serving
+		// route is asked from the lowest one none drains.
 		let start = self.groups.0;
 		let budget = self.mirrored.widest();
-		// Each replaced copy's evictions so far, counted before the walk looks at what it holds,
-		// so a group it is left to drain and loses after is asked of the serving route then.
-		let evicted: Vec<Option<u64>> = (self.copies.iter())
-			.map(|copy| copy.replaced.then(|| copy.track.evicted()))
-			.collect();
 		// Each answered copy's staleness verdict, taken once for the whole walk.
 		let taking: Vec<Option<track::Taking<'_>>> = (self.copies.iter())
 			.map(|copy| match &copy.sub {
@@ -3764,36 +3805,23 @@ impl Reader {
 			.collect();
 		// The copy left to drain group `key`, if any.
 		let drains = |key: u64| {
-			self.copies.iter().zip(&taking).position(|(copy, taking)| {
-				copy.replaced
-					&& copy.done.is_none()
-					&& !copy.expired(budget, waiter)
-					&& copy.start(start) <= key
-					&& copy.end().is_some_and(|end| key < end)
-					&& taking.as_ref().is_some_and(|taking| taking.may_take(key))
-					&& !copy_failed(&copy.track)
-					&& copy.track.peek_group(key).is_some_and(|group| group.first_frame() == 0)
-			})
+			(self.copies.iter().zip(&taking))
+				.position(|(copy, taking)| copy.may_drain(key, taking.as_ref(), start, budget, waiter))
 		};
-		let mut left = vec![false; self.copies.len()];
+		let mut left = vec![Vec::new(); self.copies.len()];
 		let lowest = (delivered.gaps(from..resumed).into_iter()).find_map(|gap| {
 			gap.into_iter().find(|key| match drains(*key) {
 				Some(index) => {
-					left[index] = true;
+					left[index].push(*key);
 					false
 				}
 				None => true,
 			})
 		});
 		drop(taking);
-		// Ranges an edit added are walked only from their own starts, which rechecks none of the
-		// groups below: a watch set there stands until a walk of the whole route renews it.
-		let partial = matches!(resumed_by, Resumed::Ranges(_));
-		for ((copy, left), evicted) in self.copies.iter_mut().zip(left).zip(evicted) {
-			copy.drains = match copy.drains {
-				Some(at) if partial => Some(at),
-				_ => evicted.filter(|_| left),
-			};
+		// Added to what earlier walks left, which one from an edit's ranges never rechecks.
+		for (copy, left) in self.copies.iter_mut().zip(left) {
+			copy.drains.extend(left);
 		}
 		// A raised start is asked from its time whatever the local floor, so the backfill
 		// places it, and the group holding it is read once the floor lets it.
@@ -10565,12 +10593,12 @@ mod test {
 	}
 
 	/// A group the switch left to a replaced copy to drain is asked of the serving route once that
-	/// copy is let go without handing it out, as when its cache loses the group: whether the reader
-	/// gets it never depends on what the copy happens to hold.
+	/// copy no longer offers it, whether its read gave the group up or its cache lost it, and
+	/// whether the copy is let go or a read of another of its groups keeps it.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_group_a_draining_copy_gives_up_is_backfilled() {
-		for evicted in [false, true] {
+		for (evicted, leased) in [(false, false), (true, false), (false, true)] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
@@ -10586,7 +10614,11 @@ mod test {
 			write(&b, 3);
 			// The switch leaves group 1 to the replaced copy, which hands out only group 2 for now.
 			assert_eq!(recv(&mut sub).start, 3);
-			assert_eq!(recv(&mut sub).start, 2);
+			let reading = recv(&mut sub);
+			assert_eq!(reading.start, 2);
+			if !leased {
+				drop(reading);
+			}
 			// A budget later, the replaced copy no longer offers group 1, while the serving route
 			// still does.
 			kio::clock::sleep(Duration::from_millis(1200)).await;
@@ -10597,7 +10629,7 @@ mod test {
 			while let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&fresh()) {
 				read.push(group.start);
 			}
-			assert_eq!(read, [1], "evicted {evicted}");
+			assert_eq!(read, [1], "evicted {evicted}, leased {leased}");
 		}
 	}
 

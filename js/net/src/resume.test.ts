@@ -5496,6 +5496,52 @@ test("a group a draining copy loses is backfilled", async () => {
 	}
 });
 
+// A group the switch left to a replaced copy to drain is asked of the serving route once that copy
+// no longer offers it, whether the copy is let go or a read of another of its groups keeps it.
+// Mirrors the Rust `a_group_a_draining_copy_gives_up_is_backfilled`.
+test("a group a draining copy gives up is backfilled", async () => {
+	for (const leased of [false, true]) {
+		const clock = new Manual();
+		const installed = install(clock);
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = timedCopy(a);
+		const tb = timedCopy(b);
+		hooks.receiveTrack(tb.producer);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe(joining(Duration.secs(1)));
+		try {
+			ta.write(0n);
+			await settle();
+			expect(drain(sub)).toEqual([0n]);
+			ta.write(1n);
+			ta.write(2n);
+			tb.write(1n);
+			front.serve(b.consume());
+			await settle();
+			tb.write(3n);
+			await settle();
+			// The switch leaves group 1 to the replaced copy, which hands out only group 2 for now.
+			expect(sub.tryRecvGroup()?.start).toBe(3n);
+			const reading = sub.tryRecvGroup();
+			expect(reading?.start).toBe(2n);
+			if (!leased) reading?.close();
+			// A budget later, the replaced copy no longer offers group 1, while the serving route
+			// still does.
+			await clock.advance(Duration.millis(1200));
+			expect(drain(sub), `leased ${leased}`).toEqual([1n]);
+			reading?.close();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
+	}
+});
+
 // Mirrors `a_switch_before_any_group_drops_the_replaced_copy` in rs/moq-net/src/model/resume.rs, once
 // the new route delivers: the Rust front splices a replacement only then.
 test("a switch before any group drops the replaced copy once the new route delivers", async () => {

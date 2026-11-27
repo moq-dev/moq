@@ -1320,11 +1320,6 @@ export const hooks: {
 	/** Whether `producer`'s cache currently holds a non-aborted group `key` (optionally whole). */
 	producerHoldsGroup: (producer: Producer, key: bigint, whole?: boolean) => boolean;
 	/**
-	 * How many cached groups the subscriber's track evicted so far. Mirrors the Rust
-	 * `Consumer::evicted`.
-	 */
-	evictions: (subscriber: Subscriber) => number;
-	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
 	 */
@@ -1835,9 +1830,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {
-		throw new Error("track.ts not loaded");
-	},
-	evictions: () => {
 		throw new Error("track.ts not loaded");
 	},
 	landed: () => {

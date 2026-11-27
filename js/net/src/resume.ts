@@ -446,10 +446,11 @@ interface Copy {
 	 */
 	dropped?: bigint;
 	/**
-	 * The track's eviction count when {@link Reader.backfillGaps} last left it a group the reader
-	 * lacks to drain, so an eviction since asks the serving route again.
+	 * The groups {@link Reader.backfillGaps} left it to drain that the reader still lacks, each one
+	 * it held then: once one no longer drains here, or the copy is let go, the serving route is asked
+	 * for it after all.
 	 */
-	drains?: number;
+	drains?: Set<bigint>;
 }
 
 /**
@@ -681,6 +682,7 @@ class Reader implements ResumeSource {
 			copy.until = undefined;
 			copy.since = undefined;
 			copy.done = undefined;
+			copy.drains = undefined;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// boundary, is the capped copies' to deliver.
 			if (boundary !== undefined) copy.floor = max(copy.floor ?? 0n, boundary);
@@ -1227,47 +1229,31 @@ class Reader implements ResumeSource {
 		if (placed.length > 0) this.#resolve(placed);
 		this.#resumed = false;
 		if (resumed === undefined) return;
-		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
-		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
-		// spent its drain budget delivers nothing more, even while a read still leases it, and one
-		// holding a group without its head may give that group up, so neither counts.
+		// A group a replaced copy drains (see #mayDrain) is that copy's: the serving route is asked
+		// from the lowest one none drains.
 		const cursor = this.#shell.cursor.peek().start;
-		// Each replaced copy's evictions so far, counted before the walk looks at what it holds, so a
-		// group it is left to drain and loses after is asked of the serving route then.
-		const evictions = new Map(
-			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.evictions(copy.sub)]),
-		);
 		// Each replaced copy's staleness verdict, taken once for the whole walk.
 		const taking = new Map(
 			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.taking(copy.sub)]),
 		);
 		// The copy left to drain group `key`, if any.
 		const drains = (key: bigint) =>
-			this.#copies.find(
-				(copy) =>
-					copy.replaced &&
-					this.#feeds(copy) &&
-					(copy.backfill ? cursor : max(cursor, copy.floor ?? 0n)) <= key &&
-					key < (copyEnd(copy) ?? UNBOUNDED) &&
-					taking.get(copy)?.(key) === true &&
-					!copyFailed(copy) &&
-					hooks.holdsGroup(copy.sub, key, true),
-			);
-		const left = new Set<Copy>();
+			this.#copies.find((copy) => this.#mayDrain(copy, key, cursor, taking.get(copy)));
 		let start: bigint | undefined;
 		for (const gap of delivered.gaps(max(floor, cursor), resumed)) {
 			let key = gap.start;
 			for (; key < gap.end; key++) {
 				const copy = drains(key);
 				if (!copy) break;
-				left.add(copy);
+				// Added to what earlier walks left.
+				copy.drains ??= new Set();
+				copy.drains.add(key);
 			}
 			if (key < gap.end) {
 				start = key;
 				break;
 			}
 		}
-		for (const copy of this.#copies) copy.drains = left.has(copy) ? evictions.get(copy) : undefined;
 		// A raised start is asked from its time whatever the local floor, so the backfill places it,
 		// and the group holding it is read once the floor lets it.
 		for (const time of owed) start = start === undefined ? time : min(start, time);
@@ -1529,7 +1515,10 @@ class Reader implements ResumeSource {
 				break;
 			}
 		}
+		const resumed = this.#resumed;
 		this.#letGo(delivered);
+		// A copy let go with a group left to drain owes the serving route a backfill: ask now.
+		if (this.#resumed && !resumed) owed = true;
 		// A copy that ran out or was let go no longer holds back a drop.
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -1542,9 +1531,9 @@ class Reader implements ResumeSource {
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 		// A revert serves the copy the failed replacement capped again, which may hold the next
-		// group already. A replaced copy that failed this pass owes the serving route a backfill
-		// once the window is placed: ask now, since its close already fired and no later group is
-		// sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
+		// group already. A replaced copy that failed or was let go with a group to drain this pass
+		// owes the serving route a backfill once the window is placed: ask now, since its close
+		// already fired and no later group is sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
 		// ends. Mirrors the Rust `Reader::poll_first`.
 		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
 		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
@@ -1778,13 +1767,40 @@ class Reader implements ResumeSource {
 			copy.done = undefined;
 			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
 		}
-		// A group the switch left a replaced copy to drain may be gone from its cache since: the
-		// serving route is asked for it after all, as a cursor on the track would ask again.
+		this.#rescanDrains(this.#delivered);
+	}
+
+	// Re-arm the walk once a group a walk left a copy to drain, which the reader still lacks, no
+	// longer drains there: evicted, given up as stale, or its copy failed or spent its budget. The
+	// serving route is then asked for it after all, as a cursor on the track would ask again. Costs
+	// the groups left to drain, each one a copy holds. Mirrors the Rust `Reader::rescan_drains`.
+	#rescanDrains(delivered: Delivered): void {
+		const cursor = this.#shell.cursor.peek().start;
 		for (const copy of this.#copies) {
-			if (copy.drains === undefined || hooks.evictions(copy.sub) === copy.drains) continue;
+			if (copy.drains === undefined) continue;
+			for (const key of copy.drains) if (delivered.has(key)) copy.drains.delete(key);
+			const taking = copy.drains.size > 0 ? hooks.taking(copy.sub) : undefined;
+			if ([...copy.drains].every((key) => this.#mayDrain(copy, key, cursor, taking))) continue;
 			copy.drains = undefined;
 			this.#resumed = true;
 		}
+	}
+
+	// Whether `copy` drains group `key` for a reader whose cursor starts at `cursor`: replaced and
+	// still read, holding the group's head under its cap and inside its own ranges, and its read
+	// `taking` still offers it. A copy that failed or spent its drain budget delivers nothing more,
+	// even while a read still leases it, and one holding a group without its head may give that
+	// group up, so neither drains. Mirrors the Rust `Copy::may_drain`.
+	#mayDrain(copy: Copy, key: bigint, cursor: bigint, taking: ((key: bigint) => boolean) | undefined): boolean {
+		return (
+			copy.replaced &&
+			this.#feeds(copy) &&
+			(copy.backfill ? cursor : max(cursor, copy.floor ?? 0n)) <= key &&
+			key < (copyEnd(copy) ?? UNBOUNDED) &&
+			taking?.(key) === true &&
+			!copyFailed(copy) &&
+			hooks.holdsGroup(copy.sub, key, true)
+		);
 	}
 
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
@@ -1999,6 +2015,9 @@ class Reader implements ResumeSource {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
 				if (retains || copy === asked) return true;
+				// Let go with a group a walk left it to drain, which it gave up by its own verdict:
+				// the serving route is asked for it after all, as when the copy's cache loses it.
+				if ([...(copy.drains ?? [])].some((key) => !delivered.has(key))) this.#resumed = true;
 			}
 			this.#drop(copy);
 			return false;

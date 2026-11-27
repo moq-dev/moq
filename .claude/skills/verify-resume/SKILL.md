@@ -31,7 +31,7 @@ quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net
 quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/Evict.cfg
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 20.3M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.7M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. All three pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 19.8M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.2M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. All three pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
 ## Open findings
 
@@ -43,19 +43,19 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a draining replaced copy's cache evicts (`Copy::drains`, `Evict`) or that copy is let go before handing out (`LetGo`'s `gaveUp`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backfill of a group a replaced copy was left to drain and no longer drains, checked every poll (`Copy::drains`, `Reader::rescan_drains`, `Rescan`) or when that copy is let go (`LetGo`'s `gaveUp`). Run `git log c53243d095.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/resume.rs` `Reader::sync`, `boundary`, `Copy::cap` (reuse of a route's copy, new copy at the boundary, replaced copies capped there) | `Sync`, `Boundary`, `Cap`, `Serve` |
-| `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps`, `Copy::drains` | `Backfill`, `BackfillGaps`, `Scan` |
+| `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps`, `rescan_drains`, `Copy::drains`, `Copy::may_drain` | `Backfill`, `BackfillGaps`, `Rescan`, `DrainsBy` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_first`, `deliverable`, `take`, `Copy::done` | `Poll`, `Pass`, `Scan`, `Peek`, `Deliverable`, `Take` |
 | `rs/moq-net/src/model/track.rs` `Cursor::poll_recv_with` (the pick in Group Order) | `Peek` |
 | `rs/moq-net/src/model/resume.rs` `Reader::let_go`, `Copy::retains` | `LetGo`, `Retains` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
 | `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, `Producer::end`, `Phase::Finished` | `Serve`, `FrontFinish`, `FrontFail` |
 | `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `max_key`, `Consumer::latest_key`, `Consumer::poll_arrived`, `track::Subscriber::has_unread_group`, `Producer::finish_shared` | `Seal`, `Held`, `MayLand`, `Latest`, `Landed`, `HasUnread`, `Settle` |
-| `rs/moq-net/src/model/track.rs` `TrackState::evict_group`, `evicted_groups`, `Consumer::evicted` | `Evict`, `Evicted`, `Arrived` |
+| `rs/moq-net/src/model/track.rs` `TrackState::evict_group` | `Evict`, `Arrived` |
 
 ## Not covered
 
