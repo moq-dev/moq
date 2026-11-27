@@ -16274,16 +16274,28 @@ mod test {
 	fn an_unlimited_front_reader_compacts_sparse_delivered_runs_under_debt() {
 		const BASE: u64 = 1_000_003;
 		const SPACING: u64 = 17;
-		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(64 * 1024));
-		let broadcast = Arc::new(broadcast::Info {
-			pool: pool.clone(),
+		// Put the logical front on a 1-byte pool so reader debt fires immediately at 2 runs
+		// (well before the 16-run non-debt watermark), while the serving source keeps its
+		// declared skips on a separate pool.
+		let logical_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1));
+		let source_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(64 * 1024 * 1024));
+		let logical_broadcast = Arc::new(broadcast::Info {
+			pool: logical_pool.clone(),
+			..Default::default()
+		});
+		let source_broadcast = Arc::new(broadcast::Info {
+			pool: source_pool,
 			..Default::default()
 		});
 		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
+		let logical = track::Request::new(logical_broadcast, "sparse")
 			.routes(routes.consume())
 			.accept(crate::track::Info::timed().with_max_age(None));
-		let source = track::Producer::new(broadcast, "sparse", crate::track::Info::timed().with_max_age(None));
+		let source = track::Producer::new(
+			source_broadcast,
+			"sparse",
+			crate::track::Info::timed().with_max_age(None),
+		);
 		source.received();
 		routes.serve(source.consume());
 
@@ -16300,7 +16312,9 @@ mod test {
 		};
 
 		let mut most_delivered = 0;
-		let mut compacted = false;
+		let mut debt_compacted = false;
+		let mut last_compacted_n = None;
+		let mut prev_runs = 0;
 		for n in 0..800u64 {
 			let key = BASE + n * SPACING;
 			let mut group = source.create_group(group::Info { start: key }).unwrap();
@@ -16312,30 +16326,30 @@ mod test {
 				Poll::Ready(Ok(Some(g))) if g.start == key
 			));
 			let runs = sub.delivered_runs();
-			if n > 100 && runs < most_delivered {
-				compacted = true;
+			// Debt compaction triggers at 2 runs (well before the 16-run non-debt watermark),
+			// so within the first 10 groups `runs` drops below the delivered count `n + 1`.
+			if n < 10 && runs <= n as usize {
+				debt_compacted = true;
 			}
+			if runs < prev_runs || (n > 0 && runs == 1) {
+				last_compacted_n = Some(n);
+			}
+			prev_runs = runs;
 			most_delivered = most_delivered.max(runs);
 		}
 		assert!(
-			compacted,
-			"logical delivered runs never compacted (peaked at {most_delivered})"
+			debt_compacted,
+			"expected debt-driven compaction before the 16-run watermark (peaked at {most_delivered})"
 		);
 		assert!(
 			most_delivered <= 20,
 			"logical delivered runs grew unboundedly to {most_delivered}"
 		);
 
-		// Starting `poll_drop` after debt compaction must still emit the serving route's skips.
-		let key = BASE + 800 * SPACING;
-		let mut group = source.create_group(group::Info { start: key }).unwrap();
-		group.write_frame(ts(key), &b"x"[..]).unwrap();
-		group.finish_at(key + SPACING).unwrap();
-		source.skip_groups(key + 1..key + SPACING);
-		assert!(matches!(
-			sub.poll_recv_group(&kio::Waiter::noop()),
-			Poll::Ready(Ok(Some(g))) if g.start == key
-		));
+		// Starting `poll_drop` after compaction must still emit a retained skip that lies
+		// strictly between two already-delivered groups that compaction joined.
+		let joined_n = last_compacted_n.expect("compaction ran");
+		let bridged_skip = BASE + (joined_n - 1) * SPACING + 1;
 		let mut emitted = Vec::new();
 		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
 			if hole == track::Hole::Skip {
@@ -16343,8 +16357,8 @@ mod test {
 			}
 		}
 		assert!(
-			emitted.iter().any(|run| run.contains(&(key + 1))),
-			"expected latest skip after compaction to be emitted, got {emitted:?}"
+			emitted.iter().any(|run| run.contains(&bridged_skip)),
+			"expected bridged skip containing {bridged_skip} to be emitted after compaction, got {emitted:?}"
 		);
 	}
 

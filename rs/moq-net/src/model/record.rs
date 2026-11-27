@@ -310,10 +310,14 @@ impl Record {
 		};
 		bill.set(bytes);
 		let owed = bill.debt() > 0;
+		let threshold = match owed {
+			true => self.compact_at.max(2),
+			false => self.compact_at.max(16),
+		};
 		let compact = skips.is_some()
 			&& self.reported.is_empty()
 			&& self.pending.is_empty()
-			&& (owed || self.delivered.runs() >= self.compact_at.max(16));
+			&& self.delivered.runs() >= threshold;
 		if !owed && !moved && !compact {
 			return;
 		}
@@ -443,13 +447,37 @@ impl Record {
 		}
 		// Keys retired below the delivered floor by the delivery budget are already closed in
 		// `delivered` and never offered again; under pool debt, drop stale write-offs and
-		// given-up misses within them without raising the report floor over unreported keys.
+		// given-up misses within them without raising the report floor over unreported keys or
+		// discarding stale verdicts for withdrawable/pending gaps.
 		let unreported = self.delivered.unreported();
 		let closed = self.delivered.floor().min(unreported.end);
 		if closed > unreported.start {
 			let span = unreported.start..closed;
-			self.written_off.remove(span.clone());
-			folded.push(span);
+			let mut protected: Vec<Range<u64>> = self
+				.reported
+				.overlapping(&span)
+				.filter(|(_, report)| **report == Report::Withdrawable)
+				.map(|(run, _)| run.start.max(span.start)..run.end.min(span.end))
+				.chain(
+					self.pending
+						.overlapping(&span)
+						.filter(|(_, pending)| pending.hole.stale_budget().is_some())
+						.map(|(run, _)| run.start.max(span.start)..run.end.min(span.end)),
+				)
+				.collect();
+			protected.sort_unstable_by_key(|run| run.start);
+			let mut at = span.start;
+			for keep in protected {
+				if at < keep.start {
+					self.written_off.remove(at..keep.start);
+					folded.push(at..keep.start);
+				}
+				at = at.max(keep.end);
+			}
+			if at < span.end {
+				self.written_off.remove(at..span.end);
+				folded.push(at..span.end);
+			}
 		}
 		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
 		if floor > self.floor {
@@ -464,12 +492,15 @@ impl Record {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
-			let next = stretch.end.max(start + 1);
+			let next = match self.reported.get_key_value(&start) {
+				Some((run, Report::Withdrawable)) if stretch.end == start => run.end,
+				_ => stretch.end.max(start + 1),
+			};
 			from = [
 				self.delivered.next_settled_from(next),
 				self.reported
 					.overlapping(&(next..u64::MAX))
-					.next()
+					.find(|(_, report)| **report == Report::Final)
 					.map(|(run, _)| run.start.max(next)),
 			]
 			.into_iter()
@@ -480,30 +511,35 @@ impl Record {
 	}
 
 	/// Compact fragmented `delivered` runs across declared skips for a non-reporting reader
-	/// under pool debt, starting strictly above the `0` prefix and marking each compacted span
-	/// unreported so `self.floor`, `reported`, and future `poll_drop` calls stay unaffected.
+	/// under pool debt, starting strictly above the `0` prefix and bridging only gaps proved
+	/// skipped so `unjudged` keys in surrounding runs stay intact and `self.floor`, `reported`,
+	/// and future `poll_drop` calls stay unaffected.
 	fn compact_delivered_skips(&mut self, skip_end: &dyn Fn(u64) -> Option<u64>, folded: &mut Vec<Range<u64>>) {
 		let mut from = self.delivered.above_gap();
 		while let Some(start) = from {
 			let mut end = start;
-			let mut last_delivered = start;
 			let mut runs = 0usize;
+			let mut gaps = Vec::new();
+			let mut last_gaps = 0usize;
 			loop {
 				if let Some(run_end) = self.delivered.run_end(end) {
 					end = run_end;
-					last_delivered = run_end;
 					runs += 1;
+					last_gaps = gaps.len();
 				} else if let Some(next) = skip_end(end).filter(|next| *next > end) {
+					gaps.push(end..next);
 					end = next;
 				} else {
 					break;
 				}
 			}
 			if runs > 1 {
-				self.delivered.compact_skip(start..last_delivered);
-				self.skipped.forget(start..last_delivered);
-				self.written_off.remove(start..last_delivered);
-				folded.push(start..last_delivered);
+				for gap in gaps.into_iter().take(last_gaps) {
+					self.delivered.compact_skip(gap.clone());
+					self.skipped.forget(gap.clone());
+					self.written_off.remove(gap.clone());
+					folded.push(gap);
+				}
 			}
 			from = self.delivered.next_from(end.max(start + 1));
 		}
@@ -586,7 +622,10 @@ impl Record {
 			self.delivered.above_gap(),
 			self.skipped.lowest(),
 			self.written_off.iter().next().map(|run| run.start),
-			self.reported.iter().next().map(|(run, _)| run.start),
+			self.reported
+				.iter()
+				.find(|(_, report)| **report == Report::Final)
+				.map(|(run, _)| run.start),
 		]
 		.into_iter()
 		.flatten()
@@ -603,7 +642,7 @@ impl Record {
 		let mut gaps = Vec::new();
 		loop {
 			let (next, step) = match self.reported.get_key_value(&end) {
-				Some((run, _)) => {
+				Some((run, Report::Final)) => {
 					// Count distinct runs overlapping this reported run up to the folding
 					// threshold so alternating served groups and drops under one coalesced
 					// `Report::Final` run compact under debt.
@@ -617,6 +656,7 @@ impl Record {
 					}
 					(run.end, 1 + extra)
 				}
+				Some((_, Report::Withdrawable)) => break,
 				None if self.pending.contains_key(&end) => break,
 				None => {
 					let local = match fold {
@@ -1484,6 +1524,127 @@ mod test {
 		assert!(
 			!record.told(3),
 			"remaining budget-retired keys stay out of report floor"
+		);
+	}
+
+	/// Under pool debt, a withdrawable stale report stops `final_end` (never advancing `floor`
+	/// or turning into `Report::Final`) and protects its stale verdict in `Beside`.
+	#[test]
+	fn debt_fold_preserves_withdrawable_reports_and_beside_verdicts() {
+		struct GivenUp(RangeSet<u64>);
+		impl Beside for GivenUp {
+			fn runs(&self) -> u64 {
+				self.0.len() as u64
+			}
+			fn given_up_end(&self, key: u64) -> Option<u64> {
+				self.0.get(&key).map(|run| run.end)
+			}
+			fn next_held(&self, key: u64) -> Option<u64> {
+				self.0
+					.overlapping(&(key..u64::MAX))
+					.next()
+					.map(|run| run.start.max(key))
+			}
+			fn forget(&mut self, folded: Range<u64>) {
+				self.0.remove(folded);
+			}
+		}
+
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(100);
+		record.delivered.fold_below(100, None);
+		record.tell(0..20, Report::Final);
+		record.tell(20..30, Report::Withdrawable);
+		record.tell(30..100, Report::Final);
+		let mut beside = GivenUp(RangeSet::new());
+		beside.0.insert(5..10);
+		beside.0.insert(20..30);
+		beside.0.insert(40..50);
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+
+		assert_eq!(record.floor, 20, "floor must stop before Report::Withdrawable");
+		assert_eq!(
+			record.reported.get(&25),
+			Some(&Report::Withdrawable),
+			"withdrawable report must stay Report::Withdrawable after debt fold"
+		);
+		assert!(
+			beside.0.contains(&25),
+			"beside stale verdict under Report::Withdrawable must survive debt fold"
+		);
+		assert!(!beside.0.contains(&5) && !beside.0.contains(&45));
+	}
+
+	/// Skip compaction preserves `unjudged` keys in surrounding runs so a subsequent range edit
+	/// still reopens groups that were provisionally closed outside the reader's ranges.
+	#[test]
+	fn skip_compaction_preserves_unjudged_keys_for_reopen() {
+		struct FnSkips<F: Fn(u64) -> Option<u64>>(F);
+		impl<F: Fn(u64) -> Option<u64>> SkipLookup for FnSkips<F> {
+			fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+				f(&self.0);
+			}
+		}
+
+		let (pool, track) = account();
+		let mut record = Record::default();
+		// Provisionally close 0..20 outside ranges (only 0..=4 was judged), then reopen 5..10 so
+		// 10..20 remains an unjudged provisional run above the floor.
+		record
+			.delivered
+			.fold_below(20, Some(&Cover::new(std::iter::once(0..=4))));
+		record.delivered.reopen(&Cover::new(std::iter::once(5..=9)));
+		assert!(record.delivered.is_unjudged(12));
+		// Hand out group 30 and declare 20..30 skipped.
+		record.delivered.insert(30);
+		let skips = FnSkips(|key: u64| (20..30).contains(&key).then_some(30));
+		record.settle_with(|| track.clone(), &mut (), Standing::default(), Some(&skips));
+		owe(&track, pool.used());
+		record.settle_with(|| track.clone(), &mut (), Standing::default(), Some(&skips));
+
+		assert!(
+			record.delivered.is_unjudged(12),
+			"unjudged key in adjacent run must survive skip compaction"
+		);
+		assert!(
+			!record.delivered.is_unjudged(25),
+			"bridged skip gap must not become unjudged"
+		);
+		// A later range edit covering 12 must reopen it so it can still be delivered.
+		record.delivered.reopen(&Cover::new(std::iter::once(12..=12)));
+		assert!(!record.delivered.contains(12), "reopened key must be owed again");
+		assert!(record.delivered.contains(25), "declared skip stays compacted");
+	}
+
+	/// Under sustained pool debt on a sparse track with no declared skips, fruitless skip scans
+	/// back off exponentially via `compact_at` instead of scanning quadratically on every read.
+	#[test]
+	fn fruitless_skip_scans_back_off_under_sustained_debt() {
+		use std::cell::Cell;
+
+		struct CountingNoSkips(Cell<usize>);
+		impl SkipLookup for CountingNoSkips {
+			fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+				self.0.set(self.0.get() + 1);
+				f(&|_| None);
+			}
+		}
+
+		let (pool, track) = account();
+		let mut record = Record::default();
+		let lookup = CountingNoSkips(Cell::new(0));
+		for n in 1..=500u64 {
+			record.delivered.insert(n * 17);
+			owe(&track, pool.used().max(RUN_OVERHEAD));
+			record.settle_with(|| track.clone(), &mut (), Standing::default(), Some(&lookup));
+		}
+		assert!(
+			lookup.0.get() <= 10,
+			"expected logarithmic backoff under sustained debt, got {} scans over 500 reads",
+			lookup.0.get()
 		);
 	}
 }

@@ -36478,48 +36478,69 @@ mod test {
 	}
 
 	/// When an ordered reader buffers two stale gaps before taking a newer group internally,
-	/// `hand_out` must keep the second gap's stale verdict in `misses` until that gap is
-	/// returned or withdrawn, so widening the budget between reads still withdraws it.
+	/// both `hand_out` and a pool-debt fold must keep the second gap's stale verdict
+	/// withdrawable until it is returned or withdrawn, so widening the budget still withdraws it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn an_ordered_reader_keeps_second_buffered_stale_gap_withdrawable_after_budget_widening() {
-		let producer = track_producer("test", Info::timed());
-		producer.received();
-		producer.anchored();
-		let _fills = producer.requests();
-		producer.skip_groups(0..100);
-		producer.give_up(100..200, Hole::stale(Duration::from_millis(100)));
-		producer.skip_groups(200..300);
-		producer.give_up(300..400, Hole::stale(Duration::from_millis(100)));
-		producer.skip_groups(400..2000);
-		write_group(&producer, 2000);
+		for force_debt in [false, true] {
+			let pool = crate::cache::Pool::unbounded();
+			let broadcast = Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			});
+			let producer = Producer::new(broadcast, "test", Info::timed());
+			producer.received();
+			producer.anchored();
+			let _fills = producer.requests();
+			producer.skip_groups(0..100);
+			producer.give_up(100..200, Hole::stale(Duration::from_millis(100)));
+			producer.skip_groups(200..300);
+			producer.give_up(300..400, Hole::stale(Duration::from_millis(100)));
+			producer.skip_groups(400..2000);
+			write_group(&producer, 2000);
 
-		let mut ord = producer.subscribe(within(Duration::from_millis(100), None)).ordered();
+			let mut ord = producer.subscribe(within(Duration::from_millis(100), None)).ordered();
 
-		// First poll: `find_gap(true)` adopts both stale runs (100..200 and 300..400) into
-		// `misses.stale` and buffers them as withdrawable gaps; then `read()` takes group 2000
-		// internally (`hand_out(2000, ordered=true)` advances `delivered.floor()` past 300..400)
-		// and returns the first gap (100..200) while keeping 300..400 buffered behind it.
-		assert!(matches!(
-			ord.poll_next_item(&kio::Waiter::noop()),
-			Poll::Ready(Ok(Some(Item::Gap { range, .. }))) if range == (100..200)
-		));
+			// First poll: `find_gap(true)` adopts both stale runs (100..200 and 300..400) into
+			// `misses.stale` and buffers them as withdrawable gaps; then `read()` takes group 2000
+			// internally (`hand_out(2000, ordered=true)` advances `delivered.floor()` past 300..400)
+			// and returns the first gap (100..200) while keeping 300..400 buffered behind it.
+			assert!(matches!(
+				ord.poll_next_item(&kio::Waiter::noop()),
+				Poll::Ready(Ok(Some(Item::Gap { range, .. }))) if range == (100..200)
+			));
 
-		// Widen the budget before reading the next item: gap 300..400 must be withdrawn
-		// rather than returned as `Old`.
-		ord.update(within(Duration::from_secs(60), None)).unwrap();
-		let mut items = Vec::new();
-		while let Poll::Ready(Ok(Some(item))) = ord.poll_next_item(&kio::Waiter::noop()) {
-			match item {
-				Item::Group(g) => items.push(Ok(g.start)),
-				Item::Gap { range, .. } => items.push(Err(range)),
+			if force_debt {
+				// Shrink capacity to 1 byte without evicting drops, assign real reader debt, and
+				// run a debt fold while 300..400 is still buffered as `Report::Withdrawable`.
+				ord.inner.settle_record(None);
+				pool.resize(1);
+				let mut debt = 1 << 20;
+				producer.state.read().cache.owe_readers(&mut debt);
+				assert!(
+					matches!(&ord.inner.inner, Inner::Plain(cursor) if cursor.record.owes()),
+					"reader must owe debt before folding"
+				);
+				ord.inner.settle_record(None);
 			}
+
+			// Widen the budget before reading the next item: gap 300..400 must be withdrawn
+			// rather than returned as `Old`.
+			ord.update(within(Duration::from_secs(60), None)).unwrap();
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = ord.poll_next_item(&kio::Waiter::noop()) {
+				match item {
+					Item::Group(g) => items.push(Ok(g.start)),
+					Item::Gap { range, .. } => items.push(Err(range)),
+				}
+			}
+			assert_eq!(
+				items,
+				[Ok(2000)],
+				"widening budget must withdraw buffered second stale gap 300..400 (force_debt={force_debt})"
+			);
 		}
-		assert_eq!(
-			items,
-			[Ok(2000)],
-			"widening budget must withdraw buffered second stale gap 300..400"
-		);
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

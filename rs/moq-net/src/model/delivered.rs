@@ -68,10 +68,18 @@ impl Delivered {
 
 	/// Record every key in `groups` as handed out, joining the runs it touches.
 	pub fn insert_run(&mut self, groups: std::ops::Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.unjudged.remove(groups.clone());
+		self.merge_run(groups);
+	}
+
+	/// Join `groups` into `runs` without clearing `unjudged` on keys already present.
+	fn merge_run(&mut self, groups: std::ops::Range<u64>) {
 		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
 			return;
 		};
-		self.unjudged.remove(groups.clone());
 		let mut first = groups.start;
 		// A run ending at or just below the first key joins it.
 		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
@@ -90,13 +98,14 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
-	/// Compact `groups` across declared skips under pool debt, extending `unreported` so
-	/// debt folding never promotes compacted skips into the report floor.
+	/// Compact a declared-skip gap `groups` into `runs`, preserving `unjudged` on surrounding
+	/// runs and extending `unreported` so debt folding never promotes compacted skips into the
+	/// report floor.
 	pub fn compact_skip(&mut self, groups: std::ops::Range<u64>) {
 		if groups.is_empty() {
 			return;
 		}
-		self.insert_run(groups.clone());
+		self.merge_run(groups.clone());
 		self.mark_unreported(groups);
 	}
 
