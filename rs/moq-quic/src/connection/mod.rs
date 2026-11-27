@@ -2524,7 +2524,10 @@ impl Connection {
 					self.ack_frequency.on_lost(packet);
 				}
 				self.spaces[pn_space].pending |= info.retransmits;
-				self.path.mtud.on_non_probe_lost(pn_space, packet, info.size);
+				// Judged against the ACKs of the path that sent it, which `on_ack` feeds the same way
+				self.sent_path(info.path_generation)
+					.mtud
+					.on_non_probe_lost(pn_space, packet, info.size);
 
 				self.spaces[pn_space].lost_packets.insert(
 					packet,
@@ -2540,6 +2543,13 @@ impl Connection {
 				self.stats.path.black_holes_detected += 1;
 				self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
 				self.datagrams().drop_oversized();
+			}
+			// The previous path's losses close their burst there, and judge only its own MTU
+			if let Some((_, prev)) = &mut self.prev_path
+				&& prev.mtud.black_hole_detected(now)
+			{
+				self.stats.path.black_holes_detected += 1;
+				prev.congestion.on_mtu_update(prev.mtud.current_mtu());
 			}
 
 			// Don't apply congestion penalty for lost ack-only packets

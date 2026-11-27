@@ -572,3 +572,42 @@ fn rebinding_with_a_probe_in_flight_keeps_searching() {
 	assert!(!server.has_prev_path());
 	assert!(server.path_mtu() > INITIAL_MTU, "{}", server.path_mtu());
 }
+
+/// Losses among full-size packets the old path sent, interleaved with ACKs of others, are that
+/// path's feedback, so a port change while they are in flight finds no black hole on the new
+/// path
+#[test]
+fn rebinding_amid_old_path_losses_finds_no_black_hole() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	let mtu = pair.server_conn_mut(server_ch).path_mtu();
+	assert!(mtu > INITIAL_MTU, "{mtu}");
+
+	// Full-size packets the client receives only every other one of
+	pair.refill_pacing();
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &[0; 10_000][..]).unwrap();
+	pair.drive_server();
+	let sent = mem::take(&mut pair.client.inbound);
+	assert!(sent.len() >= 8, "{}", sent.len());
+
+	// The client's port changes before it acknowledges any of them
+	let port = pair.next_port();
+	pair.client.addr.set_port(port);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	let client = pair.client.addr;
+	pair.server.drive(now, client);
+	assert!(pair.server_conn_mut(server_ch).has_prev_path());
+
+	pair.client.inbound.extend(sent.into_iter().skip(1).step_by(2));
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.stats().path.black_holes_detected, 0);
+	assert_eq!(server.path_mtu(), mtu);
+}
