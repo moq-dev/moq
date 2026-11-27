@@ -22,15 +22,18 @@ confirmed with temporary debug logs in the relay's `lite::publisher`:
   under the same browser cap as the live groups. The tab fetches at priority 0, below the mid tier
   it fetches for. The draft says a subscriber that wants the rest of a preempted group asks again,
   so recommended: the tab fetches again while a fetch stops with `TooFarBehind`, keeping the
-  check that the group comes back whole. Rejected: fetching above every tier, which takes credit
-  from the high tier, whose every group must arrive.
+  check that the group comes back whole. That is the protocol's own recovery for a preempted
+  group, not a test retry, so the epic's no-retry rule does not apply. Rejected: fetching above
+  every tier, which takes credit from the high tier, whose every group must arrive.
 - `Old` (52): the relay served the one-shot SUBSCRIBE a group whose copy had failed with `OLD`.
   The copy's upstream subscription is a live join with a max of 0, so the publisher reset the
   copy's stream as soon as the next group started. That judged the copy's delivery, not whether
   the group exists, and the one-shot reader has no live join at all, so upstream would answer it
-  with the group. `GroupServe::poll_open` gives it up through `poll_given_up`
-  (`group.poll_finished` returns the copy's `Old`), since `Recover::undelivered` in
-  `rs/moq-net/src/model/resume.rs` excuses `Old` only for a fetch (`reader` is `None`), not for a
+  with the group. The relay served the request as a normal subscription (its logs showed
+  `serving group` on the request's id, so the subscriber's FIN came after serving began), not
+  through `OneShotFetch`, whose routed cursor already excuses `Old`. `GroupServe::poll_open` gives
+  it up through `poll_given_up` (`group.poll_finished` returns the copy's `Old`), since
+  `Recover::undelivered` in `rs/moq-net/src/model/resume.rs` excuses `Old` only for a fetch (`reader` is `None`), not for a
   subscription reader whose own budget never reaches the group. Recommended: treat a copy's `Old`
   as undelivered for a reader whose budget is wider than the max the copy's live join was judged
   under, as the relay already does for an `OLD` drop, so the group recovers from upstream. Model it

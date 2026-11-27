@@ -56,7 +56,7 @@ EXTENDS Integers, Sequences, FiniteSets
 CONSTANTS
     Groups,        \* starts in range
     Pressure,      \* the cache pool may hand the publisher's reader debt, so its record folds
-    ReliableReset  \* the peer negotiated RESET_STREAM_AT (`Session::reliable_reset`)
+    ReliableReset  \* a reset delivers its prefix: raw QUIC or QMux with RESET_STREAM_AT, never WebTransport (`Session::reliable_reset`)
 
 \* The highest End a group may finish at: one past the highest start.
 MaxEnd == 1 + CHOOSE m \in Groups : \A x \in Groups : x <= m
