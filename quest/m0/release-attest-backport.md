@@ -31,8 +31,9 @@ against `release`: #7224's attest job and its callers' grants, including
 `nightly.yml`'s dry-run callers, with `doc/setup/install.md` left for the cut.
 Once a `moq-cli` and a `moq-relay` release tag after it merges, download one
 archive of each and run the command above, adding the archive path and
-`--source-ref refs/tags/<tag>`; then delete this quest. If either returns 404,
-open that release's run and see why its attest job failed or did not run.
+`--source-ref refs/tags/<tag>`, and delete this quest once both succeed. A 404
+keeps it open: open that release's run and see why its attest job failed or did
+not run.
 
 Public API: none. Wire: none.
 
