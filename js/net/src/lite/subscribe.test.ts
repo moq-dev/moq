@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import { ProtocolViolation, StreamCode } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import type { Range } from "../track.ts";
@@ -574,6 +574,30 @@ test("SubscribeDrop is restored on draft-07", async () => {
 	expect([got.drop.start, got.drop.end, got.drop.error]).toEqual([1n, 4n, 7]);
 	// Draft-06 carries an inclusive end.
 	expect(await encode(Version.DRAFT_06, drop)).toEqual(new Uint8Array([2, 3, 1, 3, 7]));
+});
+
+// A lite-07 OLD drop carries the max age it was judged under, in milliseconds plus one, so zero names
+// the publisher's own. No other drop, and no earlier version, carries one. Mirrors the Rust
+// `a_lite07_old_drop_carries_its_judged_max_age`.
+test("a lite-07 OLD drop carries its judged max age", async () => {
+	for (const [maxAge, wire] of [
+		[undefined, 0],
+		[0, 1],
+		[9, 10],
+	] as const) {
+		const drop: SubscribeResponse = { drop: SubscribeDrop.stale(1n, 4n, maxAge, Version.DRAFT_07) };
+		expect(await encode(Version.DRAFT_07, drop)).toEqual(new Uint8Array([2, 4, 1, 4, StreamCode.Old, wire]));
+		const got = await responseRoundtrip(Version.DRAFT_07, drop);
+		if (!("drop" in got)) throw new Error("expected drop");
+		expect([got.drop.error, got.drop.maxAge]).toEqual([StreamCode.Old, maxAge]);
+	}
+	// A drop depending on no budget settles every reader.
+	expect(SubscribeDrop.given(1n, 4n, new StreamError(StreamCode.Old), Version.DRAFT_07).maxAge).toBeUndefined();
+	const skip: SubscribeResponse = { drop: SubscribeDrop.stale(1n, 4n, 9, Version.DRAFT_07) };
+	skip.drop.error = StreamCode.Skip;
+	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([2, 3, 1, 4, 0x3a]));
+	const lite06: SubscribeResponse = { drop: SubscribeDrop.stale(1n, 4n, 9, Version.DRAFT_06) };
+	expect(await encode(Version.DRAFT_06, lite06)).toEqual(new Uint8Array([2, 3, 1, 3, 0]));
 });
 
 test("lite-07 carries skips in SubscribeDrop(SKIP) and rejects type 3", async () => {

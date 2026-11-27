@@ -560,6 +560,25 @@ export function hasGroupSpan(version: Version): boolean {
 }
 
 /**
+ * Whether an `OLD` SUBSCRIBE_DROP carries the `Max Age` its groups were judged stale under. Added in
+ * lite-07; before it a subscriber can't tell which reader a stale drop settles.
+ */
+export function hasJudgedDrop(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
  * Whether holes distinguish declared skips (SUBSCRIBE_DROP with error code SKIP) from drops
  * with an error code; added in lite-07. Earlier versions drop every hole without a distinct skip
  * code.

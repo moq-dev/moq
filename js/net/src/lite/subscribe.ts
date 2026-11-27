@@ -1,7 +1,7 @@
 import { Duration as ClockDuration } from "@moq/clock";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type * as Instance from "../instance.ts";
-import { NO_MAX_DELAY } from "../internal.ts";
+import { type Hole, NO_MAX_DELAY } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position, Range, Start } from "../track.ts";
@@ -18,9 +18,11 @@ import {
 	hasFrameBounds,
 	hasGroupOrder,
 	hasGroupSpan,
+	hasJudgedDrop,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
+	hasSkip,
 	resolvesStart,
 	Version,
 } from "./version.ts";
@@ -1476,14 +1478,24 @@ export class SubscribeDrop {
 	/** One past the last dropped group key. */
 	end: bigint;
 	error: number;
+	/**
+	 * Lite-07 with `OLD`: the `Max Age` in milliseconds the groups were judged stale under, or
+	 * undefined for the publisher's own, which settles every reader. Ignored for any other drop.
+	 */
+	maxAge: number | undefined;
 
-	constructor(props: { start: bigint; end: bigint; error: number }) {
+	constructor(props: { start: bigint; end: bigint; error: number; maxAge?: number }) {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
+		this.maxAge = props.maxAge;
 	}
 
-	/** Name `[start, end)` given up with `err`, as `version` carries it. */
+	/**
+	 * Name `[start, end)` given up with `err`, as `version` carries it. An `OLD` drop named here
+	 * depends on no reader's `Max Age`, so it settles every reader as the publisher's own does.
+	 * {@link stale} names the one a staleness verdict was judged under.
+	 */
 	static given(start: bigint, end: bigint, err: unknown, version: Version): SubscribeDrop {
 		return new SubscribeDrop({
 			start,
@@ -1491,6 +1503,35 @@ export class SubscribeDrop {
 			// Before lite-07 the code is the application's, so it says nothing of why.
 			error: hasDropCode(version) ? toStreamCode(err) : 0,
 		});
+	}
+
+	/** Name `[start, end)` judged stale under `maxAge` milliseconds, undefined for the publisher's own. */
+	static stale(start: bigint, end: bigint, maxAge: number | undefined, version: Version): SubscribeDrop {
+		const drop = SubscribeDrop.given(start, end, new StreamError(StreamCode.Old), version);
+		drop.maxAge = maxAge;
+		return drop;
+	}
+
+	/**
+	 * Name `[start, end)` given up as `hole`: lite-07 skips what was never produced with `SKIP`, and
+	 * earlier versions drop it as not found. A stale verdict names the budget it was judged under, no
+	 * limit being the publisher's own max age; an `OLD` drop with no verdict of its own, such as one
+	 * shed to make room, names `unjudged`. Mirrors the Rust `SubscribeDrop::given_up`.
+	 */
+	static hole(start: bigint, end: bigint, hole: Hole, unjudged: number | undefined, version: Version): SubscribeDrop {
+		if (hole.skip && hasSkip(version))
+			return SubscribeDrop.given(start, end, new StreamError(StreamCode.Skip), version);
+		if (hole.stale !== undefined)
+			return SubscribeDrop.stale(start, end, hole.stale >= NO_MAX_DELAY ? undefined : hole.stale, version);
+		// The max age goes out only with an OLD code.
+		const drop = SubscribeDrop.given(start, end, hole.error, version);
+		drop.maxAge = unjudged;
+		return drop;
+	}
+
+	// Whether this drop carries the `Max Age` it was judged under: an `OLD` one on lite-07 and later.
+	#judged(version: Version): boolean {
+		return hasJudgedDrop(version) && this.error === StreamCode.Old;
 	}
 
 	/**
@@ -1509,12 +1550,15 @@ export class SubscribeDrop {
 	async #encode(w: Writer, version: Version) {
 		await encodeGroups(w, this.start, this.end, version);
 		await w.u53(this.error);
+		if (this.#judged(version)) await Duration.encodeOptional(w, this.maxAge);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<SubscribeDrop> {
 		const { start, end } = await decodeGroups(r, version);
 		const error = await r.u53();
-		return new SubscribeDrop({ start, end, error });
+		const drop = new SubscribeDrop({ start, end, error });
+		if (drop.#judged(version)) drop.maxAge = await Duration.decodeOptional(r);
+		return drop;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

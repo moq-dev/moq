@@ -311,6 +311,16 @@ impl Version {
 		)
 	}
 
+	/// Whether an `OLD` SUBSCRIBE_DROP carries the `Max Age` its groups were judged stale
+	/// under. Added in lite-07; before it a subscriber can't tell which reader a stale drop
+	/// settles.
+	pub(crate) fn has_judged_drop(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE_DROP distinguishes keys declared never produced (`SKIP`) from
 	/// groups that existed. Added in lite-07; earlier versions carry no skip code.
 	pub(crate) fn has_skip(self) -> bool {

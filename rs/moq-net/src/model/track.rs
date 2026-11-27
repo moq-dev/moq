@@ -24,13 +24,13 @@ use crate::ledger::{self, Ledger};
 
 use super::subscription;
 pub(crate) use super::subscription::Resolved;
-#[cfg(feature = "async")]
-pub(crate) use super::subscription::budget;
 use super::subscription::{
 	Accounted, Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
 };
 pub(crate) use super::subscription::{JoinAsk, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
+#[cfg(feature = "async")]
+pub(crate) use super::subscription::{budget, max_of};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
@@ -9410,16 +9410,16 @@ impl group::Expiry for FetchExpiry {
 		self.reading.release();
 	}
 
-	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> Option<Duration> {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.key, waiter) {
-			return false;
+			return None;
 		}
 		let route = recover.and_then(|recover| recover.poll_budget(waiter));
 		let state = self.state.read();
 		let budget = route.map_or(Duration::MAX, |route| route.at(self.key));
 		let budget = clamp_max_delay(budget, state.max_age_bound());
-		state.poll_drifted(self.key, &Servable::ALL, budget, Some(&self.superseded), waiter)
+		(state.poll_drifted(self.key, &Servable::ALL, budget, Some(&self.superseded), waiter)).then_some(budget)
 	}
 }
 
@@ -9462,10 +9462,10 @@ impl group::Expiry for GroupExpiry {
 	/// subscription's, nor a logical reader's. Nothing it skips parking on can move it until
 	/// a group lands above, which wakes the read; a reader's preferences reach its copies
 	/// without this poll, since every update mirrors them at once.
-	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool {
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> Option<Duration> {
 		// Parked first, so a group landing above while this judges wakes it.
 		if !self.cache.wakes().watch_landing(self.key, waiter) {
-			return false;
+			return None;
 		}
 		let mut budget = recover.and_then(|recover| recover.poll_budget(waiter));
 		let mut servable = Servable::ALL;
@@ -9494,7 +9494,7 @@ impl group::Expiry for GroupExpiry {
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(budget.at(self.key), state.max_age_bound());
-		state.poll_drifted(self.key, &servable, budget, Some(&self.superseded), waiter)
+		(state.poll_drifted(self.key, &servable, budget, Some(&self.superseded), waiter)).then_some(budget)
 	}
 }
 

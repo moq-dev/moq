@@ -375,10 +375,7 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 /// as its lag then its max age, each in milliseconds rounded up, plus one so zero says no
 /// limit, and one already placed as its position then its max age, each only as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 3]), EncodeError> {
-	// Plus one, so zero says no limit.
-	let millis = |limit: Option<std::time::Duration>| {
-		limit.map_or(0, |limit| crate::track::live_millis(limit).saturating_add(1))
-	};
+	let millis = wire_millis;
 	Ok(match anchor {
 		None => (0, [None, None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None, None]),
@@ -387,6 +384,11 @@ fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 
 		Some(Anchor::Live { min, max }) => (3, [Some(millis(min)), Some(millis(max)), None]),
 		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(millis(max))]),
 	})
+}
+
+/// A lite-07 age limit in whole milliseconds, rounded up, plus one so zero says no limit.
+fn wire_millis(limit: Option<std::time::Duration>) -> u64 {
+	limit.map_or(0, |limit| crate::track::live_millis(limit).saturating_add(1))
 }
 
 /// Step over the retired `Ordered` byte on a version whose layout still has it.
@@ -1186,11 +1188,19 @@ pub struct SubscribeDrop {
 	/// Why the groups were given up: a stream error code on lite-07 and later, or an
 	/// application-specific code before, where 0 means simply unavailable.
 	pub error: u64,
+
+	/// Lite-07 with `OLD`: the `Max Age` the groups were judged stale under, or `None` for the
+	/// publisher's own, which settles every reader. Ignored for any other drop.
+	pub max_age: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "async")]
 impl SubscribeDrop {
 	/// Name `groups` given up with `err`, as `version` carries it.
+	///
+	/// An `OLD` drop named here depends on no reader's `Max Age`, so it settles every reader as
+	/// the publisher's own does. [`Self::stale`] names the one a staleness verdict was judged
+	/// under.
 	pub fn new(groups: std::ops::Range<u64>, err: &StreamError, version: Version) -> Self {
 		Self {
 			groups,
@@ -1198,6 +1208,39 @@ impl SubscribeDrop {
 			error: match version.has_drop_code() {
 				true => version.encode_stream_code(err).into(),
 				false => 0,
+			},
+			max_age: None,
+		}
+	}
+
+	/// Name `groups` judged stale under `max_age`, `None` for the publisher's own.
+	pub fn stale(groups: std::ops::Range<u64>, max_age: Option<std::time::Duration>, version: Version) -> Self {
+		Self {
+			max_age,
+			..Self::new(groups, &StreamError::Old, version)
+		}
+	}
+
+	/// Name `groups` given up as `hole`: lite-07 skips what was never produced with `SKIP`,
+	/// and earlier versions drop it as not found. A stale verdict names the budget it was
+	/// judged under, no limit being the publisher's own max age; an `OLD` drop with no verdict
+	/// of its own, such as one shed to make room, names `unjudged`.
+	pub(crate) fn given_up(
+		groups: std::ops::Range<u64>,
+		hole: &crate::track::Hole,
+		unjudged: Option<std::time::Duration>,
+		version: Version,
+	) -> Self {
+		use crate::track::Hole;
+		match hole {
+			Hole::Skip if version.has_skip() => Self::new(groups, &StreamError::Skip, version),
+			hole => match hole.stale_budget() {
+				Some(budget) => Self::stale(groups, crate::track::max_of(budget), version),
+				// The max age goes out only with an OLD code.
+				None => Self {
+					max_age: unjudged,
+					..Self::new(groups, &hole.error(), version)
+				},
 			},
 		}
 	}
@@ -1253,7 +1296,11 @@ impl<'a> Message<'a> for SubscribeDrop {
 
 		let groups = decode_groups(r, version)?;
 		let error = r.varint()?;
-		Ok(Self { groups, error })
+		let max_age = match is_stale_code(version, error) {
+			true => r.varint_opt()?.map(std::time::Duration::from_millis),
+			false => None,
+		};
+		Ok(Self { groups, error, max_age })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -1266,9 +1313,18 @@ impl<'a> Message<'a> for SubscribeDrop {
 
 		encode_groups(w, &self.groups, version)?;
 		w.varint(self.error)?;
+		if is_stale_code(version, self.error) {
+			w.varint(wire_millis(self.max_age))?;
+		}
 
 		Ok(())
 	}
+}
+
+/// Whether a SUBSCRIBE_DROP with Error Code `error` carries the `Max Age` it was judged
+/// under: an `OLD` drop on lite-07 and later.
+fn is_stale_code(version: Version, error: u64) -> bool {
+	version.has_judged_drop() && error == u64::from(StreamError::Old.to_code())
 }
 
 /// A response message on the subscribe stream, prefixed with a type discriminator
@@ -1373,6 +1429,7 @@ mod test {
 				let msg = SubscribeDrop {
 					groups: groups.clone(),
 					error: 0,
+					max_age: None,
 				};
 				let data = msg.encode_bytes(version).unwrap();
 				assert_eq!(SubscribeDrop::decode_slice(&data, version).unwrap().0.groups, groups);
@@ -1390,6 +1447,7 @@ mod test {
 			let msg = SubscribeDrop {
 				groups: groups.clone(),
 				error: skip,
+				max_age: None,
 			};
 			let data = msg.encode_bytes(Version::Lite07).unwrap();
 			let decoded = SubscribeDrop::decode_slice(&data, Version::Lite07).unwrap().0;
@@ -1407,6 +1465,7 @@ mod test {
 			SubscribeDrop {
 				groups: 3..3,
 				error: skip,
+				max_age: None,
 			}
 			.encode_bytes(Version::Lite07)
 			.is_err()
@@ -1415,6 +1474,7 @@ mod test {
 			let reversed = SubscribeDrop {
 				groups: std::ops::Range { start: 3, end: 1 },
 				error: 0,
+				max_age: None,
 			};
 			assert!(reversed.encode_bytes(version).is_err());
 		}
@@ -1541,7 +1601,11 @@ mod test {
 
 	#[test]
 	fn subscribe_drop_is_restored_on_lite07() {
-		let resp = SubscribeResponse::Drop(SubscribeDrop { groups: 1..4, error: 7 });
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: 7,
+			max_age: None,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
@@ -1557,6 +1621,35 @@ mod test {
 		}
 	}
 
+	/// A lite-07 OLD drop carries the max age it was judged under, in milliseconds plus one, so
+	/// zero names the publisher's own. No other drop, and no earlier version, carries one.
+	#[cfg(feature = "async")]
+	#[test]
+	fn a_lite07_old_drop_carries_its_judged_max_age() {
+		let old = u64::from(StreamError::Old.to_code());
+		for (max_age, wire) in [
+			(None, 0u8),
+			(Some(std::time::Duration::ZERO), 1),
+			(Some(std::time::Duration::from_millis(9)), 10),
+		] {
+			let msg = SubscribeDrop::stale(1..4, max_age, Version::Lite07);
+			let buf = msg.encode_bytes(Version::Lite07).unwrap();
+			assert_eq!(buf.as_ref(), [4, 1, 4, old as u8, wire]);
+			let decoded = SubscribeDrop::decode_slice(&buf, Version::Lite07).unwrap().0;
+			assert_eq!(decoded, msg);
+		}
+		// A drop depending on no budget settles every reader.
+		assert_eq!(
+			SubscribeDrop::new(1..4, &StreamError::Old, Version::Lite07).max_age,
+			None
+		);
+		let skip = SubscribeDrop::new(1..4, &StreamError::Skip, Version::Lite07);
+		assert_eq!(skip.encode_bytes(Version::Lite07).unwrap().as_ref(), [3, 1, 4, 0x3a]);
+		let lite06 = SubscribeDrop::stale(1..4, Some(std::time::Duration::from_millis(9)), Version::Lite06);
+		let buf = lite06.encode_bytes(Version::Lite06).unwrap();
+		assert_eq!(buf.as_ref(), [3, 1, 3, 0]);
+	}
+
 	/// Lite-07 carries skips in SUBSCRIBE_DROP with error code SKIP (0x3a); type 3 is unknown.
 	#[test]
 	fn subscribe_drop_skip_and_type_3_unknown() {
@@ -1564,6 +1657,7 @@ mod test {
 		let resp = SubscribeResponse::Drop(SubscribeDrop {
 			groups: 1..4,
 			error: skip,
+			max_age: None,
 		});
 		let buf = resp.encode_bytes(Version::Lite07).unwrap();
 		assert_eq!(buf.as_ref(), [2, 3, 1, 4, 0x3a]);
@@ -1584,7 +1678,11 @@ mod test {
 
 	#[test]
 	fn subscribe_drop_is_type_2_on_lite05() {
-		let resp = SubscribeResponse::Drop(SubscribeDrop { groups: 1..4, error: 0 });
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: 0,
+			max_age: None,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
@@ -1600,7 +1698,11 @@ mod test {
 
 	#[test]
 	fn subscribe_drop_is_type_1_on_lite04() {
-		let resp = SubscribeResponse::Drop(SubscribeDrop { groups: 1..4, error: 0 });
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: 0,
+			max_age: None,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
 			.unwrap();

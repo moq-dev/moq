@@ -1930,6 +1930,7 @@ SUBSCRIBE_DROP Message {
   Group Start (i)
   Group End (i)
   Error Code (i)
+  [Max Age (i)]
 }
 ~~~
 
@@ -1940,9 +1941,14 @@ A `Group End` at or below `Group Start` is a PROTOCOL_VIOLATION.
 **Error Code** is a [stream error code](#error-codes) saying why the groups were not delivered: for example SKIP for starts declared never produced, OLD for one past the subscriber's budget, EVICTED for one the publisher no longer holds, or NOT_FOUND for one a relay never received.
 For any Error Code other than SKIP, a subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
+**Max Age**:
+Present only when `Error Code` is OLD: the `Max Age` the publisher judged the groups stale under, in milliseconds plus one, encoded as in a Live Anchor.
+`0` means it judged them under `Publisher Max Age`, which no reader can widen past, so the drop settles every reader.
+For a group several live joins cover, it is the largest of their `Max Age` values (see [Expiration](#expiration)).
+An OLD drop with no verdict of its own, such as a group given up to make room for one that outranks it, carries the narrowest `Max Age` the subscription's live joins ask, so it settles only a reader no wider.
+
 Every drop is final on its subscription: no SUBSCRIBE_UPDATE reopens it, and a subscriber that still wants a dropped group asks for it with a SUBSCRIBE of its own.
-An OLD drop was judged against the `Max Age` of the live joins covering the group when the publisher gave it up, which the drop does not carry.
-A relay that received one settles with it only a reader whose own budget is no wider than the narrowest `Max Age` its subscription's live joins asked and whose Ranges include every group the relay's own Ranges name above the dropped start, since the verdict on a group was judged against the groups above it; it asks again for a reader the drop does not settle.
+A relay that received an OLD drop settles with it only a reader whose own budget is no wider than its `Max Age` and whose Ranges include every group the relay's own Ranges name above the dropped start, since the verdict on a group was judged against the groups above it; it asks again for a reader the drop does not settle.
 
 A publisher names each start once, besides the starts of a GROUP_END a reset may have cut (see [Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
 
@@ -2284,6 +2290,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added stream error code `SKIP` (0x3A) on SUBSCRIBE_DROP for starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped start. A publisher never skips a start it dropped, but for the starts of a GROUP_END a reset may have cut, and a skip never overrides a Group that arrived. A relay caches a skip as the final answer for its starts. A reset that may cut a GROUP_END names its inner starts again with SUBSCRIBE_DROP (SKIP). A gap between starts is not a skip, since Groups may be created out of order; a start never had and never declared skipped is named with OLD or NOT_FOUND.
 - A subscriber waits out no grace period: every start is accounted for, so one nothing accounts for is still owed.
 - Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
+- Added `Max Age` to SUBSCRIBE_DROP when its Error Code is OLD: the `Max Age` the groups were judged stale under, `0` for `Publisher Max Age`, so a relay settles with it exactly the readers no wider instead of guessing from the narrowest `Max Age` it asked.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, stays open for an update while the subscriber's send half is open; the publisher never FINs first while it is open.
 - A publisher that withheld a Range's SUBSCRIBE_START sends it, then the drops it withheld, once no group can resolve it: every Group of the bounded Range was given up, or the Track finished. A Track that finished before producing any Group is answered by SUBSCRIBE_END alone, with no SUBSCRIBE_START.

@@ -445,6 +445,18 @@ impl Subscription {
 		widest(&self.ranges)
 	}
 
+	/// The narrowest staleness budget any live join asks, `Duration::MAX` when none does.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn narrowest(&self) -> Duration {
+		(self.ranges.iter())
+			.filter_map(|range| match range.start {
+				Start::Live { max, .. } => Some(budget(max)),
+				Start::Oldest | Start::Time(_) => None,
+			})
+			.min()
+			.unwrap_or(Duration::MAX)
+	}
+
 	/// Replace [`Self::ranges`], returning `self` for chaining.
 	pub fn with_ranges(mut self, ranges: impl IntoIterator<Item = Range>) -> Self {
 		self.ranges = ranges.into_iter().collect();

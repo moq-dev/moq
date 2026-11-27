@@ -600,6 +600,8 @@ export interface ResumeShell {
 /** A drift policy a handed-out group keeps applying; see `hooks.expireGroup`. */
 export interface Expiry {
 	expired: () => boolean;
+	/** The budget in milliseconds the group is judged under, which a stale verdict names. */
+	budget?: () => number;
 	changed: readonly Getter<unknown>[];
 }
 

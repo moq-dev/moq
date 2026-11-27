@@ -254,16 +254,10 @@ interface SubscribeEntry {
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
 	declared?: { start?: bigint | null; requested?: bigint };
-	// The narrowest live join's max in milliseconds the SUBSCRIBE and every SUBSCRIBE_UPDATE asked,
-	// which a lite-07 stale drop is recorded under: the wire does not say which range or update a
-	// drop crossed, so it may have been judged under any live join's asked before it arrived, or
-	// the publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
-	// request of its own; too wide would settle it on a group it could still get.
-	staleBudget: number;
 	// The exclusive group end every live range the SUBSCRIBE and each SUBSCRIBE_UPDATE asked ended at,
 	// undefined once one followed the live edge or two ended apart: the cap a lite-07 stale drop is
-	// recorded within, so a reader capped alike settles on it. Like the budget, the wire does not say
-	// which update a drop crossed, so a cap that ever varied settles no capped reader.
+	// recorded within, so a reader capped alike settles on it. The wire does not say which update a
+	// drop crossed, so a cap that ever varied settles no capped reader.
 	staleCap: bigint | undefined;
 	// The subscribe stream, from the setup that registered this entry to its end.
 	stream: SubscribeStream;
@@ -1788,7 +1782,6 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
-			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			...framing,
 			// Before lite-07, the effective max delay is the stopgap grace: the wrong clock (it
@@ -2139,7 +2132,6 @@ export class Subscriber {
 			const entry: SubscribeEntry = {
 				// Unused for fillGroup entries; satisfies the shared SubscribeEntry shape.
 				track: undefined as unknown as track.Producer,
-				staleBudget: NO_MAX_DELAY,
 				staleCap: key + 1n,
 				compress: info.compress,
 				timescale: info.timescale ?? 0,
@@ -2539,7 +2531,6 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
-			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			compress: copy.compress,
 			timescale: copy.timescale,
@@ -3027,11 +3018,11 @@ export class Subscriber {
 					if (hasSkip(this.version)) entry.tail.drop(start, end);
 					else entry.tail.account(start, end);
 					this.#dropped(entry, start, end);
-					// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
-					// judged under: a reader wider than that does not settle on it, and asks for the group
-					// with a request of its own.
+					// On lite-07 an OLD drop is stale, recorded under the max age it names it judged under: a
+					// reader wider than that does not settle on it, and asks for the group with a request of
+					// its own.
 					const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-					const hole = stale ? staleHole(entry.staleBudget, entry.staleCap) : { error };
+					const hole = stale ? staleHole(resp.drop.maxAge ?? NO_MAX_DELAY, entry.staleCap) : { error };
 					hooks.dropTrackGroups(entry.track, start, end, hole);
 					entry.fills?.refuse(start, end, error);
 				}
@@ -3330,7 +3321,6 @@ export class Subscriber {
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
-				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
 				if (capOf(entry.live) !== entry.staleCap) entry.staleCap = undefined;
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
@@ -4160,17 +4150,6 @@ function joinKey(min: number | null, end: bigint | undefined): string {
 function wireJoin(range: WireRange): string | undefined {
 	const live = range.start?.live;
 	return live === undefined ? undefined : joinKey(live.min, through(range.end));
-}
-
-// The narrowest max in milliseconds a live join among `live` asks, as a budget: {@link NO_MAX_DELAY}
-// when none asks one. Mirrors the Rust `narrowest`.
-function narrowest(live: LiveRanges): number {
-	let narrowest = NO_MAX_DELAY;
-	for (const range of live.ranges()) {
-		const max = range.start?.live?.max ?? range.start?.joined?.max;
-		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
-	}
-	return narrowest;
 }
 
 // The exclusive group end past every range among `live`, undefined when one follows the live edge

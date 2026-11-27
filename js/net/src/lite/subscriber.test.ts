@@ -24,7 +24,7 @@ import {
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hooks } from "../internal.ts";
+import { hooks, NO_MAX_DELAY } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { concat, Reader, Writer } from "../stream.ts";
@@ -3527,47 +3527,40 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 	}
 });
 
-// A lite-07 stale (OLD) drop is recorded under the narrowest budget the subscription asked: the wire
-// does not say which update a drop crossed, so one arriving after a widening update may have been
-// judged under the budget before it. Mirrors the Rust `an_update_reopens_no_stale_drop`.
-test("a stale drop is recorded under the narrowest budget asked on lite-07", async () => {
+// A lite-07 stale (OLD) drop is recorded under the max age it names, never the narrowest the
+// subscription asked, and one judged under the publisher's own settles every reader. Mirrors the
+// Rust `an_update_reopens_no_stale_drop`.
+test("a stale drop is recorded under the max age it names on lite-07", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
-	type Entry = { staleBudget: number };
-	let entry: Entry | undefined;
-	const internal = subscriber as unknown as {
-		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
-	};
-	const runResponses = internal.runResponses.bind(internal);
-	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
-		entry = captured;
-		return runResponses(stream, captured);
+	const recorded: [bigint, bigint, number | undefined][] = [];
+	const dropTrackGroups = hooks.dropTrackGroups;
+	const spy = spyOn(hooks, "dropTrackGroups").mockImplementation((track, start, end, hole) => {
+		recorded.push([start, end, hole.stale]);
+		return dropTrackGroups(track, start, end, hole);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		const sent = new Reader(stream.outbound, undefined, version);
-		expect(await sent.u53()).toBe(StreamId.Subscribe);
-		await Subscribe.decode(sent, version);
-		await stream.reading;
-		if (!entry) throw new Error("no subscription");
-		expect(entry.staleBudget).toBe(500);
-
-		// Each update is sent only once the previous write is credited, which may take tasks, so wait
-		// for it on the wire: the budget narrows before its update is written.
-		// Each retunes the live join's max in place.
-		track.update(withMax({ delay: { max: Duration.millis(5000) } }));
-		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 5000]]);
-		expect(entry.staleBudget).toBe(500);
-		track.update(withMax({ delay: { max: Duration.millis(200) } }));
-		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 200]]);
-		expect(entry.staleBudget).toBe(200);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+		await respond(request, version, [
+			{ drop: SubscribeDrop.stale(1n, 3n, 500, version) },
+			{ drop: SubscribeDrop.stale(4n, 5n, 5000, version) },
+			{ drop: SubscribeDrop.stale(6n, 7n, undefined, version) },
+		]);
+		await drainReactions();
+		expect(recorded).toEqual([
+			[1n, 3n, 500],
+			[4n, 5n, 5000],
+			[6n, 7n, NO_MAX_DELAY],
+		]);
 	} finally {
-		responses.mockRestore();
+		spy.mockRestore();
 		track.close();
 		broadcast.close();
 		subscriber.close();

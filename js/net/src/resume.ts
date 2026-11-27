@@ -65,6 +65,7 @@ import {
 	insertDrop,
 	insertRun,
 	type Land,
+	NO_MAX_DELAY,
 	type RecoverCause,
 	type Recv,
 	type Replacement,
@@ -3060,6 +3061,10 @@ class FetchExpiry implements Expiry {
 	expired(): boolean {
 		this.#pick();
 		return this.#judging?.expiry.expired() ?? false;
+	}
+
+	budget(): number {
+		return this.#judging?.expiry.budget?.() ?? NO_MAX_DELAY;
 	}
 
 	/** Judge afresh once the group moves to another route: the old route's copy says nothing about it. */

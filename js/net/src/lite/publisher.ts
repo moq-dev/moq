@@ -38,6 +38,7 @@ import {
 	type Run,
 	runGaps,
 	sameHole,
+	staleHole,
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -619,6 +620,19 @@ class Requested {
 	/** Every live range. */
 	values(): IterableIterator<WireRange> {
 		return this.#ranges.values();
+	}
+
+	/**
+	 * The narrowest max age in milliseconds a live join among the ranges asks, undefined when none
+	 * limits it. Mirrors the Rust `Subscription::narrowest`.
+	 */
+	narrowest(): number | undefined {
+		let narrowest: number | undefined;
+		for (const range of this.#ranges.values()) {
+			const max = range.start?.live?.max ?? range.start?.joined?.max;
+			if (typeof max === "number") narrowest = Math.min(narrowest ?? max, max);
+		}
+		return narrowest;
 	}
 
 	/** Hold `range` as Range ID `id`, replacing any it held. */
@@ -2124,13 +2138,10 @@ export class Publisher {
 
 		// The message naming `[start, end)` given up as `hole` says: lite-07 skips what was never
 		// produced with `SKIP`, and earlier versions drop it as not found.
+		// The message naming `[start, end)` given up as `hole`; an OLD drop with no verdict of its own
+		// names the narrowest max age the live ranges ask, so only a reader no wider settles on it.
 		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse => ({
-			drop: SubscribeDrop.given(
-				start,
-				end,
-				hole.skip && hasSkip(this.version) ? new StreamError(StreamCode.Skip) : hole.error,
-				this.version,
-			),
+			drop: SubscribeDrop.hole(start, end, hole, requested.narrowest(), this.version),
 		});
 
 		// What the wire is told when `hole` goes out. Every report is final. Mirrors the Rust
@@ -2246,7 +2257,7 @@ export class Publisher {
 		const drops = new Signal(0);
 		// Groups whose stream failed, with why, for the control stream to name, as runs: a group held
 		// whole names its span.
-		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
+		const pendingDrops: { start: bigint; end: bigint; hole: Hole }[] = [];
 		// Lite-07: the starts inside whole groups' spans whose GROUP_END a reset may have cut, to name
 		// again as a skip. Mirrors the Rust `GroupOutcomes::cut`.
 		const pendingCuts: Run[] = [];
@@ -2322,12 +2333,11 @@ export class Publisher {
 						return false;
 				}
 				if (pendingDrops.length > 0) {
-					for (const { start, end, error } of pendingDrops.splice(0)) {
+					for (const { start, end, hole } of pendingDrops.splice(0)) {
 						// The rest of the span is told with it; the served start keeps its record.
 						for (const gap of record?.untold(start, end) ?? [])
-							record?.tell(gap.start, gap.end, reportOf({ error }));
-						if (!(await sendHole({ drop: SubscribeDrop.given(start, end, error, this.version) })))
-							return false;
+							record?.tell(gap.start, gap.end, reportOf(hole));
+						if (!(await sendHole(holeMessage(start, end, hole)))) return false;
 					}
 				}
 				// While a range waits for its START, the wait below is armed before `reportStarted` reads
@@ -2664,7 +2674,10 @@ export class Publisher {
 					}
 					if (failed && emitRange) {
 						const end = max(group.end ?? group.start, group.start + 1n);
-						pendingDrops.push({ start: group.start, end, error: failed });
+						// A group that went stale names the budget it was judged under.
+						const budget = group.staleUnder;
+						const hole = budget === undefined ? { error: failed } : staleHole(budget);
+						pendingDrops.push({ start: group.start, end, hole });
 						drops.update((revision) => revision + 1);
 					}
 				})();

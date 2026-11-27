@@ -3567,7 +3567,6 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Some(Duration::ZERO),
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: None,
 			priority: 0,
@@ -3940,7 +3939,6 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Some(Duration::ZERO),
-				stale_budget: Duration::ZERO,
 				stale_cap: None,
 				start: Some(floor),
 				priority: 0,
@@ -4468,7 +4466,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: None,
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: None,
 			priority: 0,
@@ -4526,7 +4523,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: None,
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: None,
 			priority: 0,
@@ -4596,7 +4592,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: None,
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: None,
 			priority: 0,
@@ -4666,7 +4661,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Some(Duration::ZERO),
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: Some(2),
 			priority: 0,
@@ -4787,7 +4781,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Some(Duration::ZERO),
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: Some(4),
 			priority: 0,
@@ -4859,7 +4852,6 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Some(Duration::ZERO),
-			stale_budget: Duration::ZERO,
 			stale_cap: None,
 			start: Some(4),
 			priority: 0,
@@ -6512,7 +6504,6 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Some(budget),
-			stale_budget: budget,
 			stale_cap: None,
 			start: None,
 			priority: 0,
@@ -7037,9 +7028,9 @@ mod tests {
 		assert!(!fills.recovering(), "the drained recovery gave up group 2");
 	}
 
-	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
-	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
-	/// OLD drop arriving after it may have been judged before the publisher read it.
+	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the max age it names:
+	/// a SUBSCRIBE_UPDATE widening the budget reopens nothing, and a drop judged under the
+	/// wider one, or the publisher's own, is recorded under that, never the narrowest asked.
 	#[kio::test]
 	async fn an_update_reopens_no_stale_drop() {
 		let version = Version::Lite07;
@@ -7059,12 +7050,12 @@ mod tests {
 			);
 		serving.serving.answer_join(lag, None, Some(0), Duration::MAX);
 		let waiter = kio::Waiter::noop();
-		let old = |groups: std::ops::Range<u64>| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &crate::StreamError::Old, version))
+		let old = |groups: std::ops::Range<u64>, max: Option<Duration>| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::stale(groups, max, version))
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 
-		serving.apply_response(&serve, old(1..3)).unwrap();
+		serving.apply_response(&serve, old(1..3, Some(budget))).unwrap();
 		assert!(covers(1..3));
 		assert_eq!(
 			reader.poll_drop(&waiter),
@@ -7089,11 +7080,19 @@ mod tests {
 		assert!(covers(1..3), "still accounted for");
 		assert!(reader.poll_drop(&waiter).is_pending(), "reported once");
 
-		serving.apply_response(&serve, old(4..5)).unwrap();
+		let wider = Duration::from_secs(5);
+		serving.apply_response(&serve, old(4..5, Some(wider))).unwrap();
 		assert!(covers(4..5));
 		assert_eq!(
 			reader.poll_drop(&waiter),
-			Poll::Ready((4..5, track::Hole::stale(budget)))
+			Poll::Ready((4..5, track::Hole::stale(wider)))
+		);
+
+		// Judged under the publisher's own max age, which settles every reader.
+		serving.apply_response(&serve, old(6..7, None)).unwrap();
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((6..7, track::Hole::stale(Duration::MAX)))
 		);
 	}
 
@@ -7130,7 +7129,7 @@ mod tests {
 				end: Some(3),
 			}]));
 		serving.serving.answer_join(lag, Some(3), Some(0), Duration::MAX);
-		let old = lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(1..3, &crate::StreamError::Old, version));
+		let old = lite::SubscribeResponse::Drop(lite::SubscribeDrop::stale(1..3, Some(budget), version));
 		serving.apply_response(&serve, old).unwrap();
 		assert_eq!(
 			capped.poll_drop(&kio::Waiter::noop()),
@@ -7173,15 +7172,12 @@ mod tests {
 		let version = Version::Lite07;
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
 		let now = || serve.subscriber.runtime.now();
-		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
-			&version,
-			&crate::StreamError::Old,
-		));
 		let old = |key: u64| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: key..key + 1,
-				error: code,
-			})
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::stale(
+				key..key + 1,
+				Some(Duration::from_millis(500)),
+				version,
+			))
 		};
 		let frame = |mut group: crate::group::Producer| {
 			group.write_frame(group.key_time(), &b"x"[..])?;
@@ -7225,15 +7221,8 @@ mod tests {
 		let version = Version::Lite07;
 		let budget = Duration::from_millis(500);
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
-		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
-			&version,
-			&crate::StreamError::Old,
-		));
 		let old = |first, last: u64| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: first..last + 1,
-				error: code,
-			})
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::stale(first..last + 1, Some(budget), version))
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 
@@ -7351,6 +7340,7 @@ mod tests {
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 					groups: 2..3,
 					error: code.into(),
+					max_age: None,
 				}),
 			] {
 				resp.encode(
@@ -12170,17 +12160,10 @@ struct SubStream {
 	/// The `Subscriber Max Age` a wire before lite-07 carries, echoed in every
 	/// SUBSCRIBE_UPDATE; refreshed as the downstream aggregate changes.
 	max_delay: Option<Duration>,
-	/// The narrowest live join's max age this subscription has asked, which a lite-07 stale
-	/// drop is recorded under: the wire does not say which range or update a drop crossed, so
-	/// it may have been judged under any live join's asked before it arrived, or the
-	/// publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
-	/// request of its own; too wide would settle it on a group it could still get.
-	stale_budget: Duration,
 	/// The exclusive group end every live range the SUBSCRIBE and each SUBSCRIBE_UPDATE asked
 	/// ended at, `None` once one followed the live edge or two ended apart: the cap a lite-07
-	/// stale drop is recorded within, so a reader capped alike settles on it. Like the budget,
-	/// the wire does not say which update a drop crossed, so a cap that ever varied settles no
-	/// capped reader.
+	/// stale drop is recorded within, so a reader capped alike settles on it. The wire does not
+	/// say which update a drop crossed, so a cap that ever varied settles no capped reader.
 	stale_cap: Option<u64>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
@@ -12544,7 +12527,6 @@ impl SubStream {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
 			self.probe_ids.retain(|id| live.get(*id).is_some());
 		}
-		self.stale_budget = self.stale_budget.min(narrowest(&self.live));
 		if cap_of(&self.live) != self.stale_cap {
 			self.stale_cap = None;
 		}
@@ -12718,20 +12700,6 @@ fn wire_join(range: &lite::Range) -> Option<(Option<Duration>, Option<u64>)> {
 		Some(lite::Anchor::Live { min, .. }) => Some((min, through(range.end))),
 		_ => None,
 	}
-}
-
-/// The narrowest max age a live join among `live` asks, as a budget: `Duration::MAX` when
-/// none asks one.
-fn narrowest(live: &lite::LiveRanges) -> Duration {
-	(live.iter())
-		.filter_map(|(_, range)| match range.start {
-			Some(lite::Anchor::Live { max, .. } | lite::Anchor::Joined { max, .. }) => {
-				Some(max.unwrap_or(Duration::MAX))
-			}
-			_ => None,
-		})
-		.min()
-		.unwrap_or(Duration::MAX)
 }
 
 /// The exclusive group end past every range among `live`, `None` when one follows the live
@@ -13847,7 +13815,6 @@ impl Establish {
 			stream,
 			id: self.id,
 			max_delay: self.max_age,
-			stale_budget: narrowest(&live),
 			stale_cap: cap_of(&live),
 			start: self.subscription.start(),
 			live,
@@ -15545,8 +15512,8 @@ impl ServeLoop {
 					return Ok(());
 				}
 				match serve.subscriber.version.has_skip() && error == crate::StreamError::Old {
-					// Lite-07 judged it stale, recorded under the narrowest max age it may have been
-					// judged under (see [`SubStream::stale_budget`]). A reader no wider settles on it; a wider one asks for the group
+					// Lite-07 judged it stale, recorded under the max age the drop names it judged
+					// under. A reader no wider settles on it; a wider one asks for the group
 					// on a request of its own, since this subscription never delivers it. A key already skipped stays
 					// skipped, and one whose group arrived keeps it. A group a fill asked for is
 					// recovered on its own, so the copy does not record it given up meanwhile.
@@ -15559,7 +15526,7 @@ impl ServeLoop {
 						for given in given.iter() {
 							self.serving.give_up(
 								given.clone(),
-								track::Hole::stale(active.stale_budget).capped(active.stale_cap),
+								track::Hole::stale(crate::track::budget(dropped.max_age)).capped(active.stale_cap),
 							);
 						}
 					}

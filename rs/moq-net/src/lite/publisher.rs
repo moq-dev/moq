@@ -3499,10 +3499,11 @@ impl OneShotFetch {
 								return Poll::Ready(Err(unenc));
 							}
 							serve.settle_failed(&err);
-							for (groups, code) in serve.ctx.outcomes.dropped.lock().unwrap().drain(..) {
-								writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
+							for (groups, hole) in serve.ctx.outcomes.dropped.lock().unwrap().drain(..) {
+								writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop::given_up(
 									groups,
-									&code,
+									&hole,
+									None,
 									shared.version,
 								)))?;
 							}
@@ -3528,10 +3529,11 @@ impl OneShotFetch {
 							shared.version,
 						)))?;
 					}
-					for (groups, code) in serve.ctx.outcomes.dropped.lock().unwrap().drain(..) {
-						writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
+					for (groups, hole) in serve.ctx.outcomes.dropped.lock().unwrap().drain(..) {
+						writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop::given_up(
 							groups,
-							&code,
+							&hole,
+							None,
 							shared.version,
 						)))?;
 					}
@@ -5729,7 +5731,7 @@ struct GroupOutcomes {
 	unencodable: Mutex<Option<Error>>,
 	/// Groups whose stream failed, with why, for the control stream to name: each one's span
 	/// (see [`span`]).
-	dropped: Mutex<Vec<(Range<u64>, StreamError)>>,
+	dropped: Mutex<Vec<(Range<u64>, Hole)>>,
 	/// The spans of the groups whose GROUP_END went out, which their stream accounts for.
 	whole: Mutex<Vec<Range<u64>>>,
 	/// Lite-07: the starts strictly inside a whole group's span whose GROUP_END a reset may
@@ -6568,8 +6570,7 @@ impl TrackRun {
 			// Each was served, so its record says so already, and the drop is final: nothing
 			// is served or dropped over it again. The rest of its span is told with it, so the
 			// end of the track names none of those starts again.
-			for (span, err) in dropped {
-				let hole = Hole::drop(err);
+			for (span, hole) in dropped {
 				if self.start.emits_range() {
 					let report = self.report(&hole);
 					let record = self.track.record_mut();
@@ -6872,14 +6873,13 @@ impl TrackRun {
 	}
 
 	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
-	/// produced with `SKIP`, and earlier versions drop it as not found.
+	/// produced with `SKIP`, and earlier versions drop it as not found. A stale verdict names
+	/// the `Max Age` it was judged under, no limit being the publisher's own, and an `OLD` drop
+	/// with no verdict of its own the narrowest its live ranges ask, so only a reader no wider
+	/// settles on it.
 	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
-		let version = self.ctx.version;
-		let drop = match hole {
-			Hole::Skip if version.has_skip() => lite::SubscribeDrop::new(groups, &StreamError::Skip, version),
-			hole => lite::SubscribeDrop::new(groups, &hole.error(), version),
-		};
-		lite::SubscribeResponse::Drop(drop)
+		let unjudged = crate::track::max_of(self.track.subscription().narrowest());
+		lite::SubscribeResponse::Drop(lite::SubscribeDrop::given_up(groups, hole, unjudged, self.ctx.version))
 	}
 
 	/// Send `groups` given up as `hole`, or withhold it until the first SUBSCRIBE_START.
@@ -7264,7 +7264,12 @@ impl TrackRun {
 	fn shed(&mut self, group: &group::Consumer) {
 		if self.ctx.version.has_track_stream() {
 			let span = span(group.start, group.end());
-			self.ctx.outcomes.dropped.lock().unwrap().push((span, StreamError::Old));
+			self.ctx
+				.outcomes
+				.dropped
+				.lock()
+				.unwrap()
+				.push((span, Hole::drop(StreamError::Old)));
 		}
 	}
 
@@ -8257,12 +8262,12 @@ impl GroupServe {
 			return;
 		}
 		let span = span(self.key, self.group.end());
-		self.ctx
-			.outcomes
-			.dropped
-			.lock()
-			.unwrap()
-			.push((span, StreamError::from(err)));
+		// A group that went stale names the budget it was judged under.
+		let hole = match self.group.expired_under() {
+			Some(budget) => Hole::stale(budget),
+			None => Hole::drop(StreamError::from(err)),
+		};
+		self.ctx.outcomes.dropped.lock().unwrap().push((span, hole));
 	}
 }
 
@@ -10820,11 +10825,12 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 
 		// SUBSCRIBE_START for range 0 starting at group 0 (encoded 1), with a Largest (2) of
-		// group 0 frame 0 ended, a DROP for groups [1, 2) with OLD (0x34), which the end gives
-		// up on at once, and SUBSCRIBE_END at 3.
+		// group 0 frame 0 ended, a DROP for groups [1, 2) with OLD (0x34) judged under the
+		// reader's max age of zero (encoded 1), which the end gives up on at once, and
+		// SUBSCRIBE_END at 3.
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[4, 6, 0, 1, 2, 0, 0, 1, 2, 3, 1, 2, 0x34, 1, 2, 3, 0]
+			[4, 6, 0, 1, 2, 0, 0, 1, 2, 4, 1, 2, 0x34, 1, 1, 2, 3, 0]
 		);
 	}
 
@@ -10987,7 +10993,12 @@ mod serve_group_test {
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		// Group 0's stream failed while its span reached 4.
-		run.ctx.outcomes.dropped.lock().unwrap().push((0..4, StreamError::Old));
+		run.ctx
+			.outcomes
+			.dropped
+			.lock()
+			.unwrap()
+			.push((0..4, Hole::drop(StreamError::Old)));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		write_group(&mut track, 6, 6);
 		let _track = track.finish().unwrap();
@@ -11254,7 +11265,12 @@ mod serve_group_test {
 				}
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 				// Group 3's stream expired, as a blocked transport would leave it.
-				run.ctx.outcomes.dropped.lock().unwrap().push((3..4, StreamError::Old));
+				run.ctx
+					.outcomes
+					.dropped
+					.lock()
+					.unwrap()
+					.push((3..4, Hole::drop(StreamError::Old)));
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 				let case = format!("{version:?}, widen={widen}");
 				assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 3, "{case}");
@@ -13216,8 +13232,9 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			// The DROP names groups [0, 1) with OLD (0x34).
-			[4, 6, 0, 1, 2, 0, 0, 1, 2, 3, 0, 1, 0x34, 1, 2, 2, 0],
+			// The DROP names groups [0, 1) with OLD (0x34), judged under the reader's max age of
+			// zero (encoded 1).
+			[4, 6, 0, 1, 2, 0, 0, 1, 2, 4, 0, 1, 0x34, 1, 1, 2, 2, 0],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -13229,7 +13246,7 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[4, 6, 0, 1, 2, 0, 0, 1, 2, 3, 0, 1, 0x34, 1, 2, 2, 0]
+			[4, 6, 0, 1, 2, 0, 0, 1, 2, 4, 0, 1, 0x34, 1, 1, 2, 2, 0]
 		);
 	}
 }

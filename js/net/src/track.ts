@@ -4025,6 +4025,7 @@ export class Subscriber {
 		});
 		hooks.expireGroup(group, {
 			expired: () => this.#staleAt(group.start, this.#drift(), true, held),
+			budget: () => this.#drift().budget.at(group.start),
 			changed: this.#expiryChanged(),
 		});
 		return group;
@@ -5494,6 +5495,7 @@ export class Subscriber {
 			}
 			return {
 				expired: () => subscriber.#staleAt(key, drift(), true, held),
+				budget: () => drift().budget.at(key),
 				changed,
 			};
 		};
