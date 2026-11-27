@@ -26,10 +26,16 @@ that ships with the next release (rejected: wait for
 [the cut](/quest/m3/release/cut.md) to bring `main`'s workflows over; also adding
 a post-cut verification step to the cut). It changes no shipped code or API.
 
-`main` already has the change, so the backport is one PR against `release`
-carrying only #7224's workflow changes, adapted to `release`'s
-`release-binary.yml`; this quest's deletion goes with it or in a PR on `main`.
-After the next release of each, check its archives with the command above, adding
-the archive path (for example, `./<archive>`) and `--source-ref refs/tags/<tag>`.
+The backport is [moq-dev/moq#9780](https://github.com/moq-dev/moq/pull/9780)
+against `release`: #7224's attest job and its callers' grants, including
+`nightly.yml`'s dry-run callers, with `doc/setup/install.md` left for the cut.
+Once a `moq-cli` and a `moq-relay` release tag after it merges, download one
+archive of each and run the command above, adding the archive path and
+`--source-ref refs/tags/<tag>`; then delete this quest. If either returns 404,
+open that release's run and see why its attest job failed or did not run.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: [moq-dev/moq#9780](https://github.com/moq-dev/moq/pull/9780) merges into `release`, and a `moq-cli-v*` and a `moq-relay-v*` release publish after it; check with `gh release list --repo moq-dev/moq` against the PR's merge time
