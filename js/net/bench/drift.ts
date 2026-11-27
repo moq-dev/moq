@@ -19,8 +19,7 @@ export async function run(): Promise<void> {
 		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 		// Ascending, so the first group read is the oldest the max keeps.
 		const reader = check.subscribe({
-			order: "ascending",
-			ranges: [{ start: { live: { min: null, max: Duration.millis(80) } } }],
+			ranges: [{ start: { live: { min: null, max: Duration.millis(80) } }, order: "ascending" }],
 		});
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {

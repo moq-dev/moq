@@ -7,7 +7,14 @@ import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position, Range, Start } from "../track.ts";
 import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
-import { EMPTY, liveMillis, rangeBudget, rangeTime } from "../window.ts";
+import {
+	withPolicy as atPolicy,
+	EMPTY,
+	liveMillis,
+	rangeBudget,
+	policyOf as rangePolicy,
+	rangeTime,
+} from "../window.ts";
 import * as Duration from "./duration.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./identity.ts";
 import * as Message from "./message.ts";
@@ -229,7 +236,7 @@ export interface Retune extends Policy {
  */
 export function toWireRanges(ranges: readonly Range[], placed?: ReadonlyMap<number, bigint>): WireRange[] {
 	return ranges.map((range, index) => {
-		const out: WireRange = {};
+		const out: WireRange = withPolicy({}, rangePolicy(range));
 		const time = rangeTime(range);
 		const min = liveMillis(range);
 		const group = placed?.get(index);
@@ -338,8 +345,13 @@ async function encodeSpan(
  * starting at or after it, which the publisher's floor keeps (see `cursorFloor`), and its span with
  * no start takes `legacy` (see {@link legacyStart}).
  */
-export function requestedRanges(msg: Span & { ranges?: WireRange[] }, legacy?: Start): Range[] {
+export function requestedRanges(
+	msg: Span & { ranges?: WireRange[]; priority?: number; order?: Order },
+	legacy?: Start,
+): Range[] {
 	if (msg.ranges) return msg.ranges.map(requestedRange);
+	// A wire before lite-07 carries one priority and order, which every range takes.
+	const policy = { priority: msg.priority ?? 0, order: msg.order ?? "descending" } as const;
 	const range: Range = {};
 	const max = legacyMax(legacy);
 	// One max age bounds a named start too: a live join placed there (see {@link requestedPlaced}).
@@ -347,7 +359,7 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, legacy?: S
 	else if (msg.startGroup !== undefined) range.start = msg.startGroup;
 	else if (legacy !== undefined) range.start = legacy;
 	if (msg.endGroup !== undefined) range.end = msg.endGroup;
-	return [range];
+	return [atPolicy(range, policy)];
 }
 
 /**
@@ -393,11 +405,12 @@ export function requestedPlaced(msg: Span & { ranges?: WireRange[] }, legacy?: S
 
 /** The model range one lite-07 range asks for; see {@link requestedRanges}. */
 export function requestedRange(range: WireRange): Range {
+	const policy = policyOf(range);
 	// Empty, as group bounds say it: keep its place, covering no group.
 	const start = range.start?.absolute;
 	const end = range.end && endGroup(range.end);
-	if (frameEmpty(range)) return { ...EMPTY };
-	if (end === 0n) return { ...EMPTY };
+	if (frameEmpty(range)) return atPolicy({ ...EMPTY }, policy);
+	if (end === 0n) return atPolicy({ ...EMPTY }, policy);
 	const out: Range = {};
 	const live = range.start?.live;
 	const joined = range.start?.joined;
@@ -410,7 +423,7 @@ export function requestedRange(range: WireRange): Range {
 	else if (range.start) out.start = start ?? range.start.time;
 	// An absolute end is exclusive; every model end includes its group.
 	if (range.end) out.end = end === undefined ? range.end.time : end - 1n;
-	return out;
+	return atPolicy(out, policy);
 }
 
 /**

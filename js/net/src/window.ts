@@ -12,7 +12,7 @@
 import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
 import { NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
-import type { Range, Start, Subscription } from "./track.ts";
+import type { Order, Range, Start, Subscription } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
 
@@ -55,7 +55,10 @@ function checkStart(value: unknown): Start | undefined {
 	return timeOf("range start", value);
 }
 
-/** Check and copy a caller's ranges, refusing a malformed one rather than serving it widened. */
+/**
+ * Check and copy a caller's ranges, refusing a malformed one rather than serving it widened. A
+ * default priority or order is left out, so equal ranges compare equal however they were written.
+ */
 export function rangesOf(ranges: readonly Range[]): Range[] {
 	if (!Array.isArray(ranges)) throw new TypeError("ranges must be an array");
 	return ranges.map((range) => {
@@ -65,8 +68,92 @@ export function rangesOf(ranges: readonly Range[]): Range[] {
 		const end = timeOf("range end", range.end);
 		if (start !== undefined) out.start = start;
 		if (end !== undefined) out.end = end;
-		return out;
+		return withPolicy(out, { priority: priorityOf(range.priority), order: orderOf(range.order) });
 	});
+}
+
+// A plain JS caller can pass anything, and silently serving a typo at the default would hide it.
+function priorityOf(value: number | undefined): number {
+	if (value === undefined) return 0;
+	if (!Number.isInteger(value) || value < -128 || value > 127)
+		throw new RangeError(`priority must be an integer in -128..=127: ${value}`);
+	return value;
+}
+
+function orderOf(order: Order | undefined): Order {
+	if (order === undefined) return "descending";
+	if (order !== "ascending" && order !== "descending") throw new TypeError(`unknown order: ${String(order)}`);
+	return order;
+}
+
+/**
+ * A range's priority and group order: how urgently, and in what order, its groups go out. Mirrors
+ * the Rust `Policy`.
+ */
+export interface Policy {
+	priority: number;
+	order: Order;
+}
+
+/**
+ * The default subscription, its one range at `priority`: how a datagram track is subscribed, whose
+ * only knob is a priority.
+ */
+export function latestAt(priority: number): Subscription {
+	return {
+		ranges: [
+			withPolicy(
+				{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } },
+				{ priority, order: "descending" },
+			),
+		],
+	};
+}
+
+/** The policy of a range that names none. */
+export const DEFAULT_POLICY: Readonly<Policy> = Object.freeze({ priority: 0, order: "descending" });
+
+/** The policy `range` asks under. */
+export function policyOf(range: Range): Policy {
+	return { priority: range.priority ?? 0, order: range.order ?? "descending" };
+}
+
+/** `range` under `policy`, which it leaves out where it is the default. */
+export function withPolicy(range: Range, policy: Policy): Range {
+	const { priority: _, order: __, ...out } = range;
+	const ranged: Range = out;
+	if (policy.priority !== 0) ranged.priority = policy.priority;
+	if (policy.order === "ascending") ranged.order = "ascending";
+	return ranged;
+}
+
+/**
+ * A number ranking how urgently a policy sends: the priority, then newest first, which wins a tie.
+ * Ranges at one rank cover a range at an equal or lower one, so it adds nothing beside them.
+ * Mirrors the Rust `Policy::rank`, reversed.
+ */
+export function policyRank(policy: Policy): number {
+	return policy.priority * 2 + (policy.order === "descending" ? 1 : 0);
+}
+
+/** The policy {@link policyRank} ranks `rank`. */
+export function rankPolicy(rank: number): Policy {
+	const descending = ((rank % 2) + 2) % 2 === 1;
+	return { priority: (rank - (descending ? 1 : 0)) / 2, order: descending ? "descending" : "ascending" };
+}
+
+/**
+ * What `ranges` ask as a whole, as a wire without a policy per range carries it: the highest
+ * priority, newest first if any range at that priority is. The default without any. Mirrors the
+ * Rust `Policy::of`.
+ */
+export function rangesPolicy(ranges: Iterable<Range>): Policy {
+	let top: number | undefined;
+	for (const range of ranges) {
+		const rank = policyRank(policyOf(range));
+		if (top === undefined || rank > top) top = rank;
+	}
+	return top === undefined ? { ...DEFAULT_POLICY } : rankPolicy(top);
 }
 
 /** The time `range` starts from, undefined when it doesn't name one. Mirrors the Rust `Range::time`. */
@@ -161,7 +248,13 @@ export function compare(a: Range, b: Range): number {
 	};
 	const [ra, va, ma] = rank(a);
 	const [rb, vb, mb] = rank(b);
-	return ra - rb || order(va, vb) || order(ma, mb) || order(a.end ?? -1n, b.end ?? -1n);
+	return (
+		ra - rb ||
+		order(va, vb) ||
+		order(ma, mb) ||
+		order(a.end ?? -1n, b.end ?? -1n) ||
+		policyRank(policyOf(b)) - policyRank(policyOf(a))
+	);
 }
 
 // A live join's max as a sort key: -1 for none, so it sorts first, else its milliseconds.
@@ -179,11 +272,33 @@ export function sameRanges(a: readonly Range[], b: readonly Range[]): boolean {
 	return a.length === b.length && a.every((range, index) => rangeKey(range) === rangeKey(b[index]));
 }
 
+/**
+ * Whether two lists ask for the same groups range by range, whatever their policies: a change of
+ * policy alone resolves nothing again.
+ */
+export function sameSpans(a: readonly Range[], b: readonly Range[]): boolean {
+	return a.length === b.length && a.every((range, index) => spanKey(range) === spanKey(b[index]));
+}
+
 /** A range as a string, equal exactly when the ranges are; JSON can't hold a bigint. */
 export function rangeKey(range: Range): string {
+	return `${spanKey(range)}@${range.priority ?? 0}${range.order === "ascending" ? "a" : "d"}`;
+}
+
+/** {@link rangeKey} without the range's policy: equal when two ranges ask for the same groups. */
+function spanKey(range: Range): string {
 	const live = liveMillis(range);
 	const start = live === undefined ? (rangeTime(range) ?? "") : `L${live}/${liveMax(range)}`;
 	return `${start}..${range.end ?? ""}`;
+}
+
+/**
+ * Whether `next` keeps where `old` resolved: the same groups under another policy, or the same
+ * live join under another max. Mirrors the Rust `Range::retunes`.
+ */
+export function retunes(old: Range, next: Range): boolean {
+	const join = joinOf(next);
+	return spanKey(old) === spanKey(next) || (join !== undefined && joinOf(old) === join);
 }
 
 /**
@@ -194,9 +309,40 @@ export function rangeKey(range: Range): string {
  * time span drops ranges starting inside it, and a range from the oldest group following the live
  * edge covers everything. A live join reaches no further back than its lag, so it covers nothing
  * else, and live joins of the same lag and end are one range under the largest max among them:
- * where a join lands doesn't depend on it. Mirrors the Rust `union`.
+ * where a join lands doesn't depend on it.
+ *
+ * Ranges fold so only within one policy. Across policies a range drops only once ranges at
+ * policies that {@link covers | cover} its own already ask for every group it does, since folding
+ * it into a range at another policy would lose its priority or order. Mirrors the Rust `union`.
  */
 export function union(ranges: readonly Range[]): Range[] {
+	const classes = new Map<number, Range[]>();
+	for (const range of ranges) {
+		if (isEmpty(range)) continue;
+		const rank = policyRank(policyOf(range));
+		const held = classes.get(rank);
+		const bare = withPolicy(range, DEFAULT_POLICY);
+		if (held) held.push(bare);
+		else classes.set(rank, [bare]);
+	}
+	const out: Range[] = [];
+	// The ranges at every policy covering the next, each policy covering all that follow it.
+	const above: Range[] = [];
+	for (const rank of [...classes.keys()].sort((a, b) => b - a)) {
+		const policy = rankPolicy(rank);
+		const spans = fold(classes.get(rank) ?? []);
+		const covered = fold(above);
+		for (const range of spans) {
+			if (!sameRanges(fold([...above, range]), covered)) out.push(withPolicy(range, policy));
+		}
+		above.push(...spans);
+	}
+	out.sort(compare);
+	return out;
+}
+
+// The union of `ranges`, all at one policy, as {@link union} folds them.
+function fold(ranges: readonly Range[]): Range[] {
 	const kept = ranges.filter((range) => !isEmpty(range));
 	if (kept.some((range) => range.start === undefined && range.end === undefined)) return [{}];
 
@@ -300,7 +446,7 @@ export function placedAsTimes(ranges: readonly Range[], placed: ReadonlyMap<numb
 		if (group === undefined) return range;
 		const out: Range = { start: group };
 		if (range.end !== undefined) out.end = range.end;
-		return out;
+		return withPolicy(out, policyOf(range));
 	});
 }
 
@@ -368,7 +514,7 @@ export function clamped(
 		const out: Range = {};
 		if (start !== undefined) out.start = start;
 		if (requested !== undefined) out.end = requested;
-		return out;
+		return withPolicy(out, policyOf(range));
 	});
 }
 
@@ -420,7 +566,7 @@ export function asked(
 		const join: Range = { start };
 		if (clamp.end !== undefined) join.end = clamp.end;
 		at.set(index, clamp.start);
-		out.push(join);
+		out.push(withPolicy(join, policyOf(range)));
 	}
 	return { ranges: out, placed: at };
 }
@@ -742,9 +888,12 @@ export class Window {
 	/**
 	 * Retire the ranges keyed `retire`, then resolve `add`, leaving every other range where it
 	 * resolved. A key added again replaces its range in place, but a live join added again with only
-	 * its max changed, and placed as it was, keeps where it started; any other key added is past every
-	 * key held. Each live join's range is placed as `joining` of its key says (from join tick 0 by
-	 * default). Costs the ranges edited, never the rest. Mirrors the Rust `Window::edit_since`.
+	 * its max or policy changed, and placed as it was, keeps where it started, as does any other range
+	 * added again with only its policy changed; any other key added is past every key held. Each live
+	 * join's range is placed as `joining` of its key says (from join tick 0 by default). Costs the
+	 * ranges edited, never the rest. Returns whether any group it reads, or how long one stays
+	 * fresh, may have moved: a change of policy alone moves none. Mirrors the Rust
+	 * `Window::edit_since`.
 	 */
 	edit(
 		retire: Iterable<bigint>,
@@ -752,22 +901,24 @@ export class Window {
 		latest: bigint | undefined,
 		holdings: Holdings = UNHELD,
 		joining: (key: bigint) => Joining = () => SINCE_ZERO,
-	): void {
+	): boolean {
+		let moved = false;
 		const retuned = new Set<bigint>();
 		for (const [key, range] of add) {
-			const join = joinOf(range);
 			const old = this.#ranges.get(key);
-			if (
-				join !== undefined &&
+			// A live join keeps where it started whatever its max, and any range whose policy alone
+			// moved keeps where it resolved; one added again unchanged resolves afresh.
+			const kept =
 				old !== undefined &&
-				joinOf(old) === join &&
-				placedAt(this.#joining.get(key)) === placedAt(joining(key))
-			)
-				retuned.add(key);
+				(joinOf(range) !== undefined
+					? joinOf(old) === joinOf(range)
+					: rangeKey(old) !== rangeKey(range) && retunes(old, range));
+			if (kept && placedAt(this.#joining.get(key)) === placedAt(joining(key))) retuned.add(key);
 		}
 		const readded = new Set(add.map(([key]) => key));
 		for (const key of retire) {
 			if (retuned.has(key)) continue;
+			moved = true;
 			this.#retire(key);
 			// One added again is replaced in place below, keeping its order.
 			if (!readded.has(key)) {
@@ -779,6 +930,17 @@ export class Window {
 		}
 		for (const [key, range] of add) {
 			const old = this.#ranges.get(key);
+			if (
+				retuned.has(key) &&
+				old !== undefined &&
+				retunes(old, range) &&
+				rangeBudget(old) === rangeBudget(range)
+			) {
+				// Its policy alone moved, which nothing here reads.
+				this.#ranges.set(key, range);
+				continue;
+			}
+			moved = true;
 			if (old !== undefined) this.#countBudget(old, -1);
 			this.#countBudget(range, 1);
 			if (retuned.has(key)) {
@@ -798,6 +960,7 @@ export class Window {
 			else this.#joining.delete(key);
 			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
 		}
+		return moved;
 	}
 
 	/**

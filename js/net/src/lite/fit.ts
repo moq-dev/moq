@@ -9,7 +9,7 @@
 import type { Run } from "../internal.ts";
 import { max } from "../util/key.ts";
 import { MAX_MESSAGE_SIZE } from "./message.ts";
-import { rangeSize, varintSize, type WireRange } from "./subscribe.ts";
+import { type Policy, rangeSize, subscriptionPolicy, varintSize, type WireRange, withPolicy } from "./subscribe.ts";
 
 /**
  * The most a SUBSCRIBE_UPDATE's fields besides its ranges take, size prefix included: nine
@@ -39,6 +39,10 @@ export interface Budget {
  * them fit one SUBSCRIBE_UPDATE however little the two share: a relay never narrows its ask in
  * between, which would reset group streams still arriving. Never more than leaves room in a
  * SUBSCRIBE for one range past it, which {@link fitAfter} takes.
+ *
+ * A live range the update retunes instead, its policy or a live join's max changed in place,
+ * costs its Range ID, two bytes, and its max, never more than the range as the update asks for it:
+ * the ranges replacing the last pay for their retunes as they do for their additions.
  */
 export function budget(fields: number, next: bigint, count: number): Budget {
 	const half = Math.floor((MAX_MESSAGE_SIZE - UPDATE_FIELDS) / 2);
@@ -77,10 +81,16 @@ export function fitAfter(budget: Budget, spent: readonly WireRange[], ranges: re
 	return taken;
 }
 
-/** Groups from `start`, up to the exclusive `end` or open. */
+/** Groups from `start`, up to the exclusive `end` or open, asked at `policy`. */
 interface Span {
 	start: bigint;
 	end?: bigint;
+	policy?: Policy;
+}
+
+/** What `a` and `b` ask as one range: the more urgent, newest first on a tie unless both are not. */
+function top(a: Policy | undefined, b: Policy | undefined): Policy {
+	return subscriptionPolicy([withPolicy({}, a ?? {}), withPolicy({}, b ?? {})]);
 }
 
 function spanCost(budget: Budget, span: Span): number {
@@ -97,14 +107,16 @@ function groupSpan(range: WireRange): Span | undefined {
 	const start = range.start?.absolute ?? range.start?.time;
 	if (start === undefined) return undefined;
 	const end = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
-	return end === undefined ? { start } : { start, end };
+	const policy = subscriptionPolicy([range]);
+	return end === undefined ? { start, policy } : { start, end, policy };
 }
 
 /**
  * `demand`'s ranges and the `fills` groups, each widened only as far as both must be to fit
  * `budget`, as the same arrays when nothing must. A gap between fills closes across `avoid`,
  * groups the fills leave out on purpose, only once every other gap has. A widened demand range
- * names its groups by time, as the demand's own do.
+ * names its groups by time, as the demand's own do, at the most urgent policy among the ranges it
+ * covers, so no group goes out later than one of them asked.
  *
  * Throws when even one range per kind of start would not fit, which only a broadcast path or
  * track name filling the message leaves.
@@ -154,10 +166,10 @@ export function fit(
 	}
 	if (total() > budget.bytes) throw new Error("too many ranges for one SUBSCRIBE");
 
-	const ranges: WireRange[] = spans.ranges().map(({ start, end }) => {
+	const ranges: WireRange[] = spans.ranges().map(({ start, end, policy }) => {
 		const range: WireRange = { start: { time: start } };
 		if (end !== undefined) range.end = { time: end - 1n };
-		return range;
+		return withPolicy(range, policy ?? {});
 	});
 	ranges.push(...others);
 	return { ranges, fills: runs.ranges().map(({ start, end }) => ({ start, end: bounded(end) })) };
@@ -209,6 +221,7 @@ class Spans {
 			const last = this.#spans.at(-1);
 			if (last && (last.end === undefined || last.end >= span.start)) {
 				last.end = last.end === undefined || span.end === undefined ? undefined : max(last.end, span.end);
+				last.policy = top(last.policy, span.policy);
 			} else {
 				this.#spans.push({ ...span });
 			}
@@ -250,12 +263,16 @@ class Spans {
 		this.#start[last] = first;
 	}
 
-	/** Each chain as the one span covering it. */
+	/** Each chain as the one span covering it, at the most urgent policy among its spans. */
 	ranges(): Span[] {
 		const ranges: Span[] = [];
 		for (let first = 0; first < this.#spans.length; first = this.#end[first] + 1) {
 			const last = this.#end[first];
-			ranges.push({ start: this.#spans[first].start, end: this.#spans[last].end });
+			let policy = this.#spans[first].policy;
+			for (let index = first + 1; index <= last; index++) policy = top(policy, this.#spans[index].policy);
+			const span: Span = { start: this.#spans[first].start, end: this.#spans[last].end };
+			if (policy !== undefined) span.policy = policy;
+			ranges.push(span);
 		}
 		return ranges;
 	}
@@ -274,7 +291,8 @@ function bySpan(a: Span, b: Span): number {
  * One range per kind of start covering every range of that kind, from the earliest start to the
  * latest end. A time or absolute start is a span, so only ranges with no start and live joins are
  * left: those with no start all start at the same group, and the join reaching furthest back,
- * under the widest max, delivers what each of the others does. Mirrors the Rust `collapse`.
+ * under the widest max, delivers what each of the others does. Each takes the most urgent policy
+ * among those it covers. Mirrors the Rust `collapse`.
  */
 function collapse(ranges: readonly WireRange[]): WireRange[] {
 	const kinds: WireRange[] = [];
@@ -283,11 +301,13 @@ function collapse(ranges: readonly WireRange[]): WireRange[] {
 	for (const range of ranges) {
 		const live = range.start?.live;
 		const joined = range.start?.joined;
-		const cover = kinds.find((cover) => kind(cover) === kind(range));
-		if (!cover) {
+		const index = kinds.findIndex((cover) => kind(cover) === kind(range));
+		if (index < 0) {
 			kinds.push({ ...range });
 			continue;
 		}
+		kinds[index] = withPolicy(kinds[index], subscriptionPolicy([kinds[index], range]));
+		const cover = kinds[index];
 		// The join reaching furthest back, none past one with no lag limit, under the widest max,
 		// delivers what each of the others does.
 		const held = cover.start?.live;

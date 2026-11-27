@@ -116,11 +116,11 @@ export class Priority {
 
 	/** The send order for a stream starting at this group and object, before it opens. */
 	rank(key: bigint, object: number): number {
-		const subscription = hooks.preferences(this.#track).scalars();
+		const policy = hooks.preferences(this.#track).policy();
 		return sendOrder({
-			priority: subscription?.priority ?? 0,
+			priority: policy.priority,
 			publisher: this.#publisher,
-			position: this.#position(key, object, subscription?.order),
+			position: this.#position(key, object, policy.order),
 		});
 	}
 
@@ -180,9 +180,7 @@ export class Priority {
 	// Sorted once, so ranking every stream costs one sort rather than a scan per stream: a
 	// stream's position is how many sort strictly ahead of it.
 	#rerank() {
-		const subscription = hooks.preferences(this.#track).scalars();
-		const priority = subscription?.priority ?? 0;
-		const order = subscription?.order ?? "descending";
+		const { priority, order } = hooks.preferences(this.#track).policy();
 		const queue = [...this.#streams].sort(([, a], [, b]) => compareStarts(a, b, order));
 		let position = 0;
 		for (let i = 0; i < queue.length; i++) {

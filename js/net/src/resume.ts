@@ -88,13 +88,16 @@ import {
 	isEmpty,
 	type Joining,
 	liveMillis,
+	policyOf,
 	type Resolved,
+	rangesPolicy,
 	rangeTime,
 	SINCE_ZERO,
-	sameRanges,
+	sameSpans,
 	UNHELD,
 	Window,
 	widest,
+	withPolicy,
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
@@ -861,7 +864,7 @@ class Reader implements ResumeSource {
 	#wire(copy: Pick<Copy, "floor" | "until" | "from" | "resolved"> & { sub?: track.Subscriber }): track.Subscription {
 		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
 		const ranges = preferences.ranges ?? [{}];
-		if (copy.sub && copy.from !== undefined && sameRanges(copy.from, ranges)) {
+		if (copy.sub && copy.from !== undefined && sameSpans(copy.from, ranges)) {
 			// A range keeps its first resolution: the copy re-resolves its clamped wire, so its own
 			// resolution of a capped or floored request would move the endpoints for good.
 			const own = hooks.servingResolved(copy.sub);
@@ -871,7 +874,7 @@ class Reader implements ResumeSource {
 			// Replaced ranges resolve against its cache now, as any subscriber's do.
 			copy.from = ranges;
 			copy.resolved = hooks.resolveRanges(copy.sub, { ...preferences, ranges });
-		} else if (copy.from === undefined || !sameRanges(copy.from, ranges)) {
+		} else if (copy.from === undefined || !sameSpans(copy.from, ranges)) {
 			// A new copy starts from where the reader's ranges resolved.
 			copy.from = ranges;
 			copy.resolved = this.#window().resolved();
@@ -899,7 +902,7 @@ class Reader implements ResumeSource {
 		let resolution = this.#resolution;
 		if (
 			!resolution ||
-			(resolution.from !== ranges && !sameRanges(resolution.from, ranges)) ||
+			(resolution.from !== ranges && !sameSpans(resolution.from, ranges)) ||
 			!samePlaced(resolution.placed, placed)
 		) {
 			resolution = this.#fresh(ranges);
@@ -912,7 +915,7 @@ class Reader implements ResumeSource {
 			// followed, but the front's next copy continues the track: only that copy knows which
 			// group holds it, until the track concludes.
 			if (!this.route.concluded && copyFailed(copy)) continue;
-			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
+			if (!copy.from || !sameSpans(copy.from, ranges)) continue;
 			// A closed copy's subscriber is no longer updated, so its own resolution is of the ranges
 			// it had then; the one it took when asked for these answers instead.
 			const own = copy.sub.closed.peek() === undefined ? hooks.servingResolved(copy.sub) : (copy.resolved ?? []);
@@ -1044,9 +1047,20 @@ class Reader implements ResumeSource {
 			this.#stamp(copy);
 		} else {
 			// Its ranges stay as resolved when it closed, but the groups it still holds are picked in
-			// the reader's Group Order. Mirrors the Rust `Copy::send`, which edits every copy.
-			const { priority = 0, order = "descending" } = wire;
-			hooks.editSubscriber(copy.sub, { retire: [], add: [], priority, order });
+			// the reader's Group Order: each takes the reader's policy, which keeps where it resolved.
+			// Mirrors the Rust `Copy::send`, which edits every copy.
+			const policy = rangesPolicy(wire.ranges ?? []);
+			const prefs = hooks.preferences(copy.sub);
+			const held = prefs.held();
+			const add: (readonly [bigint, track.Range])[] = [];
+			const placed = new Map<bigint, bigint>();
+			for (const [index, [key, range]] of [...prefs.entries()].entries()) {
+				const at = held[index].placed;
+				if (at !== undefined) placed.set(key, at);
+				const { priority, order } = policyOf(range);
+				if (priority !== policy.priority || order !== policy.order) add.push([key, withPolicy(range, policy)]);
+			}
+			if (add.length > 0) hooks.editSubscriber(copy.sub, { retire: [], add, placed });
 		}
 	}
 
@@ -1076,7 +1090,7 @@ class Reader implements ResumeSource {
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
 			// them, so the reader takes that resolution now, the newest copy's first.
 			const ranges = this.#ranges();
-			if (this.#resolution && !sameRanges(this.#resolution.from, ranges)) {
+			if (this.#resolution && !sameSpans(this.#resolution.from, ranges)) {
 				// The serving copy's resume point may cut off groups the new ranges cover.
 				this.#resumed = true;
 				this.#resolution = this.#fresh(ranges);
@@ -1085,7 +1099,7 @@ class Reader implements ResumeSource {
 					const copy = this.#copies[index];
 					// As in #window, a failed copy leaves the placement to the copy continuing the track.
 					if (!this.route.concluded && copyFailed(copy)) continue;
-					if (copy.from && sameRanges(copy.from, ranges)) this.#resolve(copy.resolved ?? []);
+					if (copy.from && sameSpans(copy.from, ranges)) this.#resolve(copy.resolved ?? []);
 				}
 			}
 		}
@@ -1809,7 +1823,7 @@ class Reader implements ResumeSource {
 		let first: { copy: Copy; key: bigint } | undefined;
 		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
-		const ascending = ordered || this.#shell.subscription.peek()?.order === "ascending";
+		const ascending = ordered || rangesPolicy(this.#shell.subscription.peek()?.ranges ?? []).order === "ascending";
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
 			for (;;) {

@@ -9,7 +9,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { withMax } from "../subscription.test-util.ts";
+import { everyRange, withMax } from "../subscription.test-util.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
@@ -1273,11 +1273,7 @@ test.each(
 		const consumer = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({
-				...track.Subscription.default(),
-				ranges: [range],
-				order: "ascending",
-			});
+			.subscribe(everyRange({ ...track.Subscription.default(), ranges: [range] }, { order: "ascending" }));
 		const peer = await nextStream(pair.client, version);
 		const ordered = consumer.ordered();
 		let fetch: Stream | undefined;

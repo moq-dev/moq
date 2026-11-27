@@ -618,8 +618,10 @@ export class Broadcast {
 			fetchNext = async () => (await consumer.latest())?.value;
 		} else {
 			const track = broadcast.track("catalog").subscribe({
-				...Track.Subscription.default(),
-				priority: Catalog.PRIORITY.catalog,
+				ranges: (Track.Subscription.default().ranges ?? []).map((range) => ({
+					...range,
+					priority: Catalog.PRIORITY.catalog,
+				})),
 			});
 			effect.cleanup(() => track.close());
 			const ordered = track.ordered();

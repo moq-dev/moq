@@ -18,7 +18,7 @@ import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
-import { withMax } from "./subscription.test-util.ts";
+import { everyRange, topPolicy, withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -493,13 +493,17 @@ test("a group the window dropped above the serving copy's resume point is backfi
 	ta.write(10n);
 	ta.write(50n);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe({
-		order: "ascending",
-		ranges: [
-			{ start: 10n, end: 10n },
-			{ start: 50n, end: 50n },
-		],
-	});
+	const sub = front.consumer.track("seq").subscribe(
+		everyRange(
+			{
+				ranges: [
+					{ start: 10n, end: 10n },
+					{ start: 50n, end: 50n },
+				],
+			},
+			{ order: "ascending" },
+		),
+	);
 	try {
 		await clock.advance(Duration.ZERO);
 		const first = sub.tryRecvGroup();
@@ -2343,25 +2347,22 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 	const tb = copy(b);
 	const front = new Front();
 	front.serve(a.consume());
-	const parent = front.consumer.track("seq").subscribe({
-		priority: 2,
-		ranges: [{ start: 1n }],
-	});
+	const parent = front.consumer.track("seq").subscribe(everyRange({ ranges: [{ start: 1n }] }, { priority: 2 }));
 	ta.write(0n);
 	ta.write(1n);
 	expect(drain(parent)).toEqual([1n]);
 	const fork = parent.fork(withMax({ priority: 7, delay: { max: Duration.millis(10_000) } }));
 	try {
 		expect(drain(fork)).toEqual([1n, 0n]);
-		fork.update({ priority: 9 });
-		expect(parent.subscription.peek()?.priority).toBe(2);
-		expect(fork.subscription.peek()?.priority).toBe(9);
+		fork.update(everyRange({}, { priority: 9 }));
+		expect(topPolicy(parent.subscription.peek())?.priority).toBe(2);
+		expect(topPolicy(fork.subscription.peek())?.priority).toBe(9);
 		const subscribed = tb.producer.subscription.changed();
 		front.serve(b.consume());
-		expect((await subscribed)?.priority).toBe(9);
+		expect(topPolicy(await subscribed)?.priority).toBe(9);
 		const narrowed = tb.producer.subscription.changed();
 		fork.close();
-		expect((await narrowed)?.priority).toBe(2);
+		expect(topPolicy(await narrowed)?.priority).toBe(2);
 		tb.write(2n);
 		expect(drain(parent)).toEqual([2n]);
 		parent.close();

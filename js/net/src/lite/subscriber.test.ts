@@ -28,7 +28,7 @@ import { hooks, NO_MAX_DELAY } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { concat, Reader, Writer } from "../stream.ts";
-import { withMax } from "../subscription.test-util.ts";
+import { everyRange, withMax } from "../subscription.test-util.ts";
 import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -1575,6 +1575,53 @@ test.each(
 	}
 });
 
+// Lite-07 asks each range at its own priority and order, and changing one range's priority retunes
+// that range alone in place. Mirrors the Rust `each_range_carries_its_own_policy`.
+test("lite-07: each range carries its own policy, retuned alone", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const live = { start: { live: { min: Duration.ZERO, max: Duration.ZERO } }, priority: 7 } as const;
+	const history = { start: 0n, end: 9n, priority: -2, order: "ascending" } as const;
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ ranges: [live, history] });
+	try {
+		await opened(0);
+		await streams[0].reading;
+		const request = await opened(1);
+		const subscribe = new Reader(request.outbound, undefined, version);
+		expect(await subscribe.u53()).toBe(StreamId.Subscribe);
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await new TrackInfo({ timescale: 1000, maxAge: 1000 }).encode(writer, version);
+		for (const chunk of chunks) streams[0].inbound.enqueue(chunk);
+		const msg = await Subscribe.decode(subscribe, version);
+		// In the aggregate's order, history before live joins.
+		const policies = (msg.ranges ?? []).map((range) => [range.priority ?? 0, range.order ?? "descending"]);
+		expect(policies).toEqual([
+			[-2, "ascending"],
+			[7, "descending"],
+		]);
+		// The subscription as a whole, as a wire without a policy per range would carry it.
+		expect([msg.priority, msg.order]).toEqual([7, "descending"]);
+
+		await track.info();
+		await request.reading;
+		track.update({ ranges: [live, { ...history, priority: 9 }] });
+		const update = await SubscribeUpdate.decode(subscribe, version);
+		expect([update.ranges, update.remove]).toEqual([[], []]);
+		expect(update.retune).toEqual([[0n, { priority: 9, order: "ascending", max: null }]]);
+	} finally {
+		track.close();
+		subscriber.close();
+	}
+});
+
 // A GROUP that beats its subscription's TRACK_INFO waits unread for it, then is read with it.
 test("a group that beats its track info waits for it", async () => {
 	const version = Version.DRAFT_07;
@@ -1805,7 +1852,7 @@ test.each([
 		await drainReactions();
 		// An update reopens neither drop.
 		if (kind === "final then stale") {
-			track.update({ priority: 1 });
+			track.update(everyRange({}, { priority: 1 }));
 			await drainReactions();
 		}
 
@@ -1997,10 +2044,12 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		// SUBSCRIBE_END starts the end's grace, and the update then widens the live join's max.
 		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
-		track.update({
-			priority: 0,
-			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }],
-		});
+		track.update(
+			everyRange(
+				{ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }] },
+				{ priority: 0 },
+			),
+		);
 		await drainReactions();
 
 		await clock.advance(GRACE.mul(3));
@@ -3849,7 +3898,7 @@ test.each([
 			streamErrorCode: StreamCode.Cancel,
 		});
 		const refused = stream.stop(stopped);
-		track.update({ priority: 1 });
+		track.update(everyRange({}, { priority: 1 }));
 		await refused;
 		await drainReactions();
 		expect(track.closed.peek()).toBeUndefined();

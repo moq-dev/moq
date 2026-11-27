@@ -13,7 +13,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { withMax } from "./subscription.test-util.ts";
+import { everyRange, topPolicy, withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { FillGroups, Producer, Requests, Subscription } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -646,7 +646,7 @@ test("fill: a fill names the most urgent priority among its readers", async () =
 	expect(fill.priority).toBe(1);
 	expect(fill.order).toBe("ascending");
 
-	const high = track.subscribe({ ...history, priority: 7, order: "descending" });
+	const high = track.subscribe(everyRange({ ...history }, { priority: 7, order: "descending" }));
 	void drain(high);
 	await yieldNow();
 	expect(fill.priority).toBe(7);
@@ -717,7 +717,7 @@ test("fill: an ordered reader stops waiting on an unanswered fill once the max a
 		// The publisher's max age bounds history, so it convicts the holes below group 5.
 		const { broadcast, track } = resumed(5n, Duration.millis(1000));
 		const requests = track.requests();
-		const reader = track.subscribe({ ranges: [{ start: 0n }], order: "ascending" });
+		const reader = track.subscribe(everyRange({ ranges: [{ start: 0n }] }, { order: "ascending" }));
 		const next = reader.ordered().nextGroup();
 		// The handler takes the fill for the missing groups and never answers.
 		const fill = await requests.requestedFill();
@@ -770,7 +770,7 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 	try {
 		const { broadcast, track } = resumed(5n, Duration.millis(1000));
 		const requests = track.requests();
-		const reader = track.subscribe({ ranges: [{ start: 0n }], order: "ascending" });
+		const reader = track.subscribe(everyRange({ ranges: [{ start: 0n }] }, { order: "ascending" }));
 		const next = reader.ordered().nextGroup();
 		const fill = await requests.requestedFill();
 		if (!fill) throw new Error("no fill of groups");
@@ -999,7 +999,7 @@ test("fill: a filled group stays wanted only while a reader will still read it",
 	expect(wanted.peek()).toBe(true);
 
 	// Narrowed past it, nobody reads it: only the live reader's copy is left, which it passed.
-	behind.update({ ...history, ranges: [{ start: 3n }] });
+	behind.update(everyRange({ ...history, ranges: [{ start: 3n }] }, topPolicy(history) ?? {}));
 	expect(wanted.peek()).toBe(false);
 	// Widened back over it, it counts again.
 	behind.update(history);
@@ -1025,7 +1025,7 @@ test("fill: a reader changing only its order wakes the handler", async () => {
 	expect(await fill.wantedChanged()).toBe(0n);
 	const changed = fill.wantedChanged();
 
-	reader.update({ ...history, order: "descending" });
+	reader.update(everyRange({ ...history }, { order: "descending" }));
 	expect(await changed).toBe(4n);
 	expect(fill.order).toBe("descending");
 
@@ -1363,7 +1363,7 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	expect(reader.tryRecvGroup()?.start).toBe(3n);
 	reader.tryRecvGroup();
 	// A reader of the run alone, which the verdict does not settle, waits on the same fill.
-	const bounded = track.subscribe({ ...terms, ranges: [{ start: 0n, end: 2n }] });
+	const bounded = track.subscribe(everyRange({ ...terms, ranges: [{ start: 0n, end: 2n }] }, topPolicy(terms) ?? {}));
 	bounded.tryRecvGroup();
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
@@ -1756,7 +1756,9 @@ test("fill: an answer evicted again before its reader takes it is asked again", 
 		};
 		for (let n = 0n; n <= edge; n++) write(track.createGroup(n));
 		evict();
-		const reader = track.subscribe({ ...history, ranges: [{ start: 0n, end: 4n }] });
+		const reader = track.subscribe(
+			everyRange({ ...history, ranges: [{ start: 0n, end: 4n }] }, topPolicy(history) ?? {}),
+		);
 		const ordered = reader.ordered();
 		const next = ordered.nextGroup();
 		const fill = defined(await requests.requestedFill());
@@ -2280,12 +2282,7 @@ test("fill: a refused time start fails its reader until its ranges change", asyn
 
 	// An edit replacing it resolves every range again, each by its Range ID.
 	const times = lookups(requests, (ms) => ms);
-	hooks.editSubscriber(reader, {
-		retire: [0n],
-		add: [[1n, { start: 3n }]],
-		priority: 0,
-		order: "ascending",
-	});
+	hooks.editSubscriber(reader, { retire: [0n], add: [[1n, { start: 3n, order: "ascending" }]] });
 	const got: bigint[] = [];
 	for (let i = 0; i < 3; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
 	expect(got).toEqual([3n, 4n, 5n]);
@@ -2320,7 +2317,7 @@ test("fill: replacing the ranges withdraws a lookup still out", async () => {
 	if (!lookup) throw new Error("no time start");
 	expect(lookup.start).toBe(2n);
 
-	reader.update({ ranges: [{ start: 5n }], order: "ascending" });
+	reader.update(everyRange({ ranges: [{ start: 5n }] }, { order: "ascending" }));
 	expect(reader.tryRecvGroup()?.start).toBe(5n);
 	// Nobody waits on time 2 now.
 	expect(lookup.wanted()).toBeUndefined();

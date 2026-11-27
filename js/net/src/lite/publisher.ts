@@ -1311,7 +1311,7 @@ export class Publisher {
 		const absent = legacyStart(this.version, msg.maxDelay);
 		const placed = requestedPlaced(msg, absent);
 		const subscription = (ranges: track.Range[]): track.Subscription => {
-			const out: track.Subscription = { priority: msg.priority, order: msg.order, ranges };
+			const out: track.Subscription = { ranges };
 			if (placed.size > 0) out.placed = placed;
 			return out;
 		};
@@ -1522,11 +1522,7 @@ export class Publisher {
 						// An older update restates its one span, replacing every range: an absent start is
 						// placed afresh within the new max age rather than retuned where the old one joined.
 						const absent = legacyStart(this.version, update.maxDelay);
-						const restated: track.Subscription = {
-							priority: update.priority,
-							order: update.order,
-							ranges: requestedRanges(update, absent),
-						};
+						const restated: track.Subscription = { ranges: requestedRanges(update, absent) };
 						const placed = requestedPlaced(update, absent);
 						if (placed.size > 0) restated.placed = placed;
 						hooks.restateSubscriber(track, restated);
@@ -1568,8 +1564,6 @@ export class Publisher {
 						retire: [...retired, ...replaced.map(([id]) => id)],
 						add,
 						placed,
-						priority: update.priority,
-						order: update.order,
 					});
 				},
 			});

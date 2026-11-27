@@ -19,7 +19,7 @@ import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Front } from "../resume.ts";
 import { Reader, Readers, Stream, Writer, writeBudget } from "../stream.ts";
-import { withMax } from "../subscription.test-util.ts";
+import { topPolicy, withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -323,7 +323,7 @@ async function groupSendOrders(options: {
 			if (index === 1 && update !== undefined) {
 				await replayUpdate({ priority: update, ...keep(version) }).encode(client.writer, version);
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
-				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
+				while (topPolicy(track.subscription.peek())?.priority !== update) await track.subscription.changed();
 			}
 
 			const group = track.createGroup(BigInt(key));
@@ -422,7 +422,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 
 	try {
 		await replayUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
-		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
+		while (topPolicy(track.subscription.peek())?.priority !== 9) await track.subscription.changed();
 
 		// The publisher re-ranks from that same signal, so let everything it queued run rather
 		// than depend on the dispatch order between its subscriber and this one.
@@ -476,7 +476,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 	try {
 		// The publisher is now parked inside the open, having already read priority 1.
 		await replayUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
-		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
+		while (topPolicy(track.subscription.peek())?.priority !== 9) await track.subscription.changed();
 
 		release();
 		const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -533,7 +533,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		expect(pair.server.sendStreams.uni.length).toBe(count);
 
 		await replayUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
-		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
+		while (topPolicy(track.subscription.peek())?.priority !== 9) await track.subscription.changed();
 
 		// Newest-first, so the last group opened is at position 0 and the first is at the back.
 		const expected = groups.map((group) => sendOrder({ priority: 9, position: count - 1 - Number(group.start) }));
@@ -3838,7 +3838,7 @@ for (const routed of [false, true, "nested"] as const) {
 
 			// An update keeping the start names none of the older gaps either: the next drop is a new one.
 			await new SubscribeUpdate({ priority: 1, maxDelay: 100 }).encode(sub.client.writer, Version.DRAFT_06);
-			while (sub.track.subscription.peek()?.priority !== 1) await sub.track.subscription.changed();
+			while (topPolicy(sub.track.subscription.peek())?.priority !== 1) await sub.track.subscription.changed();
 			hooks.dropTrackGroups(sub.track, 1001n, 1020n, { error: new StreamError(StreamCode.NotFound) });
 			expect(await drop()).toEqual([1001n, 1020n]);
 
