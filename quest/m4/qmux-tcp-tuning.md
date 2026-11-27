@@ -18,7 +18,7 @@ Joins `m4` (behind the release cut) as performance and optimization work with no
 Work items (measure before and after on bufferbloat and micro-benchmarks):
 
 1. **Coalesce `TCP_INFO` syscalls (`socket.rs:253-461`, `driver.rs:377-381`)**: Replace the 3-4 separate `getsockopt(TCP_INFO)` calls across `metrics()`, `read_wire()`, and `limit_unsent()` with one cached snapshot per 250ms driver tick (surfacing `min_rtt`, `retrans`, and `notsent_bytes`).
-2. **Eliminate wasted keep-alive and RTT traffic (`mux/mod.rs:101`, `session.rs:388`)**: Disable 1 Hz `QX_PING` RTT probes when `SocketStats::rtt()` is present (safe once [qmux-correctness-fixes](/quest/m1/qmux-correctness-fixes.md) fixes the one-way-sender idle-timeout bug), and restrict `ws::KeepAlive` to `qmux-00` since `qmux-01/02` enforce `idle_timeout` in-band.
+2. **Eliminate wasted keep-alive and RTT traffic (`mux/mod.rs:101`, `session.rs:388`)**: Disable 1 Hz `QX_PING` RTT probes when `SocketStats::rtt()` is present (safe now that keep-alive `QX_PING`s follow the last receive, so a one-way sender still draws answers), and restrict `ws::KeepAlive` to `qmux-00` since `qmux-01/02` enforce `idle_timeout` in-band.
 3. **Fix `TCP_NOTSENT_LOWAT` floor and refresh (`socket.rs:449-461`, `driver.rs:377-381`)**: Clamp Linux `TCP_NOTSENT_LOWAT` to `max(cwnd, 4 * mss)` (or 16 KiB) so congestion (`cwnd = 2 * MSS`) does not starve `EPOLLOUT`, and refresh it on the existing 250ms `TCP_INFO` read (0 extra syscalls) instead of only on stall. On macOS, add a floor (e.g. 64 KiB) to `SO_SNDBUF = 2 * cwnd` or benchmark leaving kernel autotuning intact.
 4. **Best-effort Linux `TCP_CONGESTION = "bbr"` (and leave `TCP_USER_TIMEOUT` unset while live)**: Opt into `bbr` per socket on Linux when permitted by sysctl (ignoring `EPERM`/`ENOENT`). Leave `TCP_USER_TIMEOUT` unset on live sessions where inbound QMux records can extend the idle deadline while outbound TCP is zero-window stalled, so the kernel cannot preempt QMux's liveness policy (if used at all, apply `TCP_USER_TIMEOUT` only during teardown once QMux is closing).
 5. **MSS-aware QMux and TLS record sizing**: Cap QMux record / TLS fragment size (e.g. `min(cwnd, 4 * mss)` when `cwnd` is small, or `rustls::Connection::set_buffer_limit`) to cut head-of-line loss tail latency past a small `TCP_NOTSENT_LOWAT`.
@@ -26,10 +26,6 @@ Work items (measure before and after on bufferbloat and micro-benchmarks):
 7. **Benchmark-gated `TCP_FASTOPEN` and selective `TCP_QUICKACK`**: Measure `TCP_FASTOPEN` / `TCP_FASTOPEN_CONNECT` (1 RTT saved on reconnect/fallback) and selective `TCP_QUICKACK` (handshake / small control exchanges) under real and impaired links; enable only if benchmarks show a clear win without middlebox regressions.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Fix Rust and JS QMux correctness bugs and port web-transport fixes](/quest/m1/qmux-correctness-fixes.md) - disabling 1 Hz `QX_PING` RTT probes requires the one-way-sender idle-timeout fix first
 
 ## Related
 

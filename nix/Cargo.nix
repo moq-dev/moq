@@ -40077,8 +40077,8 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "rustls-native-certs";
-            packageId = "rustls-native-certs";
+            name = "rustls-platform-verifier";
+            packageId = "rustls-platform-verifier";
           }
           {
             name = "thiserror";
@@ -40101,7 +40101,7 @@ rec {
             features = [
               "connect"
               "handshake"
-              "rustls-tls-native-roots"
+              "__rustls-tls"
             ];
           }
           {
@@ -49852,11 +49852,6 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "rustls-native-certs";
-            packageId = "rustls-native-certs";
-            optional = true;
-          }
-          {
             name = "rustls-pki-types";
             packageId = "rustls-pki-types";
             optional = true;
@@ -49947,9 +49942,7 @@ rec {
           "default"
           "handshake"
           "rustls"
-          "rustls-native-certs"
           "rustls-pki-types"
-          "rustls-tls-native-roots"
           "stream"
           "tokio-rustls"
         ];
@@ -60335,11 +60328,6 @@ rec {
             ];
           }
           {
-            name = "security-framework-sys";
-            packageId = "security-framework-sys";
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-          }
-          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -60498,7 +60486,7 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            features = [ "rustls-tls-native-roots" ];
+            features = [ "__rustls-tls" ];
           }
           {
             name = "tokio-util";
@@ -60801,13 +60789,10 @@ rec {
               "Win32_NetworkManagement_IpHelper"
               "Win32_NetworkManagement_Ndis"
               "Win32_Networking_WinSock"
-              "Win32_Security_Authentication_Identity"
-              "Win32_Security_Credentials"
               "Win32_Security_Cryptography"
               "Win32_Storage_FileSystem"
               "Win32_System_Console"
               "Win32_System_IO"
-              "Win32_System_LibraryLoader"
               "Win32_System_Memory"
               "Win32_System_Pipes"
               "Win32_System_SystemInformation"
@@ -61799,11 +61784,6 @@ rec {
             ];
           }
           {
-            name = "security-framework-sys";
-            packageId = "security-framework-sys";
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-          }
-          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -61960,7 +61940,7 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            features = [ "rustls-tls-native-roots" ];
+            features = [ "__rustls-tls" ];
           }
           {
             name = "tokio-util";
@@ -62263,13 +62243,10 @@ rec {
               "Win32_NetworkManagement_IpHelper"
               "Win32_NetworkManagement_Ndis"
               "Win32_Networking_WinSock"
-              "Win32_Security_Authentication_Identity"
-              "Win32_Security_Credentials"
               "Win32_Security_Cryptography"
               "Win32_Storage_FileSystem"
               "Win32_System_Console"
               "Win32_System_IO"
-              "Win32_System_LibraryLoader"
               "Win32_System_Memory"
               "Win32_System_Pipes"
               "Win32_System_SystemInformation"
