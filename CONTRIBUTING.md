@@ -35,16 +35,16 @@ Run `just ci` before every push, and mark the PR ready yourself when the work is
 
 # Landing gate
 
-**Check** runs only on PRs into `release`, including drafts. PRs into `main` get their verdict from the merge queue; run `just ci` locally for a signal before queueing. **Queue** reports as skipped until queued.
+No CI runs on pull requests: run `just ci` locally before every push. PRs into `main` get their verdict from the merge queue; **Queue** reports as skipped until queued. `release` has no merge queue, so once the next cut lands, a PR into it runs `just gate` locally before pushing, plus `just api-diff --deny` for a backport (see [RELEASE.md](RELEASE.md)).
 `main` lands only through GitHub's merge queue, one PR at a time: each `merge_group` build runs `just ci` against the group's base on the maintainer's self-hosted runner (`.github/workflows/queue.yml`, which calls main's `queue-build.yml`, whose last job posts the required **Queue** context), and the queue squashes exactly the tree it tested.
 Request landing with `quest merge <pr> --land <full-head-sha>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
 `quest merge --land` enqueues the pinned head, or arms auto-merge bound to it while its checks are pending; a push removes it from the queue. A head GitHub refuses to enqueue, for a conflict or failing checks, fails the command: fix it and request landing again.
-Local and hosted checks select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+Local checks and the merge queue select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main`.
 Repository tooling tests run whole files in `just gh test`, listed explicitly in
 `.github/justfile`; the merge gate runs them only when a path they read changes (the `tooling` module in `sh/dispatch.sh`), and `just gate` runs them always. Slow fixtures live in separate `*.slow.test.py` files;
 `just gh test-integration` runs those files and selector timing nightly.
-The merge gate lints cfg-gated macOS and Windows Rust from Linux (`just rs cross-lint-changed`); to run its tests on those hosts before merging, dispatch `platform.yml` on the branch, never the full Nightly.
+The merge gate lints cfg-gated macOS and Windows Rust from Linux (`just rs cross-lint-changed`); to run its tests on those hosts before merging, run them on a macOS or Windows host over SSH, never in CI.
 
 `quest review` records each PR's risk tier, which [RISK.md](RISK.md) sets from its diff, in the body's `## Review` section.
 

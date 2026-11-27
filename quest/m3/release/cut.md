@@ -45,7 +45,7 @@ After publication, check Release remeasure and its pin-update PR, as
 RELEASE.md describes. Also check that the first release-plz PR after the cut
 gets the regenerated `nix/Cargo.nix` commit
 ([moq-dev/moq#8684](https://github.com/moq-dev/moq/pull/8684)) and passes
-Check: that step has never run (found by the
+`just gate`: that step has never run (found by the
 [feature review](/quest/m3/release/feature-review.md), 2026-11-14). The pipeline re-measures changed planned-break pins
 and requests landing through the main merge queue.
 
@@ -294,9 +294,10 @@ candidate:
 - Widen the two-relay smoke above: keep a reader attached through each roll, in both directions
   (last published relay to candidate and back), and check it keeps receiving the same frames
   after the roll and after a withdrawal and return.
-- The cut PR (head `main`) now runs the full moq-transport matrix and Released wire
-  compatibility in its Release gate, which a backport PR still skips (planned by the audit's
-  PR). Read both results on the cut PR rather than repeating them by hand.
+- Nightly's Interop run on `main` covers the full moq-transport matrix and Released wire
+  compatibility for the cut's head, since no CI runs on the cut PR. Read both results from
+  the run at the candidate SHA, or dispatch Interop on `main`, rather than repeating them by
+  hand.
 - Attach each result to the candidate SHA in the cut PR body, so a later push visibly
   invalidates it.
 

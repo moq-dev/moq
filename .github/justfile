@@ -128,9 +128,7 @@ test:
     slot; run python3 sh/gh/nightly.test.py & pids+=($!)
     slot; run python3 sh/gh/pages-clean.test.py & pids+=($!)
     slot; run python3 sh/gh/bench-report.test.py & pids+=($!)
-    slot; run python3 sh/gh/ts-paths.test.py & pids+=($!)
     slot; run sh/go/publish-wrapper.test.sh & pids+=($!)
-    slot; run python3 sh/rs/uring.test.py & pids+=($!)
     for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
     exit "$fail"
 

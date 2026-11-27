@@ -6,7 +6,7 @@ name: Android
 # Linux job compiles them to nothing, and a moq-net change that breaks them
 # (a bitrate turning into a `bandwidth::Rate`, say) lands on main unnoticed.
 #
-# Outside Nix, unlike check.yml: the dev shell has no NDK, and the GitHub
+# Outside Nix, unlike the merge queue: the dev shell has no NDK, and the GitHub
 # ubuntu image ships one that cargo-ndk finds through `ANDROID_NDK_HOME`. The
 # recipe is still `just rs android`, so a local run and this one compile the
 # same thing, and rust-toolchain.toml still pins the compiler.
@@ -41,7 +41,7 @@ env:
 jobs:
   android:
     name: Android
-    # x86_64 rather than the arm runners check.yml uses: GitHub documents the
+    # x86_64 rather than the arm runners Nightly uses: GitHub documents the
     # Android SDK and NDK as preinstalled on this image.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -57,8 +57,8 @@ jobs:
       - name: Add the Android target
         run: rustup target add aarch64-linux-android
 
-      # No Rust cache: this workflow only runs on pull requests, which may not
-      # save one, so it would have nothing to restore.
+      # No Rust cache: only this nightly job builds the Android target, so a
+      # cache would save one build a day.
       - uses: ./.github/actions/just
 
       - name: Install cargo-ndk

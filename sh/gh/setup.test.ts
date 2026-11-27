@@ -1,5 +1,5 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions are literal strings.
-// Runner timing and action execution stay in CI. These tests check the setup gates.
+// Runner timing and action execution stay in CI. These tests check the cache and corpus setup.
 import { expect, test } from "bun:test";
 
 type Step = {
@@ -8,50 +8,7 @@ type Step = {
 	uses?: string;
 	run?: string;
 	if?: string;
-	"continue-on-error"?: boolean;
 };
-type Job = { name: string; if?: string; steps: Step[]; "runs-on": string };
-const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/check.yml").text()) as {
-	on: Record<string, unknown>;
-	jobs: Record<string, Job>;
-};
-
-for (const name of ["check"]) {
-	test(`${name} queries before setup and keeps its check name`, () => {
-		const job = workflow.jobs[name];
-		expect(job.name).toBe("Check");
-		const scopeIndex = job.steps.findIndex((step) => step.id === "scope");
-		expect(scopeIndex).toBeGreaterThan(0);
-		const scope = job.steps[scopeIndex];
-		expect(scope.if).toBeUndefined();
-		expect(scope["continue-on-error"]).toBeUndefined();
-		expect(job.steps.slice(0, scopeIndex).some((step) => step.uses === "./.github/actions/just")).toBe(true);
-
-		// No expensive action or command may bypass the query, including future additions.
-		// The Rust cache is the largest restore, so it also waits for selected work that compiles Rust.
-		const setup = job.steps.slice(scopeIndex + 1);
-		expect(setup.some((step) => step.uses === "./.github/actions/nix")).toBe(true);
-		expect(setup.some((step) => step.uses === "./.github/actions/rust-cache")).toBe(true);
-		expect(setup.filter((step) => step.run).at(-1)?.name).toBe(job.name);
-		const checkIndex = setup.findIndex((step) => step.name === job.name);
-		for (const [index, step] of setup.entries()) {
-			if (step.uses?.startsWith("actions/upload-artifact@")) {
-				expect(index).toBeGreaterThan(checkIndex);
-				expect(step.if?.replace(/^\$\{\{\s*|\s*\}\}$/g, "")).toBe(
-					"!cancelled() && steps.scope.outputs.rust == 'true'",
-				);
-				continue;
-			}
-			const output = step.uses === "./.github/actions/rust-cache" ? "rust" : "needed";
-			const hosted = step.uses === "./.github/actions/nix" ? " && runner.environment != 'self-hosted'" : "";
-			expect(step.if).toBe(`steps.scope.outputs.${output} == 'true'${hosted}`);
-		}
-	});
-
-	test(`${name} keeps release checks on a hosted runner`, () => {
-		expect(workflow.jobs[name]["runs-on"]).toBe("ubuntu-24.04-arm");
-	});
-}
 
 test("self-hosted queue jobs use local caches without R2 credentials", async () => {
 	const action = Bun.YAML.parse(await Bun.file(".github/actions/rust-cache/action.yml").text());
@@ -97,15 +54,6 @@ test("self-hosted queue jobs use local caches without R2 credentials", async () 
 		);
 	}
 	expect(action.runs.steps[0].run).toContain("exit 1");
-});
-
-test("one job runs one CI dispatch with one checkout and cache restore", () => {
-	expect(Object.keys(workflow.jobs)).toEqual(["check"]);
-	const steps = workflow.jobs.check.steps;
-	expect(steps.filter((step) => step.uses?.startsWith("actions/checkout@"))).toHaveLength(1);
-	expect(steps.filter((step) => step.uses === "./.github/actions/nix")).toHaveLength(1);
-	expect(steps.filter((step) => step.uses === "./.github/actions/rust-cache")).toHaveLength(1);
-	expect(steps.filter((step) => step.run?.includes("nix develop"))).toHaveLength(1);
 });
 
 test("nightly fuzzing restores and saves minimized target-specific corpora", async () => {

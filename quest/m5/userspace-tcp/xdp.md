@@ -29,8 +29,8 @@ tokio first. Recommendations, by the agent:
 - Use RSS so each 4-tuple stays on one queue and so on one task, with no shared
   connection table.
 - Test on a veth pair in a netns, where XDP works in native mode on any
-  kernel. It needs `CAP_NET_ADMIN` and `CAP_BPF`, so it runs on the
-  self-hosted Linux runner and skips loudly elsewhere.
+  kernel. It needs `CAP_NET_ADMIN` and `CAP_BPF`, so it runs under sudo on a
+  GitHub-hosted Linux runner, which grants both, and skips loudly elsewhere.
 
 ## Hosts
 

@@ -1,11 +1,11 @@
-# [XS] PR CI builds the C++, Go, and Python interop clients
+# [XS] The merge gate builds the C++, Go, and Python interop clients
 
 ## Goal
 
-PR CI builds the C++, Go, and Python interop clients
-(`test/interop/clients/{cpp,go,python}`) when their bindings or the client
-change, so a binding API change that breaks one fails the branch rather than
-the next interop run.
+`just ci`, and so the merge queue, builds the C++, Go, and Python interop
+clients (`test/interop/clients/{cpp,go,python}`) when their bindings or the
+client change, so a binding API change that breaks one fails the branch rather
+than the next interop run.
 
 ## Plan
 

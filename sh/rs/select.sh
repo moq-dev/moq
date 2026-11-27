@@ -3,13 +3,13 @@
 # plus their dependents. `platform` is the Windows and macOS compile on those
 # hosts, and `cross` lints for both from any host.
 #
-# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross|uring LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross|uring LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -17,10 +17,6 @@ cd "$(git rev-parse --show-toplevel)"
 
 # Print `ALL`, nothing (no crate affected), or cargo package ids.
 select_packages() {
-    if [[ "$action" == uring && -f "$list" ]] && grep -qE '^(justfile|flake\.(nix|lock)|sh/changed\.sh|\.github/workflows/uring\.yml|\.cargo/.*|\.github/actions/.*)$' "$list"; then
-        echo ALL
-        return
-    fi
     # The flake pins the cross toolchain and zig.
     if [[ "$action" == cross && -f "$list" ]] && grep -qE '^flake\.(nix|lock)$' "$list"; then
         echo ALL
@@ -233,9 +229,6 @@ else
 fi
 
 case "$action" in
-    uring)
-        if wants '(moq-uring|moq-relay)'; then just rs uring; fi
-        ;;
     check | check-test | lint)
         # The session driver's Send proof runs on nightly in its own target dir
         # (target/send-depth), so overlap it with the stable lint steps and
@@ -251,7 +244,7 @@ case "$action" in
 
         fail=0
         # The isolated feature builds (`just rs features`) stay out of the
-        # gate; the Features workflow runs them nightly and on release PRs.
+        # gate; the Features workflow runs them nightly.
         just rs "$action" "${flags[@]}" || fail=1
         # Lint benches and examples in check mode (no codegen or linking) with
         # their required features, since `test` runs nextest on `--tests` alone.
@@ -312,7 +305,7 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
-        # CI keeps Cargo's per-crate build timings, which check.yml uploads.
+        # CI keeps Cargo's per-crate build timings, which queue-build.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
         # The tests behind the off-by-default device and runtime features join this build

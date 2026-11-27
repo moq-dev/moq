@@ -1,13 +1,9 @@
 name: Quest
 
-# Validates the quest tree on branches that take direct pushes. `main` lands only
-# through the merge queue, whose `just ci` runs `quest check`, and check.yml runs
-# it on release PRs, but a direct push (a merge to `release`, or `main` merged
-# into a questline) is nobody's pull request, so a broken tree could land there
-# unseen.
-#
-# Push only: a pull request is check.yml's job, and a pull_request trigger here
-# would spawn a skipped Alert run on every push to every pull request.
+# Validates the quest tree on `release`, which takes merges without the merge
+# queue. `main` lands only through the merge queue, whose `just ci` runs
+# `quest check`. Pull request branches, quest branches included, get no CI:
+# their authors run `just check` before pushing.
 #
 # The paths mirror the quest module in sh/dispatch.sh's impact map: the
 # documents, and flake.lock, which pins the validator.
@@ -19,7 +15,6 @@ on:
   push:
     branches:
       - release
-      - "quest/**"
     paths:
       - "quest/**"
       - "flake.lock"
@@ -32,8 +27,6 @@ concurrency:
 
 jobs:
   check:
-    # Not `Check`: that is check.yml's status, and a second job with
-    # the same name would make it ambiguous on a head that runs both.
     name: Quest
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15

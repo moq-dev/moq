@@ -402,16 +402,16 @@ jobs:
           path: test/smoke/_site/
           if-no-files-found: error
 
-  # Publish the relay report from main only (nightly or on demand), never from a
-  # PR. moq has one Pages site, so this commits under relays/ on the gh-pages
-  # branch the nightly benchmark table and the interop report also write, then
-  # deploys that whole branch. Sharing nightly.yml's concurrency group, with every
+  # Publish the relay report from main only (nightly or on demand). moq has one
+  # Pages site, so this commits under relays/ on the gh-pages branch the nightly
+  # benchmark table and the interop report also write, then deploys that whole
+  # branch. Sharing nightly.yml's concurrency group, with every
   # waiting writer queued, keeps the writers from racing the branch or each
   # other's deploy.
   relays-report:
     name: Publish relay report
     needs: relays
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.relays.outputs.report == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.relays.outputs.report == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -599,7 +599,7 @@ jobs:
   interop-runner-report:
     name: Publish upstream runner report
     needs: interop-runner
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.interop-runner.outputs.report == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.interop-runner.outputs.report == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:

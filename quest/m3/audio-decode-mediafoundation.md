@@ -19,8 +19,8 @@ ones. Behind the decode seam as the first candidate on `target_os =
 - Optional MFTs (Dolby, FLAC) are probed at open: absent means the codec is
   not advertised on that host, not an error at decode time.
 - Fixtures and layout-order tests as in the AudioToolbox quest.
-- Verification runs on a Windows host; the per-PR CI only compiles the
-  platform code (`just rs windows`).
+- Verification runs on a Windows host; CI only compiles the platform code,
+  nightly (`just rs windows`).
 
 Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break. `decode::Consumer` still places each packet by the one output it returns and refuses any other count, so if this backend holds or splits output, it also teaches the consumer to place that output.
 

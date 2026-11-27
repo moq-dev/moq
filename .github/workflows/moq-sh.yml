@@ -11,20 +11,16 @@ on:
     paths:
       - "infra/moq-sh/**"
       - ".github/workflows/moq-sh.yml"
-  # Release PRs, through release-gate.yml. Main PRs skip it: the landing gate's
-  # Check runs its fixtures on Linux, and nightly.yml's platform.yml call runs
-  # them and the smoke on macOS.
-  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 # Deploys share one group, so a queued deploy replaces an older pending one;
-# each resolves the newest release itself. Pull requests cancel superseded runs.
+# each resolves the newest release itself.
 concurrency:
-  group: moq-sh-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: moq-sh-deploy
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -55,7 +51,7 @@ jobs:
   deploy:
     name: Deploy
     needs: test
-    if: github.repository_owner == 'moq-dev' && github.event_name != 'pull_request' && github.ref == 'refs/heads/release'
+    if: github.repository_owner == 'moq-dev' && github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     # Write credentials live in the `publish` Environment, which only protected
     # refs can deploy to.

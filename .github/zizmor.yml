@@ -11,5 +11,4 @@ rules:
   secrets-inherit:
     ignore:
       - nightly.yml
-      - release-gate.yml
       - release-shared-ffi.yml

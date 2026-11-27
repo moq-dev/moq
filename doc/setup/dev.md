@@ -17,10 +17,10 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just ci-select` | Report whether CI and Rust build setup are needed, without running checks. |
 | `just fix` | Format and lint the repository, and regenerate committed JS API reports (`js/*/api/`) for affected packages. |
 | `just check` | Lint the repository, and compile and test affected packages. |
-| `just ci` | Run the merge queue's gate locally, strictly, before every push. Check runs on PRs into `release`; for `main`, only the queue gates landing. |
-| `just gate` | `just ci` over every package, as nightly and release PRs run it. `just gate rs` runs only the named module. |
+| `just ci` | Run the merge queue's gate locally, strictly, before every push. No CI runs on pull requests; for `main`, only the queue gates landing. |
+| `just gate` | `just ci` over every package, as nightly runs it and as a PR into `release` runs it before pushing. `just gate rs` runs only the named module. |
 | `just fix --all`, `just check --all` | The same, over every package. |
-| `just api-diff` | Diff every published API against its last release, the JS reports against ones rendered from `origin/release`. PRs into `release` run it; `--deny` fails a backport on any break. |
+| `just api-diff` | Diff every published API against its last release, the JS reports against ones rendered from `origin/release`. A PR into `release` runs it before pushing; `--deny` fails a backport on any break. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
 | `just sub gst bbb <url>` | Play a broadcast through GStreamer. |
 | `just relay` | Run a local relay on its own. |

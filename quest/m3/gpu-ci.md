@@ -45,10 +45,9 @@ skipping inside the Nix shell.
   `vulkan_cuda_auto_external_encode` must pass its per-plane pixel checks
   against the CPU reference for both renditions, RGBA and BGRA, through
   NVENC and CUDA external-image import (the verification #4975 deferred here).
-- Merge queue: a `merge_group` job in `.github/workflows/check.yml` (or
-  `video.yml`) runs `nix develop --command just rs nvidia`, a recipe and not
-  a script path, like every other workflow step, on a self-hosted runner
-  labeled for the NVIDIA host. Scope it like the other queue jobs: run when
+- Merge queue: the queue runs `nix develop --command just rs nvidia`, a recipe
+  and not a script path, like every other workflow step, where the Waiting
+  decision below places it. Scope it like the other queue jobs: run when
   the queue's diff touches moq-video, moq-nvenc, or what they depend on.
   Read-only `permissions`, never `pull_request`.
 - Decided 2026-10-20 (maintainer): GPU tests gate in the merge queue on the
@@ -64,6 +63,13 @@ skipping inside the Nix shell.
   sandboxing over a VM).
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: the 2026-11-27 CI policy allows no new per-repository self-hosted runner, and Kixel Quest will host every repository's merge queue on its own runners. Where do the NVIDIA tests gate?
+  - On Kixel Quest's merge queue runner on `nixos`, with the NVIDIA device nodes bound in (Recommended) - keeps the hardware gate without a per-repository runner
+  - Nightly on GitHub's NVIDIA GPU runners - billed per minute, and a break lands a day before it is caught
+  - On a moq-dev/moq self-hosted runner, as planned - an exception to the policy
 
 ## Related
 

@@ -141,7 +141,7 @@ device features, and on Linux the relay's io_uring runtime) plus fmt, doc,
 shear, and sort. It drops the isolated feature
 shapes (`rs_shapes`, cargo-hack), the net, QUIC, tokio, and media feature
 contracts, and the wasm32 and io_uring clippy passes; `just rs features` keeps
-the feature matrix in the Features workflow (nightly and release PRs). On a host land batch the Rust lane had taken about 1,340 s, 691 s
+the feature matrix in the Features workflow (nightly). On a host land batch the Rust lane had taken about 1,340 s, 691 s
 of it `rs_shapes` and 238 s `tokio-features`.
 
 Decided 2026-10-31 (maintainer), on the gate's remaining lint compiles: "Remove

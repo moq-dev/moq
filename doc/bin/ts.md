@@ -236,12 +236,12 @@ Passthrough carries damaged packets as they came.
 
 ## Evidence
 
-Every claim above has an automated test. **PR** runs in the Rust gate on every
-pull request (`just rs test -p moq-mux`, on a paused clock). **Nightly** runs in
-the [TS workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/ts.yml)
-every night and on release PRs: a relay round trip through the CLI, graded by
-TSDuck, FFmpeg, and the harness's own models. **Nightly only** skips release
-PRs. The [harness README](https://github.com/moq-dev/moq/blob/main/test/ts/README.md)
+Every claim above has an automated test. **PR** runs in the merge queue's Rust
+gate (`just rs test -p moq-mux`, on a paused clock). **Nightly** runs in the
+[TS workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/ts.yml)
+every night: a relay round trip through the CLI, graded by TSDuck, FFmpeg, and
+the harness's own models. **Nightly only** marks that workflow's long,
+real-time runs. The [harness README](https://github.com/moq-dev/moq/blob/main/test/ts/README.md)
 details each grader and its negative controls.
 
 ### Semantic profile
