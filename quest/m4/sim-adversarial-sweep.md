@@ -27,7 +27,3 @@ Decided 2026-11-27 (maintainer, /quest-plan on kio's follow-ups).
   such tests on one thread.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [kio main](/quest/m0/kio-main.md) - moves moq's kio pin past kixel-ai/kio#10, which added the schedules and the probe
