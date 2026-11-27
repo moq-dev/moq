@@ -4,9 +4,9 @@
 //! ends, on every wire, from the publisher directly or through a relay. A range reaching
 //! past the live edge ends once the groups up to its end arrive.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 use support::AppendNext;
 
 use std::time::Duration;

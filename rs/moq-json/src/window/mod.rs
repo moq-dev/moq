@@ -1091,8 +1091,7 @@ mod test {
 			.create_track("test", moq_net::track::Info::default().with_max_age(None))
 			.unwrap();
 		let replay = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::ALL])
-			.with_order(moq_net::track::Order::Ascending);
+			.with_ranges([moq_net::track::Range::ALL.with_order(moq_net::track::Order::Ascending)]);
 		let mut groups = track.subscribe(replay);
 		let mut producer = Producer::<Value>::new(track, Config::default());
 

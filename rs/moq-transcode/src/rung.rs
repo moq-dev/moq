@@ -854,13 +854,12 @@ async fn drop_gap(
 	// The fill holds the miss, so it has a last key.
 	let last = end - 1;
 	let from = if below { first } else { sequence };
-	let subscription = Subscription::default()
-		.with_ranges([Range {
-			start: Start::Time(from),
-			end: Some(last),
-		}])
-		.with_order(Order::Ascending)
-		.with_priority(fill.priority());
+	let subscription = Subscription::default().with_ranges([Range {
+		start: Start::Time(from),
+		end: Some(last),
+		priority: fill.priority(),
+		order: Order::Ascending,
+	}]);
 
 	let around = async {
 		let mut groups = track.subscribe(subscription).await?.ordered();
@@ -1238,12 +1237,12 @@ mod tests {
 		let mut track = output.create_track("video/120p", timed).unwrap();
 		let fills = track.requests();
 		let ascending = |from| {
-			moq_net::track::Subscription::default()
-				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Start::Time(from),
-					end: None,
-				}])
-				.with_order(moq_net::track::Order::Ascending)
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+				start: moq_net::track::Start::Time(from),
+				end: None,
+				..Default::default()
+			}
+			.with_order(moq_net::track::Order::Ascending)])
 		};
 		let mut reader = track.subscribe(ascending(7));
 		track.start_at(10).unwrap();
@@ -1381,12 +1380,12 @@ mod tests {
 			.unwrap();
 		let fills = track.requests();
 		let mut reader = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Start::Time(1),
-					end: None,
-				}])
-				.with_order(order),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+				start: moq_net::track::Start::Time(1),
+				end: None,
+				..Default::default()
+			}
+			.with_order(order)]),
 		);
 		track.start_at(HOUR).unwrap();
 		track
@@ -1463,12 +1462,12 @@ mod tests {
 		let mut track = output.create_track("video/120p", timed).unwrap();
 		let fills = track.requests();
 		let mut reader = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Start::Time(7),
-					end: None,
-				}])
-				.with_order(moq_net::track::Order::Ascending),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+				start: moq_net::track::Start::Time(7),
+				end: None,
+				..Default::default()
+			}
+			.with_order(moq_net::track::Order::Ascending)]),
 		);
 		track.start_at(10).unwrap();
 		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
@@ -1710,8 +1709,16 @@ mod tests {
 	#[test]
 	fn before_any_group_only_open_ranges_and_live_joins_reach_live() {
 		use moq_net::track::{Range, Start, Subscription};
-		let reaches =
-			|start, end, edge| reaches_live(&Subscription::default().with_ranges([Range { start, end }]), edge);
+		let reaches = |start, end, edge| {
+			reaches_live(
+				&Subscription::default().with_ranges([Range {
+					start,
+					end,
+					..Default::default()
+				}]),
+				edge,
+			)
+		};
 		let live = Start::Live { min: None, max: None };
 		assert!(reaches(Start::Time(3), None, None));
 		assert!(!reaches(Start::Time(3), Some(4), None));

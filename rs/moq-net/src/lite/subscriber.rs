@@ -1683,9 +1683,9 @@ impl GroupRecv {
 		} = opened;
 		let records: bool = ietf && framing.ietf.is_some();
 		let (priority, order) = match &target {
-			OpenedTarget::Copy(track) => track
-				.subscription()
-				.map_or((0, Default::default()), |sub| (sub.policy().priority, sub.policy().order)),
+			OpenedTarget::Copy(track) => track.subscription().map_or((0, Default::default()), |sub| {
+				(sub.policy().priority, sub.policy().order)
+			}),
 			OpenedTarget::Fill(_, priority) => (*priority, Default::default()),
 		};
 		self.reader
@@ -13465,8 +13465,7 @@ impl TrackServe {
 		// nothing keeps the subscriber's ranges: no start would widen a live viewer's ask to
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
-			subscription.start().is_none()
-				&& (!ranged || subscription.ranges.iter().all(track::Range::is_all))
+			subscription.start().is_none() && (!ranged || subscription.ranges.iter().all(track::Range::is_all))
 		});
 		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);
@@ -13992,7 +13991,8 @@ impl FinishedServe {
 			return Ok(());
 		};
 		while let Poll::Ready(Ok(demand)) = serving.poll_subscription_changed(waiter) {
-			(self.priority, self.asks) = demand.map_or((0, Vec::new()), |demand| (demand.policy().priority, demand.asks));
+			(self.priority, self.asks) =
+				demand.map_or((0, Vec::new()), |demand| (demand.policy().priority, demand.asks));
 		}
 		let asks = &self.asks;
 		// Sorted, as the demand counts them by time: a copy's readers can wait on thousands.

@@ -94,7 +94,11 @@ pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 		Some(start) => track::Start::Time(start),
 		None => track::Start::Oldest,
 	};
-	track::Range { start, end, ..Default::default() }
+	track::Range {
+		start,
+		end,
+		..Default::default()
+	}
 }
 
 /// Wait until anyone wants the track.

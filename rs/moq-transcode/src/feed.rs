@@ -206,12 +206,13 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// Ascending, since this loop finishes one group before it reads the next.
 	// Reading stays in arrival order: every group decodes independently from its
 	// own keyframe, so there is nothing for a sequence cursor to buy.
-	let subscription = moq_net::track::Subscription::default()
-		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
 			min: Some(std::time::Duration::ZERO),
 			max: Some(SUPERSEDED),
-		})]);
+		},
+	)
+	.with_order(moq_net::track::Order::Ascending)]);
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {

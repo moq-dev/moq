@@ -163,6 +163,7 @@ fn floor_range(floor: Bound<u64>, delay: crate::container::Delay) -> moq_net::tr
 				max: Some(max),
 			},
 			end: None,
+			..Default::default()
 		},
 		(Bound::Included(group) | Bound::Excluded(group), None) => Range::from(Start::Time(group)),
 	}

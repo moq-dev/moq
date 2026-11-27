@@ -6,9 +6,9 @@
 //! fetchable, and a relay's fetch-only demand puts no live subscription upstream to race
 //! the fetches that report where the track ends.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 use support::AppendNext;
 use support::AtStart;
 

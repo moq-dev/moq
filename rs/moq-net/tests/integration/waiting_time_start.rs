@@ -4,9 +4,9 @@
 //! drives them: the publisher writes group 66, a viewer fetches group 67, which the publisher
 //! serves only from a fill, and a viewer then subscribes from time 66.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 

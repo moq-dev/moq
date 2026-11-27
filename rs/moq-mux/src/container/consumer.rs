@@ -2267,6 +2267,7 @@ mod tests {
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(0),
 			end: None,
+			..Default::default()
 		}]);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
@@ -2298,6 +2299,7 @@ mod tests {
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(0),
 			end: None,
+			..Default::default()
 		}]);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
@@ -3061,6 +3063,7 @@ mod tests {
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(0),
 			end: None,
+			..Default::default()
 		}]);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
@@ -3122,6 +3125,7 @@ mod tests {
 				let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 					start: moq_net::track::Start::Time(0),
 					end: None,
+					..Default::default()
 				}]);
 				let mut reader = Consumer::new(
 					track.subscribe(subscription),
@@ -6247,10 +6251,12 @@ mod tests {
 			moq_net::track::Range {
 				start: moq_net::track::Start::Time(0),
 				end: Some(0),
+				..Default::default()
 			},
 			moq_net::track::Range {
 				start: moq_net::track::Start::Time(10),
 				end: Some(10),
+				..Default::default()
 			},
 		]);
 		let mut consumer = Consumer::new(

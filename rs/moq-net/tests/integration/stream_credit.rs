@@ -3,8 +3,8 @@
 //! A peer granting few streams still gets everything asked of it, on each protocol: opens
 //! wait their turn for credit rather than failing.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
+use crate::support::EveryRange;
 use std::time::Duration;
 
 use moq_net::{Version, origin, track};

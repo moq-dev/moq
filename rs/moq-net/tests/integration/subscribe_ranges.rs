@@ -3,9 +3,9 @@
 //! Subscribers asking for different ranges of one track share a single upstream
 //! subscription, and each still gets the groups its own range asks for.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -421,11 +421,9 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 					"the narrowed reader read its range"
 				);
 				loop {
-					if fixture
-						.track
-						.subscription()
-						.is_some_and(|subscription| subscription.ranges == [support::keys(4..5).with_order(moq_net::track::Order::Ascending)])
-					{
+					if fixture.track.subscription().is_some_and(|subscription| {
+						subscription.ranges == [support::keys(4..5).with_order(moq_net::track::Order::Ascending)]
+					}) {
 						return std::task::Poll::Ready(());
 					}
 					if fixture.track.poll_subscription_changed(waiter).is_pending() {
@@ -476,11 +474,9 @@ async fn draft22_carries_time_ends_as_group_ids() {
 		assert_eq!(got, [0, 1], "relay={relay}");
 		kio::clock::timeout(TIMEOUT, async {
 			loop {
-				if fixture
-					.track
-					.subscription()
-					.is_some_and(|subscription| subscription.ranges == [support::keys(0..3).with_order(moq_net::track::Order::Ascending)])
-				{
+				if fixture.track.subscription().is_some_and(|subscription| {
+					subscription.ranges == [support::keys(0..3).with_order(moq_net::track::Order::Ascending)]
+				}) {
 					break;
 				}
 				fixture.track.subscription_changed().await.unwrap();
@@ -898,13 +894,16 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 
 		let mut reader = subscribe(
 			&fixture.remote,
-			Subscription::default().with_max(budget).with_ranges([
-				keys(0..8),
-				Range::from(Start::Live {
-					min: Some(Duration::ZERO),
-					max: Some(std::time::Duration::ZERO),
-				}),
-			]).ordered(order),
+			Subscription::default()
+				.with_max(budget)
+				.with_ranges([
+					keys(0..8),
+					Range::from(Start::Live {
+						min: Some(Duration::ZERO),
+						max: Some(std::time::Duration::ZERO),
+					}),
+				])
+				.ordered(order),
 		)
 		.await;
 		// Everything in range that exists now, before the live edge moves.

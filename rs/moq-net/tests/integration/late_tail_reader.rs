@@ -4,9 +4,9 @@
 //! after another: each reader gets the group, however its subscription names the start and
 //! whenever it joins as the reader before it lets go.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 

@@ -3,9 +3,9 @@
 //! moq-transport carries group keys verbatim as Group IDs through a relay on every
 //! supported draft.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 

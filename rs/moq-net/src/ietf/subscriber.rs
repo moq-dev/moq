@@ -6222,9 +6222,9 @@ impl RecvGroup {
 		// below, and the subscription's end waits until it is read.
 		let mut reading: Reading = Reading::open(&held.tail, Some(group.group_id), this.runtime.now());
 		drop(state);
-		let (priority, order) = track
-			.subscription()
-			.map_or((0, Default::default()), |sub| (sub.policy().priority, sub.policy().order));
+		let (priority, order) = track.subscription().map_or((0, Default::default()), |sub| {
+			(sub.policy().priority, sub.policy().order)
+		});
 		stream.set_priority(crate::priority::recv_group(priority, group.group_id, order));
 
 		// Peek before creating a group: a standalone END_OF_TRACK has no payload

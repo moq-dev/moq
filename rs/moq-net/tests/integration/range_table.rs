@@ -7,8 +7,8 @@
 //! may. Every group arrives whole: a switch stalls the first route partway through, so the second
 //! supplies the groups the first never delivered and the tail of one it delivered only the head of.
 
-use crate::support::EveryRange;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 

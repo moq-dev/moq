@@ -1930,7 +1930,10 @@ mod test {
 	#[test]
 	fn subscribe_frame_bounds_roundtrip() {
 		let msg = framed_sample();
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, msg.ranges.clone()));
+		assert_eq!(
+			roundtrip(&msg, Version::Lite06).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 	}
 
 	/// The whole-group defaults are what a version without the fields decodes to, so
@@ -1984,8 +1987,14 @@ mod test {
 
 		let lite05 = encode(&msg, Version::Lite05).unwrap();
 		let lite06 = encode(&msg, Version::Lite06).unwrap();
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, legacy(&msg, msg.ranges.clone()));
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, msg.ranges.clone()));
+		assert_eq!(
+			roundtrip(&msg, Version::Lite05).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
+		assert_eq!(
+			roundtrip(&msg, Version::Lite06).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 		// The raw byte differs: 7 on the wire, not 7 + 1.
 		assert_ne!(lite05, lite06);
 
@@ -2005,7 +2014,10 @@ mod test {
 		// On the pre-06 wire an explicit group 0 is key + 1, distinct from an
 		// absent start (the latest group).
 		let explicit = encode(&msg, Version::Lite05).unwrap();
-		assert_eq!(roundtrip(&msg, Version::Lite05).ranges, legacy(&msg, msg.ranges.clone()));
+		assert_eq!(
+			roundtrip(&msg, Version::Lite05).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 		msg.ranges = vec![Range::OPEN];
 		let latest = encode(&msg, Version::Lite05).unwrap();
 		assert_ne!(explicit, latest);
@@ -2019,7 +2031,10 @@ mod test {
 	fn frame_start_may_qualify_group_zero_on_lite06() {
 		let mut msg = framed_sample();
 		msg.ranges[0].start = absolute(0, 4);
-		assert_eq!(roundtrip(&msg, Version::Lite06).ranges, legacy(&msg, msg.ranges.clone()));
+		assert_eq!(
+			roundtrip(&msg, Version::Lite06).ranges,
+			legacy(&msg, msg.ranges.clone())
+		);
 	}
 
 	/// Silently widening to the whole group would deliver frames the caller excluded.

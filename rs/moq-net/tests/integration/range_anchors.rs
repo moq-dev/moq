@@ -7,8 +7,8 @@
 //! by the Min Age: a live join that far behind the live edge where lite-07 carries it, the
 //! oldest group when it is not stated.
 
-use crate::support::EveryRange;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -122,9 +122,7 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 		},
 		_ => range,
 	};
-	let subscription = Subscription::default()
-		.with_ranges([range])
-		.ordered(Order::Ascending);
+	let subscription = Subscription::default().with_ranges([range]).ordered(Order::Ascending);
 	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")?;
@@ -178,7 +176,11 @@ fn range(start: Option<u64>, end: Option<u64>) -> Range {
 		Some(start) => moq_net::track::Start::Time(start),
 		None => moq_net::track::Start::Oldest,
 	};
-	Range { start, end, ..Default::default() }
+	Range {
+		start,
+		end,
+		..Default::default()
+	}
 }
 
 /// Time ranges, with what a reader of the held track reads.

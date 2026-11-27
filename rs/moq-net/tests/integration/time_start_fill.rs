@@ -5,9 +5,9 @@
 //! below it. A handler that knows its groups' times answers with the group containing the
 //! time; one serving key by key serves the key, which is that group when one starts there.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::collections::BTreeSet;
 use std::time::Duration;

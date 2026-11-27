@@ -10,8 +10,8 @@
 //! each test waits for both before writing. A datagram and the track's end take different
 //! paths, so each test reads its datagrams before ending the track.
 
-use crate::support::EveryRange;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 

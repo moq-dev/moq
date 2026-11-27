@@ -66,12 +66,13 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// and fails if it cannot. A [compressed](moq_net::track::Info::compression) track reads the
 	/// same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Consumer, config: Config) -> Self {
-		let subscription = moq_net::track::Subscription::default()
-			.with_priority(config.priority)
-			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
 				min: Some(config.delay),
 				max: Some(config.delay),
-			})]);
+			},
+		)
+		.with_priority(config.priority)]);
 		let name = track.name().to_string();
 		let mut track = Track::Subscribing(track.subscribe(subscription).into_inner());
 		// Join now when the track already resolves, as an in-process one does, so the publisher
@@ -228,10 +229,9 @@ mod subscription {
 		};
 		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
 		let subscription = track.subscription().expect("the consumer subscribed");
-		assert_eq!(subscription.priority, 5);
 		assert_eq!(
 			subscription.ranges,
-			[moq_net::track::Range::from(moq_net::track::Start::LATEST)]
+			[moq_net::track::Range::from(moq_net::track::Start::LATEST).with_priority(5)]
 		);
 	}
 

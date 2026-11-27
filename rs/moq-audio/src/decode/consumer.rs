@@ -276,8 +276,7 @@ impl Consumer {
 			.subscribe(
 				playout.subscription(
 					moq_net::track::Subscription::default()
-						.with_priority(options.priority)
-						.with_ranges([moq_net::track::Range::ALL]),
+						.with_ranges([moq_net::track::Range::ALL.with_priority(options.priority)]),
 				),
 			)
 			.await?;
@@ -390,10 +389,13 @@ impl Consumer {
 		let Some(control) = &self.control else {
 			return;
 		};
-		let subscription = control.subscription();
-		if subscription.priority != priority {
+		let mut subscription = control.subscription();
+		if subscription.ranges.iter().any(|range| range.priority != priority) {
+			for range in &mut subscription.ranges {
+				range.priority = priority;
+			}
 			// Closed only once the track ended, when there is nothing left to prioritize.
-			let _ = control.update(subscription.with_priority(priority));
+			let _ = control.update(subscription);
 		}
 	}
 
@@ -1179,7 +1181,8 @@ mod tests {
 			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
 				min: Some(Duration::from_millis(400)),
 				max: Some(Duration::from_millis(600)),
-			})])
+			})
+			.with_priority(hang::catalog::PRIORITY.audio)])
 		);
 	}
 
@@ -1196,18 +1199,18 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(
-			track.subscription().map(|sub| sub.priority),
+			track.subscription().map(|sub| sub.ranges[0].priority),
 			Some(hang::catalog::PRIORITY.audio)
 		);
 
 		consumer.set_priority(-20);
 		assert_eq!(consumer.options().priority, -20);
-		assert_eq!(track.subscription().map(|sub| sub.priority), Some(-20));
+		assert_eq!(track.subscription().map(|sub| sub.ranges[0].priority), Some(-20));
 
 		// A later delay change rewrites the subscription without undoing the priority.
 		consumer.set_max_delay(Duration::from_secs(2));
 		let subscription = track.subscription().unwrap();
-		assert_eq!(subscription.priority, -20);
+		assert_eq!(subscription.ranges[0].priority, -20);
 		assert_eq!(live_max(&subscription), Some(Duration::from_secs(2)));
 	}
 

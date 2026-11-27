@@ -4,9 +4,9 @@
 //! group below the end, then the error, and so does one subscribing after the first ended.
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 use support::AppendNext;
 use support::AtStart;
 

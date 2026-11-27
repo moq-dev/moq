@@ -589,12 +589,11 @@ impl Aged {
 					.unwrap();
 				// Ascending, so the first read is the held group under the finished ones.
 				let mut sub = track.subscribe(
-					track::Subscription::default()
-						.with_ranges([track::Range::from(track::Start::Live {
-							min: Some(AGED_BUDGET),
-							max: Some(AGED_BUDGET),
-						})
-						.with_order(track::Order::Ascending)]),
+					track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+						min: Some(AGED_BUDGET),
+						max: Some(AGED_BUDGET),
+					})
+					.with_order(track::Order::Ascending)]),
 				);
 				let mut held = track.append_group(Timestamp::unscaled(0)).unwrap();
 				held.write_frame(moq_net::Timestamp::unscaled(held.start), Bytes::from_static(b"x"))
@@ -1120,20 +1119,18 @@ fn bench_subscriber_join(c: &mut Criterion) {
 ///
 /// Each held reader asks for distinct values, so the aggregate's tables grow with the audience.
 fn bench_subscriber_preferences(c: &mut Criterion) {
-	let ordinary =
-		track::Subscription::default().with_ranges([span(100, 199).with_order(track::Order::Ascending)]);
+	let ordinary = track::Subscription::default().with_ranges([span(100, 199).with_order(track::Order::Ascending)]);
 	let held = |i: usize| {
 		let i = i as u64;
 		track::Subscription::default().with_ranges([span(100 + i, 199 + i)
 			.with_priority(((i % 255) as i16 - 128) as i8)
 			.with_order(track::Order::Ascending)])
 	};
-	let extreme = track::Subscription::default()
-		.with_ranges([track::Range::from(track::Start::Live {
-			min: Some(Duration::from_secs(10)),
-			max: Some(Duration::from_secs(10)),
-		})
-		.with_priority(i8::MAX)]);
+	let extreme = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+		min: Some(Duration::from_secs(10)),
+		max: Some(Duration::from_secs(10)),
+	})
+	.with_priority(i8::MAX)]);
 	let mut group = c.benchmark_group("track_subscriber_preferences");
 	for steady in STEADY {
 		for touched in CHURN {

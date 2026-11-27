@@ -17831,13 +17831,19 @@ mod tests {
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		assert_eq!(replacement.subscription().map(|wanted| wanted.policy().priority), Some(0));
+		assert_eq!(
+			replacement.subscription().map(|wanted| wanted.policy().priority),
+			Some(0)
+		);
 
 		subscription.update(subscription.subscription().prioritized(9)).unwrap();
 		for _ in 0..10 {
 			kio::clock::sim::yield_now().await;
 		}
-		assert_eq!(replacement.subscription().map(|wanted| wanted.policy().priority), Some(9));
+		assert_eq!(
+			replacement.subscription().map(|wanted| wanted.policy().priority),
+			Some(9)
+		);
 	}
 
 	/// Before the incumbent delivered anything, the newcomer answers "video" with matching

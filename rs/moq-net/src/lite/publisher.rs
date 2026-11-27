@@ -6227,12 +6227,7 @@ impl TrackRun {
 	/// A range left live keeps where it resolved: the model keeps each by its Range ID, so it
 	/// never places a live join again by a newer live edge, nor looks a time start up again in
 	/// newer groups. A retuned join is the same range to the model, placed where it was.
-	fn edit(
-		&mut self,
-		retired: Vec<u64>,
-		added: Vec<(u64, lite::Range)>,
-		retuned: Vec<(u64, lite::Range)>,
-	) -> bool {
+	fn edit(&mut self, retired: Vec<u64>, added: Vec<(u64, lite::Range)>, retuned: Vec<(u64, lite::Range)>) -> bool {
 		let (mut positions, mut stopping) = (Vec::new(), Vec::new());
 		let mut placed = std::collections::BTreeMap::new();
 		let added: Vec<(u64, crate::track::Range)> = added
@@ -6367,11 +6362,7 @@ impl TrackRun {
 	}
 
 	/// Before lite-07: restate every range, as an update there does. Returns whether it applied.
-	fn replace_ranges(
-		&mut self,
-		ranges: Vec<(u64, lite::Range)>,
-		legacy: Option<crate::track::Start>,
-	) -> bool {
+	fn replace_ranges(&mut self, ranges: Vec<(u64, lite::Range)>, legacy: Option<crate::track::Start>) -> bool {
 		let (ids, ranges): (Vec<u64>, Vec<lite::Range>) = ranges.into_iter().unzip();
 		let bounds = Bounds::new(&ranges, legacy);
 		let model = bounds.groups();

@@ -485,10 +485,11 @@ async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() 
 
 		// An oldest reader hides the unanswered live range before any group answers it.
 		let mut oldest = track.subscribe(joining(None)).await.unwrap().ordered();
-		while asked
-			.subscription()
-			.is_none_or(|subscription| !subscription.ranges.contains(&track::Range::ALL.with_order(track::Order::Ascending)))
-		{
+		while asked.subscription().is_none_or(|subscription| {
+			!subscription
+				.ranges
+				.contains(&track::Range::ALL.with_order(track::Order::Ascending))
+		}) {
 			asked.subscription_changed().await.unwrap();
 		}
 		for start in (0..=2000).step_by(500) {

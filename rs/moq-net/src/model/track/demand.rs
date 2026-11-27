@@ -872,7 +872,10 @@ impl Prefs {
 
 	/// The priority and order these ranges ask as a whole: see [`Policy::top`].
 	pub fn policy(&self) -> Policy {
-		self.policies.values().next().map_or_else(Policy::default, |(policy, _)| *policy)
+		self.policies
+			.values()
+			.next()
+			.map_or_else(Policy::default, |(policy, _)| *policy)
 	}
 
 	fn contribution(&self) -> Contribution {

@@ -141,9 +141,7 @@ async fn fetch(broadcast: &broadcast::Producer, track: &str, sequence: u64) -> m
 /// Read every group from 0 on, in order, with no age limit.
 async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Ordered {
 	let track = broadcast.consume().track(track).unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([from(0)])
-		.with_order(Order::Ascending);
+	let subscription = Subscription::default().with_ranges([from(0).with_order(Order::Ascending)]);
 	track.subscribe(subscription).await.unwrap().ordered()
 }
 
@@ -152,6 +150,7 @@ fn from(start: u64) -> track::Range {
 	track::Range {
 		start: track::Start::Time(start),
 		end: None,
+		..Default::default()
 	}
 }
 
@@ -309,11 +308,7 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 	let mock = archive.store.inner().clone();
 	mock.take();
 	let gate = mock.stall_gets("rec/video/");
-	let ascending = |start| {
-		Subscription::default()
-			.with_ranges([from(start)])
-			.with_order(Order::Ascending)
-	};
+	let ascending = |start| Subscription::default().with_ranges([from(start).with_order(Order::Ascending)]);
 	let mut subscriber = broadcast
 		.consume()
 		.track("video")
@@ -720,9 +715,7 @@ async fn an_unordered_listing_is_sorted() {
 /// track.
 async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::Range) -> Vec<u64> {
 	let track = broadcast.consume().track(track).unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([range])
-		.with_order(Order::Ascending);
+	let subscription = Subscription::default().with_ranges([range.with_order(Order::Ascending)]);
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
@@ -771,6 +764,7 @@ async fn a_time_range_resolves_from_the_archive() {
 	let range = |start, end| track::Range {
 		start: track::Start::Time(start),
 		end,
+		..Default::default()
 	};
 	assert_eq!(
 		read_range(&broadcast, "video", range(4_500, at(6_500))).await,
@@ -785,9 +779,7 @@ async fn a_time_range_resolves_from_the_archive() {
 
 	// A start alone reads on through the live edge.
 	let track = broadcast.consume().track("video").unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([range(7_002, None)])
-		.with_order(Order::Ascending);
+	let subscription = Subscription::default().with_ranges([range(7_002, None).with_order(Order::Ascending)]);
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	for expected in 7..10 {
 		assert_eq!(sequence(&mut reader).await, Some(expected * 1000));
@@ -812,12 +804,12 @@ async fn a_failed_time_lookup_fails_the_subscription() {
 			false => drop(archive.store.inner().fail_gets(&format!("rec/{object}"))),
 		}
 		let track = broadcast.consume().track("video").unwrap();
-		let subscription = Subscription::default()
-			.with_ranges([track::Range {
-				start: track::Start::Time(4_500),
-				end: None,
-			}])
-			.with_order(Order::Ascending);
+		let subscription = Subscription::default().with_ranges([track::Range {
+			start: track::Start::Time(4_500),
+			end: None,
+			..Default::default()
+		}
+		.with_order(Order::Ascending)]);
 		let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 		let read = timeout(5 * REFRESH, reader.next_group()).await.expect("answered");
 		let err = read.map(|group| group.map(|group| group.start)).unwrap_err();
@@ -842,6 +834,7 @@ async fn a_completed_archive_reads_a_time_range() {
 	let range = track::Range {
 		start: track::Start::Time(2_500),
 		end: None,
+		..Default::default()
 	};
 	assert_eq!(
 		read_range(&broadcast, "video", range).await,
@@ -861,6 +854,7 @@ async fn a_time_before_the_archive_starts_at_its_oldest_group() {
 	let range = track::Range {
 		start: track::Start::Time(500),
 		end: at(4_500),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 4_000]);
 }
@@ -879,6 +873,7 @@ async fn a_time_before_a_pruned_head_starts_at_the_oldest_whole_group() {
 	let range = track::Range {
 		start: track::Start::Time(500),
 		end: at(7_500),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [6_000, 7_000]);
 }
@@ -895,6 +890,7 @@ async fn a_time_in_a_gap_starts_before_it() {
 	let range = track::Range {
 		start: track::Start::Time(4_500),
 		end: at(6_500),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 6_000]);
 }
@@ -942,6 +938,7 @@ async fn a_continuation_does_not_bound_a_group_start() {
 	let range = track::Range {
 		start: track::Start::Time(600),
 		end: at(700),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [500]);
 }
@@ -968,6 +965,7 @@ async fn a_time_resolves_by_key_not_first_frame() {
 	let range = track::Range {
 		start: track::Start::Time(2_200),
 		end: at(2_300),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [2_000]);
 }
@@ -985,6 +983,7 @@ async fn a_scale_less_track_looks_up_a_time_by_key() {
 	let range = track::Range {
 		start: track::Start::Time(3),
 		end: at(5),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "log", range).await, [2, 5]);
 }
@@ -1053,6 +1052,7 @@ async fn a_seek_across_pruned_history_reaches_the_oldest_retained_group() {
 	let range = |start| track::Range {
 		start: track::Start::Time(start),
 		end: at(6_500),
+		..Default::default()
 	};
 	assert_eq!(read_range(&broadcast, "video", range(4_500)).await, [6_000]);
 	let pruned = mock
@@ -1084,9 +1084,7 @@ async fn a_seek_finds_objects_retention_replaced_the_index_with() {
 	mock.take();
 
 	let track = broadcast.consume().track("video").unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([from(500)])
-		.with_order(Order::Ascending);
+	let subscription = Subscription::default().with_ranges([from(500).with_order(Order::Ascending)]);
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	assert!(sequence(&mut reader).await.is_some());
 	// Before any refresh lists after the cursor: yields, not time.
@@ -1132,6 +1130,7 @@ async fn a_seek_reads_a_listed_but_missing_object_once() {
 	let range = track::Range {
 		start: track::Start::Time(2_500),
 		end: at(4_500),
+		..Default::default()
 	};
 	// The newest group the store serves at or before the time, then the range's end.
 	assert_eq!(read_range(&broadcast, "video", range).await, [1_000, 4_000]);
@@ -1201,9 +1200,7 @@ async fn a_reader_follows_a_real_dvr_through_its_rotations() {
 		if sequence % 50 == 0 {
 			let oldest = listed.objects.first().unwrap().0.0;
 			let track = broadcast.consume().track("video").unwrap();
-			let subscription = Subscription::default()
-				.with_ranges([from(0)])
-				.with_order(Order::Ascending);
+			let subscription = Subscription::default().with_ranges([from(0).with_order(Order::Ascending)]);
 			let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 			assert_eq!(
 				super::tests::sequence(&mut reader).await,

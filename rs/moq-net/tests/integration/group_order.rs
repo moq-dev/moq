@@ -7,9 +7,9 @@
 //! the hop into the subscriber and releases them by send order, the way a congested
 //! sender would transmit them.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -202,7 +202,11 @@ async fn merged_subscribers_keep_their_own_order() {
 		let (descending_pair, descending_origin) = connect(version, relay.consume(), 3).await;
 		let (ascending_pair, ascending_origin) = connect(version, relay.consume(), 4).await;
 
-		let upstream_order = || track.subscription().and_then(|subscription| subscription.ranges.iter().map(|range| range.order).max());
+		let upstream_order = || {
+			track
+				.subscription()
+				.and_then(|subscription| subscription.ranges.iter().map(|range| range.order).max())
+		};
 
 		let ascending = read_arrivals(ascending_origin.clone(), Order::Ascending);
 		support::harness::subscribed(&track).await;

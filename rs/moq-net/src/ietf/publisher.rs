@@ -6776,7 +6776,10 @@ impl TrackServe {
 		let session = session;
 		let ranking = Ranking {
 			queue: PriorityQueue::default(),
-			group: session.send_group(crate::priority::group(track.subscription().policy().priority, publisher)),
+			group: session.send_group(crate::priority::group(
+				track.subscription().policy().priority,
+				publisher,
+			)),
 			request_id,
 			priority: priority.consume(),
 			publisher,

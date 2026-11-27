@@ -437,7 +437,11 @@ impl Range {
 			None => None,
 		};
 		let start = start.map_or(Start::Oldest, Start::Time);
-		let range = Self { start, end, ..Self::ALL };
+		let range = Self {
+			start,
+			end,
+			..Self::ALL
+		};
 		(!range.is_empty()).then_some(range)
 	}
 }
@@ -459,7 +463,11 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 	let mut classes = BTreeMap::<_, (Policy, Vec<Range>)>::new();
 	for range in ranges {
 		let policy = range.policy();
-		classes.entry(policy.rank()).or_insert((policy, Vec::new())).1.push(range);
+		classes
+			.entry(policy.rank())
+			.or_insert((policy, Vec::new()))
+			.1
+			.push(range);
 	}
 	// Every policy before one in this order covers it.
 	let mut above: Vec<Range> = Vec::new();
@@ -1217,7 +1225,10 @@ mod tests {
 		);
 		// At one priority, newest first covers oldest first but not the reverse.
 		assert_eq!(
-			ranges(&[sub(&[groups(2, 5).with_order(Order::Ascending)]), sub(&[all(0, Order::Descending)])]),
+			ranges(&[
+				sub(&[groups(2, 5).with_order(Order::Ascending)]),
+				sub(&[all(0, Order::Descending)])
+			]),
 			vec![all(0, Order::Descending)]
 		);
 		assert_eq!(

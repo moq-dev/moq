@@ -7,9 +7,9 @@
 //! by. These fixtures pin what `E` gets today; a route-health standby on `M2` is meant
 //! to change each of them.
 
-use crate::support::EveryRange;
 use super::route_change::{Delivery, link, payload, priced_link, produce_origin, read, settle, timed};
 use crate::WithMax as _;
+use crate::support::EveryRange;
 
 use std::collections::BTreeSet;
 use std::time::Duration;

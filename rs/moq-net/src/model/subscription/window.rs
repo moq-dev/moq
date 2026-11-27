@@ -1678,7 +1678,11 @@ mod tests {
 			Some(time) => Start::Time(time),
 			None => Start::Oldest,
 		};
-		Range { start, end: end.into(), ..Default::default() }
+		Range {
+			start,
+			end: end.into(),
+			..Default::default()
+		}
 	}
 
 	/// A live join `min` behind the live edge, or with no lag limit for `None`.

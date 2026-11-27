@@ -327,7 +327,8 @@ impl Catalog<()> {
 	/// The subscription preferences used for the catalog track (high priority so
 	/// it preempts media tracks).
 	pub fn default_subscription() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_priority(PRIORITY.catalog)
+		moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::default().with_priority(PRIORITY.catalog)])
 	}
 }
 

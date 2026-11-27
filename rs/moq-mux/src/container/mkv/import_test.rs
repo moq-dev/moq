@@ -1878,12 +1878,13 @@ async fn a_seek_mid_block_waits_for_the_block() {
 
 	let snapshot = catalog.snapshot();
 	let name = snapshot.audio.renditions.keys().next().unwrap();
-	let replay = moq_net::track::Subscription::default()
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
 			min: Some(std::time::Duration::from_secs(3600)),
 			max: Some(std::time::Duration::from_secs(3600)),
-		})])
-		.with_order(moq_net::track::Order::Ascending);
+		},
+	)
+	.with_order(moq_net::track::Order::Ascending)]);
 	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 	let mut groups = Vec::new();
 	while let Some(mut group) = track.recv_group().await.unwrap() {

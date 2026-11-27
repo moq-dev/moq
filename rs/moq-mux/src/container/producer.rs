@@ -1469,12 +1469,13 @@ mod tests {
 	/// edge: history has to be asked for.
 	/// Oldest first, as they are read back.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
 				min: Some(RECORDING_MAX_DELAY),
 				max: Some(RECORDING_MAX_DELAY),
-			})])
-			.with_order(moq_net::track::Order::Ascending)
+			},
+		)
+		.with_order(moq_net::track::Order::Ascending)])
 	}
 
 	/// The media track's full max age, so readers started after publishing

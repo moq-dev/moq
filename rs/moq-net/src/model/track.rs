@@ -23,13 +23,13 @@ use super::record::{Pending, Record, Report, Standing};
 use crate::ledger::{self, Ledger};
 
 use super::subscription;
+pub(crate) use super::subscription::Policy;
 pub(crate) use super::subscription::Resolved;
 use super::subscription::{
 	Accounted, Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
 };
 pub(crate) use super::subscription::{JoinAsk, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
-pub(crate) use super::subscription::Policy;
 #[cfg(feature = "async")]
 pub(crate) use super::subscription::{budget, max_of};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
@@ -32891,11 +32891,15 @@ mod test {
 	fn a_time_start_is_answered_by_the_group_below_it() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(7),
-			end: Some(8),
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(7),
+					end: Some(8),
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
@@ -33006,11 +33010,15 @@ mod test {
 			if !cached {
 				evict(&producer, 1000);
 			}
-			let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-				start: crate::track::Start::Time(1700),
-				end: None,
-				..Default::default()
-			}]).ordered(Order::Ascending));
+			let mut subscriber = producer.subscribe(
+				replay()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(1700),
+						end: None,
+						..Default::default()
+					}])
+					.ordered(Order::Ascending),
+			);
 			let waiter = kio::Waiter::noop();
 			if !cached {
 				assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
@@ -33058,11 +33066,15 @@ mod test {
 			drop(group.finish_at(end).unwrap());
 		}
 		evict(&producer, 1000);
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(1700),
-			end: None,
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1700),
+					end: None,
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		let waiter = kio::Waiter::noop();
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
 		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
@@ -33096,11 +33108,15 @@ mod test {
 			drop(group.finish_at(start + 400).unwrap());
 		}
 		evict(&producer, 1000);
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(1300),
-			end: None,
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1300),
+					end: None,
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
@@ -33136,11 +33152,15 @@ mod test {
 			drop(group.finish_at(start + 400).unwrap());
 		}
 		evict(&producer, 1000);
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(1300),
-			end: None,
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1300),
+					end: None,
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
@@ -33190,11 +33210,15 @@ mod test {
 			drop(group.finish_at(end).unwrap());
 		}
 		evict(&producer, 1000);
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(1700),
-			end: None,
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1700),
+					end: None,
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
@@ -33232,11 +33256,15 @@ mod test {
 				.write_frame(Timestamp::from_millis(3000).unwrap(), &b"x"[..])
 				.unwrap();
 			drop(later.finish_at(3400).unwrap());
-			let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-				start: crate::track::Start::Time(1700),
-				end: None,
-				..Default::default()
-			}]).ordered(Order::Ascending));
+			let mut subscriber = producer.subscribe(
+				replay()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(1700),
+						end: None,
+						..Default::default()
+					}])
+					.ordered(Order::Ascending),
+			);
 			assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
 			let waiter = kio::Waiter::noop();
 			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
@@ -33278,11 +33306,15 @@ mod test {
 			drop(group.finish_at(start + 400).unwrap());
 		}
 		evict(&producer, 1000);
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(1300),
-			end: None,
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1300),
+					end: None,
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
@@ -33323,11 +33355,13 @@ mod test {
 				.unwrap();
 			drop(group.finish_at(end).unwrap());
 		}
-		let from = replay().with_ranges([Range {
-			start: crate::track::Start::Time(1700),
-			end: None,
-			..Default::default()
-		}]).ordered(Order::Ascending);
+		let from = replay()
+			.with_ranges([Range {
+				start: crate::track::Start::Time(1700),
+				end: None,
+				..Default::default()
+			}])
+			.ordered(Order::Ascending);
 		let mut first = producer.subscribe(from.clone());
 		let mut second = producer.subscribe(from);
 		assert_eq!(drain_groups(&mut first), Vec::<u64>::new());
@@ -33361,11 +33395,15 @@ mod test {
 			let dynamic = producer.requests();
 			write_group(&producer, 4);
 			write_group(&producer, 10);
-			let subscriber = producer.subscribe(replay().with_ranges([Range {
-				start: crate::track::Start::Time(5),
-				end: None,
-				..Default::default()
-			}]).ordered(Order::Ascending));
+			let subscriber = producer.subscribe(
+				replay()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(5),
+						end: None,
+						..Default::default()
+					}])
+					.ordered(Order::Ascending),
+			);
 			let waiter = kio::Waiter::noop();
 			let (mut arrival, mut keyed) = match ordered {
 				true => (None, Some(subscriber.ordered())),
@@ -33499,11 +33537,15 @@ mod test {
 		for key in [3, 4] {
 			evict(&producer, key);
 		}
-		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
-			start: crate::track::Start::Time(0),
-			end: Some(4),
-			..Default::default()
-		}]).ordered(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			replay()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(0),
+					end: Some(4),
+					..Default::default()
+				}])
+				.ordered(Order::Ascending),
+		);
 		// Polled as an executor would, again whenever the read wakes itself.
 		let (flag, waiter) = Flag::waiter();
 		let mut poll = || loop {
@@ -35260,7 +35302,11 @@ mod test {
 				_ => Start::Time(rng.random_range(0..24_000)),
 			};
 			let end = rng.random_bool(0.6).then(|| rng.random_range(0..24_000));
-			Range { start, end, ..Default::default() }
+			Range {
+				start,
+				end,
+				..Default::default()
+			}
 		};
 		// Key 0 is the default subscription's one range.
 		let mut live = BTreeMap::from([(0, Range::ALL)]);

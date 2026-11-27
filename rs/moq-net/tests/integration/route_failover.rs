@@ -12,12 +12,12 @@
 //! The mesh fixtures port moq-dev/moq#4644's live-graph withdrawal and failover tests,
 //! which ran on lite-06 under a hold-down, to lite-07's route rule.
 
-use crate::support::EveryRange;
 use crate::WithMax as _;
 use crate::mesh_withdraw::{PRODUCTION, PRODUCTION_LATENCY_MS};
 use crate::path_routes::{DEBOUNCE, HOLD, lite07};
 use crate::route_change::{payload, produce_origin, timed};
 use crate::support;
+use crate::support::EveryRange;
 
 use std::collections::BTreeMap;
 use std::time::Duration;

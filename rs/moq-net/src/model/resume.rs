@@ -2327,10 +2327,7 @@ impl Reader {
 			let start = match (waits || range.time().is_some(), resolved.floored) {
 				(true, true) => track::Start::Time(resolved.start),
 				(true, false) if range.time().is_some() => {
-					reached.push((
-						key,
-						track::Range { end, ..range },
-					));
+					reached.push((key, track::Range { end, ..range }));
 					continue;
 				}
 				(true, false) => track::Start::Oldest,
@@ -3011,8 +3008,7 @@ impl Reader {
 		let groups = self.groups;
 		let widest = self.mirrored.widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
-		let ascending =
-			ordered || track::Policy::of(self.mirrored.ranges.values()).order == track::Order::Ascending;
+		let ascending = ordered || track::Policy::of(self.mirrored.ranges.values()).order == track::Order::Ascending;
 		let mut first: Option<Candidate> = None;
 		let mut held = false;
 		for index in 0..self.copies.len() {
@@ -10072,9 +10068,7 @@ mod test {
 				let a = copy();
 				routes.serve(a.consume());
 				// Oldest first, so the arrival read reserves group 1 too.
-				let subscription = Subscription::default()
-					.with_max(HOUR)
-					.ordered(track::Order::Ascending);
+				let subscription = Subscription::default().with_max(HOUR).ordered(track::Order::Ascending);
 				let logical = if nested { &outer } else { &inner };
 				let mut sub = logical
 					.consume()
@@ -11551,7 +11545,11 @@ mod test {
 				_ => track::Start::Time(rng.random_range(0..24_000)),
 			};
 			let end = rng.random_bool(0.6).then(|| rng.random_range(0..24_000));
-			track::Range { start, end, ..Default::default() }
+			track::Range {
+				start,
+				end,
+				..Default::default()
+			}
 		};
 		let answer = |sub: &Subscriber| {
 			let mut reader = sub.reader();
@@ -11717,9 +11715,7 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let mut terms = Subscription::default()
-			.with_max(HOUR)
-			.ordered(track::Order::Ascending);
+		let mut terms = Subscription::default().with_max(HOUR).ordered(track::Order::Ascending);
 		terms.feed = true;
 		let mut holder = logical.consume().subscribe(terms).now_or_never().unwrap().unwrap();
 		write(&a, 0);
@@ -14943,7 +14939,11 @@ mod test {
 			write(&a, 0);
 			routes.serve(a.consume());
 			let subscription = Subscription::default()
-				.with_ranges([track::Range { start, end: Some(1), ..Default::default() }])
+				.with_ranges([track::Range {
+					start,
+					end: Some(1),
+					..Default::default()
+				}])
 				.with_max(HOUR);
 			let mut sub = logical
 				.consume()
@@ -15158,11 +15158,7 @@ mod test {
 						// Observing one change must re-arm the waiter for the next change.
 						wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
 						sub.control()
-							.update(
-								Subscription::default()
-									.prioritized(8)
-									.with_max(Duration::from_secs(10)),
-							)
+							.update(Subscription::default().prioritized(8).with_max(Duration::from_secs(10)))
 							.unwrap();
 						assert!(
 							wake.0.load(std::sync::atomic::Ordering::Relaxed),
@@ -15252,11 +15248,7 @@ mod test {
 						writer.finish().unwrap();
 					}
 					Event::Update => control
-						.update(
-							Subscription::default()
-								.prioritized(7)
-								.with_max(Duration::from_secs(2)),
-						)
+						.update(Subscription::default().prioritized(7).with_max(Duration::from_secs(2)))
 						.unwrap(),
 					Event::Cancel => {
 						groups[0] = None;

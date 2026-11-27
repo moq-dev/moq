@@ -73,7 +73,11 @@ impl Ranges {
 		let mut union = Vec::new();
 		for (policy, class) in self.classes.values() {
 			let spans = class.union();
-			union.extend((spans.iter()).filter(|range| !above.covers(range)).map(|range| range.with_policy(*policy)));
+			union.extend(
+				(spans.iter())
+					.filter(|range| !above.covers(range))
+					.map(|range| range.with_policy(*policy)),
+			);
 			above.extend(spans);
 		}
 		union.sort_unstable();
