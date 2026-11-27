@@ -242,7 +242,9 @@ impl MoqAudioRead {
 	fn new(read: moq_audio::decode::Read) -> Option<Self> {
 		Some(match read {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
-			moq_audio::decode::Read::Gap { timestamp, duration, .. } => Self::Gap {
+			moq_audio::decode::Read::Gap {
+				timestamp, duration, ..
+			} => Self::Gap {
 				timestamp: timestamp.into(),
 				duration: crate::ffi::gap(duration),
 			},
