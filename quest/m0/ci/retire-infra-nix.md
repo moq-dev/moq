@@ -5,7 +5,7 @@
 `moq-dev/moq` stops maintaining its own Nix binary cache Worker (`infra/nix/`) and per-repo `mbx` bucket config (`infra/mbx/`), moving onto the shared cross-repo `nix.kixel.quest` binary cache (which keeps `nix.moq.dev` aliased for external users) and the shared public Backblaze B2 `mbx` Rust cache:
 
 - `flake.nix`, `.github/workflows/cache.yml`, and `.github/workflows/release-nix.yml` push through `quest cache push` (replacing `sh/gh/cache.sh`, `sh/gh/cache-runtime.sh`, and `infra/nix/justfile`), and `infra/nix/` is deleted once `nix.kixel.quest` serves `nix.moq.dev` with all existing release paths verified.
-- Hosted cross-platform and Nightly `mbx` jobs switch from `mbx-moq-dev` to the shared public B2 `mbx` bucket so `moq` shares compiled crate artifacts across repositories, and `infra/mbx/` is retired.
+- Hosted cross-platform and Nightly `mbx` jobs switch from `mbx-moq-dev` to the shared public B2 `mbx-public` bucket so `moq` shares compiled crate artifacts across repositories, and `infra/mbx/` is retired.
 - External `nix run github:moq-dev/moq/<tag>#moq-relay --accept-flake-config` continues substituting cleanly from `nix.moq.dev` and `nix.kixel.quest`.
 
 ## Plan
@@ -20,11 +20,19 @@ Implementation notes:
 - Carry forward the ranged `If-Match` NAR resume fix (`moq-dev/moq#9604`, `#9625`) when `kixel.quest` takes over `nix.moq.dev`, and verify every existing release tag closure substitutes from `nix.moq.dev` and `nix.kixel.quest` in a clean container before deleting `infra/nix/`.
 - Keep `nix.moq.dev` aliased to the shared cache Worker so existing pinned release flakes and user docs continue working with zero breakage.
 
+Changed 2026-11-27 upstream ([kixel.quest's shared Nix cache](https://github.com/kixel-ai/kixel.quest/blob/main/quest/m0/nix-cache.md)): CI writes to the shared caches through a GitHub Actions OIDC exchange at `kixel.quest`, and the org signing and B2 write secrets are being deleted from `moq-dev`, so nothing here may come to depend on them.
+
+- `cache.yml` and `release-nix.yml` get `id-token: write` and hold no signing or B2 secrets: `quest cache push` exchanges the job's OIDC token, and the Worker signs each `.narinfo`. Their `NIX_SIGNING_KEY` and `NIX_B2_*` inputs go.
+- `.github/actions/rust-cache/action.yml` takes its `mbx-public` key from the same exchange ([kixel.quest's shared public mbx cache](https://github.com/kixel-ai/kixel.quest/blob/main/quest/m0/mbx-public.md)), so every job using it gets `id-token: write` and drops the `MBX_B2_*` inputs.
+- New pushes are signed by `nix.kixel.quest-2`, while the release paths copied from `nix-moq-dev` keep their `nix.moq.dev-1` signatures, so `flake.nix`'s `nixConfig` trusts both keys.
+- Once nothing reads them, delete the `NIX_SIGNING_KEY`, `NIX_B2_*`, and `MBX_B2_*` secrets (repository and `cache-write` Environment), the B2 application keys behind them, and the `mbx-moq-dev` bucket; then delete the `cache-write` Environment once it holds no secret, with each workflow's `environment: cache-write`.
+
 Tests: clean container test substituting both the current `devShells.default` and a released `moq-relay` tag from `nix.moq.dev` and `nix.kixel.quest`; confirm a Nightly macOS/Windows run hits the shared public `mbx` B2 cache; `just check` passes after deleting `infra/nix/` and `infra/mbx/`.
 
 ## Waiting
 
-- kixel-ai/kixel.quest: `nix.kixel.quest` (with `nix.moq.dev` alias and existing release paths copied) and the shared public B2 `mbx` bucket are live; check once `https://nix.kixel.quest/nix-cache-info` responds 200 and release tags substitute there.
+- kixel-ai/kixel.quest: `nix.kixel.quest` (with `nix.moq.dev` alias and existing release paths copied) is live with its OIDC exchange ([its quest](https://github.com/kixel-ai/kixel.quest/blob/main/quest/m0/nix-cache.md)); check once `https://nix.kixel.quest/nix-cache-info` responds 200 and release tags substitute there.
+- kixel-ai/kixel.quest: the shared public B2 `mbx-public` bucket and the exchange's scoped keys for it are live ([its quest](https://github.com/kixel-ai/kixel.quest/blob/main/quest/m0/mbx-public.md)); check once that quest's file is deleted on kixel.quest's `main`.
 - kixel-ai/quest: `quest cache push` ships on `main`; check once `quest cache push --help` is available in `moq`'s pinned `quest` flake input.
 
 ## Related
