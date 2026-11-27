@@ -4,9 +4,9 @@
  * Random sequences of route flips, route failures, give-ups, short closes, ranges, cache expiry,
  * and reader joins and leaves drive an origin's fronts on the manual clock. Every reader's groups,
  * frames, drops, and end are checked against what one plain cursor on the logical track would see:
- * every group its range and staleness budget allow, each once, in its order. A second identity, priced
- * below the first, wins the path while older readers stay on theirs until it has no route left,
- * then end with an error.
+ * every group its range and staleness budget allow, in its order, and once while its range holds it.
+ * A second identity, priced below the first, wins the path while older readers stay on theirs until
+ * it has no route left, then end with an error.
  *
  * `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
  */
@@ -311,6 +311,13 @@ interface Reader {
 	/** Every group handed out, in order. */
 	handed: number[];
 	reading: Map<number, Reading>;
+	/**
+	 * Groups handed out that a range edit since left outside the ranges: ranges holding one again
+	 * may hand it out again, as a new subscription would.
+	 */
+	released: Set<number>;
+	/** The earlier readings of groups handed out again, each still checked to its end. */
+	superseded: Reading[];
 	/** Groups reported dropped. */
 	dropped: Set<number>;
 	/** Only groups past this one are owed: older ones were cached history at join, or may have expired. */
@@ -392,10 +399,18 @@ function admits(reader: Reader, group: number, resolved: number | undefined): bo
 	return ranges && within(reader.local, group);
 }
 
+/** Every group handed out with its reading, the earlier readings of one handed out again included. */
+function readings(reader: Reader): [number, Reading][] {
+	return [
+		...reader.reading,
+		...reader.superseded.map((reading): [number, Reading] => [Number(reading.group.start), reading]),
+	];
+}
+
 /** Everything observed, to tell whether a poll found anything new. */
 function observed(reader: Reader): string {
 	let read = 0;
-	for (const reading of reader.reading.values()) read += reading.frames + (reading.end !== undefined ? 1 : 0);
+	for (const [, reading] of readings(reader)) read += reading.frames + (reading.end !== undefined ? 1 : 0);
 	return JSON.stringify([reader.handed.length, read, reader.end !== undefined, reader.dropped.size]);
 }
 
@@ -522,6 +537,13 @@ class Model {
 			case "ranges": {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
+				// A live join places behind the newest group, so it holds none written before.
+				const newest = this.identities[reader.identity].newest();
+				const holds = (group: number): boolean => {
+					if (op.range) return op.range[0] <= group && group < op.range[1];
+					return reader.spec.budget === "hour" || newest === undefined || group >= newest;
+				};
+				for (const group of reader.reading.keys()) if (!holds(group)) reader.released.add(group);
 				reader.ranges = op.range;
 				reader.holding = undefined;
 				reader.expires ||= expires(reader.spec, op.range);
@@ -710,6 +732,8 @@ class Model {
 			cursor: spec.range,
 			handed: [],
 			reading: new Map(),
+			released: new Set(),
+			superseded: [],
 			dropped: new Set(),
 			floor: this.identities[identity].newest(),
 			doomed: false,
@@ -727,7 +751,7 @@ class Model {
 		this.readers[index] = undefined;
 		reader.gone = true;
 		reader.unwatch?.();
-		for (const reading of reader.reading.values()) reading.group.close();
+		for (const [, reading] of readings(reader)) reading.group.close();
 		reader.sub.close();
 		reader.request.close();
 	}
@@ -778,7 +802,7 @@ class Model {
 			if (recv.kind === "group") {
 				const group = recv.group;
 				const key = Number(group.start);
-				if (reader.reading.has(key)) {
+				if (reader.reading.has(key) && !reader.released.delete(key)) {
 					throw fail(index, `group ${key} handed out twice: ${reader.handed}`);
 				}
 				const last = reader.handed.at(-1);
@@ -799,6 +823,8 @@ class Model {
 				}
 				reader.handed.push(key);
 				const reading: Reading = { group, frames: 0 };
+				const earlier = reader.reading.get(key);
+				if (earlier) reader.superseded.push(earlier);
 				reader.reading.set(key, reading);
 				void this.#read(index, reader, reading);
 			} else if (recv.kind === "done") {
@@ -956,7 +982,7 @@ class Model {
 			if (!reader) continue;
 			this.poll(index);
 			// A frame read still waiting with a frame or its end ready was never woken.
-			for (const [key, reading] of reader.reading) {
+			for (const [key, reading] of readings(reader)) {
 				if (reading.end !== undefined) continue;
 				const ready = reading.group.done ? "its end" : reading.group.tryReadFrame() ? "a frame" : undefined;
 				if (ready) throw fail(index, `group ${key} has ${ready} ready that never woke its read`);
@@ -1002,7 +1028,7 @@ class Model {
 		let problems = "";
 		if (missing.length > 0) problems += `missing groups ${missing}; `;
 		if (!reader.expires) {
-			for (const [key, reading] of reader.reading) {
+			for (const [key, reading] of readings(reader)) {
 				if (reading.end === null || !carried(key) || identity.givenUp.has(key)) continue;
 				// Like a group under the floor, one older than an expiry may be gone from its own copy
 				// or from the route it would continue from.
@@ -1841,6 +1867,22 @@ test("regressions", async () => {
 				{ kind: "write", identity: 0, slot: 0, group: 11, frames: 1 },
 				{ kind: "end", identity: 0, slot: 2 },
 				{ kind: "close", identity: 0, slot: 2, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Ranges moved off groups 0 and 2 forget them, so ranges holding them again may hand group 2
+		// out a second time: only a range holding a group throughout keeps it once. Mirrors the Rust
+		// case.
+		{
+			ops: [
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 2, group: 4, frames: 1 },
+				{ kind: "ranges", reader: 1, range: [4, 5] },
+				{ kind: "ranges", reader: 1, range: undefined },
 			],
 			finish: false,
 		},
