@@ -24,8 +24,8 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-/// `carries_instance`: the wire carries the publisher's instance, as only lite-07 does.
-async fn acquisition(version: &str, carries_instance: bool) {
+/// `carries_identity`: the wire carries the publisher's identity, as only lite-07 does.
+async fn acquisition(version: &str, carries_identity: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
@@ -60,19 +60,19 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	// The publisher is still available and the old session remains alive. Holding
 	// TRACK_INFO makes the replacement happen during acquisition without sleeps.
 	let _new = link(version, &publisher, &subscriber, 1).await;
-	// A replacement under a minted instance restarts the advertisement; a carried one only
+	// A replacement under a minted identity restarts the advertisement; a carried one only
 	// updates it.
 	let new_cost = match announced.next().await {
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Update,
 			announce,
 			..
-		}) if carries_instance => announce.route.cost(),
+		}) if carries_identity => announce.route.cost(),
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Restart,
 			announce,
 			..
-		}) if !carries_instance => announce.route.cost(),
+		}) if !carries_identity => announce.route.cost(),
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
@@ -83,8 +83,8 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		.unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
-	if carries_instance {
-		let mut subscription = result.expect("the same instance must acquire");
+	if carries_identity {
+		let mut subscription = result.expect("the same identity must acquire");
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"catalog");
 	} else {

@@ -13,7 +13,7 @@ export const TimelineSchema = z.object({
 	clock: z.optional(ClockSchema),
 	// The promise that every audio and video track starts a group at least this often outside a
 	// pause: the longest GOP of any track, in whole milliseconds, and never zero. Fixed for the
-	// broadcast instance, since an HLS or DASH export cuts its segment grid on it and numbers every
+	// broadcast identity, since an HLS or DASH export cuts its segment grid on it and numbers every
 	// rendition's segments from it. A broadcast without one is not HLS-renderable.
 	interval: z.optional(nonzeroU53Schema),
 });

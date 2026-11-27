@@ -5,7 +5,7 @@
 The codec importers that `moq-ffi`, `libmoq` and the language bindings
 (Python, Swift, Go, Kotlin, Dart, C) use close an audio group once it holds
 about 100 ms, as the Rust and JS publishers do after
-[the 100 ms default](/quest/m1/audio-group-200ms.md), so a binding user gets the
+[the 100 ms default](https://github.com/moq-dev/moq/pull/9561), so a binding user gets the
 relay CPU and memory savings without calling `cut()`. An explicit `cut()`
 still works. Non-goal: picking the default again, beyond the measurement
 below.
@@ -28,7 +28,3 @@ decision rather than changing it here. For reference, #9561 measured a
 
 Mirror the Rust importer's grouping rather than adding a second policy;
 update every binding and wrapper together, with each binding's tests.
-
-## Required
-
-- [Audio groups span 100 ms](/quest/m1/audio-group-200ms.md) - the default and the Rust and JS grouping these importers follow

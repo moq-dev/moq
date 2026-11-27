@@ -23,13 +23,13 @@ export const DISCOVERY_REMOVED =
 const LINGER = Duration.millis(2000);
 
 /**
- * Names one route a session reports: its prefix, and on lite-07 the instance whose claim it is,
- * since a stream reports each instance's claim at a path as its own route.
+ * Names one route a session reports: its prefix, and on lite-07 the identity whose claim it is,
+ * since a stream reports each identity's claim at a path as its own route.
  */
 type Key = string;
 
 function keyOf(prefix: Path.Valid, route: WireRoute): Key {
-	return route.claimed && route.instance !== undefined ? `${prefix}\u0000${route.instance}` : prefix;
+	return route.claimed && route.identity !== undefined ? `${prefix}\u0000${route.identity}` : prefix;
 }
 
 /** One announce request open on the session, and the routes it currently reports. */
@@ -67,7 +67,7 @@ interface Reported {
  * open until the broader one covering it goes, so neither takes the other's routes over
  * before it has synced, which not every version can tell. A route both report is inserted once and
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
- * unless one instance proves both requests saw one stream.
+ * unless one identity proves both requests saw one stream.
  *
  * A peer that refuses overlapping requests gets exclusive discovery instead: a broader request
  * closes the narrower ones beneath it, and the session keeps it off the wire until they have
@@ -132,12 +132,12 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 
 	/**
 	 * Bring the handle up to its driving reporter's route: a fresh route for another publisher
-	 * instance or epoch, so nothing resolved through the old one is joined again, and an in-place
+	 * identity or epoch, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
 	const updateReported = (existing: Reported, route: WireRoute, restart: boolean) => {
 		const current = wireOf(existing.handle).info;
-		if (restart || route.instance !== current?.instance || route.epoch !== current?.epoch) {
+		if (restart || route.identity !== current?.identity || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
 			const handle = originWire.receive(existing.prefix, route);
@@ -163,9 +163,9 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 			if (ended) wireOf(existing.handle).end();
 			else existing.handle.close();
 		} else if (driving) {
-			// The next request takes over driving. Without an instance nothing proves it reports
+			// The next request takes over driving. Without an identity nothing proves it reports
 			// the stream the handle serves, so the route restarts rather than stitch two together.
-			updateReported(existing, next.value, next.value.instance === undefined);
+			updateReported(existing, next.value, next.value.identity === undefined);
 		}
 	};
 
@@ -310,7 +310,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 
 /**
  * Answer the requests under a received route by consuming them from the session, pinned to the
- * route's instance: the session may carry another instance's claim at the prefix, which ranks
+ * route's identity: the session may carry another identity's claim at the prefix, which ranks
  * apart from this one, and must never be served under this one's identity.
  */
 async function drive(handle: Claim, conn: Session): Promise<void> {
@@ -318,7 +318,7 @@ async function drive(handle: Claim, conn: Session): Promise<void> {
 	try {
 		for await (const request of handle.requested()) {
 			// Read per request: a handover may update the handle in place.
-			request.serve(session.consume(request.path, wireOf(handle).info?.instance));
+			request.serve(session.consume(request.path, wireOf(handle).info?.identity));
 		}
 	} catch {
 		handle.close();
@@ -331,7 +331,7 @@ async function drive(handle: Claim, conn: Session): Promise<void> {
  * Every session answers, discovery or not: subscribing to an unannounced path is always
  * legal, and a missing broadcast surfaces as a reset on the first track. The first session
  * to answer wins; when this session dies its answers are withdrawn, and the requests they
- * resolved end with it, since a later session is another publisher instance.
+ * resolved end with it, since a later session is another publisher identity.
  *
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.

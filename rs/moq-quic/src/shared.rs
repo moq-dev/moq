@@ -27,6 +27,16 @@ pub(crate) struct DatagramConnectionEvent {
 	pub(crate) remaining: Option<BytesMut>,
 }
 
+impl DatagramConnectionEvent {
+	/// Copy the datagram into allocations of its own, so holding it pins only its own bytes
+	pub(crate) fn detach(&mut self) {
+		self.first_decode.detach();
+		if let Some(rest) = &mut self.remaining {
+			*rest = BytesMut::from(&rest[..]);
+		}
+	}
+}
+
 /// Events sent from a Connection to an Endpoint
 #[derive(Debug)]
 pub struct EndpointEvent(pub(crate) EndpointEventInner);

@@ -30,6 +30,7 @@ import {
 import { Dials as DialsClass, type Dial as DialType } from "./dials.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Goaway as GoawayType, Handover as HandoverType, Redirect as RedirectType } from "./goaway.ts";
+import type { KeepAlive as KeepAliveType, Liveness as LivenessType } from "./keep_alive.ts";
 import { type Backoff as BackoffType, pumpAnnounced, Reload, type ReloadStatus } from "./reload.ts";
 import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
@@ -64,6 +65,13 @@ export interface ConnectionProps {
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket?: WebSocketPropsType;
+
+	/**
+	 * The keep-alive each connection runs (not reactive), reported through the established
+	 * session's `liveness`. Implies a private loop, and throws wherever the loop would dial
+	 * WebTransport; see {@link Connection.KeepAlive}.
+	 */
+	keepAlive?: KeepAliveType;
 
 	/** The origin whose broadcasts are served, spanning reconnects. Implies a private loop. */
 	publish?: Origin.Consumer;
@@ -197,11 +205,14 @@ export class Connection {
 	/** Receive estimates while observed, or undefined while disconnected; peek does not request them. */
 	readonly probe: Getter<ProbeType | undefined>;
 
+	/** The current session's liveness under {@link ConnectionProps.keepAlive}, or undefined without one or while disconnected. */
+	readonly liveness: Getter<LivenessType | undefined>;
+
 	/**
 	 * The send-side bandwidth allocator for the current URL, or undefined
 	 * while disabled or URL-less.
 	 *
-	 * Every handle on this URL shares the same instance, so publishers reserve
+	 * Every handle on this URL shares the same identity, so publishers reserve
 	 * against one registry. Borrowed, not owned: the type has no close, since
 	 * closing it would starve every other handle.
 	 */
@@ -210,7 +221,7 @@ export class Connection {
 	/**
 	 * The receive-side registry for the current URL, or undefined while disabled or URL-less.
 	 *
-	 * Every handle on this URL shares the same instance, so players watching over one
+	 * Every handle on this URL shares the same identity, so players watching over one
 	 * connection split its receive estimate instead of each selecting against all of it,
 	 * and their ceilings summed are the PROBE target. Borrowed, not owned: it has no close.
 	 */
@@ -294,6 +305,10 @@ export class Connection {
 		this.viewers = this.#viewers;
 		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
+		this.liveness = this.#signals.computed((effect) => {
+			const liveness = effect.get(this.#established)?.liveness;
+			return liveness && effect.get(liveness);
+		});
 
 		// Key on the serialized URL: URL objects use identity equality, and an equivalent
 		// instance must not release and redial.
@@ -364,6 +379,7 @@ export class Connection {
 				versions,
 				webtransport: props.webtransport,
 				websocket: props.websocket,
+				keepAlive: props.keepAlive,
 				backoff: props.backoff,
 				timeout: props.timeout,
 				cost: props.cost,
@@ -513,6 +529,10 @@ export namespace Connection {
 	export type Transport = TransportType;
 	/** Tuning for the WebSocket fallback. @reexport */
 	export type WebSocketProps = WebSocketPropsType;
+	/** How long a session may go without hearing from its peer: `stale` after `soft`, closed after `hard`. @reexport */
+	export type KeepAlive = KeepAliveType;
+	/** Whether a session heard from its peer within its keep-alive's `soft` limit. @reexport */
+	export type Liveness = LivenessType;
 	/** WebTransport options, including friendlier certificate pinning. @reexport */
 	export type WebTransportProps = WebTransportPropsType;
 	/** A server certificate hash used to pin a self-signed server. @reexport */
@@ -580,6 +600,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.cost !== undefined) {
 		throw new Error("cost cannot be shared; pass share: false");
 	}
+	if (props.keepAlive !== undefined) {
+		throw new Error("keepAlive cannot be shared; pass share: false");
+	}
 }
 
 /** Options tied to one handle cannot be represented by a URL-keyed shared entry. */
@@ -587,6 +610,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 	return (
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
+		props.keepAlive !== undefined ||
 		props.backoff !== undefined ||
 		props.tokens !== undefined ||
 		props.urlAuth === true ||

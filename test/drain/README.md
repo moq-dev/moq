@@ -34,9 +34,9 @@ deletes its own.
   serve the same groups.
 - **The viewer** is `@moq/net` over WebSocket. It requests the path once and
   reads one subscription for the whole run. The publisher's route carries one
-  instance through both relays, so B's route serves the same stream as A's, and
+  identity through both relays, so B's route serves the same stream as A's, and
   the origin resumes the track there from the first group the viewer lacks.
-  Instances travel on the work-in-progress moq-lite-07 only, so the relays,
+  Identities travel on the work-in-progress moq-lite-07 only, so the relays,
   A's cluster dial, and both JS sessions offer it.
 
 Once the viewer has read groups through A, the driver withdraws A from the name

@@ -32,7 +32,7 @@ public enum Media {
     /// Where an audio or video decoder starts on a track that already holds
     /// groups: `.latest` for a live player.
     public typealias DecodeStart = MoqFFI.MoqDecodeStart
-    /// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
+    /// How a track's frames are packaged (Legacy, CMAF, LOC, Raw, or CTS), as advertised in
     /// the catalog.
     public typealias Container = MoqFFI.MoqContainer
 
@@ -240,14 +240,16 @@ public enum Media {
             self.ffi = ffi
         }
 
-        /// Decode `group` with the track's container, as each frame lands.
+        /// Decode `group` with the catalog rendition's container and media role, as each frame lands.
         ///
-        /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
+        /// Only the rendition's role and container are used, since `group` is already the track's;
+        /// the role tells an endpoint marker from a frame. Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
         /// timestamps are container media time, not the transport's. Which groups arrive, and how
         /// long a stalled one stays readable, is the subscription's `delay.max`. Takes over
         /// `group`, whose handle is closed afterward; throws if it has already read a frame.
-        public convenience init(group: Moq.GroupConsumer, container: Container) throws {
-            self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
+        public convenience init(group: Moq.GroupConsumer, rendition: Rendition) throws {
+            try checkRendition(rendition)
+            self.init(try MoqMediaGroupConsumer(group: group.ffi, rendition: rendition))
         }
 
         /// The start of this group within the track.
@@ -323,8 +325,9 @@ public enum Media {
         /// Draw a group boundary here.
         ///
         /// Audio has no boundary of its own (every packet is independently decodable), so this is the
-        /// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
-        /// the relay forwards without waiting, or at a segment cadence to align with video. Video
+        /// only thing that gives it groups (one QUIC stream each): call it after the frame that brings
+        /// a group to about 100 ms, so the relay sees the group finish at once. Frames forward as they
+        /// are written either way; a cut per frame costs a stream per packet. Video
         /// groups at its own keyframes and needs this only to override that.
         public func cut() throws {
             try ffi.cut()
@@ -336,15 +339,6 @@ public enum Media {
         /// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
         public func seek(_ start: UInt64) throws {
             try ffi.seek(start: start)
-        }
-
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track and finalize encoding.
@@ -426,15 +420,6 @@ public enum Media {
         /// keyframe in the stream.
         public func setEnabled(_ enabled: Bool) throws {
             try ffi.setEnabled(enabled: enabled)
-        }
-
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finalize the track, publishing the last access unit still waiting for a

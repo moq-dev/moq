@@ -59,7 +59,7 @@ into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
 resolves timed text (`qtdemux` on a 3GPP timed-text track) can feed the pad
 directly. A cue with no duration is dropped rather than left on screen.
 
-Audio packets share groups of at least 20 ms while forwarding as they arrive.
+Audio packets share groups of at least 100 ms, one QUIC stream each, while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container, and
@@ -101,7 +101,7 @@ comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
 or unset keep-alive derives from the idle timeout and reads back as zero.
 Each run from `READY` publishes under a fresh
-[instance](/concept/moq-lite#publisher-instances), so viewers switch to a
+[identity](/concept/moq-lite#publisher-identities), so viewers switch to a
 restarted pipeline at once instead of stalling on the old one; reconnects
 within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its

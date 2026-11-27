@@ -282,6 +282,8 @@ pub(super) struct LostPacket {
 	pub(super) time_sent: Instant,
 	/// The generation of the path it was sent marked ECT(0) on, if marked
 	pub(super) ecn_path: Option<u64>,
+	/// The generation of the path whose controller answered its loss, if one did
+	pub(super) congestion_path: Option<u64>,
 }
 
 /// Retransmittable data queue
@@ -339,7 +341,7 @@ impl Retransmits {
 			&& !(self.data_blocked && streams.can_send_data_blocked())
 			&& !self.max_stream_id.into_iter().any(|x| x)
 			&& !self.streams_blocked.into_iter().any(|x| x)
-			&& self.reset_stream.is_empty()
+			&& self.reset_stream.iter().all(|&(id, _)| !streams.can_send_reset(id))
 			&& self.stop_sending.is_empty()
 			&& self
 				.max_stream_data
@@ -678,8 +680,9 @@ impl PendingAcks {
 
 	/// Returns the delay since the packet with the largest packet number was received
 	pub(super) fn ack_delay(&self, now: Instant) -> Duration {
-		self.largest_packet
-			.map_or_else(Duration::default, |(_, received)| now - received)
+		self.largest_packet.map_or_else(Duration::default, |(_, received)| {
+			now.saturating_duration_since(received)
+		})
 	}
 
 	/// Handle receipt of a new packet

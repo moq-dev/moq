@@ -46,6 +46,12 @@ mod mediafoundation;
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 mod mediacodec;
 
+#[cfg(any(
+	all(target_os = "android", feature = "mediacodec"),
+	all(target_os = "linux", any(feature = "nvidia", feature = "v4l2", feature = "vaapi")),
+))]
+mod submitted;
+
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvdec;
 

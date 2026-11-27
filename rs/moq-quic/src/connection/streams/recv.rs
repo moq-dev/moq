@@ -627,6 +627,12 @@ impl<'a> Chunks<'a> {
 		let max_data = self.streams.add_read_credits(self.read);
 		self.pending.max_data |= max_data;
 		should_transmit |= max_data;
+		// The credit may only have paid a shrunk window's debt, and the leasing readers that
+		// would rerun the stuck pass may all be waiting on this read.
+		if let Some(max_data) = self.streams.evict_if_stuck() {
+			self.pending.max_data |= max_data;
+			should_transmit = true;
+		}
 		if should_transmit {
 			self.streams.waits.wake_transmit();
 		}

@@ -4244,7 +4244,8 @@ struct Cursor {
 	raw: bool,
 
 	// Whether the last frame handed out to stream from this copy was still being written,
-	// until a skip past it. Left uncommitted when the copy fails, it is torn. A whole read
+	// until a skip past it or a header read gives up its payload. Left uncommitted when the
+	// copy fails, it is torn. A whole read
 	// after it follows its commit, so it can leave this set.
 	partial: bool,
 
@@ -4840,6 +4841,13 @@ impl Consumer {
 			Idle::disarm(&mut self.idle);
 		}
 		res
+	}
+
+	/// Give up the payload of the frame last handed out, as a header-only read does, so a copy
+	/// failing partway through that frame tears nothing and the read goes on from another route.
+	#[cfg(feature = "async")]
+	pub(crate) fn forget_payload(&mut self) {
+		self.cursor.partial = false;
 	}
 
 	/// Pass a read through, releasing the track demand once it reached the group's end,

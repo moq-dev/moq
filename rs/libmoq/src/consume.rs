@@ -40,7 +40,7 @@ struct ConsumeCatalog {
 	audio_codec: Vec<String>,
 	video_codec: Vec<String>,
 
-	/// Each rendition's broadcast reference and instance as strings, for the same reason.
+	/// Each rendition's broadcast reference and identity as strings, for the same reason.
 	audio_ref: Vec<Reference>,
 	video_ref: Vec<Reference>,
 
@@ -53,14 +53,14 @@ struct ConsumeCatalog {
 #[derive(Default)]
 struct Reference {
 	broadcast: Option<String>,
-	instance: Option<String>,
+	identity: Option<String>,
 }
 
 impl Reference {
-	fn new(broadcast: &Option<moq_net::path::Relative>, instance: &Option<moq_net::Instance>) -> Self {
+	fn new(broadcast: &Option<moq_net::path::Relative>, identity: &Option<moq_net::Identity>) -> Self {
 		Self {
 			broadcast: broadcast.as_ref().map(ToString::to_string),
-			instance: instance.as_ref().map(ToString::to_string),
+			identity: identity.as_ref().map(ToString::to_string),
 		}
 	}
 }
@@ -144,7 +144,7 @@ pub struct Rendition<C> {
 }
 
 impl<C: hang::catalog::Reference> Rendition<C> {
-	/// The broadcast serving the rendition, honoring its reference and instance like
+	/// The broadcast serving the rendition, honoring its reference and identity like
 	/// [`moq_consume_video`](crate::moq_consume_video) does. Awaited inside the decode task.
 	pub(crate) async fn resolve(
 		broadcast: moq_net::broadcast::Consumer,
@@ -155,7 +155,7 @@ impl<C: hang::catalog::Reference> Rendition<C> {
 			broadcast,
 			origin,
 			config.broadcast().cloned(),
-			config.instance().cloned(),
+			config.identity().cloned(),
 		)
 		.await
 	}
@@ -173,25 +173,25 @@ struct ConsumeBroadcast {
 	origin: Option<crate::origin::Consumer>,
 }
 
-/// The broadcast serving a rendition, honoring its catalog `broadcast` reference and `instance`.
+/// The broadcast serving a rendition, honoring its catalog `broadcast` reference and `identity`.
 ///
 /// An absent or empty reference names the catalog's own broadcast; anything else resolves
 /// against that broadcast's path through the origin, which deduplicates the subscription the
-/// catalog itself already holds. A rendition naming an instance resolves through the origin
+/// catalog itself already holds. A rendition naming an identity resolves through the origin
 /// even without a reference, so a broadcast proven to serve another stream is refused; a route
-/// over a wire that carries no instance cannot prove one, so there it is best effort. Awaited
+/// over a wire that carries no identity cannot prove one, so there it is best effort. Awaited
 /// inside the track task, never under the state lock, so `origin` is cloned out rather than
 /// borrowed.
 pub(crate) async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
 	reference: Option<moq_net::path::Relative>,
-	instance: Option<moq_net::Instance>,
+	identity: Option<moq_net::Identity>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
 	let reference = reference.filter(|reference| !reference.is_empty());
-	// The catalog's own broadcast, with no instance to check, or none to prove: a standalone
+	// The catalog's own broadcast, with no identity to check, or none to prove: a standalone
 	// broadcast came through no route.
-	if reference.is_none() && (instance.is_none() || origin.is_none()) {
+	if reference.is_none() && (identity.is_none() || origin.is_none()) {
 		return Ok(broadcast);
 	}
 	let origin = origin.ok_or_else(|| {
@@ -200,7 +200,7 @@ pub(crate) async fn resolve(
 	let source = moq_mux::Source::new(origin.inner, broadcast);
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(reference.as_ref(), instance.as_ref()).await?) })
+		.watch(async { Ok(source.resolve(reference.as_ref(), identity.as_ref()).await?) })
 		.await
 }
 
@@ -446,13 +446,13 @@ impl Consume {
 				.audio
 				.renditions
 				.values()
-				.map(|config| Reference::new(&config.broadcast, &config.instance))
+				.map(|config| Reference::new(&config.broadcast, &config.identity))
 				.collect();
 			let video_ref = update
 				.video
 				.renditions
 				.values()
-				.map(|config| Reference::new(&config.broadcast, &config.instance))
+				.map(|config| Reference::new(&config.broadcast, &config.identity))
 				.collect();
 
 			// Serialize the untyped application sections to owned strings so the
@@ -499,7 +499,7 @@ impl Consume {
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 		let reference = consume.video_ref.get(index).ok_or(Error::NoIndex)?;
 		let (broadcast, broadcast_len) = lend(reference.broadcast.as_ref());
-		let (instance, instance_len) = lend(reference.instance.as_ref());
+		let (identity, identity_len) = lend(reference.identity.as_ref());
 		let (track, track_len) = lend(config.track.as_ref());
 
 		*dst = moq_video_config {
@@ -525,8 +525,8 @@ impl Consume {
 			label_len: config.label.as_ref().map_or(0, String::len),
 			broadcast,
 			broadcast_len,
-			instance,
-			instance_len,
+			identity,
+			identity_len,
 			track,
 			track_len,
 		};
@@ -577,7 +577,7 @@ impl Consume {
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
 		let reference = consume.audio_ref.get(index).ok_or(Error::NoIndex)?;
 		let (broadcast, broadcast_len) = lend(reference.broadcast.as_ref());
-		let (instance, instance_len) = lend(reference.instance.as_ref());
+		let (identity, identity_len) = lend(reference.identity.as_ref());
 		let (track, track_len) = lend(config.track.as_ref());
 
 		*dst = moq_audio_config {
@@ -606,8 +606,8 @@ impl Consume {
 			has_warmup: config.warmup.is_some(),
 			broadcast,
 			broadcast_len,
-			instance,
-			instance_len,
+			identity,
+			identity_len,
 			track,
 			track_len,
 		};
@@ -686,7 +686,7 @@ impl Consume {
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
-		let instance = config.instance().cloned();
+		let identity = config.identity().cloned();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
@@ -706,7 +706,7 @@ impl Consume {
 						);
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
-							let broadcast = resolve(broadcast, origin, reference, instance).await?;
+							let broadcast = resolve(broadcast, origin, reference, identity).await?;
 							Self::subscribe(&broadcast, &name, subscription).await
 						};
 						let Some(track) = Self::until_closed(&mut close, setup).await? else {
@@ -956,15 +956,21 @@ impl Consume {
 				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}
-				match ready!(group.poll_read_frame(waiter))? {
-					Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
-					None => Poll::Ready(Ok(RawStep::End)),
+				match ready!(group.poll_read_frame(waiter)) {
+					Ok(Some(frame)) => Poll::Ready(Ok(RawStep::Item(frame))),
+					// A group superseded, as one a dropped producer left open while read, is passed
+					// as the UniFFI raw reader passes it. Any other failure, such as a publisher's
+					// abort, ends the track with it, so a truncated group is never silent.
+					Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
+						Poll::Ready(Ok(RawStep::End))
+					}
+					Err(err) => Poll::Ready(Err(err.into())),
 				}
 			})
 			.await?
 			{
 				RawStep::Item(frame) => frame,
-				// Group fully read.
+				// Group read to its end, or superseded.
 				RawStep::End => return Ok(false),
 				// Consumer closed mid-group: terminate without touching `close` again.
 				RawStep::Stop => return Ok(true),

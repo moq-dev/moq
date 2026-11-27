@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::transport::poll::Session as _;
-use crate::transport::{Error as _, Metrics as _};
+use crate::transport::{Error as _, Liveness, Metrics as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
@@ -229,6 +229,8 @@ pub struct Session {
 	work: Work,
 	/// What [`Stats::datagrams_unrouted`] reads.
 	datagrams_unrouted: Option<Arc<AtomicU64>>,
+	/// The peer's liveness, under a keep-alive.
+	liveness: Option<kio::Consumer<Liveness>>,
 }
 
 /// Two handles are equal when they are clones of the same session.
@@ -485,6 +487,26 @@ impl Session {
 		self.work.poll_idle(waiter)
 	}
 
+	/// Whether the peer was heard within the [`KeepAlive`](crate::transport::KeepAlive)'s `soft` limit, or `None` when the
+	/// session runs without one.
+	pub fn liveness(&self) -> Option<Liveness> {
+		self.liveness.as_ref().map(|liveness| *liveness.read())
+	}
+
+	/// Ready with the peer's liveness once it differs from `last`, or `None` once the session
+	/// ends or when it runs without a [`KeepAlive`](crate::transport::KeepAlive).
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_liveness_changed(&self, waiter: &kio::Waiter, last: Liveness) -> Poll<Option<Liveness>> {
+		let Some(liveness) = &self.liveness else {
+			return Poll::Ready(None);
+		};
+		let changed = liveness.poll(waiter, |now| match **now != last {
+			true => Poll::Ready(**now),
+			false => Poll::Pending,
+		});
+		changed.map(Result::ok)
+	}
+
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
@@ -602,6 +624,7 @@ impl Session {
 			demanded: false,
 		});
 		let work = session.work().clone();
+		let liveness = session.keeps_alive().then(|| kio::Producer::new(Liveness::Live));
 
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
@@ -622,6 +645,7 @@ impl Session {
 			drain: Drain::Idle,
 			unconfirmed: None,
 			auth: auth.clone(),
+			liveness: liveness.clone(),
 		};
 
 		let session = Self {
@@ -640,6 +664,7 @@ impl Session {
 			credential,
 			work,
 			datagrams_unrouted,
+			liveness: liveness.map(|liveness| liveness.consume()),
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -697,6 +722,9 @@ pub(crate) struct Supervisor {
 	/// This session's side of its auth handle, closed before the end is published so a
 	/// replacement session built on the same handle never finds this one still active.
 	auth: auth::Link,
+	/// Where the transport's report of the peer's liveness is published, under a keep-alive.
+	/// Dropped with the supervisor, which ends every wait on it.
+	liveness: Option<kio::Producer<Liveness>>,
 }
 
 /// A transport's sender and the two targets it probes up to, whichever is larger.
@@ -913,6 +941,26 @@ impl Supervisor {
 
 		if let Some(probe) = &mut self.probe {
 			probe.poll(waiter);
+		}
+
+		self.poll_liveness(waiter);
+	}
+
+	/// Publish each change in the peer's liveness the transport reports.
+	fn poll_liveness(&mut self, waiter: &kio::Waiter) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		loop {
+			let last = *liveness.read();
+			let Poll::Ready(now) = self.session.poll_liveness(waiter, last) else {
+				return;
+			};
+			match liveness.write() {
+				Ok(mut current) => *current = now,
+				// Every consumer is gone for good.
+				Err(_) => return,
+			}
 		}
 	}
 

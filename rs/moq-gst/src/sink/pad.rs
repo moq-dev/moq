@@ -4,8 +4,6 @@
 //! that pad's own streaming thread, so this type is touched from one thread and needs no generation
 //! tagging or cross-thread failure map.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
@@ -109,10 +107,10 @@ pub(super) struct Closed {
 /// An audio or video pad, published through a codec importer.
 struct Media {
 	track: import::Track,
-	/// Audio is independently decodable, so bound its groups by media time instead of keyframes.
+	/// Audio is independently decodable, so its groups roll by media time instead of keyframes.
 	audio: bool,
-	/// The media time of the first packet in the current audio group.
-	group_start: Option<Duration>,
+	/// Where the current audio group closes.
+	join: moq_mux::container::Join,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
 	/// Video can start or resume mid-GOP, so deltas drop until a keyframe opens a group. Stays set:
@@ -126,20 +124,14 @@ struct Media {
 impl Media {
 	/// Publish one frame at `micros` on the media clock. Returns false when a frame is dropped while
 	/// waiting for a keyframe at or beyond the live edge.
-	fn write(&mut self, data: &Bytes, micros: u64) -> Result<bool> {
+	///
+	/// An audio buffer's `duration`, when it states one, lets the buffer that fills its group close
+	/// it at once; without one, the group closes on the first buffer starting a join past it.
+	fn write(&mut self, data: &Bytes, micros: u64, duration: Option<gst::ClockTime>) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
 			self.keyframe = !self.audio;
-			self.group_start = None;
-		}
-		let timestamp = Duration::from_micros(micros);
-		if self.audio
-			&& self
-				.group_start
-				.is_some_and(|start| timestamp.saturating_sub(start) >= Duration::from_millis(20))
-		{
-			self.track.cut(None)?;
-			self.group_start = None;
+			self.join.reset();
 		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		match self.track.decode(data, ts) {
@@ -148,13 +140,21 @@ impl Media {
 				// A rejected delta leaves its group open; later deltas cannot decode across that gap.
 				self.track.cut(None)?;
 				self.keyframe = !self.audio;
-				self.group_start = None;
+				self.join.reset();
 				return Ok(false);
 			}
 			result => result?,
 		}
-		if self.audio {
-			self.group_start.get_or_insert(timestamp);
+		if self.audio
+			&& let Some(start) = ts
+		{
+			let end = duration
+				.map(|duration| hang::container::Timestamp::from_micros(micros.saturating_add(duration.useconds())))
+				.transpose()?;
+			if let Some(reach) = self.join.fill(start, end.unwrap_or(start)) {
+				// The group ends past its furthest media, which a rewound buffer's own end can fall below.
+				self.track.cut(end.map(|_| reach))?;
+			}
 		}
 		Ok(true)
 	}
@@ -664,7 +664,7 @@ impl Pad {
 		let media = Media {
 			track,
 			audio,
-			group_start: None,
+			join: moq_mux::container::Join::default(),
 			discontinuity: false,
 			keyframe: !audio,
 			pre_skip,
@@ -923,7 +923,7 @@ impl Pad {
 				let result: Result<()> = match shifted.map(|micros| (micros, &mut publishing.track)) {
 					Err(err) => Err(err),
 					Ok((micros, track)) => match track {
-						Sink::Media(media) => match media.write(&data, micros) {
+						Sink::Media(media) => match media.write(&data, micros, duration) {
 							Ok(false) => {
 								gst::debug!(
 									CAT,
@@ -1404,6 +1404,7 @@ pub(crate) fn h264_keyframe_au() -> Bytes {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::time::Duration;
 
 	/// Local producers, no network: a broadcast plus its catalog, exactly what the element holds.
 	fn producers() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
@@ -1781,53 +1782,60 @@ mod tests {
 		builder.build()
 	}
 
+	/// The buffer that brings a group to 100 ms closes it when buffers state their duration, and
+	/// otherwise the first buffer starting 100 ms past the group's start does.
 	#[tokio::test(start_paused = true)]
-	async fn audio_groups_carry_twenty_milliseconds() {
+	async fn audio_groups_carry_one_hundred_milliseconds() {
 		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let consumer = broadcast.consume();
-		let mut pad = Pad::new();
-		pad.observe_caps(
-			&broadcast,
-			&catalog,
-			producer_options(&opus_caps(1, None, None), Some("audio")),
-		);
-		pad.observe_segment(time_segment());
-		let mut track = consumer
-			.track("audio")
-			.unwrap()
-			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-						min: Some(Duration::from_secs(1)),
-						max: Some(Duration::from_secs(1)),
-					})])
-					.with_order(moq_net::track::Order::Ascending),
-			)
-			.await
-			.unwrap();
-		for index in 0..17 {
-			assert_eq!(
-				pad.push_buffer(
-					Bytes::from_static(&[0x80, 0xff, 0xfe]),
-					Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
-					None,
-					None
-				)
-				.unwrap(),
-				PushOutcome::Published
+		for (duration, expected) in [
+			(Some(gst::ClockTime::from_useconds(2_500)), [40, 40, 10]),
+			(None, [41, 41, 8]),
+		] {
+			let (broadcast, catalog) = producers();
+			let consumer = broadcast.consume();
+			let mut pad = Pad::new();
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				producer_options(&opus_caps(1, None, None), Some("audio")),
 			);
-		}
-		pad.finalize().unwrap();
-		for expected in [8, 8, 1] {
-			let mut group = track.recv_group().await.unwrap().unwrap();
-			let mut count = 0;
-			while group.read_frame().await.unwrap().is_some() {
-				count += 1;
+			pad.observe_segment(time_segment());
+			let mut track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						})])
+						.with_order(moq_net::track::Order::Ascending),
+				)
+				.await
+				.unwrap();
+			for index in 0..90 {
+				assert_eq!(
+					pad.push_buffer(
+						Bytes::from_static(&[0x80, 0xff, 0xfe]),
+						Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
+						duration,
+						None
+					)
+					.unwrap(),
+					PushOutcome::Published
+				);
 			}
-			assert_eq!(count, expected);
+			pad.finalize().unwrap();
+			for expected in expected {
+				let mut group = track.recv_group().await.unwrap().unwrap();
+				let mut count = 0;
+				while group.read_frame().await.unwrap().is_some() {
+					count += 1;
+				}
+				assert_eq!(count, expected, "{duration:?}");
+			}
+			assert!(track.recv_group().await.unwrap().is_none());
 		}
-		assert!(track.recv_group().await.unwrap().is_none());
 	}
 
 	fn published_opus(

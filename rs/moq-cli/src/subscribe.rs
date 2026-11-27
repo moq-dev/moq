@@ -212,7 +212,7 @@ pub struct SubscribeArgs {
 	/// it ends (TS only).
 	pub follow: Duration,
 
-	/// Follow another publisher instance replacing the broadcast, as a program switch (TS only).
+	/// Follow another publisher identity replacing the broadcast, as a program switch (TS only).
 	pub stitch: bool,
 
 	/// Cap the output duration: publisher groups by default for fMP4, video GOPs for MKV.
@@ -292,7 +292,7 @@ pub struct Subscribe {
 	finish: CancellationToken,
 }
 
-/// How a TS export ends, suggesting `--stitch` when another instance replaced its broadcast.
+/// How a TS export ends, suggesting `--stitch` when another identity replaced its broadcast.
 fn replaced(end: moq_mux::Result<()>) -> anyhow::Result<()> {
 	match end {
 		Err(err @ moq_mux::Error::Replaced(_)) => {

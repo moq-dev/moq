@@ -30,6 +30,7 @@ import {
 	type DropRun,
 	dropAt,
 	type FillStarts,
+	type FoldTerms,
 	finalKey,
 	groupBounds,
 	type Held,
@@ -1307,7 +1308,6 @@ let ordered_: {
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
-	isSkipped(subscriber: Subscriber, start: bigint, end: bigint): boolean;
 };
 
 // A pending request for a group past every key written. Mirrors the Rust `demand::Pending`.
@@ -2941,8 +2941,8 @@ export class Producer {
 	 *
 	 * The same broadcast, track, and group start always name the same content, and nothing
 	 * checks it: the broadcast remembers nothing of an earlier producer of the name. A recreated
-	 * track, or a restarted publisher keeping its instance, keeps its starts moving forward, as
-	 * its media time does, or uses a new track name or instance. Reusing a start only corrupts
+	 * track, or a restarted publisher keeping its identity, keeps its starts moving forward, as
+	 * its media time does, or uses a new track name or identity. Reusing a start only corrupts
 	 * this broadcast for its readers. Datagram keys name no cached content and are exempt.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a scaled timestamp on every frame
@@ -3389,7 +3389,7 @@ export class Producer {
 	}
 
 	/**
-	 * Release this producer, like dropping the last Rust producer. Idempotent.
+	 * Release this producer. Idempotent.
 	 *
 	 * With an end declared ({@link finish}, {@link finishAt}, or {@link fail}), the track ends
 	 * there and its subscribers drain to it. Without one, the track aborts: nothing finished it.
@@ -3582,7 +3582,7 @@ export interface Finished {
 	subscribe(options?: Subscription): Subscriber;
 	/** Abort the track; see {@link Producer.abort}. */
 	abort(error: Error): void;
-	/** Release the track, like dropping the last Rust handle; see {@link Producer.close}. */
+	/** Release the track; see {@link Producer.close}. */
 	close(): void;
 }
 
@@ -4120,18 +4120,18 @@ export class Subscriber {
 		this.#stoppedReading(passed, floor);
 	}
 
-	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
-	// this track holds it or not: one landing there would be written off. A group skipped as
-	// stale is not forgotten, since a wider budget offers it again, and neither is one still
-	// buffered unread: it may have arrived after a newer one, so its own successor may be fresh.
-	// Nor is a cached group no range covers, which a range added later owes. Mirrors the Rust
-	// `Cursor::forget_past_budget` keeping what the arrivals still owe. No gap at or above `keep`
-	// is forgotten either.
-	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget(), keep?: bigint): void {
+	// Forget the gaps in `delivered` below each group past the budget of `terms` now, whether this
+	// track holds it or not: one landing there would be written off. A group skipped as stale is
+	// not forgotten, since a wider budget offers it again, and neither is one still buffered unread:
+	// it may have arrived after a newer one, so its own successor may be fresh. A gap no range of
+	// `terms` holds, which the budget never judged, a range added later owes again (see
+	// `Delivered.foldBelow`). Mirrors the Rust `Cursor::forget_past_budget` keeping what the
+	// arrivals still owe. No gap at or above `keep` is forgotten either.
+	#forgetPastBudget(delivered: Delivered, terms = this.#foldTerms(), keep?: bigint): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
 		const own = this.#drift();
-		const drift = { ...own, budget: budget.clamped(own.bound) };
+		const drift = { ...own, budget: terms.budget.clamped(own.bound) };
 		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped. A
 		// skip whose group left the cache can never be offered again, so it is forgotten here
 		// rather than holding the gaps above it forever.
@@ -4156,16 +4156,12 @@ export class Subscriber {
 				if (owed !== undefined) skipped = min(skipped ?? owed, owed);
 				if (keep !== undefined) skipped = min(skipped ?? keep, keep);
 			}
-			// Searched only in the gaps this step retires, so a read that forgets nothing never
-			// walks the runs it has piled up.
-			const uncovered = this.#lowestUncovered(delivered, oldest);
-			const hold = uncovered === undefined ? skipped : min(skipped ?? uncovered, uncovered);
-			if (hold !== undefined && hold < oldest) {
-				delivered.forgetBelow(hold);
-				forgot = hold;
+			if (skipped !== undefined && skipped < oldest) {
+				delivered.foldBelow(skipped, terms.ranges);
+				forgot = skipped;
 				break;
 			}
-			delivered.forgetBelow(oldest);
+			delivered.foldBelow(oldest, terms.ranges);
 			forgot = oldest;
 		}
 		// A buffered group in a gap forgotten here is never handed out.
@@ -4184,19 +4180,15 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover: the
-	// budget never judged it, and a range added later that covers it owes it. While a range is
-	// still being placed, any cached group in a gap may be one.
-	#lowestUncovered(delivered: Delivered, end: bigint): bigint | undefined {
-		const groups = this.#state.groups.peek();
-		for (const gap of delivered.gaps(0n, end)) {
-			for (let index = timelineIndex(groups, gap.start); index < groups.length; index++) {
-				const key = groups[index].start;
-				if (key >= gap.end) break;
-				if (this.#window.pending || !this.#window.holds(key)) return key;
-			}
-		}
-		return undefined;
+	// This subscriber's own fold terms: its budget, and its window once nothing waits on a first group.
+	#foldTerms(): FoldTerms {
+		return { budget: this.#window.budget(), ranges: this.#window.pending ? undefined : this.#window };
+	}
+
+	// Take back what a fold counted as handed out before any range held it, which the ranges placed
+	// so far now owe. A front's reader does so on each read, as its copies place its ranges.
+	#reopenFolded(): void {
+		if (!this.#resume) this.#delivered.reopen(this.#window);
 	}
 
 	// Record `key` as skipped stale under `budget`, so a wider one offers it again.
@@ -4299,6 +4291,7 @@ export class Subscriber {
 	// The window moved: narrow the bounds to it.
 	#moved(): void {
 		this.#revision++;
+		this.#reopenFolded();
 		this.#bound();
 		this.#ask();
 	}
@@ -5431,9 +5424,9 @@ export class Subscriber {
 			if (ordered) subscriber.#raiseNext(floor);
 			return subscriber.#peekGroup(ordered);
 		};
-		hooks.forgetPastBudget = (subscriber, delivered, budget, keep) => {
-			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget, keep);
-			else subscriber.#forgetPastBudget(delivered, budget, keep);
+		hooks.forgetPastBudget = (subscriber, delivered, terms, keep) => {
+			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, terms, keep);
+			else subscriber.#forgetPastBudget(delivered, terms, keep);
 		};
 		hooks.keyAfter = (subscriber, key) => subscriber.#keyAfter(key);
 		hooks.refused = (subscriber) => subscriber.#settle() ?? subscriber.#resume?.refused();
@@ -5659,7 +5652,6 @@ export class Subscriber {
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
-			isSkipped: (subscriber, start, end) => subscriber.#isSkipped(start, end),
 		};
 	}
 
@@ -5752,8 +5744,12 @@ export class Subscriber {
 		return firstOpen(this.#window.runs(from), (key) => holeEnd(drops, key, true));
 	}
 
-	// Whether the publisher declared every start in `[start, end)` skipped; see Ordered.isSkipped.
-	#isSkipped(start: bigint, end: bigint): boolean {
+	/**
+	 * Whether the publisher declared every start in `[start, end)` skipped, never to be produced,
+	 * so no group can arrive there; see {@link Ordered.isSkipped}. Mirrors the Rust
+	 * `Subscriber::is_skipped`.
+	 */
+	isSkipped(start: bigint, end: bigint): boolean {
 		if (end <= start) return true;
 		const run = [{ start, end }];
 		if (this.#resume) {
@@ -7336,7 +7332,7 @@ export class Ordered {
 	 * the Rust `Ordered::is_skipped`.
 	 */
 	isSkipped(start: bigint, end: bigint): boolean {
-		return ordered_.isSkipped(this.#subscriber, start, end);
+		return this.#subscriber.isSkipped(start, end);
 	}
 
 	/**

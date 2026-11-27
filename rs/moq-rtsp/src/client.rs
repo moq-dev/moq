@@ -75,7 +75,7 @@ pub enum End {
 	/// The session's RTP timeline jumped, so its tracks finished before the jump.
 	///
 	/// Its timestamps no longer continue the broadcast's, so the caller finishes the
-	/// broadcast and restarts every session sharing it under a fresh instance.
+	/// broadcast and restarts every session sharing it under a fresh identity.
 	Jumped,
 }
 
@@ -243,7 +243,10 @@ impl Client {
 						};
 						let config = aac::config(params.extra_data())?;
 						let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio));
-						Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
+						Track::Aac {
+							import: Box::new(aac::Import::new(track, reserved.clone(), config)?),
+							join: moq_mux::container::Join::default(),
+						}
 					}
 				};
 				ingest.streams[*index] = Some(Stream {
@@ -352,7 +355,11 @@ enum Kind {
 
 enum Track {
 	Video(Box<Video>),
-	Aac(Box<aac::Import>),
+	Aac {
+		import: Box<aac::Import>,
+		/// Where the open group closes.
+		join: moq_mux::container::Join,
+	},
 }
 
 impl Track {
@@ -363,7 +370,7 @@ impl Track {
 				Video::H264 { import, .. } => import.finish().map(drop),
 				Video::H265 { import, .. } => import.finish().map(drop),
 			},
-			Self::Aac(import) => import.finish().map(drop),
+			Self::Aac { import, .. } => import.finish().map(drop),
 		}
 	}
 
@@ -373,7 +380,7 @@ impl Track {
 				Video::H264 { import, .. } => import.abort(err),
 				Video::H265 { import, .. } => import.abort(err),
 			},
-			Self::Aac(import) => import.abort(err),
+			Self::Aac { import, .. } => import.abort(err),
 		}
 	}
 }
@@ -853,13 +860,15 @@ impl Ingest {
 
 	/// Publish one depacketized item under its stream's video `params`.
 	fn publish(&mut self, item: CodecItem, params: Option<&VideoParameters>) -> Result<()> {
-		let (stream_id, timestamp, data, changed, loss) = match &item {
+		// An audio frame's length in clock units, so the frame that fills a group closes it.
+		let (stream_id, timestamp, data, changed, loss, length) = match &item {
 			CodecItem::VideoFrame(frame) => (
 				frame.stream_id(),
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
 				frame.loss(),
+				None,
 			),
 			CodecItem::AudioFrame(frame) => (
 				frame.stream_id(),
@@ -868,6 +877,7 @@ impl Ingest {
 				false,
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
+				Some(frame.frame_length().get()),
 			),
 			_ => return Ok(()),
 		};
@@ -926,7 +936,7 @@ impl Ingest {
 				}
 				video.decode(frames)?;
 			}
-			Track::Aac(import) => {
+			Track::Aac { import, join } => {
 				if !stream.started {
 					// Audio waits for the first keyframe too.
 					if self.video && !self.started {
@@ -935,8 +945,14 @@ impl Ingest {
 					stream.started = true;
 				}
 				import.decode(data, Some(pts))?;
-				// Each packet its own group (one QUIC stream), so relays forward it at once.
-				import.cut(None)?;
+				// Each packet forwards as it is written; its group closes once it carries a join.
+				let length = moq_net::Timestamp::from_scale(length.map_or(0, u64::from), u64::from(rate));
+				let end = length
+					.and_then(|length| pts.checked_add(length))
+					.map_err(moq_mux::Error::from)?;
+				if let Some(end) = join.fill(pts, end) {
+					import.cut(Some(end))?;
+				}
 			}
 		}
 		Ok(())
@@ -1029,7 +1045,12 @@ mod tests {
 		let mut updates = catalog.consume().unwrap();
 		within("the catalog", async {
 			loop {
-				let snapshot = updates.next().await.expect("catalog update").expect("catalog open");
+				let snapshot = updates
+					.next()
+					.await
+					.expect("catalog update")
+					.expect("catalog open")
+					.value;
 				if snapshot.video.renditions.len() == video && snapshot.audio.renditions.len() == audio {
 					return snapshot;
 				}
@@ -1297,7 +1318,7 @@ mod tests {
 
 	/// Two sessions (a camera's SD and HD URLs) publish renditions of one broadcast. When one
 	/// session's timeline jumps, the caller ends the broadcast and restarts both under a fresh
-	/// instance, each new broadcast with its own catalog.
+	/// identity, each new broadcast with its own catalog.
 	#[tokio::test]
 	async fn two_sessions_restart_together_on_a_jump() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -1320,7 +1341,7 @@ mod tests {
 					let mut catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast.clone(), Default::default()).unwrap();
 					published_tx
-						.send((route.instance(), broadcast.clone(), catalog.clone()))
+						.send((route.identity(), broadcast.clone(), catalog.clone()))
 						.unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
@@ -1336,10 +1357,10 @@ mod tests {
 			}
 		});
 
-		let mut instances = Vec::new();
+		let mut identities = Vec::new();
 		for run in 0..2 {
-			let (instance, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
-			instances.push(instance);
+			let (identity, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
+			identities.push(identity);
 			let mut sd_session = within("SD PLAY", sd.accept(500)).await;
 			let mut hd_session = within("HD PLAY", hd.accept(9000)).await;
 			sd_session.video(0, 500, &[fake::H264_IDR]).await;
@@ -1366,7 +1387,7 @@ mod tests {
 		let ends = within("the caller", caller).await.unwrap();
 		assert_eq!(ends[0], End::Jumped);
 		assert_eq!(ends[1], End::Closed);
-		assert_ne!(instances[1], instances[0], "the restart mints a fresh instance");
+		assert_ne!(identities[1], identities[0], "the restart mints a fresh identity");
 	}
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.
@@ -2269,7 +2290,10 @@ mod tests {
 		let config = aac::config(fake::AAC_CONFIG).unwrap();
 		let mut ingest = Ingest {
 			streams: vec![Some(Stream {
-				track: Track::Aac(Box::new(aac::Import::new(track, catalog.reserve(), config).unwrap())),
+				track: Track::Aac {
+					import: Box::new(aac::Import::new(track, catalog.reserve(), config).unwrap()),
+					join: moq_mux::container::Join::default(),
+				},
 				last: None,
 				started: false,
 				held: None,

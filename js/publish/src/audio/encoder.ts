@@ -121,7 +121,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
-	// The time between join points: a frame opens a group once it is this far past the last one's start. Defaults to 20 ms.
+	// The time between join points: the frame that brings a group to this much audio closes it. Defaults to 100 ms.
 	join?: Duration | Signal<Duration>;
 };
 
@@ -181,10 +181,11 @@ export class Encoder {
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
-	 * The time between join points: a frame opens the next group once it is at least this far past
-	 * the open group's start, closing the previous one. Defaults to 20 ms. A longer join costs the
-	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
-	 * join that is not a positive, finite duration refuses the rendition.
+	 * The time between join points: the minimum audio each group carries. The frame that reaches it
+	 * closes the group, so the relay sees it finish without waiting for the next, and frames still
+	 * forward as they are encoded. Defaults to 100 ms ({@link Container.JOIN}). A longer join costs
+	 * the relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group.
+	 * A join that is not a positive, finite duration refuses the rendition.
 	 */
 	join: Signal<Duration>;
 
@@ -246,7 +247,7 @@ export class Encoder {
 	#history: Duration | undefined;
 
 	// The last valid join, which #runConfig validates.
-	#join = Duration.micros(20_000);
+	#join = Container.JOIN;
 	// How far apart groups start under the resolved config, a whole number of frames, which the
 	// broadcast may declare as the catalog's join interval (see groupSpacing).
 	#spacing = new Signal<Duration | undefined>(undefined);
@@ -297,7 +298,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.join = Signal.from(props?.join ?? Duration.millis(20));
+		this.join = Signal.from(props?.join ?? Container.JOIN);
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -714,6 +715,7 @@ export class Encoder {
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
+		const duration = frameDuration(resolved);
 		// A stopped rendition stops holding the others' delay back.
 		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
@@ -782,13 +784,22 @@ export class Encoder {
 						const live = this.#live;
 						if (live && (this.#floor === undefined || timestamp.ge(this.#floor))) {
 							// Every audio frame decodes on its own, so any of them can open a group: the
-							// first one at or past the minimum after the open group's start. Frames forward
-							// as they are written rather than waiting for the group to fill. A dropped
-							// group leaves a gap for the codec's PLC.
-							const keyframe =
-								live.start === undefined || timestamp.saturatingSub(live.start).ge(this.#join);
-							if (keyframe) live.start = timestamp;
+							// first after a cut, or one a gap put past the join. The frame that brings the
+							// group to the join closes it, so the relay sees it finish without waiting for
+							// the next. Frames forward as they are written rather than waiting for the group
+							// to fill. A dropped group leaves a gap for the codec's PLC.
+							const open = live.start;
+							const start =
+								open !== undefined && timestamp.saturatingSub(open).lt(this.#join) ? open : timestamp;
+							const keyframe = start !== open;
 							live.producer.encode(frame, timestamp, keyframe);
+							const end = timestamp.add(duration);
+							if (end.saturatingSub(start).ge(this.#join)) {
+								live.producer.cut(end);
+								live.start = undefined;
+							} else {
+								live.start = start;
+							}
 							const history = this.#history !== undefined && timestamp.lt(this.#history);
 							if (!history && this.#estimator.write(timestamp.asMicros(), order, keyframe)) {
 								this.#estimate.set({ ...this.#estimator.estimate });

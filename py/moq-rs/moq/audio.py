@@ -22,7 +22,7 @@ from ._read import End, Gap, _end, _gap
 from ._records import Delay, Timestamp
 from ._stream import _Stream
 from .media import Audio, AudioInit, CatalogProducer, DecodeStart
-from .publish import TrackDemand
+from .publish import TrackDemand, TrackRequest
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
@@ -138,6 +138,38 @@ class Producer:
             ),
         )
 
+    @classmethod
+    def requested(
+        cls,
+        catalog: CatalogProducer,
+        request: TrackRequest,
+        input: EncoderInput,
+        output: EncoderOutput,
+        *,
+        bandwidth: Allocator | None = None,
+    ) -> Producer:
+        """Open an audio track on the track a subscriber's ``request`` asks for, which names it.
+
+        This is how an on-demand publisher serves a track asked for again after its producer was
+        released while read: pass the settings it was first published with. Settings that change
+        the track info its readers hold end the track with ``MalformedTrack`` and raise here; nothing
+        checks the codec settings, which its readers decode with, so keep those too. The request
+        must belong to the catalog's broadcast, and a config that can't be encoded rejects it
+        with ``NotFound``.
+        """
+        producer = cls.__new__(cls)
+        producer._inner = MoqAudioProducer.requested(
+            catalog._inner,
+            request._inner,
+            MoqAudioProducerOptions(
+                input=input,
+                output=output._ffi(),
+                track=None,
+                bandwidth=None if bandwidth is None else bandwidth._inner,
+            ),
+        )
+        return producer
+
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this audio track has subscribers."""
         return TrackDemand(self._inner.demand())
@@ -154,16 +186,6 @@ class Producer:
         """This encoder's bandwidth reservation, if published against a session allocator."""
         value = self._inner.reservation()
         return None if value is None else Reservation(value)
-
-    def abort_unwanted(self, error_code: int) -> bool:
-        """Abort this track with an application error code, but only while nobody wants it.
-
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
-        the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
-        returned ``None`` misses a reader that came and went, and waits on.
-        """
-        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Flush any pending samples and finalize the track."""

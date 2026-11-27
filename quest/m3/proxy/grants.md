@@ -18,12 +18,11 @@ a media broadcast can never open a stream to its publisher.
   predates these fields refuses a grant carrying them rather than widening it.
   Note it in the Impact section with the token and auth endpoint formats that
   change.
-- lite-07's `AUTH_OK` carries a session's publish and subscribe grants, so it
-  carries `dial` and `listen` too, a wire change in the current wip version.
-- Grants become path prefixes in
-  [moq-dev/moq#9251](https://github.com/moq-dev/moq/pull/9251)
-  (`quest/m2/prefix-grants.md`); `dial` and `listen` are prefix sets like the
-  others, so build on it once it lands.
+- lite-08-wip's `AUTH_OK` carries a session's publish and subscribe grants, so it
+  carries `dial` and `listen` too, a wire change in the post-cut wip version.
+- Grants are path prefixes since
+  [moq-dev/moq#9251](https://github.com/moq-dev/moq/pull/9251);
+  `dial` and `listen` are prefix sets like the others.
 - A cluster link forwards streams for many sessions, so a link's grant covers
   the `dial` and `listen` it relays, as its publish and subscribe already do.
 - Mirror the names in Rust, JS, and the docs. moq.pro's dashboard tokens and
@@ -32,4 +31,4 @@ a media broadcast can never open a stream to its publisher.
 
 Public API: additive, `Grant::dial` and `Grant::listen` and their JS
 counterparts. Wire: the token and auth endpoint formats gain two fields that
-an older reader refuses, and lite-07-wip's `AUTH_OK` gains them.
+an older reader refuses, and lite-08-wip's `AUTH_OK` gains them.

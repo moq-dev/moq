@@ -56,5 +56,5 @@ after; `just bench-fanout` checks the single-threaded count did not grow.
 
 ## Related
 
-- [kio channel contention](/quest/m9/kio-channel-contention/README.md) - the general lock-wait work this narrows to one channel
+- [kio channel contention](/quest/m5/kio-channel-contention/README.md) - the general lock-wait work this narrows to one channel
 - [Performance audit](/quest/m3/audit-perf.md) - reruns the release pairing after the cut

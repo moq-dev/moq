@@ -1,6 +1,6 @@
 import { Duration as ClockDuration } from "@moq/clock";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
-import type * as Instance from "../instance.ts";
+import type * as Identity from "../identity.ts";
 import { NO_MAX_DELAY } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -9,7 +9,7 @@ import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY, liveMillis, rangeBudget, rangeTime } from "../window.ts";
 import * as Duration from "./duration.ts";
-import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
+import { decodeNode, decodePin, encodeNode, encodePin } from "./identity.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import {
@@ -18,6 +18,7 @@ import {
 	hasFrameBounds,
 	hasGroupOrder,
 	hasGroupSpan,
+	hasMeta,
 	hasOrder,
 	hasRanges,
 	hasRefresh,
@@ -921,6 +922,32 @@ async function encodeOrder(w: Writer, version: Version, order: Order) {
 	await w.u8(order === "ascending" ? 1 : 0);
 }
 
+/**
+ * Decode SUBSCRIBE's trailing `Meta` byte, lite-07's only: 1 for headers alone, 0 for the payload,
+ * anything else malformed. An earlier wire always asks for the payload.
+ */
+async function decodeMeta(r: Reader, version: Version): Promise<boolean> {
+	if (!hasMeta(version)) return false;
+	const meta = await r.u8();
+	switch (meta) {
+		case 0:
+			return false;
+		case 1:
+			return true;
+		default:
+			throw new ProtocolViolation(`unknown meta: ${meta}`);
+	}
+}
+
+/** The inverse of {@link decodeMeta}, throwing for a metadata subscription on a wire without one. */
+async function encodeMeta(w: Writer, version: Version, meta: boolean) {
+	if (hasMeta(version)) {
+		await w.u8(meta ? 1 : 0);
+	} else if (meta) {
+		throw new Error("a metadata subscription needs moq-lite-07");
+	}
+}
+
 /** The error for a requested range the wire cannot carry: one asking for nothing. */
 export const EMPTY_RANGE = "empty subscription range cannot be encoded";
 
@@ -1101,8 +1128,8 @@ export class SubscribeUpdate {
 export class Subscribe {
 	id: bigint;
 	broadcast: Path.Valid;
-	/** The publisher instance the subscriber expects. Lite-07+. */
-	instance?: Instance.Valid;
+	/** The publisher identity the subscriber expects. Lite-07+. */
+	identity?: Identity.Valid;
 	track: string;
 	priority: number;
 	/**
@@ -1140,10 +1167,17 @@ export class Subscribe {
 	 */
 	ranges?: WireRange[];
 
+	/**
+	 * Whether each frame is delivered as its header alone, without its payload, for the
+	 * subscription's whole life. Lite-07+: an earlier wire cannot carry it, so encoding one there
+	 * throws rather than asking for the payload.
+	 */
+	meta: boolean;
+
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
-		instance?: Instance.Valid;
+		identity?: Identity.Valid;
 		track: string;
 		priority: number;
 		order?: Order;
@@ -1153,10 +1187,11 @@ export class Subscribe {
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
+		meta?: boolean;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
-		this.instance = props.instance;
+		this.identity = props.identity;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -1166,12 +1201,13 @@ export class Subscribe {
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 		this.ranges = props.ranges;
+		this.meta = props.meta ?? false;
 	}
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
-		await encodePin(w, version, this.instance);
+		await encodePin(w, version, this.identity);
 		await encodeNode(w, version);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
@@ -1186,12 +1222,13 @@ export class Subscribe {
 				await encodeSpan(w, version, this, this.ranges);
 				break;
 		}
+		await encodeMeta(w, version, this.meta);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
-		const instance = await decodePin(r, version);
+		const identity = await decodePin(r, version);
 		await decodeNode(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
@@ -1204,15 +1241,17 @@ export class Subscribe {
 				const order = await decodeOrder(r, version);
 				const maxDelay = await decodeMaxDelay(r, version);
 				const span = await decodeSpan(r, version);
+				const meta = await decodeMeta(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
-					instance,
+					identity,
 					track,
 					priority,
 					order,
 					maxDelay,
 					...span,
+					meta,
 				});
 			}
 		}

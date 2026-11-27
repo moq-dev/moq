@@ -1,11 +1,11 @@
 //! Whether the source's clock stepped onto another timeline, or its PAT named another
-//! program, either of which ends the import's instance.
+//! program, either of which ends the import's identity.
 //!
 //! A contribution switched between two encoders whose clocks were never locked steps every
 //! timestamp at once without `discontinuity_indicator`. Splicing the two would put two sources
 //! on one timeline, and a step back would break the rule that group starts never go
-//! backwards within an instance, so the import ends its instance at the step and hands the
-//! input from there to a caller that republishes it under a new instance.
+//! backwards within an identity, so the import ends its identity at the step and hands the
+//! input from there to a caller that republishes it under a new identity.
 //!
 //! The step is judged the way ffmpeg infers an unflagged one: the program clock and every
 //! elementary stream that keeps a timestamp cadence step together, forward by more than
@@ -15,7 +15,7 @@
 //! streams stepping back is a rewind; one stepping forward splices as before.
 //!
 //! A PAT naming another `transport_stream_id` or program number is another source too, even
-//! when it arrives before the new source's first clock reading. The new instance reads from
+//! when it arrives before the new source's first clock reading. The new identity reads from
 //! the packet that completes that PAT, so one spanning packets is read at its next repetition.
 
 use std::collections::{HashMap, HashSet};
@@ -38,10 +38,10 @@ const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
 
 /// The source's clock stepped onto another timeline, or its PAT named another program, so the
-/// [`Import`](super::Import) ended its instance there.
+/// [`Import`](super::Import) ended its identity there.
 ///
 /// Only [`Republish`](super::Republish) sees it, and reads [`remainder`](Self::remainder) into a
-/// new instance on the same path; a raw import fails with [`Error::Restarted`](super::Error::Restarted).
+/// new identity on the same path; a raw import fails with [`Error::Restarted`](super::Error::Restarted).
 #[derive(Clone, Debug)]
 pub(super) struct Restart {
 	/// How the source changed.
@@ -50,7 +50,7 @@ pub(super) struct Restart {
 	pub remainder: Bytes,
 }
 
-/// How the source changed, ending an import's instance.
+/// How the source changed, ending an import's identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Step {
@@ -112,7 +112,7 @@ pub(super) enum Verdict {
 	Route,
 	/// Route nothing yet: a step is being judged on input still to come.
 	Hold,
-	/// The clock stepped at it: end the instance there.
+	/// The clock stepped at it: end the identity there.
 	Restart(Step),
 }
 
@@ -283,10 +283,10 @@ impl Headers {
 
 /// A step being judged, from the packet that showed it on.
 struct Ahead {
-	/// The input offset of that packet, where a new instance starts.
+	/// The input offset of that packet, where a new identity starts.
 	at: u64,
 	/// The way it stepped and by how much, or `None` for the clock PID's flagged break, which
-	/// ends the instance only if the streams step back.
+	/// ends the identity only if the streams step back.
 	stepped: Option<(Way, Duration)>,
 	/// Whether the PCR still has to step with it.
 	pcr: bool,
@@ -506,7 +506,7 @@ impl Ahead {
 	}
 
 	/// The step every clock heard from agreed on, `stepped` when that is enough to end the
-	/// instance, or the offset judged through when it is not.
+	/// identity, or the offset judged through when it is not.
 	fn verdict(&self, end: u64, stepped: bool) -> Result<Step, u64> {
 		match self.stepped {
 			Some((Way::Back, by)) if stepped => Ok(Step::Rewind { by, flagged: false }),

@@ -68,9 +68,7 @@ The cut:
   final peer refuse each other by ALPN rather than misparse; no
   compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
-  passes. Fix `drafts/draft-lcurley-moq-lite.md:2380` (the lite-07 changelog
-  says `0 is malformed` instead of `0 is GROUP_END`, contradicting lines 2218,
-  2245, and 2376; found in the 2026-11-21 full-codebase audit).
+  passes.
 - SETUP keeps its stronger rule: #4820 put it under the general Message
   Length cap, which only permits rejection (MAY), while "a receiver MUST
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
@@ -162,7 +160,7 @@ would need a breaking release had it landed right after the cut:
   PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
   which fails the route key lane on a Chromium below 158, so only the pinned
   toolchain clears it. As an early signal, before the rename, run the route
-  key lane (`test/interop/clients/js/route-key.ts`) once with Playwright
+  key lane once with Playwright
   1.65.0 or later from npm, which bundles Chromium 158, and put the result in
   the PR. If the tab fails, stop and report it, since only the wire can fix
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
@@ -239,7 +237,9 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
 full-codebase audit): ✅ this quest fixes the changelog typo at
-`drafts/draft-lcurley-moq-lite.md:2380` during the cut.
+`drafts/draft-lcurley-moq-lite.md:2380` during the cut. The draft review in
+[moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553) rewrote that
+changelog without the typo.
 
 Decided 2026-11-24 (maintainer, on
 [moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371#issuecomment-7146881312)):
@@ -264,7 +264,7 @@ Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` pro
 
 Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
 ✅ the cut also waits on
-[Identity rename and 256-byte cap](/quest/m2/identity-rename-and-cap.md)
+the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720))
 (renaming `Instance` to `Identity`, capping it at 256 UTF-8 bytes for public
 keys, and hashing it in `moq-hls` URLs; rejected: keeping `Instance`, 1024-byte
 cap, raw URLs, no wire cap) and on
@@ -274,15 +274,21 @@ deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD indexing is
 an immediate consumer and `moq_subscription` changes the C ABI; rejected:
 moving only the wire into `m2`, leaving both in `m3`).
 
+Decided 2026-11-25 (maintainer, the pick round on
+[moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553)): ✅ the cut waits
+for [unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md), so lite-07's
+`FRAME` timestamp deltas freeze unsigned, so the timestamps they produce never
+decrease (rejected: the next wip version after the cut).
+
 ## Required
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
-- [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - wire rename and 256-byte UTF-8 ceiling on Identity freeze into lite-07
-- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - Meta byte on SUBSCRIBE and payload-less FRAME freeze into lite-07
+- [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
+- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - relays forward metadata demand upstream and both libraries read the payload-less FRAME, whose Meta byte and layout are already on lite-07
 - [The lite-07 draft's TRACKS SYNCED matches relays](/quest/m2/tracks-synced-draft.md) - the draft stops saying a relay sends SYNCED before its upstream syncs
 - [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - Rust, JS, and C/binding metadata subscriber API lands before the cut so the C ABI does not break right after 0.22
 
 ## Related
 
-- [Takeover](/quest/m3/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
+- [Takeover](/quest/m4/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
 - [The moq.pro mesh runs lite-07](/quest/m5/lite07-mesh.md) - the deployment condition that follows this

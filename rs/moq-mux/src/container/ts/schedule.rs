@@ -209,7 +209,7 @@ pub(super) struct Psi {
 	/// The PAT and PMT packets.
 	pub packets: Vec<u8>,
 	/// The same tables flagging a break, for the first unit of them to go out after a switch to
-	/// another instance.
+	/// another identity.
 	pub flagged: Option<Vec<u8>>,
 	/// The PID every slot's clock rides once they have gone out.
 	pub clock: u16,
@@ -823,7 +823,7 @@ impl Schedule {
 	}
 
 	/// Whether every source has ended, so what is queued still goes out, late if it must.
-	/// A source that resumes (a same-instance return) holds its deadlines again.
+	/// A source that resumes (a same-identity return) holds its deadlines again.
 	pub fn set_ended(&mut self, ended: bool) {
 		self.ended = ended;
 	}

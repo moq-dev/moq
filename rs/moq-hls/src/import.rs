@@ -1181,13 +1181,20 @@ fn select_audio<'a>(master: &'a MasterPlaylist, group_id: &str) -> Option<&'a Al
 }
 
 fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
-	// Map codec strings into a coarse "family" so we can prefer H.264 over others.
+	// Map codec strings into a coarse "family", for each video codec the fMP4 importer reads.
 	fn codec_family(codec: &str) -> Option<&'static str> {
-		if codec.starts_with("avc1.") || codec.starts_with("avc3.") {
-			Some("h264")
-		} else {
-			None
-		}
+		const FAMILIES: &[(&str, &str)] = &[
+			("avc1.", "h264"),
+			("avc3.", "h264"),
+			("hvc1.", "hevc"),
+			("hev1.", "hevc"),
+			("av01.", "av1"),
+			("vp09.", "vp9"),
+		];
+		FAMILIES
+			.iter()
+			.find(|(prefix, _)| codec.starts_with(prefix))
+			.map(|(_, family)| *family)
 	}
 
 	// Extract the first *video* codec token from the CODECS attribute. A list like
@@ -1220,8 +1227,9 @@ fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
 		return Vec::new();
 	}
 
-	// Prefer families in this order, falling back to the first available.
-	const FAMILY_PREFERENCE: &[&str] = &["h264"];
+	// Prefer the families more players decode: H.264 everywhere, then AV1 and VP9 in every modern
+	// browser, then HEVC, which many decode only in hardware.
+	const FAMILY_PREFERENCE: &[&str] = &["h264", "av1", "vp9", "hevc"];
 
 	let families_present: Vec<&str> = candidates.iter().map(|(_, _, fam)| *fam).collect();
 
@@ -1687,6 +1695,24 @@ mod tests {
 		let (_, master) = m3u8_rs::parse_master_playlist(master).unwrap();
 		let variants = select_variants(&master);
 		assert_eq!(variants.len(), 1);
+	}
+
+	/// A master without H.264 imports its HEVC, AV1, or VP9 variants, and a mix takes the family
+	/// more players decode.
+	#[test]
+	fn select_variants_imports_other_video_codecs() {
+		for codec in ["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0", "av01.0.04M.08", "vp09.00.10.08"] {
+			let master =
+				format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4a.40.2,{codec}\"\nvideo.m3u8\n");
+			let (_, master) = m3u8_rs::parse_master_playlist(master.as_bytes()).unwrap();
+			assert_eq!(select_variants(&master).len(), 1, "{codec}");
+		}
+		let master = b"#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080,CODECS=\"hvc1.1.6.L120.B0\"\nhevc.m3u8\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,CODECS=\"av01.0.08M.08\"\nav1.m3u8\n";
+		let (_, master) = m3u8_rs::parse_master_playlist(master).unwrap();
+		let uris: Vec<&str> = select_variants(&master).iter().map(|v| v.uri.as_str()).collect();
+		assert_eq!(uris, ["av1.m3u8"]);
 	}
 
 	/// Same resolution at two bitrates: re-publish the better one, deterministically.
@@ -3013,6 +3039,7 @@ video.m3u8
 		let published_early = match consumer.poll_next(&kio::Waiter::noop()) {
 			Poll::Pending => false,
 			Poll::Ready(Ok(Some(snapshot))) => {
+				let snapshot = snapshot.value;
 				assert!(
 					!snapshot.video.renditions.is_empty() && !snapshot.audio.renditions.is_empty(),
 					"first catalog listed video {} and audio {}",
@@ -3030,7 +3057,7 @@ video.m3u8
 
 		if !published_early {
 			let snapshot = match consumer.poll_next(&kio::Waiter::noop()) {
-				Poll::Ready(Ok(Some(snapshot))) => snapshot,
+				Poll::Ready(Ok(Some(snapshot))) => snapshot.value,
 				other => panic!("expected the first catalog, got {other:?}"),
 			};
 			assert!(!snapshot.video.renditions.is_empty(), "video rendition missing");

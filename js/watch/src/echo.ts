@@ -124,7 +124,7 @@ export class Echo {
 			let broadcast: Moq.Broadcast.Producer | undefined;
 			let writer: Report.Writer<Schema.Snapshot, Schema.SnapshotInput>;
 			try {
-				// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
+				// A fresh identity, so a reader sees a replaced feedback broadcast as a restart.
 				const route = origin.route(path, { hidden: true });
 				broadcast = route.broadcast;
 				writer = new Report.Writer(broadcast, Schema.TRACK, Schema.SnapshotSchema);

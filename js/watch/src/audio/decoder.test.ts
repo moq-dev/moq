@@ -363,7 +363,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	}
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
 	const enabled = new Signal(true);
-	// The catalog broadcast's instance, identified by its `closed` handle.
+	// The catalog broadcast's identity, identified by its `closed` handle.
 	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
 		in: { enabled, name: new Signal(Moq.Path.from("watched")) },
@@ -1208,7 +1208,7 @@ describe("Decoder across a rendition's absence", () => {
 		container: { container: { kind: "loc" } },
 		codec: { codec: "mp4a.40.2" },
 	})) {
-		it(`keeps compatible PCM and Sync when the ${name} changes on the same instance`, async () => {
+		it(`keeps compatible PCM and Sync when the ${name} changes on the same identity`, async () => {
 			const clock = new Manual();
 			const installed = clock.install();
 			const playback = await play(Duration.millis(100), true);

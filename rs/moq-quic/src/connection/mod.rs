@@ -56,6 +56,10 @@ mod datagrams;
 use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
+mod keep_alive;
+use keep_alive::Liveness;
+pub use keep_alive::{KeepAlive, KeepAliveError};
+
 mod mtud;
 pub mod mux;
 
@@ -213,6 +217,13 @@ pub struct Connection {
 	idle_timeout: Option<Duration>,
 	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
 	keep_alive: Option<Duration>,
+	/// The keep-alive [`Self::set_keep_alive`] started, which replaces [`Self::keep_alive`]
+	liveness: Option<Liveness>,
+	/// When the peer was last heard: the latest authenticated packet
+	heard: Instant,
+	/// When the keep-alive's first probe past the congestion window since the peer last
+	/// acknowledged progress went out, and how many have since
+	exempt_probes: Option<(Instant, u32)>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -368,6 +379,9 @@ impl Connection {
 			},
 			// Armed only once established, after the peer's parameters set it.
 			keep_alive: None,
+			liveness: None,
+			heard: now,
+			exempt_probes: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -762,6 +776,10 @@ impl Connection {
 		// resends data already in flight, so it is not one.
 		let mut pacing_until = None;
 
+		// Whatever still holds a send back sets the pacing timer again, so one that has since
+		// cleared, as when the data it held was reset, wakes nobody
+		self.timers.stop(Timer::Pacing);
+
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
 		let spaces = [SpaceId::Initial, SpaceId::Handshake, SpaceId::Data];
@@ -882,10 +900,13 @@ impl Connection {
 				if (ack_eliciting || padded) && self.spaces[space_id].loss_probes == 0 && !close {
 					debug_assert!(untracked_bytes <= segment_size as u64);
 
+					// A bandwidth probe held back leaves the sender limited by the probe, as
+					// `Ready::Blocked` does, not by the window or the pacer: only data it has to
+					// send counts for those.
 					let bytes_to_send = segment_size as u64 + untracked_bytes;
 					if self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
 						send_blocked = true;
-						cwnd_blocked = true;
+						cwnd_blocked |= !bandwidth_probe;
 						trace!("blocked by congestion control");
 						if !acks_alone {
 							// We continue instead of breaking here in order to avoid
@@ -899,7 +920,9 @@ impl Connection {
 					else if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
-						pacing_until = Some(delay);
+						if !bandwidth_probe {
+							pacing_until = Some(delay);
+						}
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
@@ -1055,7 +1078,7 @@ impl Connection {
 					&& self.path.in_flight.bytes + untracked_bytes > self.path.congestion.window()
 				{
 					send_blocked = true;
-					cwnd_blocked = true;
+					cwnd_blocked |= !bandwidth_probe;
 					trace!("blocked by congestion control");
 					if !acks_alone {
 						space_idx += 1;
@@ -1311,19 +1334,25 @@ impl Connection {
 
 		// Send MTU probe if necessary. Only probe validated paths: probes bypass the
 		// anti-amplification check above, and until a migrated path is validated, its budget is
-		// needed for PATH_CHALLENGE.
-		if buf.is_empty() && self.state.is_established() && self.path.validated {
+		// needed for PATH_CHALLENGE. One still challenged again after a short challenge has not
+		// shown it carries `min_mtu`, let alone more. Whatever held this call's data back holds
+		// the probe too.
+		if buf.is_empty()
+			&& self.state.is_established()
+			&& self.path.validated
+			&& self.path.challenge.is_none()
+			&& !send_blocked
+			&& !rate_blocked
+			&& let Some(probe_size) = self.path.mtud.poll_transmit(now)
+			&& self.mtu_probe_cleared(now, probe_size)
+		{
 			let space_id = SpaceId::Data;
-			let probe_size = self
-				.path
-				.mtud
-				.poll_transmit(now, self.packet_number_filter.peek(&self.spaces[space_id]))?;
-
 			let buf_capacity = probe_size as usize;
 			buf.reserve(buf_capacity);
 
 			let mut builder =
 				PacketBuilder::new(now, space_id, self.rem_cids.active(), buf, buf_capacity, 0, true, self)?;
+			let pn = builder.exact_number;
 
 			// We implement MTU probes as ping packets padded up to the probe size
 			buf.write(frame::FrameType::PING);
@@ -1341,6 +1370,7 @@ impl Connection {
 				..Default::default()
 			};
 			builder.finish_and_track(now, self, Some(sent_frames), buf);
+			self.path.mtud.on_probe_sent(pn, probe_size);
 
 			self.stats.path.sent_plpmtud_probes += 1;
 			num_datagrams = 1;
@@ -1371,6 +1401,25 @@ impl Connection {
 			},
 			local_ip: self.local_ip,
 		})
+	}
+
+	/// Whether an MTU probe of `size` bytes may go now: it is ack-eliciting data like any other,
+	/// so the congestion window, the pacer, and the send rate cap hold it back too
+	fn mtu_probe_cleared(&mut self, now: Instant, size: u16) -> bool {
+		let size = u64::from(size);
+		if self.path.in_flight.bytes + size > self.path.congestion.window() {
+			return false;
+		}
+		let delay = self
+			.path
+			.congestion
+			.pace(now, size)
+			.or_else(|| self.send_rate.as_mut().and_then(|cap| cap.delay(now, size)));
+		if let Some(delay) = delay {
+			self.timers.set(Timer::Pacing, delay);
+			return false;
+		}
+		true
 	}
 
 	/// Pad a datagram to `min_mtu`, or to its `room` when the anti-amplification limit shrank it
@@ -1483,7 +1532,7 @@ impl Connection {
 				// A datagram read after the idle deadline, as one buffered while this process was
 				// stopped, finds the connection already timed out: handling it first would restart
 				// the idle timer, and its ACKs would fold the stop into the RTT and so into 3 * PTO.
-				if self.timers.is_expired(Timer::Idle, now) {
+				if self.timers.is_expired(Timer::Idle, now) || self.timers.is_expired(Timer::Silent, now) {
 					self.handle_timeout(now);
 					return;
 				}
@@ -1576,9 +1625,20 @@ impl Connection {
 						false => Error::TimedOut,
 					});
 				}
+				Timer::KeepAlive if self.liveness.is_some() => self.probe(now),
 				Timer::KeepAlive => {
 					trace!("sending keep-alive");
 					self.ping();
+				}
+				Timer::Stale => {
+					if self.liveness.as_mut().is_some_and(|liveness| liveness.expire(now)) {
+						debug!("peer is stale");
+						self.streams.waits.wake_stale();
+					}
+				}
+				Timer::Silent => {
+					debug!("keep-alive closing on a silent peer");
+					self.kill(Error::TimedOut);
 				}
 				Timer::LossDetection => {
 					self.on_loss_detection_timeout(now);
@@ -1591,13 +1651,10 @@ impl Connection {
 				}
 				Timer::PathValidation => {
 					debug!("path validation failed");
-					if let Some((_, prev)) = self.prev_path.take() {
-						// The failed path's congestion wait ends with it.
-						self.observe_congestion(now, true);
-						self.path = prev;
-						self.set_loss_detection_timer(now);
+					match self.prev_path.take() {
+						Some((_, prev)) => self.fall_back(now, prev),
+						None => self.path.challenge = None,
 					}
-					self.path.challenge = None;
 				}
 				Timer::Pacing => trace!("pacing timer expired"),
 				Timer::PushNewCid => {
@@ -1943,6 +2000,39 @@ impl Connection {
 		self.streams.peak_stream_receive_window()
 	}
 
+	/// Start `keep_alive`, replacing any running, measured from when the peer was last heard
+	///
+	/// It replaces the keep-alive [`transport::Config::keep_alive`] derives: a PING goes out each
+	/// half of `soft` the peer stays unheard and nothing else ack-eliciting went out, the peer turns stale
+	/// once all of `soft` passes (see [`Self::poll_stale`]), and the connection closes as
+	/// [`Error::TimedOut`] once `hard` does. Errors, changing nothing, on a `hard` longer than the
+	/// negotiated idle timeout, which stays in force as a backstop.
+	pub fn set_keep_alive(&mut self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
+		let liveness = Liveness::new(keep_alive, self.idle_timeout, self.heard)?;
+		if self.liveness.replace(liveness).is_some_and(|old| old.is_stale()) {
+			self.streams.waits.wake_stale();
+		}
+		self.arm_liveness();
+		// The driver reads the new deadlines when it next polls.
+		self.streams.waits.wake_transmit();
+		Ok(())
+	}
+
+	/// Whether a [`KeepAlive`] found the peer unheard for its `soft` limit
+	pub fn is_stale(&self) -> bool {
+		self.liveness.as_ref().is_some_and(Liveness::is_stale)
+	}
+
+	/// Wait until [`Self::is_stale`] differs from `stale`, returning the new value
+	pub fn poll_stale(&mut self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		let now = self.is_stale();
+		if now != stale {
+			return Poll::Ready(now);
+		}
+		self.streams.waits.register_stale(waiter);
+		Poll::Pending
+	}
+
 	/// Change every limit `limits` sets, leaving the others as they are
 	///
 	/// Errors, changing nothing, on limits [`Limits::validate`] refuses.
@@ -2051,10 +2141,11 @@ impl Connection {
 				ecn_acked += u64::from(info.ecn && this_path);
 				self.spaces[space].ecn_prior_path |= info.ecn && !this_path;
 
-				// Notify MTU discovery that a packet was acked, because it might be an MTU probe
-				let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
-				if mtu_updated {
-					self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
+				// Notify MTU discovery that a packet was acked, because it might be an MTU probe. One
+				// the peer's previous path sent stays that path's, which it may return to.
+				let path = self.sent_path(info.path_generation);
+				if path.mtud.on_acked(space, packet, info.size) {
+					path.congestion.on_mtu_update(path.mtud.current_mtu());
 				}
 
 				// Packet numbers repeat across spaces, and only 1-RTT packets carry ACK_FREQUENCY. A
@@ -2135,6 +2226,7 @@ impl Connection {
 			return false;
 		}
 
+		let mut answered = false;
 		for range in ack.iter() {
 			let spurious_losses: Vec<u64> = space.lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
 
@@ -2142,14 +2234,18 @@ impl Connection {
 				// A late packet still carried its mark into the peer's counts
 				let lost = space.lost_packets.remove(pn).expect("listed above");
 				space.ecn_prior_path |= lost.ecn_path.is_some_and(|path| path != generation);
+				answered |= lost.congestion_path == Some(generation);
 			}
 		}
 
-		// If this ACK frame acknowledged all deemed lost packets,
-		// then we have raised a spurious congestion event in the past.
-		// We cannot conclude when there are remaining packets,
-		// but future ACK frames might indicate a spurious loss detection.
-		space.lost_packets.is_empty()
+		// Once this ACK covers every loss this path's controller answered, its response was
+		// spurious. Losses it never heard, such as an ACK-only packet's, prove nothing: a late ACK
+		// of one would undo an unrelated cut.
+		answered
+			&& !space
+				.lost_packets
+				.range(..)
+				.any(|(_, lost)| lost.congestion_path == Some(generation))
 	}
 
 	/// Drain lost packets that we reasonably think will never arrive
@@ -2182,6 +2278,10 @@ impl Connection {
 			Ok(false) => {}
 			// The marks may be the earlier path's, whose controller this path's never answers for
 			Ok(true) if prior_path => debug!("CE marks may belong to an earlier path"),
+			// While the path validates, its controller hears no congestion signal, as it hears no
+			// ACK (see `on_packet_acked`): BBR3 would leave Startup with no bandwidth sample and
+			// pace at zero.
+			Ok(true) if self.path.challenge.is_some() => {}
 			Ok(true) => {
 				self.stats.path.congestion_events += 1;
 				self.path.congestion.on_ce(congestion::Ce {
@@ -2369,8 +2469,14 @@ impl Connection {
 
 	fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
 		let mut lost_packets = Vec::<u64>::new();
-		let mut lost_mtu_probe = None;
-		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe(pn_space);
+		let mut lost_mtu_probes = [None; 2];
+		// The previous path's probe too, which stays that path's
+		let in_flight_mtu_probes = [
+			self.path.mtud.in_flight_mtu_probe(pn_space),
+			self.prev_path
+				.as_ref()
+				.and_then(|(_, prev)| prev.mtud.in_flight_mtu_probe(pn_space)),
+		];
 		let rtt = self.path.rtt.conservative();
 		let loss_delay = cmp::max(rtt.mul_f32(self.config.time_threshold), TIMER_GRANULARITY);
 
@@ -2402,10 +2508,10 @@ impl Connection {
 			// saturating equivalent of this substraction operation with a Duration.
 			let packet_too_old = now.saturating_duration_since(info.time_sent) >= loss_delay;
 			if packet_too_old || largest_acked_packet >= packet + packet_threshold {
-				if Some(packet) == in_flight_mtu_probe {
+				if let Some(i) = in_flight_mtu_probes.iter().position(|&probe| probe == Some(packet)) {
 					// Lost MTU probes are not included in `lost_packets`, because they should not
 					// trigger a congestion control response
-					lost_mtu_probe = in_flight_mtu_probe;
+					lost_mtu_probes[i] = Some(packet);
 				} else {
 					lost_packets.push(packet);
 					size_of_lost_packets += info.size as u64;
@@ -2413,7 +2519,7 @@ impl Connection {
 						match persistent_congestion_start {
 							// Two ACK-eliciting packets lost more than congestion_period apart, with no
 							// ACKed packets in between
-							Some(start) if info.time_sent - start > congestion_period => {
+							Some(start) if info.time_sent.saturating_duration_since(start) > congestion_period => {
 								in_persistent_congestion = true;
 							}
 							// Persistent congestion must start after the first RTT sample
@@ -2448,11 +2554,14 @@ impl Connection {
 
 			for &packet in &lost_packets {
 				let info = self.spaces[pn_space].sent_packets.remove(packet).unwrap(); // safe: lost_packets is populated just above
-				// A packet from another path carries another controller's state.
-				if let Some(state) = info
+				// A packet from another path carries another controller's state. While the path
+				// validates, its controller hears no loss, as it hears no ACK (see
+				// `on_packet_acked`): losses alone read as a path that delivers nothing.
+				let generation = self.path.generation();
+				let state = info
 					.congestion
-					.filter(|_| info.path_generation == self.path.generation())
-				{
+					.filter(|_| self.path.challenge.is_none() && info.path_generation == generation);
+				if let Some(state) = state {
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
@@ -2473,13 +2582,17 @@ impl Connection {
 					self.ack_frequency.on_lost(packet);
 				}
 				self.spaces[pn_space].pending |= info.retransmits;
-				self.path.mtud.on_non_probe_lost(pn_space, packet, info.size);
+				// Judged against the ACKs of the path that sent it, which `on_ack` feeds the same way
+				self.sent_path(info.path_generation)
+					.mtud
+					.on_non_probe_lost(pn_space, packet, info.size);
 
 				self.spaces[pn_space].lost_packets.insert(
 					packet,
 					LostPacket {
 						time_sent: info.time_sent,
 						ecn_path: info.ecn.then_some(info.path_generation),
+						congestion_path: state.is_some().then_some(generation),
 					},
 				);
 			}
@@ -2488,6 +2601,13 @@ impl Connection {
 				self.stats.path.black_holes_detected += 1;
 				self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
 				self.datagrams().drop_oversized();
+			}
+			// The previous path's losses close their burst there, and judge only its own MTU
+			if let Some((_, prev)) = &mut self.prev_path
+				&& prev.mtud.black_hole_detected(now)
+			{
+				self.stats.path.black_holes_detected += 1;
+				prev.congestion.on_mtu_update(prev.mtud.current_mtu());
 			}
 
 			// Don't apply congestion penalty for lost ack-only packets
@@ -2503,10 +2623,10 @@ impl Connection {
 		}
 
 		// Handle a lost MTU probe
-		if let Some(packet) = lost_mtu_probe {
-			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
+		for packet in lost_mtu_probes.into_iter().flatten() {
+			let info = self.spaces[SpaceId::Data].sent_packets.remove(packet).unwrap(); // safe: lost_mtu_probes is omitted from lost_packets, and therefore must not have been removed yet
 			self.remove_in_flight(&info);
-			self.path.mtud.on_probe_lost();
+			self.sent_path(info.path_generation).mtud.on_probe_lost();
 			self.stats.path.lost_plpmtud_probes += 1;
 		}
 	}
@@ -2620,6 +2740,18 @@ impl Connection {
 		packet: Option<u64>,
 		spin: bool,
 	) {
+		// Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+		// Version Negotiation packet.
+		if packet.is_some() {
+			self.heard = self.heard.max(now);
+			if let Some(liveness) = &mut self.liveness
+				&& liveness.heard(now)
+			{
+				debug!("peer is live again");
+				self.streams.waits.wake_stale();
+			}
+			self.arm_liveness();
+		}
 		self.reset_keep_alive(now);
 		self.reset_idle_timeout(now, space_id);
 		self.permit_idle_reset = true;
@@ -2671,6 +2803,10 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
+		// A keep-alive counts only what the peer sends; see [`Self::arm_liveness`].
+		if self.liveness.is_some() {
+			return;
+		}
 		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
@@ -2681,6 +2817,61 @@ impl Connection {
 			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
 			None => self.timers.stop(Timer::KeepAlive),
 		}
+	}
+
+	/// Probe an unheard peer under a keep-alive, unless something ack-eliciting went out within half
+	/// of its `soft`, then check again half a `soft` after the latest
+	///
+	/// Ack-eliciting packets on a dead path stay in flight, and PTO probes back off exponentially,
+	/// so this bounds the gap between probes: a path that heals is heard within half a `soft`, even
+	/// with the congestion window full.
+	fn probe(&mut self, now: Instant) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		let after = liveness.probe_after();
+		let limit = liveness.probes_before_close();
+		let sent = self.spaces[SpaceId::Data].time_of_last_ack_eliciting_packet;
+		match sent.map(|sent| sent.saturating_add(after)).filter(|&at| at > now) {
+			Some(at) => self.timers.set(Timer::KeepAlive, at),
+			None => {
+				trace!("sending keep-alive probe");
+				self.ping();
+				// Exempt from congestion control, as a PTO's probe is: a dead path leaves the window
+				// full of packets nothing acknowledges, and the backed-off PTO can fall past `hard`.
+				// Only as many as a dead path draws before `hard` closes it, until the peer
+				// acknowledges one: a peer that keeps talking without acknowledging could otherwise
+				// grow the sent history by one probe per half `soft`.
+				let space = self.highest_space;
+				let acked = self.spaces[space].largest_acked_packet_sent;
+				let (since, count) = self
+					.exempt_probes
+					.filter(|&(since, _)| acked < since)
+					.unwrap_or((now, 0));
+				// A reservation still waiting to leave, as behind a stalled socket, already covers this.
+				if count < limit && self.spaces[space].loss_probes == 0 {
+					self.exempt_probes = Some((since, count + 1));
+					self.spaces[space].loss_probes = 1;
+				}
+				self.timers.set(Timer::KeepAlive, now.saturating_add(after));
+			}
+		}
+	}
+
+	/// Arm the keep-alive's probe, stale, and silent timers from when the peer was last heard
+	fn arm_liveness(&mut self) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		if self.state.is_closed() {
+			return;
+		}
+		self.timers.set(Timer::KeepAlive, liveness.probe_at());
+		match liveness.stale_at() {
+			Some(at) => self.timers.set(Timer::Stale, at),
+			None => self.timers.stop(Timer::Stale),
+		}
+		self.timers.set(Timer::Silent, liveness.silent_at());
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -3518,7 +3709,16 @@ impl Connection {
 							trace!("new path validated");
 							self.timers.stop(Timer::PathValidation);
 							self.path.challenge = None;
+							// Kept only to fall back to while this path validates
+							self.prev_path = None;
 						}
+					} else if let Some((_, prev_path)) = &mut self.prev_path
+						&& remote == prev_path.remote
+						&& prev_path.challenge.is_some_and(|challenge| challenge.token == token)
+					{
+						// The previous path still works, so a migration back to it skips validation
+						trace!("previous path validated");
+						prev_path.challenge = None;
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
 					}
@@ -3581,6 +3781,12 @@ impl Connection {
 						sequence,
 						allow_more_cids,
 					));
+					// The peer catching up on a Retire Prior To lets the next expiry proceed, and a
+					// retirement may drop the batch the timer was armed for
+					match self.local_cid_state.next_timeout() {
+						Some(at) => self.timers.set(Timer::PushNewCid, at),
+						None => self.timers.stop(Timer::PushNewCid),
+					}
 				}
 				Frame::NewConnectionId(frame) => {
 					trace!(
@@ -3749,11 +3955,21 @@ impl Connection {
 
 	fn migrate(&mut self, now: Instant, remote: SocketAddr) {
 		trace!(%remote, "migration initiated");
+		// The peer is back on the address validated before an apparent migration, which was
+		// spurious, as when an attacker forwards a copy of its packet (RFC 9000 §9.3.3). Return to
+		// that path, skipping validation and keeping its loss detection and congestion state (§9.3).
+		if let Some((_, prev)) = self.prev_path.take_if(|(_, prev)| prev.remote == remote) {
+			trace!("returning to the previous path");
+			self.fall_back(now, prev);
+			return;
+		}
 		self.path_counter = self.path_counter.wrapping_add(1);
-		// Reset rtt/congestion state for new path unless it looks like a NAT rebinding.
+		// Reset rtt/congestion state for new path unless it looks like a NAT rebinding: only the
+		// port changed (RFC 9000 §9.4). A dual-stack socket reports an IPv4 peer as IPv4-mapped
+		// IPv6, so compare canonical addresses.
 		// Note that the congestion window will not grow until validation terminates. Helps mitigate
 		// amplification attacks performed by spoofing source addresses.
-		let mut new_path = if remote.is_ipv4() && remote.ip() == self.path.remote.ip() {
+		let mut new_path = if remote.ip().to_canonical() == self.path.remote.ip().to_canonical() {
 			PathData::from_previous(remote, &self.path, self.path_counter)
 		} else {
 			let peer_max_udp_payload_size =
@@ -3772,9 +3988,7 @@ impl Connection {
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
-		// The old path's congestion wait ends with it.
-		self.observe_congestion(now, true);
-		let mut prev = mem::replace(&mut self.path, new_path);
+		let mut prev = self.replace_path(now, new_path);
 		self.datagrams().drop_oversized();
 
 		// Don't clobber the original path if the previous one hasn't been validated yet
@@ -3789,6 +4003,58 @@ impl Connection {
 			Timer::PathValidation,
 			now.saturating_add(3 * cmp::max(self.pto(SpaceId::Data), prev_pto)),
 		);
+	}
+
+	/// Return to the path the peer left, abandoning the unvalidated ones it moved to
+	fn fall_back(&mut self, now: Instant, prev: PathData) {
+		self.replace_path(now, prev);
+		self.path.challenge = None;
+		self.timers.stop(Timer::PathValidation);
+
+		// No path counts what went out on the abandoned ones in flight, so loss detection would
+		// never find it lost: requeue it, as those addresses may never have reached the peer. A
+		// late ACK of it then goes unmatched, as one of a packet already declared lost may.
+		let generation = self.path.generation();
+		let space = &mut self.spaces[SpaceId::Data];
+		let sent: Vec<u64> = space
+			.sent_packets
+			.range(..)
+			.filter(|(_, info)| info.path_generation != generation)
+			.map(|(pn, _)| pn)
+			.collect();
+		for packet in sent {
+			let info = self.spaces[SpaceId::Data]
+				.sent_packets
+				.remove(packet)
+				.expect("listed above");
+			// A probe's duplicates leave the loss of their data to the originals
+			if !info.bandwidth_probe {
+				for frame in info.stream_frames {
+					self.streams.retransmit(frame);
+				}
+			}
+			self.ack_frequency.on_lost(packet);
+			self.spaces[SpaceId::Data].pending |= info.retransmits;
+		}
+
+		self.datagrams().drop_oversized();
+		self.set_loss_detection_timer(now);
+	}
+
+	/// The path a packet sent on path `generation` counts against: the previous one if it went
+	/// there, otherwise the current one
+	fn sent_path(&mut self, generation: u64) -> &mut PathData {
+		match &mut self.prev_path {
+			Some((_, prev)) if prev.generation() == generation => prev,
+			_ => &mut self.path,
+		}
+	}
+
+	/// Make `path` the current path, returning the one it replaces
+	fn replace_path(&mut self, now: Instant, path: PathData) -> PathData {
+		// The old path's congestion wait ends with it.
+		self.observe_congestion(now, true);
+		mem::replace(&mut self.path, path)
 	}
 
 	/// Handle a change in the local address, i.e. an active migration
@@ -4380,6 +4646,32 @@ impl Connection {
 		buf
 	}
 
+	/// Whether the path the peer moved away from is still kept to fall back to
+	#[cfg(test)]
+	pub(crate) fn has_prev_path(&self) -> bool {
+		self.prev_path.is_some()
+	}
+
+	/// How many keep-alive probes past the congestion window count against the current budget
+	#[cfg(test)]
+	pub(crate) fn exempt_probes_spent(&self) -> u32 {
+		self.exempt_probes.map_or(0, |(_, count)| count)
+	}
+
+	/// Bytes in flight on the current path, and its congestion window
+	#[cfg(test)]
+	pub(crate) fn in_flight_and_window(&self) -> (u64, u64) {
+		(self.path.in_flight.bytes, self.path.congestion.window())
+	}
+
+	/// When the pacer's bucket is full again, or `None` if it is now
+	#[cfg(test)]
+	pub(crate) fn pacing_release(&mut self, now: Instant) -> Option<Instant> {
+		// The pacer caps what it waits for at its bucket, so asking for the most it could send
+		// waits for a full one
+		self.path.congestion.pace(now, u64::MAX)
+	}
+
 	/// The number of bytes of packets containing retransmittable frames that have not been
 	/// acknowledged or declared lost.
 	#[cfg(test)]
@@ -4419,7 +4711,7 @@ impl Connection {
 		self.streams.receive_rate_deadline()
 	}
 
-	/// Whether no timers but keepalive, idle, rtt, pushnewcid, and key discard are running
+	/// Whether no timers but keepalive, idle, rtt, pushnewcid, key discard, stale, and silent are running
 	#[cfg(test)]
 	pub(crate) fn is_idle(&self) -> bool {
 		if self.streams.receive_rate_deadline().is_some() {
@@ -4427,7 +4719,12 @@ impl Connection {
 		}
 		Timer::VALUES
 			.iter()
-			.filter(|&&t| !matches!(t, Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard))
+			.filter(|&&t| {
+				!matches!(
+					t,
+					Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard | Timer::Stale | Timer::Silent
+				)
+			})
 			.filter_map(|&t| Some((t, self.timers.get(t)?)))
 			.min_by_key(|&(_, time)| time)
 			.is_none_or(|(timer, _)| timer == Timer::Idle)

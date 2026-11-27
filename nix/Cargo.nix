@@ -22357,6 +22357,10 @@ rec {
             features = [ "async" ];
           }
           {
+            name = "moq-json";
+            packageId = "moq-json";
+          }
+          {
             name = "moq-mux";
             packageId = "moq-mux";
           }

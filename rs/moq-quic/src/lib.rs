@@ -45,6 +45,7 @@ pub(crate) use stream::{Dir, Id as StreamId};
 mod config;
 mod limits;
 pub use config::{ConfigError, client, server, transport};
+pub use connection::{KeepAlive, KeepAliveError};
 pub use limits::{Limits, LimitsError, Rate};
 
 pub mod crypto;

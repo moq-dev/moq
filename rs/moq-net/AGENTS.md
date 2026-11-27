@@ -1,4 +1,4 @@
-The wire layer: generic over transport and media-agnostic. Protocol state-machine details (stream instances, live edge, group expiry, route switching) live in `src/lib.rs` and `doc/concept/moq-lite.md`.
+The wire layer: generic over transport and media-agnostic. Protocol state-machine details (stream identities, live edge, group expiry, route switching) live in `src/lib.rs` and `doc/concept/moq-lite.md`.
 
 # Rules
 
