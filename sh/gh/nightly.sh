@@ -139,10 +139,10 @@ case "$1" in
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
-        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
+        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring \
             -p moq-quic --features moq-stats/bench,moq-quic/fuzz \
             --bench http_idle --bench auth --bench http_auth --bench producer_tick --bench decode --bench aggregate \
-            --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
+            --bench catalog --bench ts_schedule --bench export --bench containers \
             --bench chunk_interleaving --bench worker_turns \
             --bench streams --bench receive --bench endpoint --bench wire
         ;;
@@ -194,7 +194,6 @@ case "$1" in
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript audio-support just js audio-support-bench
-        javascript pattern just js pattern-bench
         javascript clock just js clock-bench
         ;;
     # The binding benchmark's runners at a token budget, so they keep working at this

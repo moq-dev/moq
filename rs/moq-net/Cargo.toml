@@ -237,6 +237,10 @@ harness = false
 required-features = ["async"]
 
 [[bench]]
+name = "prefixes"
+harness = false
+
+[[bench]]
 name = "path"
 harness = false
 required-features = ["fuzz"]

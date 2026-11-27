@@ -63,7 +63,7 @@ judged, so this pass reads only the difference:
     [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855), and `e2ee`
     left with the crate move
     ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)).
-  - `serde` in moq-pattern and moq-crypto: an optional dependency, by
+  - `serde` in moq-crypto: an optional dependency, by
     ecosystem convention.
   - moq-video's `capture`: device I/O the bindings deliberately leave to the
     language wrappers, and its platform frameworks would bloat mobile builds.

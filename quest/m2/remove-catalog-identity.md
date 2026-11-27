@@ -34,8 +34,3 @@ Scope:
 - Explicitly preserve `moq_net::Identity` on the wire and route table,
   `BroadcastConsumer::info().identity`, and announcement-driven
   restart/takeover behavior.
-
-## Related
-
-- [Delete moq-pattern and @moq/pattern](/quest/m2/delete-moq-pattern.md) -
-  companion pre-0.22 removal

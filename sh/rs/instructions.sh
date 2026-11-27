@@ -40,8 +40,7 @@ targets=(
     "moq-mux parameter_sets" "moq-mux sync" "moq-mux ts_programs" "moq-mux ts_schedule" "moq-mux ts_video"
     "moq-net announce" "moq-net auth" "moq-net bandwidth" "moq-net canonical" "moq-net codec" "moq-net frame"
     "moq-net interests" "moq-net priority" "moq-net retirement" "moq-net schedule" "moq-net stats"
-    "moq-net synced" "moq-net tail" "moq-net tracks" "moq-net varint" "moq-net viewers"
-    "moq-pattern matching"
+    "moq-net prefixes" "moq-net synced" "moq-net tail" "moq-net tracks" "moq-net varint" "moq-net viewers"
     "moq-quic endpoint" "moq-quic receive" "moq-quic sent_packets" "moq-quic streams"
     "moq-rtmp chunk_interleaving"
 )

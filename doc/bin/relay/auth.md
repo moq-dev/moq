@@ -138,7 +138,7 @@ sessions by the fields the server already saw; see
 curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
 
 # Re-check everyone under a path.
-curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?path=demo/**'
+curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?prefix=demo'
 
 moq auth revalidate --internal-url http://127.0.0.1:9101 --id 00ff
 ```
@@ -291,7 +291,7 @@ the relay opens the window once it admits the session.
 
 ### Path matching
 
-Grants are [prefixes](https://docs.rs/moq-pattern) relative to `root`: `foo`
+Grants are [prefixes](https://docs.rs/moq-net/latest/moq_net/path/struct.Prefix.html) relative to `root`: `foo`
 covers `foo` and everything beneath it, and the empty prefix `""` covers
 everything. A grant takes no wildcard: `foo/**`, `**`, `live/*`, or `cam-*.hang`
 is refused in `moq auth serve` rules, relay config, and CLI flags, with a

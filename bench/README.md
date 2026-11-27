@@ -761,12 +761,11 @@ The browser smoke lane preserves one measured round of all seven fixtures, and d
 ledger, bandwidth, replay and buffered also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
-## Pattern and container coverage
+## Prefix and container coverage
 
-Rust Criterion coverage includes `moq-pattern`'s
-`matching` (pattern count and path depth, last match and miss; and, in
-`pattern-algebra`, whole-union operations, including the worst known peer grant
-shapes swept over encoded size up to a whole `AUTH_OK`) and `moq-mux`'s
+Rust Criterion coverage includes `moq-net`'s `prefixes` (collecting a peer
+grant's prefixes and comparing them with the previous grant, swept over encoded
+size up to a whole `AUTH_OK`) and `moq-mux`'s
 `containers` (CMAF and Annex-B import/export). Container cases vary frame count
 and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.
@@ -880,7 +879,7 @@ These write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
 measured Rust run using the same evidence lifecycle:
 
 ```bash
-nix develop --command env BENCH_LABEL=pattern BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
+nix develop --command env BENCH_LABEL=prefixes BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-net --bench prefixes
 nix develop --command just gh benchmark-report rust /tmp /tmp/rust-report.json
 ```
 

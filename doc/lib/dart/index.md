@@ -61,7 +61,7 @@ final moq = await Moq.connect('https://relay.example.com');
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
 moq
     .announced(
-      options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
+      options: const AnnounceOptions(prefix: 'live'),
     )
     .updates()
     .listen((event) {
@@ -70,8 +70,6 @@ moq
   switch (event) {
     case AnnounceEventPresent(:final announce):
       print(announce.prefix);
-      // Captures are a list of wildcard matches, empty without wildcards.
-      print(announce.captures);
     case AnnounceEventAbsent():
   }
 });

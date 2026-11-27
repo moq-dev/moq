@@ -191,7 +191,7 @@ explicit opt-in on the announce request. On moq-transport that opt-in is the
 [hidden](/draft/moq-hidden) extension; a peer that never declares it receives
 every authorized namespace, dot-prefixed ones included.
 
-## Grants and filters
+## Grants and listings
 
 A grant, what a token or an origin scope lets a session publish and subscribe
 to, is a set of path prefixes. A prefix covers its path and everything beneath
@@ -207,30 +207,15 @@ it instead, so a claim at `room` through a grant of `room/alice` is announced at
 `room/alice`, and no reader is shown it where it cannot serve. Each relay it
 crosses does the same with the grant it takes the claim under.
 
-Patterns are discovery filters: they pick which announcements a consumer lists,
-and never widen or narrow what it may request. They never travel as
-announcements: the wire carries prefixes, and each side filters locally.
-
-A pattern matches the whole path. `room` matches only `room`, while `room/**`
-matches `room` and every descendant. Segments are separated by `/`:
-
-| Segment | Matches |
-| --- | --- |
-| `room` | That literal segment. |
-| `*` | Exactly one nonempty segment. |
-| `camera-*` | One segment starting with `camera-`. |
-| `pre*suf` | One segment with that prefix and suffix, without overlapping them. |
-| `**` | Zero or more segments. |
-
-A pattern may contain at most 32 segments and one `**`. A literal escapes a `/`
-the way a path does, so `room/a\/b/*` names a namespace field holding a `/`;
-there is no escape for a literal `*`. The empty pattern matches the empty path.
+A listing names the prefixes to watch, the same way a grant does, and a
+consumer narrows it to any subset locally. There is no wildcard: a `*` in a path
+is an ordinary byte.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
-its scope can use. A listing reports only routes whose literal name matches its
-filter: under `**/*.chat`, a claim at `room` is left out even though it could
-serve `room/lobby.chat`, and so is a route above the root. Requests still
+its scope can use. A listing reports only routes its prefixes cover: listing
+`room/lobby.chat`, a claim at `room` is left out even though it could serve
+`room/lobby.chat`, and so is a route above the root. Requests still
 resolve through such covering routes, and a session still forwards them to its
 peer, which routes through them. Code that routes or forwards opts in with the
 origin consumer's covering view: `covering()` in Rust, `{ covering: true }` in
@@ -240,7 +225,7 @@ JS.
 
 On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
 own Auth stream and learns what it may publish and subscribe to: a set of
-[path prefixes](#grants-and-filters), delivered exactly as issued. Right after setup both sides present the credential the connection
+[path prefixes](#grants-and-listings), delivered exactly as issued. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the

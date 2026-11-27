@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-net's model, and the kio (clock included) and moq-pattern code it calls, stay inside the
+moq-net's model, and the kio (clock included) code it calls, stay inside the
 subset [rust2-ts](https://github.com/kixel-ai/rust2/blob/main/ts/README.md) translates,
 so the [source-translator route](/quest/m5/rs2ts-js.md) can be measured on the model
 with no hand-written stand-ins for moq's own logic.

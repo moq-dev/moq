@@ -54,15 +54,15 @@ import dev.moq.media.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
-    moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
+    moq.announced(AnnounceConfig(prefix = "live")).updates().collect { event ->
         // A path stays present across publisher restarts: hold moq.follow(path) to be handed
         // each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
             is AnnounceEventAbsent -> return@collect
         }
-        // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
-        println(announce.captures)
+        // Prefixes stay origin-relative.
+        println(announce.prefix)
         val broadcast = moq.request(announce.prefix)
         println(catalog(broadcast))
     }

@@ -76,7 +76,7 @@ Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 on demand as separate chunks, so a moq-lite session WebTransport wins within its head start
 never downloads them.
 Grant prefixes and discovery scopes are on the
-[concept page](/concept/moq-lite#grants-and-filters).
+[concept page](/concept/moq-lite#grants-and-listings).
 
 Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
 Readers that fall behind the shed front receive `Evicted`; tracks that
