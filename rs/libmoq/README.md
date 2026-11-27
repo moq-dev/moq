@@ -200,6 +200,11 @@ int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_l
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);
+int32_t moq_consume_meta(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_header, void *user_data);
+int32_t moq_consume_meta_update(uint32_t meta, const moq_subscription *subscription);
+int32_t moq_consume_meta_header(uint32_t header, moq_header *dst);
+int32_t moq_consume_meta_header_free(uint32_t header);
+int32_t moq_consume_meta_cancel(uint32_t meta);
 
 // Codecs without a broadcast: encode, then publish or store the packets yourself
 int32_t moq_audio_encoder_create(const moq_audio_encoder_output *output);
@@ -231,6 +236,10 @@ theirs to the track's timescale, a microsecond one unless
 the key a scale-less group's frames carry. `moq_consume_track_frame` points
 `moq_frame.timestamp` at the timestamp read, never NULL, valid until the frame
 is freed.
+
+`moq_consume_meta` reads a track's metadata: each frame's group, index,
+declared size, and timestamp in a `moq_header`, without its payload. It is a
+subscription of its own beside any `moq_consume_track` of the same track.
 
 A zeroed `moq_track_info`, like a NULL one, advertises a zero max age, how long
 a superseded group stays fresh, so only the live edge is served. Set

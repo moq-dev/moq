@@ -2750,6 +2750,57 @@ fn raw_track_ends_on_an_aborted_group() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A metadata subscription delivers each frame's position, declared size, and timestamp, an
+/// empty frame as size 0, then ends cleanly with the track; a header outlives its callback until
+/// freed.
+#[test]
+fn meta_reads_headers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"meta-reads-headers");
+	let name = b"video";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let consume = consume_local(broadcast);
+	let header_cb = Callback::new();
+	let meta = id(unsafe {
+		moq_consume_meta(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			header_cb.ptr,
+		)
+	});
+
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	for (payload, at) in [(&b"key"[..], 0), (b"", 1)] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &micros(at)) },
+			0
+		);
+	}
+	assert_eq!(moq_publish_group_finish(group), 0);
+
+	let mut headers = Vec::new();
+	for _ in 0..2 {
+		let header = id(header_cb.recv());
+		let mut dst = unsafe { std::mem::zeroed::<moq_header>() };
+		assert_eq!(unsafe { moq_consume_meta_header(header, &mut dst) }, 0);
+		assert_eq!(moq_consume_meta_header_free(header), 0);
+		assert!(moq_consume_meta_header_free(header) < 0, "freed once");
+		headers.push((dst.group, dst.frame, dst.size, dst.timestamp.value));
+	}
+	assert_eq!(headers, [(0, 0, 3, 0), (0, 1, 0, 1)]);
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(header_cb.recv(), 0, "the track finished");
+	assert!(moq_consume_meta_cancel(meta) < 0, "the task already ended");
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// The subscription's ranges filter the read, and an update replaces them on the live read.
 ///
 /// No delivery budget runs on the wall clock (the track keeps its groups and the read waits
