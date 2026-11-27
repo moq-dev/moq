@@ -31,9 +31,6 @@ echo "page_url=$page_url" >>"$GITHUB_OUTPUT"
 echo "Deploying artifact $1 to $page_url"
 deployment_path="repos/$GITHUB_REPOSITORY/pages/deployments/$id"
 
-# A cancelled or timed-out job stops its deployment rather than leave it pending.
-trap 'gh api -X POST "$deployment_path/cancel" >/dev/null; exit 1' INT TERM
-
 # Pages offers no completion event, so poll as deploy-pages does; the job's timeout bounds it.
 # A failed read is not a result: the deployment exists and may still be settling.
 while :; do
