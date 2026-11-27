@@ -294,6 +294,7 @@ A reset after a `GROUP_END` may cut the `GROUP_END`, so the publisher names the 
 Any other reset may lose the `GROUP` message, since a `RESET_STREAM` lets the peer's transport discard data it has not delivered, even data it acknowledged.
 So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT` or over a browser's WebTransport, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
 A subscriber that read the `GROUP` message first already accounted for the Group, and the drop ends its readers with the reset's error.
+The drop stands in for the reset, which a transport (such as a browser's WebTransport) can lose: a subscriber MAY stop reading a Group Stream once a drop names its Group, whether the drop arrives before or after its `GROUP` message, rather than wait for a reset that may never come.
 
 A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder subscribe again from the first Position they lack).
 Both peers MAY reset a Group Stream at any time without affecting the session.

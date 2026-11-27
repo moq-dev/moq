@@ -16,11 +16,6 @@ export interface TailOptions {
 export interface Counted {
 	/** Mark it read to its end. Idempotent. */
 	done(): void;
-	/**
-	 * The publisher accounted for its group another way, such as a drop, so {@link Tail.settle}
-	 * waits for it at most the grace. Idempotent.
-	 */
-	excuse(): void;
 	/** Stop holding the end open while it waits, unread, on a copy another stream delivers. Idempotent. */
 	park(): void;
 	/** Hold the end open again once it reads the group itself. Idempotent. */
@@ -48,9 +43,6 @@ export class Tail {
 	#active = 0;
 	// The lowest group a stream's header named, which proves the group exists.
 	#first: bigint | undefined;
-	// Streams still being read that the end waits for at most the grace, until a settle gives up
-	// on them, as the ledger does on a gap.
-	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration | undefined;
 	// Keys a drop named, so a stream whose header the drop overtook can be told from one
@@ -83,37 +75,25 @@ export class Tail {
 		this.#active += 1;
 		this.#account(key, key + 1n);
 
-		// Parked holds nothing, excused or not: an excuse made while parked applies once it resumes.
-		let state: "held" | "excused" | "parked" | "parked-excused" | "done" = "held";
-		const token = {};
+		// Parked holds nothing.
+		let state: "held" | "parked" | "done" = "held";
 		return {
 			done: () => {
+				if (state === "done") return;
 				if (state === "held") this.#active -= 1;
-				else if (state === "excused") this.#excused.delete(token);
-				else if (state === "done") return;
 				state = "done";
 				this.#bump();
 			},
-			excuse: () => {
-				if (state === "parked") state = "parked-excused";
-				if (state !== "held") return;
-				state = "excused";
-				this.#active -= 1;
-				this.#excused.add(token);
-				this.#bump();
-			},
 			park: () => {
-				if (state === "held") this.#active -= 1;
-				else if (state === "excused") this.#excused.delete(token);
-				else return;
-				state = state === "held" ? "parked" : "parked-excused";
+				if (state !== "held") return;
+				state = "parked";
+				this.#active -= 1;
 				this.#bump();
 			},
 			resume: () => {
-				if (state === "parked") this.#active += 1;
-				else if (state === "parked-excused") this.#excused.add(token);
-				else return;
-				state = state === "parked" ? "held" : "excused";
+				if (state !== "parked") return;
+				state = "held";
+				this.#active += 1;
 				this.#bump();
 			},
 		};
@@ -184,9 +164,9 @@ export class Tail {
 		return runGaps(this.#ledger.gaps(start, end), start, end);
 	}
 
-	/** Whether a group stream is still being read, an excused one included until a settle gives up on it. */
+	/** Whether a group stream is still being read. */
 	get reading(): boolean {
-		return this.#active > 0 || this.#excused.size > 0;
+		return this.#active > 0;
 	}
 
 	/** Bumped on every change {@link settle} watches. */
@@ -201,13 +181,11 @@ export class Tail {
 
 	/**
 	 * Wait until every stream is read to its end and `complete()` holds, or the grace passes
-	 * with nothing left being read but excused streams, or `closed` settles.
+	 * with nothing left being read, or `closed` settles.
 	 *
-	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
-	 * never because its track ended. The grace gives up on streams that never arrived, and on
-	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
-	 * publisher's drop already accounted for its group. `limit` caps the grace. With no grace,
-	 * only excused streams are given up, after `limit` or {@link GRACE}: every other start
+	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset, or on
+	 * lite-07 the drop naming its group, never because its track ended. The grace gives up on
+	 * streams that never arrived, and `limit` caps it. With no grace nothing is timed: every start
 	 * waits for the wire to account for it.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
@@ -217,23 +195,18 @@ export class Tail {
 
 		let expired = false;
 		const timer = new AbortController();
-		const wait = grace === undefined ? (limit ?? GRACE) : limit === undefined ? grace : grace.min(limit);
-		void sleep(wait, { signal: timer.signal }).then(
-			() => {
-				expired = true;
-				this.#bump();
-			},
-			() => {},
-		);
+		if (grace !== undefined) {
+			void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
+				() => {
+					expired = true;
+					this.#bump();
+				},
+				() => {},
+			);
+		}
 		try {
 			while (closed.peek() === undefined) {
-				if (this.#active === 0 && expired) {
-					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
-					// not wait another grace for them.
-					this.#excused.clear();
-					if (grace !== undefined) return;
-				}
-				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
+				if (this.#active === 0 && (expired || complete())) return;
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {

@@ -47,7 +47,7 @@ import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
-import { type Counted, Tail } from "../tail.ts";
+import { Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -301,11 +301,12 @@ interface SubscribeEntry {
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
-	// Lite-07: the hold each stream reading a group has on the subscription's end, by key, one
-	// per stream, so stream credit bounds them. A browser can lose the reset of a stream the publisher
-	// gave up on (Chromium drops one that reaches a stream before the page took it), so a drop naming
-	// the group excuses it, and the end waits for the stream at most the grace.
-	reading?: Map<bigint, Counted>;
+	// Lite-07: how to end each stream reading a group, with the group it reads, one per stream, so
+	// stream credit bounds them. A browser can lose the reset of a stream the publisher gave up on
+	// (Chromium drops one that reaches a stream before the page took it), so the drop naming the
+	// group, which the publisher sends for any reset that could lose its header, ends the stream in
+	// its place.
+	reading?: Map<(err: Error) => void, bigint>;
 	// Active subscription identity for D2 fetchGroup deduplication.
 	broadcast?: Path.Valid;
 	consumedId?: number;
@@ -2269,13 +2270,17 @@ export class Subscriber {
 						refused ??= new NotFound(`group ${key}`);
 					}
 				} else if ("drop" in resp) {
-					entry.tail.account(resp.drop.start, resp.drop.end);
-					if (key >= resp.drop.start && key < resp.drop.end) {
-						refused ??=
-							hasSkip(this.version) && resp.drop.error === StreamCode.Skip
-								? new NotFound(`group ${key}`)
-								: resp.drop.cause(this.version);
+					const { start, end } = resp.drop;
+					const skip = hasSkip(this.version) && resp.drop.error === StreamCode.Skip;
+					const cause = skip ? new NotFound(`group ${key}`) : resp.drop.cause(this.version);
+					if (skip) entry.tail.account(start, end);
+					else {
+						// Ends the stream still reading the group, whose reset a browser can lose, and
+						// refuses one the drop overtook.
+						entry.tail.drop(start, end);
+						this.#dropped(entry, start, end, cause);
 					}
+					if (key >= start && key < end) refused ??= cause;
 				} else if ("end" in resp) {
 					if (ended) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 					ended = true;
@@ -2721,8 +2726,7 @@ export class Subscriber {
 						ended = true;
 					},
 				);
-				// An excused stream is waited for at most the grace, as at a subscription's end: a browser
-				// can lose its reset.
+				// Ends a settle still waiting once this loop leaves it.
 				const stopped = new Once<null>();
 				const covered = () => entry.tail.covers(groups.start, groups.end);
 				try {
@@ -2769,14 +2773,12 @@ export class Subscriber {
 					await responses;
 					// The publisher FINs once done (unprompted before lite-07, or in reply to our
 					// one-shot FIN on lite-07), before every uni Group Stream it opened may have
-					// landed: wait for those before refusing what is left (no grace timer on lite-07).
+					// landed: wait for those before refusing what is left, at most the grace before
+					// lite-07, whose tail has none.
 					if (!covered() || entry.tail.reading) {
 						const drained = new Once<null>();
 						try {
-							await race([
-								entry.tail.settle(covered, drained, hasSkip(this.version) ? undefined : GRACE),
-								leaving,
-							]);
+							await race([entry.tail.settle(covered, drained, GRACE), leaving]);
 						} finally {
 							drained.set(null);
 						}
@@ -2859,7 +2861,7 @@ export class Subscriber {
 					entry.tail.account(start, end);
 					hooks.skipTrackGroups(entry.track, start, end);
 				} else {
-					this.#dropped(entry, start, end);
+					this.#dropped(entry, start, end, cause);
 					// Final, so a stream it overtook is told from one whose gap the grace gave up on.
 					entry.tail.drop(start, end);
 					giveUp(start, end, dropped(cause));
@@ -3076,10 +3078,11 @@ export class Subscriber {
 				} else {
 					// The publisher will never send these groups on this subscription, so they are accounted
 					// for without a stream, and a reader of one still arriving ends with the drop's error now.
-					// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
+					// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on, and
+					// ends a stream still reading one, whose reset a browser can lose.
 					if (hasSkip(this.version)) entry.tail.drop(start, end);
 					else entry.tail.account(start, end);
-					this.#dropped(entry, start, end);
+					this.#dropped(entry, start, end, error);
 					// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
 					// judged under: a reader wider than that does not settle on it, and asks for the group
 					// with a request of its own.
@@ -3565,20 +3568,23 @@ export class Subscriber {
 
 		if (entry.fillGroup) {
 			const target = entry.fillGroup;
-			if (group.key !== target.producer.start || target.taken) {
+			// A drop that overtook the header already ended the stream, as below.
+			if (group.key !== target.producer.start || target.taken || entry.tail.dropped(group.key)) {
 				stream.stop(StreamCode.Cancel);
 				return;
 			}
 			target.taken = true;
 			target.arrived();
 			const counted = entry.tail.open(group.key);
+			const read = droppable(entry, group.key);
 			try {
 				const format = {
 					scale: entry.timescale,
 					compress: entry.compress,
 					lengthFirst: hasLengthFirst(this.version),
 				};
-				const end = await untilAbandoned(target.producer, readFrames(stream, target.producer, format));
+				const frames = untilAbandoned(target.producer, readFrames(stream, target.producer, format));
+				const end = await race([frames, read.dropped]);
 				if (end === undefined) target.producer.finish();
 				else target.producer.finishAt(end);
 				stream.stop(StreamCode.Cancel);
@@ -3591,20 +3597,19 @@ export class Subscriber {
 				target.producer.abort(e);
 				stream.stop(e);
 			} finally {
+				read.release();
 				counted.done();
 			}
 			return;
 		}
 
 		const { track, timescale, tail } = entry;
-		// Asked before this stream accounts for the group: a drop that overtook it named it.
-		let owed = !tail.covers(group.key, group.key + 1n);
-		// A drop that overtook this stream, rather than a gap the grace gave up on.
-		const dropped = !owed && tail.dropped(group.key);
+		// Lite-07: a drop that overtook the header already ended this stream, standing in for its
+		// reset, which a browser can lose.
+		const overtaken = hasSkip(this.version) && tail.dropped(group.key);
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
-		// Lite-07: this stream's entry in `SubscribeEntry.reading`.
-		let reading = false;
+		let read: Droppable | undefined;
 		const counted = tail.open(group.key);
 
 		try {
@@ -3618,29 +3623,28 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
-			// Registered before any duplicate wait below, so a drop that lands during it finds the read.
-			if (hasSkip(this.version)) {
-				entry.reading ??= new Map();
-				entry.reading.set(group.key, counted);
-				reading = true;
+			if (overtaken) {
+				stream.stop(StreamCode.Cancel);
+				return;
 			}
+			// Registered before any duplicate wait below, so a drop that lands during it ends the wait.
+			if (hasSkip(this.version)) read = droppable(entry, group.key);
 			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
 			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
 			// refused as a duplicate if the copy finished and takes the group if it failed,
-			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
-			// wait; a clean end leaves it on the copy alone. Parked meanwhile: that copy's stream holds
-			// the end of whatever carries it, so a stall there never holds this subscription's.
+			// continuing the reads of that copy, which wait while it is held. Its own reset, or a drop
+			// naming the group, ends the wait; a clean end leaves it on the copy alone. Parked
+			// meanwhile: that copy's stream holds the end of whatever carries it, so a stall there
+			// never holds this subscription's.
 			for (;;) {
 				// Kept held past a failure until this copy takes the group, below.
 				const next = hooks.arrivingGroup(track, group.key);
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
-				// Served again once that copy fails, so owed again.
-				owed = true;
 				counted.park();
 				const settled = arriving.settled;
-				await race([settled, stream.closed.then(() => settled)]);
+				await race([settled, stream.closed.then(() => settled), ...(read ? [read.dropped] : [])]);
 			}
 			counted.resume();
 			producer ??= hooks.receiveGroup(track, {
@@ -3653,13 +3657,11 @@ export class Subscriber {
 			if (!hasRanges(this.version) && !entry.filling) hooks.answerEdge(track);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
-			// A drop that overtook the header already accounts for the group; a copy served again is
-			// owed whatever dropped the earlier one.
-			if (reading && !owed && dropped) counted.excuse();
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
-			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
+			const reading = entry.filling ? untilAbandoned(producer, frames) : frames;
+			const end = await (read ? race([reading, read.dropped]) : reading);
 
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
 			if (end === undefined) producer.finish();
@@ -3685,16 +3687,16 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			arriving?.release();
-			if (reading && entry.reading?.get(group.key) === counted) entry.reading.delete(group.key);
+			read?.release();
 			counted.done();
 		}
 	}
 
-	// A SUBSCRIBE_DROP named `[start, end)`: a stream still reading a group it names holds the
-	// subscription's end at most the grace, since a browser can lose that stream's reset.
-	#dropped(entry: SubscribeEntry, start: bigint, end: bigint): void {
-		for (const [key, counted] of entry.reading ?? []) {
-			if (key >= start && key < end) counted.excuse();
+	// A SUBSCRIBE_DROP named `[start, end)`: it ends a stream still reading a group it names with
+	// `error`, standing in for the stream's reset, which a browser can lose.
+	#dropped(entry: SubscribeEntry, start: bigint, end: bigint, error: Error): void {
+		for (const [drop, key] of entry.reading ?? []) {
+			if (key >= start && key < end) drop(error);
 		}
 	}
 
@@ -4008,6 +4010,27 @@ async function groupUnwanted(group: netGroup.Producer): Promise<void> {
 	while (demand.wanted.peek() && demand.closed.peek() === undefined) {
 		await Signal.race(demand.wanted, demand.closed);
 	}
+}
+
+// A lite-07 stream registered in `SubscribeEntry.reading`: `dropped` rejects with the error of a
+// drop naming its group, and `release` unregisters it once its read ends.
+interface Droppable {
+	dropped: Promise<never>;
+	release(): void;
+}
+
+// Register a stream reading group `key` of `entry`, so a drop naming the group ends it.
+function droppable(entry: SubscribeEntry, key: bigint): Droppable {
+	let drop!: (err: Error) => void;
+	const dropped = new Promise<never>((_, reject) => {
+		drop = reject;
+	});
+	// A drop can land while nothing races it, such as after the read ended but before its release.
+	dropped.catch(() => {});
+	entry.reading ??= new Map();
+	const reading = entry.reading;
+	reading.set(drop, key);
+	return { dropped, release: () => reading.delete(drop) };
 }
 
 // Like untilClosed, but also cancels once every reader has left. Demand is level-triggered, so a
