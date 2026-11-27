@@ -92,9 +92,7 @@ impl Clock {
 		let nanos = (num % den).checked_mul(1_000_000_000).ok_or_else(overflow)? / den;
 		let since_moq_epoch = std::time::Duration::new(secs, nanos as u32);
 		// A catalog can name a wall beyond the clock's nanosecond range.
-		moq_net::time::EPOCH
-			.checked_add(since_moq_epoch)
-			.ok_or_else(overflow)
+		moq_net::time::EPOCH.checked_add(since_moq_epoch).ok_or_else(overflow)
 	}
 }
 
