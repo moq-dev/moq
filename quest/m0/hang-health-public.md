@@ -17,7 +17,7 @@ in the unused-API sweep until something reads the grade. Two consumers now do:
 HUD graded with `Hang.Health`.
 
 Decided 2026-11-26 (maintainer, `/quest-run` in moq-dev/studio): ✅ split
-this out of [Client health in use](/quest/m3/stats/health-consumers.md) so
+this out of [Client health in use](/quest/m1/health-consumers.md) so
 the studio waits only on the export (rejected: waiting for that whole quest;
 vendoring the grade into the studio).
 
@@ -55,4 +55,4 @@ Public API: additive in Rust and JS, since neither is on `release`. Wire: none.
 
 ## Related
 
-- [Client health in use](/quest/m3/stats/health-consumers.md) - the consumers and the per-connection counter that build on this export
+- [Client health in use](/quest/m1/health-consumers.md) - the consumers and the per-connection counter that build on this export

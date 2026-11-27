@@ -49,7 +49,7 @@ the group whole through the ordered reader; `test/stream-credit` drops the
 tab's fetch and asserts the top two tiers read every group whole. Run
 `just test interop --all`.
 
-This also gives [takeover](/quest/m3/group-takeover.md)'s "Measure first"
+This also gives [takeover](/quest/m4/group-takeover.md)'s "Measure first"
 the drop plus bounded SUBSCRIBE baseline it compares a continuation against.
 
 Public API: none. Wire: none.
@@ -60,5 +60,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Takeover](/quest/m3/group-takeover.md) - measures this against a continuation before lite-08 brings one back
+- [Takeover](/quest/m4/group-takeover.md) - measures this against a continuation before lite-08 brings one back
 - [Chromium reset fix](/quest/m4/browser-fixes/chromium-reset-before-accept.md) - why a browser reader learns of the reset from the drop, not the stream

@@ -67,4 +67,4 @@ Public API: none. The errors map to existing `Io` variants, and the new
 
 ## Related
 
-- [A typed DTLS handshake timeout error](/quest/m3/webrtc/dtls-timeout.md) - also adds an `ice::Error` variant mapped through the session loop
+- [A typed DTLS handshake timeout error](/quest/m4/webrtc-dtls-timeout.md) - also adds an `ice::Error` variant mapped through the session loop

@@ -62,4 +62,4 @@ Public API and wire: none expected.
 ## Related
 
 - [Route wakes](/quest/m3/route-wakes.md) - the fronts' half of a route change's cost
-- [Mesh session cost](/quest/m9/perf/mesh-session-cost.md) - per-session cost in the mesh tests, `sync_route` among it
+- [Mesh session cost](/quest/m4/perf/mesh-session-cost.md) - per-session cost in the mesh tests, `sync_route` among it
