@@ -11,6 +11,7 @@ Boundaries and non-goals: covers kernel-socket QMux transports in `rs/qmux` and 
 Decided 2026-11-26 (maintainer, `/quest-plan` of the QMux audit):
 
 - Kernel TCP knobs: ✅ BBR + `TCP_USER_TIMEOUT` + MSS-aware capping + `TCP_NOTSENT_LOWAT`/coalesced `TCP_INFO`/vectored writes; gate `TCP_FASTOPEN` and selective `TCP_QUICKACK` on benchmarks (rejected: Enable all including `TCP_FASTOPEN` and selective `TCP_QUICKACK` by default; Conservative only).
+  - Narrowed in PR review: `TCP_USER_TIMEOUT` stays unset on live sessions and is optional during teardown only (item 4), since Linux applies it to zero-window stalls that QMux's own liveness policy must own.
 
 Joins `m4` (behind the release cut) as performance and optimization work with no release blocker.
 
