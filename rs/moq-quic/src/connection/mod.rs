@@ -3860,20 +3860,21 @@ impl Connection {
 		);
 	}
 
-	/// Return to the path the peer left, abandoning the unvalidated one it moved to
+	/// Return to the path the peer left, abandoning the unvalidated ones it moved to
 	fn fall_back(&mut self, now: Instant, prev: PathData) {
-		let abandoned = self.replace_path(now, prev);
+		self.replace_path(now, prev);
 		self.path.challenge = None;
 		self.timers.stop(Timer::PathValidation);
 
-		// No path counts what went out on the abandoned one in flight, so loss detection would
-		// never find it lost: requeue it, as the address may never have reached the peer
-		let generation = abandoned.generation();
+		// No path counts what went out on the abandoned ones in flight, so loss detection would
+		// never find it lost: requeue it, as those addresses may never have reached the peer. A
+		// late ACK of it then goes unmatched, as one of a packet already declared lost may.
+		let generation = self.path.generation();
 		let space = &mut self.spaces[SpaceId::Data];
 		let sent: Vec<u64> = space
 			.sent_packets
 			.range(..)
-			.filter(|(_, info)| info.path_generation == generation)
+			.filter(|(_, info)| info.path_generation != generation)
 			.map(|(pn, _)| pn)
 			.collect();
 		for packet in sent {
@@ -3888,17 +3889,7 @@ impl Connection {
 				}
 			}
 			self.ack_frequency.on_lost(packet);
-			let space = &mut self.spaces[SpaceId::Data];
-			space.pending |= info.retransmits;
-			// Kept so a late ACK of it still attributes its ECN mark to the abandoned path
-			space.lost_packets.insert(
-				packet,
-				LostPacket {
-					time_sent: info.time_sent,
-					ecn_path: info.ecn.then_some(generation),
-					congestion_path: None,
-				},
-			);
+			self.spaces[SpaceId::Data].pending |= info.retransmits;
 		}
 
 		self.datagrams().drop_oversized();

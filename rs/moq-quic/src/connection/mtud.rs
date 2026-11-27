@@ -63,6 +63,20 @@ impl MtuDiscovery {
 			.and_then(|state| state.poll_transmit(now, self.current_mtu))
 	}
 
+	/// A copy for a new path to the same peer address, sharing the confirmed MTU but not an
+	/// in-flight probe, whose ACK or loss reaches the path that sent it: the copy's search
+	/// starts over instead
+	pub(crate) fn fork(&self) -> Self {
+		let mut mtud = self.clone();
+		if let Some(state) = &mut mtud.state
+			&& let Phase::Searching(search) = &state.phase
+			&& search.in_flight_probe.is_some()
+		{
+			state.phase = Phase::Initial;
+		}
+		mtud
+	}
+
 	/// Notifies the [`MtuDiscovery`] that the probe [`Self::poll_transmit`] returned was sent as `pn`
 	pub(crate) fn on_probe_sent(&mut self, pn: u64, size: u16) {
 		if let Some(state) = &mut self.state {

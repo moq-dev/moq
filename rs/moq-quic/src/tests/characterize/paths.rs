@@ -426,9 +426,17 @@ fn validated_migration_releases_the_previous_path() {
 }
 
 /// Data the server sent toward a forwarded copy's address goes again once the client, back on
-/// the address it never left, returns the server to the path it validated
+/// the address it never left, returns the server to the path it validated, including data sent
+/// toward an earlier forwarded address another copy moved the server on from
 #[test]
-fn falling_back_resends_what_the_abandoned_path_sent() {
+fn falling_back_resends_what_the_abandoned_paths_sent() {
+	for hops in [1, 2] {
+		resend_after_falling_back(hops);
+	}
+}
+
+/// Moves the server across `hops` forwarded addresses, sending data toward the first, then back
+fn resend_after_falling_back(hops: u8) {
 	let _guard = subscribe();
 	// Nothing ack-eliciting follows the fall back to show the data lost: no MTU probe, and no
 	// spare connection ID to retire, as a client with zero-length ones has none
@@ -458,14 +466,17 @@ fn falling_back_resends_what_the_abandoned_path_sent() {
 
 	// A PING padded large enough that the anti-amplification limit lets the server send data
 	// toward it, which the client does not track, so nothing it sent waits on the server's ACK
-	let mut ping = vec![0; 1000];
-	ping[0] = 0x01;
-	let now = pair.time;
-	let packet = pair.client_conn_mut(client_ch).forge_packet(now, SpaceId::Data, &ping);
-	pair.server.inbound.push_back((now, None, packet.as_slice().into()));
-	let forwarded = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 1).into(), 4433);
-	pair.server.drive(now, forwarded);
-	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
+	let forward = |pair: &mut Pair, hop: u8| {
+		let mut ping = vec![0; 1000];
+		ping[0] = 0x01;
+		let now = pair.time;
+		let packet = pair.client_conn_mut(client_ch).forge_packet(now, SpaceId::Data, &ping);
+		pair.server.inbound.push_back((now, None, packet.as_slice().into()));
+		let forwarded = SocketAddr::new(Ipv4Addr::new(192, 0, 2, hop).into(), 4433);
+		pair.server.drive(now, forwarded);
+		assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
+	};
+	forward(&mut pair, 1);
 
 	// Sent toward the forwarded address, which never delivers it
 	let s = pair
@@ -481,20 +492,25 @@ fn falling_back_resends_what_the_abandoned_path_sent() {
 		}
 		pair.time = pair.server.next_wakeup().expect("the pacer releases the data");
 	}
+	for hop in 2..=hops {
+		forward(&mut pair, hop);
+	}
 
 	pair.drive();
-	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), client);
-	assert_eq!(pair.client_streams(client_ch).accept(Dir::Uni), Some(s));
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), client, "{hops} hops");
+	assert_eq!(pair.client_streams(client_ch).accept(Dir::Uni), Some(s), "{hops} hops");
 }
 
-/// An MTU probe the server sent before a forwarded copy moved it stays the validated path's, so
-/// the client's ACK of it, arriving while the server is away, still completes it there
-#[test]
-fn probe_acked_while_away_completes_on_its_path() {
-	let _guard = subscribe();
+/// A pair connecting until the server's first MTU probe, the only datagram past the initial MTU,
+/// which it returns undelivered
+fn hold_first_probe() -> (
+	Pair,
+	ConnectionHandle,
+	ConnectionHandle,
+	(Instant, Option<EcnCodepoint>, BytesMut),
+) {
 	let mut pair = pair_with(|_| {});
 	let client_ch = pair.begin_connect(client_with(|_| {}));
-	// Hold back the first probe, the only datagram past the initial MTU
 	let probe = loop {
 		assert!(pair.step(), "no probe sent");
 		let i = pair
@@ -509,7 +525,15 @@ fn probe_acked_while_away_completes_on_its_path() {
 	pair.drive_client();
 	pair.drive_server();
 	let server_ch = pair.server.assert_accept();
+	(pair, client_ch, server_ch, probe)
+}
 
+/// An MTU probe the server sent before a forwarded copy moved it stays the validated path's, so
+/// the client's ACK of it, arriving while the server is away, still completes it there
+#[test]
+fn probe_acked_while_away_completes_on_its_path() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch, probe) = hold_first_probe();
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 	let client = pair.client.addr;
@@ -523,5 +547,28 @@ fn probe_acked_while_away_completes_on_its_path() {
 	pair.drive();
 	let server = pair.server_conn_mut(server_ch);
 	assert_eq!(server.remote_address(), client);
+	assert!(server.path_mtu() > INITIAL_MTU, "{}", server.path_mtu());
+}
+
+/// A port change while an MTU probe is in flight leaves that probe to the path that sent it, and
+/// the new path searches on from the MTU confirmed so far
+#[test]
+fn rebinding_with_a_probe_in_flight_keeps_searching() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch, probe) = hold_first_probe();
+	let port = pair.next_port();
+	pair.client.addr.set_port(port);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	let client = pair.client.addr;
+	pair.server.drive(now, client);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), client);
+
+	// The client acknowledges the probe from its new port, while the old path is still kept
+	pair.client.inbound.push_back(probe);
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert!(!server.has_prev_path());
 	assert!(server.path_mtu() > INITIAL_MTU, "{}", server.path_mtu());
 }
