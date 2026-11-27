@@ -10,6 +10,15 @@ main into release.
 
 ## Plan
 
+Decided 2026-11-27 (maintainer, `/quest-plan`):
+
+- ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
+  and [remove `instance` from `hang::catalog`](/quest/m2/remove-catalog-instance.md)
+  to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
+  keep `moq-pattern` or catalog `instance`). Wildcards never transit the wire,
+  grants already moved to `Prefixes`, and wire announcements already carry
+  route `Instance` identity, so neither should freeze into `0.22.0`.
+
 Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 
 - ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
