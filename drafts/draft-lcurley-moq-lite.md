@@ -161,8 +161,8 @@ A subscription starts at a configurable Group (defaulting to the latest) and con
 A subscription reads whole Groups, or starts or ends partway through one at a Position (see [Positions](#positions)).
 
 The subscriber and publisher both indicate their delivery preference:
-- `Priority` indicates if Track A should be transmitted instead of Track B.
-- `Group Order` indicates if the newest or oldest pending Group of a Track should be transmitted first.
+- `Priority` indicates if Track A should be transmitted instead of Track B, and, as each Range carries its own, one span of a Track instead of another.
+- `Group Order` indicates if the newest or oldest pending Group of a Range should be transmitted first.
 - A live join's `Max Age` indicates how far a non-latest Group it reaches may fall behind the live edge before it is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
