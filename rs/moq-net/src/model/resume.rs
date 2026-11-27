@@ -12346,8 +12346,8 @@ mod test {
 	}
 
 	/// As [`a_backfill_waits_for_the_group_holding_a_time_under_its_floor`], with the group
-	/// landing as a later resume point widens the backfill for a gap above its floor alone: it
-	/// still reads that group under its floor, also once the local bounds change.
+	/// landing as a later resume point widens the backfill for a gap above its floor alone: once
+	/// the local bounds change, it still hands out that group under its floor, unasked again.
 	#[kio::test]
 	async fn a_backfill_widened_past_its_time_start_still_reads_the_group_holding_it() {
 		let routes = Producer::new();
@@ -12388,7 +12388,9 @@ mod test {
 		assert_eq!(recv(&mut sub).start, 11);
 		// A new local cap applies the local bounds to every copy again.
 		let mut sub = sub.with_range(..100);
-		assert_eq!(drain(&mut sub, false), [6]);
+		assert_eq!(recv(&mut sub).start, 6);
+		// From the copy that held it: the route is not asked for it again.
+		assert!(!asked_for(&b, 6), "{:?}", b.subscription());
 	}
 
 	/// As [`a_time_start_under_the_resume_point_reads_the_group_holding_it`], for ranges
