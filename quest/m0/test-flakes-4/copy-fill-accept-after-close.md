@@ -22,3 +22,6 @@ the test, so a fill still open when the test ends keeps asking for keys.
 `defined` throws outside any test. Find what leaves the fill open past the
 test's end, and end the loop with the fill or wait for it in `close()`,
 rather than ignoring a missing group.
+
+Kept (maintainer, 2026-11-27 merge pick of
+[moq-dev/moq#9735](https://github.com/moq-dev/moq/pull/9735)).
