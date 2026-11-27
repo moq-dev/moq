@@ -12168,6 +12168,8 @@ impl Cursor {
 		if let Some(misses) = &mut self.misses {
 			misses.pick_up();
 		}
+		#[cfg(test)]
+		test::after_sync();
 		self.poll_recv_with(drift, waiter)
 	}
 
@@ -12237,6 +12239,14 @@ impl Cursor {
 						// The feed ended, but a fill still owes a group. Its answer wakes us.
 						if self.awaits_fill() {
 							return Poll::Pending;
+						}
+						// The window was synced before this walk read the track: the session may
+						// have answered a live join and then ended the track since, from another
+						// thread, and the window as synced holds none of that join's groups.
+						if self.sync() {
+							self.admit();
+							drift = ready!(self.poll_drift(&self.servable, waiter))?;
+							continue;
 						}
 						// Nothing reads the kept-out keys now: a read polled again asks anew.
 						self.kept_out = None;
@@ -12583,6 +12593,8 @@ impl Cursor {
 		if let Some(misses) = &mut self.misses {
 			misses.pick_up();
 		}
+		#[cfg(test)]
+		test::after_sync();
 		self.poll_next_with(floor, drift, waiter)
 	}
 
@@ -12623,6 +12635,15 @@ impl Cursor {
 				// The feed ended, but a fill still owes a group. Its answer wakes us.
 				if self.awaits_fill() {
 					return Poll::Pending;
+				}
+				// As in the arrival walk: a join answered since the sync, before the track ended,
+				// places the window over groups this walk read nothing of.
+				if self.sync() {
+					drift = ready!(self.poll_drift(&self.servable, waiter))?;
+					floor = floor.max(self.floor());
+					from = from.max(self.floor());
+					seen = None;
+					continue;
 				}
 				// Nothing reads the kept-out keys now: a read polled again asks anew.
 				self.kept_out = None;
@@ -15518,6 +15539,20 @@ mod test {
 
 	thread_local! {
 		static BEFORE_OWED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+		static AFTER_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+	}
+
+	/// Runs, once, what [`set_after_sync`] armed: the moment between a read syncing its window
+	/// and walking the track, where another thread's session races the read.
+	pub(super) fn after_sync() {
+		if let Some(hook) = AFTER_SYNC.with(|hook| hook.borrow_mut().take()) {
+			hook();
+		}
+	}
+
+	#[cfg(feature = "async")]
+	fn set_after_sync(hook: impl FnOnce() + 'static) {
+		AFTER_SYNC.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 	}
 
 	/// Runs, once, what [`set_before_owed`] armed: the moment between an ordered walk
@@ -26784,6 +26819,73 @@ mod test {
 				"pending"
 			]
 		);
+	}
+
+	/// A lite-07 copy holding a finished burst for a live join still waiting on its upstream,
+	/// and a read that walked the burst while it waited. The skip below the burst then wakes
+	/// the read, and the copy's session answers the join and ends the track while that read is
+	/// between syncing its window and walking the track, as it does from another thread.
+	#[cfg(feature = "async")]
+	fn answered_and_ended_mid_read<R>(
+		order: Order,
+		open: impl FnOnce(Subscriber) -> R,
+		poll: impl FnOnce(&mut R, &kio::Waiter) -> bool,
+	) -> R {
+		let lag = Some(Duration::from_secs(1));
+		let join = Subscription::default()
+			.with_order(order)
+			.with_ranges([Range::from(Start::Live { min: lag, max: None })]);
+		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(30)));
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		let mut reader = open(producer.subscribe(join));
+		for key in 10..13 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(Timestamp::unscaled(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		let (woken, waiter) = Flag::waiter();
+		assert!(poll(&mut reader, &waiter), "waits on its upstream");
+		producer.skip_groups(0..10);
+		assert!(woken.take(), "the skip wakes the read");
+		let mut session = producer.clone();
+		set_after_sync(move || {
+			session.answer_join(lag, None, Some(10), Duration::MAX);
+			session.finish_at(Position::group(13)).unwrap();
+			// Every group below the end arrived, so the tail settles at once.
+			session.finish_shared().unwrap();
+		});
+		reader
+	}
+
+	/// An arrival read whose live join is answered, and whose track then ends, after it synced
+	/// its window reads the join's groups before it ends.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_arrival_read_takes_a_join_answered_as_the_track_ends() {
+		let mut reader = answered_and_ended_mid_read(
+			Order::Descending,
+			|reader| reader,
+			|reader, waiter| reader.poll_recv_group(waiter).is_pending(),
+		);
+		assert_eq!(drain_groups(&mut reader), [12, 11, 10]);
+		assert!(matches!(
+			reader.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// The ordered read of the same race reads the join's groups in key order before it ends.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_takes_a_join_answered_as_the_track_ends() {
+		let mut ordered = answered_and_ended_mid_read(
+			Order::Ascending,
+			Subscriber::ordered,
+			|ordered, waiter| ordered.poll_next_item(waiter).is_pending(),
+		);
+		assert_eq!(items(&mut ordered), ["group 10", "group 11", "group 12"]);
 	}
 
 	/// An ordered read whose bounded window runs out past a group it stepped over as stale
