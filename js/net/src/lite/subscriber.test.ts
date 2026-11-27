@@ -1870,12 +1870,23 @@ test("a drop during a duplicate wait lets go of a stream whose reset was lost", 
 	}
 });
 
-// Lite-07: a stream a drop overtook holds no end, unless it takes the group from a copy that failed
-// while it waited: that copy's group is owed again, so the end waits for this stream's read.
-test("a stream a drop overtook holds the end once it takes a failed copy's group", async () => {
+// Lite-07: a stream a drop overtook holds no end, even once it takes the group from another
+// subscription's copy that failed while it waited: the drop already named this stream's group on
+// the wire, so its reset, which a browser can lose, may be all that is left of it.
+test("a stream a drop overtook holds no end after it takes a failed copy's group", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { track: Producer; tail: { reading: boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 	try {
 		await opened(0);
@@ -1883,36 +1894,31 @@ test("a stream a drop overtook holds the end once it takes a failed copy's group
 		const request = await opened(1);
 		await request.reading;
 		await respond(request, version, [{ start: answer(version, 0n) }]);
+		if (!entry) throw new Error("no subscription");
 
-		// A copy still arriving, which a stale drop leaves arriving, then a stream of the same group
-		// the drop overtook, which waits on it.
-		const first = handStream(version);
-		first.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), first.reader);
-		const group = await track.recvGroup();
-		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		// Another subscription's copy of group 0, still arriving, then a stale drop, then this
+		// subscription's stream of the group, which the drop overtook and which waits on that copy.
+		const other = hooks.receiveGroup(entry.track, { start: 0n, offset: 0 });
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
 		await drainReactions();
-		const taker = handStream(version);
-		taker.write(await liteFrame(0, new Uint8Array([1])));
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), taker.reader);
+		const lost = handStream(version);
+		lost.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		await drainReactions();
 
-		// The copy fails, so the waiting stream takes its group and holds the end while it reads.
-		first.reset(StreamCode.Cancel);
+		// That copy fails, so this stream takes the group, and still holds no end.
+		other.abort(new StreamError(StreamCode.Cancel));
 		await drainReactions();
+		expect(entry.tail.reading).toBe(false);
 		let fin = false;
 		void request.finished.then(() => {
 			fin = true;
 		});
 		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
-		expect(fin).toBe(false);
-		taker.finish();
-		await running;
-		await drainReactions();
 		expect(fin).toBe(true);
 	} finally {
+		responses.mockRestore();
 		track.close();
 		subscriber.close();
 	}

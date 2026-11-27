@@ -3617,8 +3617,6 @@ export class Subscriber {
 				entry.reading ??= new Map();
 				entry.reading.set(counted, group.key);
 			}
-			// Whether this stream took the group from a copy that failed, which owes it again.
-			let served = false;
 			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
 			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
 			// refused as a duplicate if the copy finished and takes the group if it failed,
@@ -3631,15 +3629,15 @@ export class Subscriber {
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
-				served = true;
 				counted.park();
 				const settled = arriving.settled;
 				await race([settled, stream.closed.then(() => settled)]);
 			}
 			counted.resume();
-			// The drop already accounts for the group, so the stream holds no end, whose reset a
-			// browser can lose. It reads on until its own end, or the track's release cuts it.
-			if (overtaken && !served) counted.done();
+			// The drop already named this stream's group on the wire, so the stream holds no end, even
+			// once it takes the group from a copy that failed: its reset, which a browser can lose, may
+			// be all that is left of it. It reads on until its own end, or the track's release cuts it.
+			if (overtaken) counted.done();
 			producer ??= hooks.receiveGroup(track, {
 				start: group.key,
 				offset: group.frameStart,
