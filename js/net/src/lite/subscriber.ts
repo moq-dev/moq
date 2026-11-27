@@ -3577,6 +3577,7 @@ export class Subscriber {
 			target.arrived();
 			const counted = entry.tail.open(group.key);
 			const read = droppable(entry, group.key);
+			read.producer = target.producer;
 			try {
 				const format = {
 					scale: entry.timescale,
@@ -3652,6 +3653,7 @@ export class Subscriber {
 				offset: group.frameStart,
 				fill: entry.filling,
 			});
+			if (read) read.producer = producer;
 			// Before lite-07 no answer says where the live feed is, so its first group does, once the
 			// copy holds it. Mirrors the Rust `Producer::edge_from_groups`.
 			if (!hasRanges(this.version) && !entry.filling) hooks.answerEdge(track);
@@ -4016,21 +4018,29 @@ async function groupUnwanted(group: netGroup.Producer): Promise<void> {
 // drop naming its group, and `release` unregisters it once its read ends.
 interface Droppable {
 	dropped: Promise<never>;
+	// The group the stream writes once it has one. The drop aborts it at once, as the lost reset
+	// would have, so the track sees it ended before it records the drop's verdict.
+	producer?: netGroup.Producer;
 	release(): void;
 }
 
 // Register a stream reading group `key` of `entry`, so a drop naming the group ends it.
 function droppable(entry: SubscribeEntry, key: bigint): Droppable {
-	let drop!: (err: Error) => void;
-	const dropped = new Promise<never>((_, reject) => {
-		drop = reject;
+	let reject!: (err: Error) => void;
+	const dropped = new Promise<never>((_, rejected) => {
+		reject = rejected;
 	});
 	// A drop can land while nothing races it, such as after the read ended but before its release.
 	dropped.catch(() => {});
 	entry.reading ??= new Map();
 	const reading = entry.reading;
+	const read: Droppable = { dropped, release: () => reading.delete(drop) };
+	const drop = (err: Error) => {
+		read.producer?.abort(err);
+		reject(err);
+	};
 	reading.set(drop, key);
-	return { dropped, release: () => reading.delete(drop) };
+	return read;
 }
 
 // Like untilClosed, but also cancels once every reader has left. Demand is level-triggered, so a

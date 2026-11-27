@@ -1802,8 +1802,16 @@ test.each([
 		if (order === "after") {
 			const group = await track.recvGroup();
 			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
-			await respond(request, version, [drop]);
-			expect(await group?.closed).toMatchObject({ code: error });
+			// The drop ends the group before the track records its verdict, as the lost reset
+			// would have, so the track records the verdict, a stale one included.
+			const recorded = spyOn(hooks, "dropTrackGroups");
+			try {
+				await respond(request, version, [drop]);
+				expect(await group?.closed).toMatchObject({ code: error });
+				expect(recorded.mock.results[0]?.value).toEqual([{ start: 0n, end: 1n }]);
+			} finally {
+				recorded.mockRestore();
+			}
 		}
 		await running;
 		expect(lost.stopped()).toBe(true);
