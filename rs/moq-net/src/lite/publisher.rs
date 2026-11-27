@@ -7222,10 +7222,12 @@ impl TrackRun {
 		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
 		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
 		// one per group. An update that asks below the start names them then, and a wider budget
-		// may still serve a stale one. A run stale under the track's own freshness bound is final
-		// all the same, since no budget reaches past that bound: a relay reading from the oldest
-		// group would otherwise wait on it forever.
-		let bound = self.track.max_age_bound();
+		// may still serve a stale one. On lite-07, whose ranges bound what a stale verdict was judged
+		// within, a run stale under the track's own freshness bound is final all the same, since no
+		// budget reaches past that bound: a relay reading from the oldest group would otherwise wait
+		// on it forever. Earlier drafts name a drop with no range, which a capped read could still
+		// serve, so they stop there.
+		let bound = self.ctx.version.has_ranges().then(|| self.track.max_age_bound()).flatten();
 		let final_stale = |budget: Duration| bound.is_some_and(|bound| budget >= bound);
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {

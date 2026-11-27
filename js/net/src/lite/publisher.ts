@@ -2298,11 +2298,12 @@ export class Publisher {
 					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
 					// gave up, stay untold: naming them would send every gap in the track's history, as a
 					// lite-06 track keyed by timestamp holds one per group. An update that asks below the start
-					// names them then, and a wider budget may still serve a stale one. A run stale under the
-					// track's own max age is final all the same, since no budget reaches past it: a relay
-					// reading from the oldest group would otherwise wait on it forever. Mirrors the Rust
-					// `TrackRun::resolve`.
-					const bound = serving.maxAge;
+					// names them then, and a wider budget may still serve a stale one. On lite-07, whose ranges
+					// bound what a stale verdict was judged within, a run stale under the track's own max age is
+					// final all the same, since no budget reaches past it: a relay reading from the oldest group
+					// would otherwise wait on it forever. Earlier drafts name a drop with no range, which a
+					// capped read could still serve, so they stop there. Mirrors the Rust `TrackRun::resolve`.
+					const bound = hasRanges(this.version) ? serving.maxAge : undefined;
 					const finalStale = (stale: number) => bound !== undefined && stale >= bound;
 					let reach = startKey;
 					for (let i = skipped.size - 1; i >= 0; i--) {
