@@ -7400,6 +7400,50 @@ for (const [reader, subscription, dropped] of [false, true].flatMap((dropped) =>
 	});
 }
 
+// The reader's own fetch answers under the reader's own terms, so a group it delivered failing too
+// old ends the read rather than asking the route again. Mirrors `a_fetched_groups_stale_reset_stands`
+// in rs/moq-net/src/model/resume.rs.
+test("a fetched group's stale reset stands", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.judgeUnder(ta.producer, 0);
+	const arriving = ta.write(0n, 1, false);
+	let answer: ((group: GroupConsumer) => void) | undefined;
+	let holding = false;
+	const { route, asked } = counted(a, () => {
+		if (!holding) return undefined;
+		return new Promise<GroupConsumer>((resolve) => {
+			answer = resolve;
+		});
+	});
+	front.serve(route);
+	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(10_000) } }));
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	holding = true;
+
+	arriving.abort(new StreamError(StreamCode.Old));
+	ta.write(1n, 1, false);
+	const read = group.readFrame();
+	expect(await isPending(read)).toBe(true);
+	if (!answer) throw new Error("expected a recovery fetch");
+	const rest = new GroupProducer(0n);
+	for (const frame of ["0.0", "0.1"])
+		rest.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(rest.start) });
+	answer(rest.consume());
+	expect(dec.decode((await read)?.payload)).toBe("0.1");
+
+	rest.abort(new StreamError(StreamCode.Old));
+	await expect(group.readFrame()).rejects.toMatchObject({ code: StreamCode.Old });
+	expect(asked).toEqual([0n]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 for (const fetched of [false, true]) {
 	test(`a verdict ends a ${fetched ? "fetched" : "read"} group once, never asking its own route again`, async () => {
 		const front = new Front();

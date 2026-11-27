@@ -14858,6 +14858,39 @@ mod test {
 		}
 	}
 
+	/// The reader's own fetch answers under the reader's own terms, so a group it delivered
+	/// failing too old ends the read: the route is not asked again. Mirrors "a fetched group's
+	/// stale reset stands" in `js/net/src/resume.test.ts`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_groups_stale_reset_stands() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let dynamic = a.requests();
+		routes.serve(a.consume());
+		a.judge_under(Duration::ZERO);
+
+		let mut arriving = a.create_group(group::Info { start: 0 }).unwrap();
+		arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		arriving.abort(Error::Stream(StreamError::Old)).unwrap();
+		let _next = a.create_group(group::Info { start: 1 }).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none());
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
+		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+
+		rest.abort(Error::Stream(StreamError::Old)).unwrap();
+		let res = reading.read_frame().now_or_never();
+		assert!(dynamic.requested_fill_group().now_or_never().is_none(), "asked again");
+		assert!(matches!(res, Some(Err(_))), "{res:?}");
+	}
+
 	/// Mirrors `routeFailed` in `js/net/src/resume.test.ts`: only these stream codes are a
 	/// route failing to deliver; every other code judges the group.
 	#[test]

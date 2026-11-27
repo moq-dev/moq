@@ -2863,6 +2863,8 @@ class Recover implements GroupRecover {
 	#copy?: Copy;
 	/** The route generation when `#copy` was acquired; kept separate because `Reader.sync` updates `copy.generation` in place on switch-back. */
 	#generation: number;
+	/** The reader's own fetch delivered the group being read, judged under the reader's own terms. */
+	#fetched = false;
 
 	/**
 	 * Puts the group on the reader's list of those still read, so the other copies that hold it,
@@ -2932,7 +2934,7 @@ class Recover implements GroupRecover {
 	 * route is asked, which bounds a hostile route to one bad answer per route change.
 	 */
 	#undelivered(failed: Error, copy: Copy): boolean {
-		return routeFailed(failed) || copyFailed(copy) || this.#outgrows(failed, copy);
+		return routeFailed(failed) || copyFailed(copy) || (!this.#fetched && this.#outgrows(failed, copy));
 	}
 
 	/** Whether `err` is a too old verdict from `copy` that the reader outgrows (see {@link #outgrowsJudging}). */
@@ -3060,7 +3062,7 @@ class Recover implements GroupRecover {
 				const asked = fetch?.generation === generation ? fetch : undefined;
 				const outcome = asked?.outcome;
 				// An answer carries its own expiry; the verdict and the budget only end the wait.
-				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
+				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving, true);
 				if (verdict) throw verdict;
 				// Judged within the reader's window, as a moved group is: the serving copy's subscription
 				// starts at the boundary, past groups in the window that supersede this one.
@@ -3089,7 +3091,7 @@ class Recover implements GroupRecover {
 		}
 	}
 
-	#replacement(group: GroupConsumer, copy: Copy): Replacement {
+	#replacement(group: GroupConsumer, copy: Copy, fetched = false): Replacement {
 		// Capture the route generation at selection time: `Reader.sync` may rewrite
 		// `copy.generation` in place on a switch-back before `adopt` runs.
 		const generation = copy.generation;
@@ -3104,6 +3106,7 @@ class Recover implements GroupRecover {
 				this.#release();
 				this.#copy = copy;
 				this.#generation = generation;
+				this.#fetched = fetched;
 			},
 			discard: () => group.close(),
 		};

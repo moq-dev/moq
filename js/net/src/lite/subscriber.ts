@@ -2280,6 +2280,10 @@ export class Subscriber {
 							hasSkip(this.version) && resp.drop.error === StreamCode.Skip
 								? new NotFound(`group ${key}`)
 								: resp.drop.cause(this.version);
+						// The publisher gave up a group whose stream it opened: the stream ends
+						// with this reason, even where the browser lost its reset. One received
+						// whole stays whole.
+						if (target.taken) target.producer.abort(refused);
 					}
 				} else if ("end" in resp) {
 					if (ended) throw new ProtocolViolation("duplicate SUBSCRIBE_END");

@@ -1762,8 +1762,9 @@ test("a reset without its code ends the group", async () => {
 
 // Lite-07: a fetch's Group Stream reset to make room competes for the same cap, and a reader asks
 // again only once it knows why. When Firefox drops the reset's code, the drop the publisher names
-// the group in says it, before or after the reset lands.
-test.each(["before", "after"] as const)(
+// the group in says it, before or after the reset lands; when Chromium loses the reset itself, the
+// drop ends the stream.
+test.each(["before", "after", "without"] as const)(
 	"a fetch whose reset lost its code ends with the reason its drop names (drop %s the reset)",
 	async (order) => {
 		const version = Version.DRAFT_07;
@@ -1784,12 +1785,13 @@ test.each(["before", "after"] as const)(
 			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
 			const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.TooFarBehind }) };
-			if (order === "before") await respond(request, version, [drop]);
-			stream.error(new TypeError("Error in input stream"));
-			await running;
+			if (order !== "after") await respond(request, version, [drop]);
+			if (order !== "without") stream.error(new TypeError("Error in input stream"));
+			if (order !== "without") await running;
 			if (order === "after") await respond(request, version, [drop]);
 			request.inbound.close();
 			expect(await group.closed).toMatchObject({ code: StreamCode.TooFarBehind });
+			await running;
 		} finally {
 			subscriber.close();
 		}
