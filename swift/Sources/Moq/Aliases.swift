@@ -58,8 +58,7 @@ public typealias Identity = MoqFFI.MoqIdentity
 /// The read-only facts on a received route: the `Identity` of the stream it serves, its static
 /// production and link cost, lower wins, and whether a usable path reaches it.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
-/// A route over a prefix: the origin-relative `prefix`, what each filter
-/// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
+/// A route over a prefix: the origin-relative `prefix` and the `route` serving it.
 /// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields, each carrying an `Announce`: `.present` once a route

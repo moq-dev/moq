@@ -39,7 +39,7 @@ if err != nil {
 }
 defer client.Close()
 
-announced, err := client.Announced(moq.AnnounceOptions{Prefix: "demos/"})
+announced, err := client.Announced(moq.AnnounceOptions{Prefix: "demos"})
 if err != nil {
 	log.Fatal(err)
 }

@@ -30,16 +30,15 @@ import kotlinx.coroutines.flow.collect
 
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
-    moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { event ->
+    moq.announced(AnnounceConfig(prefix = "demos")).updates().collect { event ->
         // The listing reports each path once while it stays present, even as its publisher
         // restarts; `moq.follow(path)` hands out each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
             else -> return@collect
         }
-        // Prefix stays origin-relative; captures reports what * matched.
+        // Prefix stays origin-relative: every path at or beneath `demos`.
         println("got broadcast ${announce.prefix}")
-        println("captures ${announce.captures}")
 
         val catalog = dev.moq.media.catalog(moq.request(announce.prefix))
         println("catalog: $catalog")

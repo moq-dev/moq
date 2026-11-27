@@ -9,7 +9,7 @@ import 'package:moq/moq.dart';
 
 final connection = await Moq.connect('https://relay.example.com');
 final announced = connection.announced(
-  options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
+  options: const AnnounceOptions(prefix: 'live'),
 );
 await for (final event in announced.updates()) {
   // The listing reports each path once while it stays present, even as its
@@ -17,9 +17,8 @@ await for (final event in announced.updates()) {
   // null once it goes offline.
   switch (event) {
     case AnnounceEventPresent(:final announce):
-      // Prefix stays origin-relative; captures reports wildcard matches.
+      // Prefix stays origin-relative: every path at or beneath `live`.
       print(announce.prefix);
-      print(announce.captures);
     case AnnounceEventAbsent():
   }
 }

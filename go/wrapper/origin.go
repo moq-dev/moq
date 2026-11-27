@@ -274,20 +274,16 @@ type OriginConsumer struct {
 
 // AnnounceOptions scopes an announcement stream.
 type AnnounceOptions struct {
-	// Prefix is a literal path root beneath the origin.
+	// Prefix is listed with every path beneath it; empty lists everything. It holds no "*".
 	Prefix string
-	// Filter is a pattern relative to Prefix. Nil matches every path beneath it.
-	Filter *string
 	// Hidden also lists paths with a segment starting with "." below Prefix.
 	Hidden bool
 }
 
-// Announced lists the paths under a literal prefix matching an optional pattern filter, as each
-// becomes present or absent. To see another publisher identity take a path over, use Follow.
+// Announced lists the paths at or beneath a prefix, as each becomes present or absent. To see another publisher identity take a path over, use Follow.
 func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
-		Filter: options.Filter,
 		Hidden: options.Hidden,
 	})
 	if err != nil {
