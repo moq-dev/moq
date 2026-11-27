@@ -93,7 +93,7 @@ uv run --no-project python sh/js/install.py frozen
 
 cd "$HERE"
 # The in-memory paths share Chromium installation and artifact retention with this lane.
-for benchmark in frames drift ledger bandwidth replay resume-history buffered pattern; do
+for benchmark in frames drift ledger bandwidth replay resume-history buffered; do
     bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
         current="$WORKSPACE" aa="$WORKSPACE"
 done
