@@ -3617,9 +3617,8 @@ export class Subscriber {
 				entry.reading ??= new Map();
 				entry.reading.set(counted, group.key);
 			}
-			// The drop already accounts for the group, so the stream holds no end, whose reset a
-			// browser can lose. It still reads, so a group that arrives whole anyway is kept.
-			if (overtaken) counted.done();
+			// Whether this stream took the group from a copy that failed, which owes it again.
+			let served = false;
 			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
 			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
 			// refused as a duplicate if the copy finished and takes the group if it failed,
@@ -3632,11 +3631,15 @@ export class Subscriber {
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
+				served = true;
 				counted.park();
 				const settled = arriving.settled;
 				await race([settled, stream.closed.then(() => settled)]);
 			}
 			counted.resume();
+			// The drop already accounts for the group, so the stream holds no end, whose reset a
+			// browser can lose. It reads on until its own end, or the track's release cuts it.
+			if (overtaken && !served) counted.done();
 			producer ??= hooks.receiveGroup(track, {
 				start: group.key,
 				offset: group.frameStart,
@@ -3683,8 +3686,9 @@ export class Subscriber {
 
 	// A SUBSCRIBE_DROP named `[start, end)`: a stream still reading a group it names holds the
 	// subscription's end no longer, since the drop accounts for the group and a browser can lose
-	// that stream's reset. The stream reads on, so a group that still arrives whole is kept; a final
-	// drop ends it through the track, which aborts the group.
+	// that stream's reset. A final drop ends the read through the track, which aborts the group. A
+	// stale one leaves it reading until its own end or the track's release, which cuts a group still
+	// arriving: lite-07 waits out no timer for a group the publisher already gave up.
 	#dropped(entry: SubscribeEntry, start: bigint, end: bigint): void {
 		for (const [counted, key] of entry.reading ?? []) {
 			if (key >= start && key < end) counted.done();

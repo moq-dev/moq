@@ -1763,9 +1763,9 @@ test("a reset without its code ends the group", async () => {
 // Lite-07: Chromium can lose the reset of a Group Stream it has not handed to the page yet, which
 // leaves the stream open forever. The publisher names every group whose stream it resets without a
 // reliable reset in a drop, which accounts for the group, so the stream holds the subscription's end
-// no longer, before or after its header: the end waits out no timer. The stream still reads, so a
-// stale drop leaves its group to arrive whole, as when every byte landed and QUIC ignored the
-// reset. A final drop ends the group through the track at once.
+// no longer, before or after its header: the end waits out no timer. A final drop ends the group
+// through the track at once; a stale one leaves it arriving, as the track's contract says, until
+// the stream's own end or the track's release.
 test.each([
 	["stale", "before"],
 	["stale", "after"],
@@ -1812,14 +1812,12 @@ test.each([
 		await drainReactions();
 		expect(fin).toBe(true);
 
-		// The stream reads on, unless the final drop already ended it: a group the stale drop left
-		// arriving ends whole on its FIN.
-		if (kind === "stale" || order === "before") lost.finish();
+		// The publisher's FIN in reply releases the track, which cuts a group the stale drop left
+		// arriving, and with it the read of a stream that never ends.
+		request.inbound.close();
 		await running;
-		if (kind === "stale" && order === "after") {
-			expect(await group?.readFrame()).toBeUndefined();
-			expect(await group?.closed).toBeNull();
-		}
+		if (kind === "stale" && order === "after")
+			expect(await group?.closed).toMatchObject({ code: StreamCode.Cancel });
 	} finally {
 		track.close();
 		subscriber.close();
@@ -1869,6 +1867,54 @@ test("a drop during a duplicate wait lets go of a stream whose reset was lost", 
 		track.close();
 		subscriber.close();
 		installed.close();
+	}
+});
+
+// Lite-07: a stream a drop overtook holds no end, unless it takes the group from a copy that failed
+// while it waited: that copy's group is owed again, so the end waits for this stream's read.
+test("a stream a drop overtook holds the end once it takes a failed copy's group", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+
+		// A copy still arriving, which a stale drop leaves arriving, then a stream of the same group
+		// the drop overtook, which waits on it.
+		const first = handStream(version);
+		first.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), first.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
+		await drainReactions();
+		const taker = handStream(version);
+		taker.write(await liteFrame(0, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), taker.reader);
+		await drainReactions();
+
+		// The copy fails, so the waiting stream takes its group and holds the end while it reads.
+		first.reset(StreamCode.Cancel);
+		await drainReactions();
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
+		await drainReactions();
+		expect(fin).toBe(false);
+		taker.finish();
+		await running;
+		await drainReactions();
+		expect(fin).toBe(true);
+	} finally {
+		track.close();
+		subscriber.close();
 	}
 });
 
