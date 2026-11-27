@@ -32,7 +32,7 @@ import type {
 	Subscription,
 	WireRecord,
 } from "./track.ts";
-import { max, min } from "./util/key.ts";
+import { max, min, UNBOUNDED } from "./util/key.ts";
 import * as Varint from "./varint.ts";
 import type { Budget, Holdings, Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
@@ -388,6 +388,31 @@ export function staleHole(budget: number, cap?: bigint): Hole {
 	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget, cap };
 }
 
+/** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
+export type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
+
+/**
+ * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
+ * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
+ * that reads every group above the run's start: its own successor and edge are then no older than
+ * those the verdict was judged against, since a group's verdict looks only above it. An uncapped
+ * reader reads them past the live edge; a capped one only when the upstream judged within the very
+ * cap it has (`run.cap`), else the verdict may rest on groups above the cap it never sees. A reader
+ * whose budget varies by group is held to its widest. Mirrors the Rust `settles`.
+ */
+export function settles(run: Run & Hole, budget: Budget, coverage: Coverage): boolean {
+	if (run.stale === undefined) return true;
+	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
+	if (coverage === undefined) return false;
+	const { cap } = coverage;
+	if (cap !== undefined && run.cap !== cap) return false;
+	const above = run.start + 1n;
+	const end = cap ?? UNBOUNDED;
+	if (above >= end) return true;
+	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
+	return held !== undefined && held.end >= end;
+}
+
 /** A run of keys given up, with why. */
 export interface DropRun extends Run, Hole {
 	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
@@ -562,7 +587,7 @@ export interface ReadGroupFrame {
 	index: number;
 	/** The frame, holding its DEFLATE slice on a compressed read. */
 	frame: Frame;
-	/** The stored slice's declared plain size, on compressed reads. */
+	/** The declared plain size: a stored slice's on compressed reads, and a metadata copy's on every read. */
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
@@ -828,6 +853,8 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 	/** Whether a metadata-only lookup opened this request, if its broadcast supports them. */
 	lookups?: { opened: boolean };
+	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. */
+	meta?: boolean;
 }
 
 /**
@@ -905,6 +932,11 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
+	/**
+	 * Make a new track a metadata copy, before it holds any group: each group it creates holds
+	 * frame headers alone (see {@link metaGroup}). Assigned by `track.ts`.
+	 */
+	metaTrack: (producer: Producer) => void;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -1366,6 +1398,17 @@ export const hooks: {
 	/** The error the subscriber's track gave `key` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, key: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
+	 * An upstream subscription feeding this copy asks a live join under `budget` milliseconds, before
+	 * it reaches the wire: that upstream may judge a group too old under it from then on. Mirrors
+	 * the Rust crate-private `track::Producer::judge_under`.
+	 */
+	judgeUnder: (producer: Producer, budget: number) => void;
+	/**
+	 * The narrowest budget in milliseconds an upstream subscription feeding the subscriber's copy
+	 * asked, undefined while none asked one. Mirrors the Rust `track::Consumer::judged_under`.
+	 */
+	judgedUnder: (subscriber: Subscriber) => number | undefined;
+	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
 	 * a new upstream subscription superseded is gone. Mirrors the Rust crate-private
 	 * `track::Subscriber::stale_held`.
@@ -1442,6 +1485,20 @@ export const hooks: {
 	 */
 	skipGroupFrames: (group: GroupConsumer) => void;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
+	/**
+	 * Make a new group a metadata copy, before its first frame: it holds each frame's header alone,
+	 * which {@link writeGroupHeader} writes, and refuses a payload. It stores no compressed stream,
+	 * whatever its track declares. Assigned by `group.ts`.
+	 */
+	metaGroup: (group: GroupProducer) => void;
+	/** Whether a group is a metadata copy; see {@link metaGroup}. Assigned by `group.ts`. */
+	groupMeta: (group: GroupProducer) => boolean;
+	/**
+	 * Write the header of a frame of `size` plain bytes at `timestamp` into a metadata copy, as a
+	 * metadata subscription delivers it: an empty payload, which readers get with `size` as its
+	 * declared plain size. Throws on a payload group. Assigned by `group.ts`.
+	 */
+	writeGroupHeader: (group: GroupProducer, timestamp: Timestamp, size: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
 	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
@@ -1556,6 +1613,13 @@ export const hooks: {
 	 * until `hold` aborts; undefined with no such copy. Assigned by `broadcast.ts`.
 	 */
 	resolveHeld: (broadcast: BroadcastConsumer, name: string, hold?: AbortSignal) => Promise<Info> | undefined;
+	/**
+	 * Serve a broadcast's metadata lookups from a metadata copy apart from the payload one, which
+	 * its request handler fills with frame headers alone: set only by a handler that can, a lite-07
+	 * session asking upstream with a metadata subscription. Mirrors the Rust `serve_meta`; assigned
+	 * by `broadcast.ts`.
+	 */
+	serveMeta: (broadcast: BroadcastConsumer) => void;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
@@ -1603,6 +1667,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	metaTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1890,6 +1957,12 @@ export const hooks: {
 	givenUp: () => {
 		throw new Error("track.ts not loaded");
 	},
+	judgeUnder: () => {
+		throw new Error("track.ts not loaded");
+	},
+	judgedUnder: () => {
+		throw new Error("track.ts not loaded");
+	},
 	mayLand: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1972,6 +2045,15 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	writeGroupFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	metaGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupMeta: () => {
+		throw new Error("group.ts not loaded");
+	},
+	writeGroupHeader: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupCacheBytes: () => {
@@ -2083,6 +2165,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	resolveHeld: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	serveMeta: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	keepRequest: () => {

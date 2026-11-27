@@ -385,7 +385,7 @@ struct Stamp {
 /// never moves a timestamp back.
 fn since_epoch(at: Instant) -> Duration {
 	let (instant, wall) = kio::clock::origin();
-	let base = wall.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH);
+	let base = wall.saturating_duration_since(moq_net::time::EPOCH);
 	match at.checked_duration_since(instant) {
 		Some(after) => base + after,
 		None => base.saturating_sub(instant.saturating_duration_since(at)),

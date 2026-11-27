@@ -3,9 +3,9 @@
 //! Random keys of route flips, route failures, give-ups, short closes, ranges, cache expiry,
 //! and reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
 //! groups, frames, drops, and end are checked against what one plain cursor on the logical
-//! track would see: every group its range and staleness budget allow, each once, in its order. A
-//! second identity, priced below the first, wins the path while older readers stay on
-//! theirs until it has no route left, then end with an error.
+//! track would see: every group its range and staleness budget allow, in its order, and once
+//! while its range holds it. A second identity, priced below the first, wins the path while
+//! older readers stay on theirs until it has no route left, then end with an error.
 //!
 //! `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
 
@@ -316,6 +316,11 @@ struct Reader {
 	/// Every group handed out, in order.
 	handed: Vec<u64>,
 	reading: BTreeMap<u64, Reading>,
+	/// Groups handed out that a range edit since left outside the ranges: ranges holding one
+	/// again may hand it out again, as a new subscription would.
+	released: BTreeSet<u64>,
+	/// The earlier readings of groups handed out again, each still checked to its end.
+	superseded: Vec<(u64, Reading)>,
 	/// Groups reported dropped.
 	dropped: BTreeSet<u64>,
 	/// Only groups past this one are owed: older ones were cached history at join, or
@@ -409,9 +414,8 @@ impl Reader {
 
 	/// Everything observed, to tell whether a poll found anything new.
 	fn observed(&self) -> (usize, usize, bool, usize) {
-		let frames = self
-			.reading
-			.values()
+		let frames = (self.reading.values())
+			.chain(self.superseded.iter().map(|(_, read)| read))
 			.map(|read| read.frames + usize::from(read.end.is_some()))
 			.sum();
 		(self.handed.len(), frames, self.end.is_some(), self.dropped.len())
@@ -539,6 +543,15 @@ impl Model {
 				let Some(reader) = &mut self.readers[index] else {
 					return Ok(());
 				};
+				// A live join places behind the newest group, so it holds none written before.
+				let newest = self.identities[reader.identity].newest();
+				let holds = |group: u64| match (range, reader.spec.budget) {
+					(Some((start, end)), _) => (start..end).contains(&group),
+					(None, Budget::Hour) => true,
+					(None, Budget::Short) => newest.is_none_or(|newest| group >= newest),
+				};
+				let left: Vec<u64> = reader.reading.keys().copied().filter(|group| !holds(*group)).collect();
+				reader.released.extend(left);
 				reader.ranges = range;
 				reader.holding = None;
 				reader.expires |= reader.spec.expires(range);
@@ -783,6 +796,8 @@ impl Model {
 			carried: BTreeSet::new(),
 			passed: None,
 			holding: None,
+			released: BTreeSet::new(),
+			superseded: Vec::new(),
 		};
 		self.readers[index] = Some(reader);
 		self.poll(index)
@@ -816,7 +831,7 @@ impl Model {
 				Poll::Pending => break,
 				Poll::Ready(Ok(Some(group))) => {
 					let key = group.start;
-					if reader.reading.contains_key(&key) {
+					if reader.reading.contains_key(&key) && !reader.released.remove(&key) {
 						return Err(fail(
 							index,
 							format!("group {key} handed out twice: {:?}", reader.handed),
@@ -846,7 +861,7 @@ impl Model {
 						return Err(fail(index, format!("group {key} handed out before any route had it")));
 					}
 					reader.handed.push(key);
-					reader.reading.insert(
+					let earlier = reader.reading.insert(
 						key,
 						Reading {
 							consumer: Some(group),
@@ -854,6 +869,7 @@ impl Model {
 							end: None,
 						},
 					);
+					reader.superseded.extend(earlier.map(|earlier| (key, earlier)));
 				}
 				Poll::Ready(Ok(None)) => {
 					// A bounded read ends once its range is read, a local cap holding nothing
@@ -913,7 +929,8 @@ impl Model {
 			}
 		}
 
-		for (key, read) in &mut reader.reading {
+		let superseded = reader.superseded.iter_mut().map(|(key, read)| (&*key, read));
+		for (key, read) in reader.reading.iter_mut().chain(superseded) {
 			let Some(consumer) = &mut read.consumer else {
 				continue;
 			};
@@ -1105,7 +1122,8 @@ impl Model {
 			let _ = write!(problems, "missing groups {missing:?}; ");
 		}
 		if !reader.expires {
-			for (key, read) in &reader.reading {
+			let superseded = reader.superseded.iter().map(|(key, read)| (key, read));
+			for (key, read) in reader.reading.iter().chain(superseded) {
 				if carried(*key) && !identity.given_up.contains(key) && !matches!(read.end, Some(Ok(()))) {
 					let _ = write!(
 						problems,
@@ -2231,6 +2249,42 @@ fn regressions() {
 					frames: 1,
 				},
 				Op::Down { identity: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// Ranges moved off groups 0 and 2 forget them, so ranges holding them again may hand
+		// group 2 out a second time: only a range holding a group throughout keeps it once.
+		Case {
+			ops: vec![
+				Op::Write {
+					identity: 0,
+					slot: 0,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { identity: 0, slot: 2 },
+				Op::Up { identity: 0, slot: 0 },
+				Op::Write {
+					identity: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					identity: 0,
+					slot: 2,
+					group: Some(4),
+					frames: 1,
+				},
+				Op::Ranges {
+					reader: 1,
+					range: Some((4, 5)),
+				},
+				Op::Ranges { reader: 1, range: None },
 			],
 			finish: false,
 		},

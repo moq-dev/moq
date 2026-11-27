@@ -25,6 +25,7 @@ import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer }
 import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type Ask,
+	type Coverage,
 	cutRun,
 	type Dispositions,
 	type DropRun,
@@ -50,6 +51,7 @@ import {
 	runsFrom,
 	type StagedTrack,
 	sameHole,
+	settles,
 	skipHole,
 	staleHole,
 	subtractRuns,
@@ -501,6 +503,8 @@ function orderOf(order: Order | undefined): Order {
 export class Request {
 	/** The requested track name. */
 	readonly name: string;
+	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. @internal */
+	readonly meta: boolean;
 
 	#producer: Producer;
 	#pending: Set<Request>;
@@ -508,6 +512,7 @@ export class Request {
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
+		this.meta = options.meta ?? false;
 		this.#producer = options.producer;
 		this.#pending = options.pending;
 		this.#lookups = options.lookups;
@@ -1212,9 +1217,6 @@ let unaccounted: (
 	settled: (start: bigint, end: bigint) => Run[],
 ) => { folds?: Instant } | undefined;
 
-/** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
-type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
-
 /** Whether two coverages hold the same groups and cap. */
 function sameCoverage(a: Coverage, b: Coverage): boolean {
 	if (a === undefined || b === undefined) return a === b;
@@ -1274,29 +1276,10 @@ function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): 
 	return out;
 }
 
-/**
- * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
- * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
- * that reads every group above the run's start: its own successor and edge are then no older than
- * those the verdict was judged against, since a group's verdict looks only above it. An uncapped
- * reader reads them past the live edge; a capped one only when the upstream judged within the very
- * cap it has (`run.cap`), else the verdict may rest on groups above the cap it never sees. A reader
- * whose budget varies by group is held to its widest. Mirrors the Rust `settles`.
- */
-function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
-	if (run.stale === undefined) return true;
-	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
-	if (coverage === undefined) return false;
-	const { cap } = coverage;
-	if (cap !== undefined && run.cap !== cap) return false;
-	const above = run.start + 1n;
-	const end = cap ?? UNBOUNDED;
-	if (above >= end) return true;
-	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
-	return held !== undefined && held.end >= end;
-}
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;
+// The budget a copy's upstream may judge a group too old under; see `Producer.#judging`.
+let judgingOf: (producer: Producer) => number | undefined;
 // The fills serving the producer's misses; assigned in its static block.
 let fillsOf: (producer: Producer) => FillState;
 
@@ -1572,6 +1555,10 @@ export class Producer {
 	// A copy some wire subscription fed, which knows the live feed only from its upstream's answer,
 	// even between feeds; never set on a track's own publisher.
 	#copy = false;
+	// The narrowest budget in milliseconds any upstream subscription feeding this copy asked,
+	// undefined while none asked one: a group whose stream that upstream reset as too old may have
+	// been judged under it, so the verdict stands only for a reader no wider (see `hooks.judgeUnder`).
+	#judging?: number;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The keys the live feed delivered as a group, and the drops a reclaim forgot, which `drops`
@@ -1586,6 +1573,9 @@ export class Producer {
 	#produced: Run[] = [];
 	// One past the last append: every key below it arrived, was given up, or was skipped.
 	#appended?: bigint;
+	// A metadata copy, whose groups hold each frame's header alone: a broadcast entry apart from
+	// the payload copy, which no payload reader is ever handed. Fixed before any group.
+	#meta = false;
 
 	constructor(name: string) {
 		checkName(name);
@@ -1745,6 +1735,10 @@ export class Producer {
 				throw new Error("track already caches groups");
 			producer.#account = producer.#openAccount(pool);
 		};
+		hooks.metaTrack = (producer) => {
+			if (producer.#cache.size > 0 || producer.#received > 0n) throw new Error("track already holds groups");
+			producer.#meta = true;
+		};
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#requested;
 		unlive = (producer, sink) => producer.#unlive(sink);
@@ -1774,6 +1768,10 @@ export class Producer {
 			producer.#copy = true;
 			producer.#placing++;
 		};
+		hooks.judgeUnder = (producer, budget) => {
+			producer.#judging = Math.min(producer.#judging ?? budget, budget);
+		};
+		judgingOf = (producer) => producer.#judging;
 		hooks.answerEdge = (producer) => {
 			if (!producer.#wire || producer.#wire.edge) return;
 			producer.#wire.edge = true;
@@ -2904,6 +2902,13 @@ export class Producer {
 		return rescaled.key ?? BigInt(rescaled.value);
 	}
 
+	// A new group of this track: a metadata copy's holds each frame's header alone.
+	#newGroup(key: bigint): GroupProducer {
+		const group = new GroupProducer(key);
+		if (this.#meta) hooks.metaGroup(group);
+		return group;
+	}
+
 	// Hold a group to this track's timedness, once the track has committed it.
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
@@ -2964,7 +2969,7 @@ export class Producer {
 		if (key < this.#received) throw new TimestampMismatch();
 		this.#writable(key);
 		this.#refuseSkipped(key);
-		const group = new GroupProducer(key);
+		const group = this.#newGroup(key);
 		this.#bind(group);
 		this.#cap(group);
 		this.#publish(group);
@@ -3103,7 +3108,7 @@ export class Producer {
 			this.#uncache(existing, true);
 		}
 
-		const group = new GroupProducer(key);
+		const group = this.#newGroup(key);
 		// Mirrors copy the absolute indices, so set them before publishing to any sink.
 		hooks.startGroup(group, start);
 		this.#bind(group);
@@ -5611,6 +5616,10 @@ export class Subscriber {
 			return held;
 		};
 		hooks.trackAborted = (subscriber) => subscriber.#state.aborted;
+		hooks.judgedUnder = (subscriber) => {
+			const producer = subscriber.#state.producer;
+			return producer && judgingOf(producer);
+		};
 		hooks.givenUp = (subscriber, key) => {
 			const { drops, refused } = subscriber.#state;
 			const drop = drops.at(key);
@@ -5965,7 +5974,8 @@ export class Subscriber {
 	 * Both bounds are assigned, in either direction: an omitted start is group 0 and an
 	 * omitted end removes the cap. They narrow the subscription's ranges, never widen them.
 	 * Lowering the floor or raising the cap offers the groups it newly covers that the track
-	 * still caches and this reader never handed out; a group is never handed out twice. A local
+	 * still caches and this reader never handed out; a group is never handed out twice while the
+	 * subscription's ranges hold it (see {@link update}). A local
 	 * filter, not a request: it leaves the wire subscription alone, so to change what is asked
 	 * for, replace {@link Subscription.ranges} with {@link update}. One exception: on a track
 	 * served across route changes, lowering the floor asks the serving route again for the groups
@@ -7301,9 +7311,10 @@ export class Subscriber {
 
 	/**
 	 * Update this subscription's options (e.g. priority), triggering a SUBSCRIBE_UPDATE to the
-	 * publisher. Replacing the ranges resolves them again, without redelivering groups already
-	 * read; an arrival reader can receive the unread groups it still holds that the new ranges
-	 * take in. Changing only a live join's {@link Live.max} keeps where it joined.
+	 * publisher. Replacing the ranges resolves them again, without redelivering a group read
+	 * while they held it throughout; ranges replaced off a group may forget it, so ranges holding
+	 * it again may hand it out again, as a new subscription would. An arrival reader can receive
+	 * the unread groups it still holds that the new ranges take in. Changing only a live join's {@link Live.max} keeps where it joined.
 	 * Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {

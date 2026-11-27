@@ -129,6 +129,7 @@ import {
 	hasIdentity,
 	hasLengthFirst,
 	hasMediaTime,
+	hasMeta,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
@@ -231,6 +232,9 @@ interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
 	track: track.Producer;
+	// Whether it fills the track's metadata copy, asking with a metadata subscription for each
+	// frame's header alone.
+	meta: boolean;
 	compress: boolean;
 	// Per-frame timestamp scale (0 = none), resolved before this entry is registered.
 	timescale: number;
@@ -311,11 +315,20 @@ interface SubscribeEntry {
 	broadcast?: Path.Valid;
 	consumedId?: number;
 	// Standalone one-shot SUBSCRIBE fetch target (lite-07 fetchGroup with no active subscription).
-	fillGroup?: {
-		producer: netGroup.Producer;
-		taken: boolean;
-		arrived: () => void;
-	};
+	fillGroup?: FetchTarget;
+}
+
+// The group a lite-07 one-shot fetch delivers into.
+interface FetchTarget {
+	producer: netGroup.Producer;
+	taken: boolean;
+	arrived: () => void;
+	// How its stream failed without a code, as Firefox reports a reset that lost one: the drop the
+	// publisher names the group in says why, which a reader needs to ask again after TOO_FAR_BEHIND.
+	lost?: Error;
+	// Why the publisher dropped the group, once it said: a stream for it arriving later is one whose
+	// reset may never land, as Chromium loses one, so it is not taken.
+	dropped?: Error;
 }
 
 // A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
@@ -1452,7 +1465,7 @@ export class Subscriber {
 	) {
 		const { valid } = consumed;
 		const { ranges, placed } = wireHeld(request.subscription);
-		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges, placed);
+		const msg = this.#subscribeMessage(id, broadcast, consumed, request, request.subscription, ranges, placed);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
@@ -1520,14 +1533,15 @@ export class Subscriber {
 		await this.#serveStream(id, broadcast, consumed, state, stream, entry, msg);
 	}
 
-	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model, each live
-	// join `placed` at a group by index starting there. Its own wire ranges wait for the track's
-	// timescale when they name a time (see `#withRanges`).
+	// The SUBSCRIBE of `target` (a metadata subscription for its metadata copy) for `subscription`,
+	// asking for `ranges`, its wire ranges in the model, each live join `placed` at a group by index
+	// starting there. Its own wire ranges wait for the track's timescale when they name a time (see
+	// `#withRanges`).
 	#subscribeMessage(
 		id: bigint,
 		broadcast: Path.Valid,
 		consumed: Consumed,
-		name: string,
+		target: { name: string; meta: boolean },
 		subscription: Readonly<track.Subscription>,
 		ranges: readonly track.Range[],
 		placed: ReadonlyMap<number, bigint> = new Map(),
@@ -1537,12 +1551,13 @@ export class Subscriber {
 			id,
 			broadcast,
 			identity: consumed.identity,
-			track: name,
+			track: target.name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
 			maxDelay: maxAge(ranges),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
+			meta: target.meta,
 		});
 	}
 
@@ -1842,6 +1857,7 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
+			meta: msg.meta,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			...framing,
@@ -1901,6 +1917,9 @@ export class Subscriber {
 			}
 		}
 
+		// Before any group of it reaches a reader, its publisher may judge one too old under any
+		// live join it asked.
+		hooks.judgeUnder(producer, entry.staleBudget);
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
 		return entry;
@@ -2027,6 +2046,8 @@ export class Subscriber {
 			if (
 				!entry.filling &&
 				!entry.fillGroup &&
+				// A metadata copy holds no payload a payload fetch could take.
+				!entry.meta &&
 				entry.broadcast === broadcast &&
 				entry.consumedId === consumed.id &&
 				entry.track.name === track
@@ -2185,7 +2206,7 @@ export class Subscriber {
 
 			hooks.bindGroupCompression(group, info.compress);
 			const live = new LiveRanges(this.version, ranges);
-			const target = {
+			const target: FetchTarget = {
 				producer: group,
 				taken: false,
 				arrived: () => arrived.resolve(),
@@ -2193,6 +2214,7 @@ export class Subscriber {
 			const entry: SubscribeEntry = {
 				// Unused for fillGroup entries; satisfies the shared SubscribeEntry shape.
 				track: undefined as unknown as track.Producer,
+				meta: false,
 				staleBudget: NO_MAX_DELAY,
 				staleCap: key + 1n,
 				compress: info.compress,
@@ -2248,12 +2270,7 @@ export class Subscriber {
 
 	// Read a standalone lite-07 one-shot SUBSCRIBE's responses until publisher FIN, waiting for any
 	// in-flight uni Group Stream before concluding the group was not delivered.
-	async #readFetchSubscribe(
-		stream: Stream,
-		entry: SubscribeEntry,
-		key: bigint,
-		target: { producer: netGroup.Producer; taken: boolean; arrived: () => void },
-	): Promise<void> {
+	async #readFetchSubscribe(stream: Stream, entry: SubscribeEntry, key: bigint, target: FetchTarget): Promise<void> {
 		let started = false;
 		let ended = false;
 		let refused: Error | undefined;
@@ -2276,6 +2293,10 @@ export class Subscriber {
 							hasSkip(this.version) && resp.drop.error === StreamCode.Skip
 								? new NotFound(`group ${key}`)
 								: resp.drop.cause(this.version);
+						// The publisher gave up the group: a stream it opened ends with this reason,
+						// even where the browser lost its reset. One received whole stays whole.
+						target.dropped ??= refused;
+						if (target.taken) target.producer.abort(refused);
 					}
 				} else if ("end" in resp) {
 					if (ended) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
@@ -2315,6 +2336,7 @@ export class Subscriber {
 			if (!target.taken) {
 				throw refused ?? new NotFound(`group ${key}`);
 			}
+			if (target.lost) target.producer.abort(refused ?? target.lost);
 		} catch (err: unknown) {
 			closeViolation(this.#quic, err);
 			const e = await sessionCause(this.#quic, err);
@@ -2576,8 +2598,10 @@ export class Subscriber {
 		const oneStart = !hasGroupEnd(this.version);
 		const oneShot = keepsSubscribeOpen(this.version);
 		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
+		// A metadata copy's fill asks for headers alone too.
+		const target = { name: producer.name, meta: copy.meta };
 		const msg = this.#withRanges(
-			this.#subscribeMessage(id, broadcast, consumed, producer.name, { priority, order: "ascending" }, ranges),
+			this.#subscribeMessage(id, broadcast, consumed, target, { priority, order: "ascending" }, ranges),
 			ranges,
 		);
 		// Lite-07 recovery asks for exact group bounds [Position(start, 0), Position(end, 0))
@@ -2593,6 +2617,7 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
+			meta: copy.meta,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			compress: copy.compress,
@@ -3382,6 +3407,8 @@ export class Subscriber {
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
 				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
+				// Before the update reaches the wire, as the SUBSCRIBE did.
+				hooks.judgeUnder(entry.track, entry.staleBudget);
 				if (capOf(entry.live) !== entry.staleCap) entry.staleCap = undefined;
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
@@ -3565,7 +3592,7 @@ export class Subscriber {
 
 		if (entry.fillGroup) {
 			const target = entry.fillGroup;
-			if (group.key !== target.producer.start || target.taken) {
+			if (group.key !== target.producer.start || target.taken || target.dropped) {
 				stream.stop(StreamCode.Cancel);
 				return;
 			}
@@ -3588,7 +3615,9 @@ export class Subscriber {
 					throw err;
 				}
 				const e = await sessionCause(this.#quic, err);
-				target.producer.abort(e);
+				// A failure with no code waits for the subscription's end to say why.
+				if (e instanceof StreamError || e instanceof SessionError) target.producer.abort(e);
+				else target.lost = e;
 				stream.stop(e);
 			} finally {
 				counted.done();
@@ -4038,6 +4067,8 @@ class ConsumeBroadcast extends broadcast.Consumer {
 
 	constructor(subscriber: Subscriber, path: Path.Valid, consumed: Consumed, state?: never) {
 		super(state);
+		// A metadata reader gets a copy of its own, filled by a metadata subscription.
+		if (hasMeta(subscriber.version)) hooks.serveMeta(this);
 		const baseFetchGroup = wireOf(this).fetchGroup;
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: async (name, hold) => {

@@ -2577,7 +2577,7 @@ mod test {
 		use std::time::Duration;
 
 		let captured = kio::clock::now();
-		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
+		let wall = moq_net::time::EPOCH + Duration::from_millis(60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let front = origin
@@ -2749,7 +2749,7 @@ mod test {
 
 		kio::clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
+		let wall = moq_net::time::EPOCH + Duration::from_millis(60_000);
 		let start = kio::clock::now().saturating_sub(Duration::from_secs(5));
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
@@ -2924,7 +2924,7 @@ mod test {
 		use std::time::Duration;
 
 		let now = Duration::from_secs(86_400);
-		crate::clock::fake_host_wall(kio::clock::Wall::MOQ_EPOCH + now);
+		crate::clock::fake_host_wall(moq_net::time::EPOCH + now);
 		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
 		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
 	}
@@ -2954,7 +2954,7 @@ mod test {
 
 		// The faked host wall clock moves with time, as a real one does.
 		tokio::time::advance(std::time::Duration::from_secs(3)).await;
-		crate::clock::fake_host_wall(kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_secs(86_403));
+		crate::clock::fake_host_wall(moq_net::time::EPOCH + std::time::Duration::from_secs(86_403));
 		assert_eq!(
 			catalog.timestamp(None).unwrap(),
 			moq_net::Timestamp::from_micros(3_603_000_000).unwrap()
@@ -2983,7 +2983,7 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros().unwrap() as u64);
+		let zero = moq_net::time::EPOCH + Duration::from_micros(input.wall.as_micros().unwrap() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.sync.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
@@ -3106,7 +3106,7 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(catalog.snapshot().sync.clock, None);
 
-		let wall = kio::clock::Wall::MOQ_EPOCH;
+		let wall = moq_net::time::EPOCH;
 		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		assert!(matches!(
 			catalog.timebase().place(pts, wall),

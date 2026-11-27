@@ -105,10 +105,11 @@ impl Info {
 #[derive(Default)]
 struct BroadcastState {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
-	// Keyed by the track's shared `Arc<str>` name (the same Arc the handle holds).
+	// Keyed by the track's shared `Arc<str>` name (the same Arc the handle holds) and its
+	// copy: a metadata copy is an entry apart from the payload one.
 	// The cache reclaims closed entries incrementally on insert so a long-lived
 	// broadcast churning distinct track names stays bounded by the live count.
-	tracks: WeakCache<Arc<str>, track::TrackWeak>,
+	tracks: WeakCache<track::Key, track::TrackWeak>,
 
 	// Shared across suffixes and producer clones; cache eviction must not reset IDs.
 	unique: u64,
@@ -117,7 +118,7 @@ struct BroadcastState {
 	// and waiting for a dynamic handler to accept or deny them. A request leaves
 	// here once handed out (the handler caches it in `tracks`, so lookups keep
 	// coalescing onto it there).
-	requests: RequestQueue<Arc<str>, track::Request>,
+	requests: RequestQueue<track::Key, track::Request>,
 
 	// The tracks the broadcast lists, and the readers listing them; see [`Tracks`].
 	listing: listing::ListingState,
@@ -141,6 +142,9 @@ struct BroadcastState {
 	datagram_source: Option<Option<Consumer>>,
 	// A session's source, relaying a peer's broadcast; see [`Consumer::has_local_datagrams`].
 	relayed: bool,
+	// Whether its handler serves a metadata copy apart from the payload one; see
+	// [`Consumer::track_meta`].
+	meta: bool,
 }
 
 impl BroadcastState {
@@ -161,7 +165,7 @@ impl BroadcastState {
 			let id = self.unique;
 			self.unique = id.checked_add(1).expect("unique track IDs exhausted");
 			let name = format!("{id}{separator}{suffix}");
-			if !self.tracks.contains_key(name.as_str()) {
+			if !self.tracks.contains_key(&track::Key::payload(name.as_str())) {
 				return name;
 			}
 		}
@@ -170,7 +174,7 @@ impl BroadcastState {
 	/// Cache a track under its name and hand it to every [`Demand`], unless a live track
 	/// already holds the name, which is returned instead.
 	fn cache_track(&mut self, weak: track::TrackWeak) -> Option<track::TrackWeak> {
-		if let Some(live) = self.tracks.insert(weak.name().clone(), weak.clone()) {
+		if let Some(live) = self.tracks.insert(weak.key().clone(), weak.clone()) {
 			return Some(live);
 		}
 		for (_, cached) in &mut self.demands {
@@ -212,28 +216,37 @@ impl BroadcastState {
 		let finished: HashSet<Arc<str>> = self
 			.tracks
 			.iter()
-			.filter(|track| track.is_finished())
+			.filter(|track| !track.key().meta && track.is_finished())
 			.map(|track| track.name().clone())
 			.collect();
 		self.listing.close(|name| finished.contains(name));
 	}
 
-	/// The live track cached under `name`. Writing through the guard wakes every [`Demand`]
+	/// The live track cached under `key`. Writing through the guard wakes every [`Demand`]
 	/// watcher, so only reclaiming a closed entry writes: a hit or a miss just reads.
-	fn live_track(state: &mut kio::Mut<'_, Self>, name: &str) -> Option<track::TrackWeak> {
-		let live = state.tracks.get(name);
-		if live.is_none() && state.tracks.contains_key(name) {
-			state.tracks.remove(name);
+	fn live_track(state: &mut kio::Mut<'_, Self>, key: &track::Key) -> Option<track::TrackWeak> {
+		let live = state.tracks.get(key);
+		if live.is_none() && state.tracks.contains_key(key) {
+			state.tracks.remove(key);
 		}
 		live
 	}
 
-	/// The track serving `name` now, published or requested, read without joining its demand.
-	fn peek(state: &mut kio::Mut<'_, Self>, name: &str) -> Option<kio::ConsumerWeak<track::TrackState>> {
-		if let Some(weak) = Self::live_track(state, name) {
+	/// The track serving `key` now, published or requested, read without joining its demand.
+	fn peek(state: &mut kio::Mut<'_, Self>, key: &track::Key) -> Option<kio::ConsumerWeak<track::TrackState>> {
+		if let Some(weak) = Self::live_track(state, key) {
 			return Some(weak.peek());
 		}
-		state.requests.get(name).map(|pending| pending.peek())
+		state.requests.get(key).map(|pending| pending.peek())
+	}
+
+	/// The entry a lookup of `name` reads: the metadata copy only where the handler serves
+	/// one apart, and the payload copy otherwise, whose headers a metadata reader takes.
+	fn key(&self, name: Arc<str>, meta: bool) -> track::Key {
+		track::Key {
+			name,
+			meta: meta && self.meta,
+		}
 	}
 }
 
@@ -305,6 +318,15 @@ impl Producer {
 		hook();
 	}
 
+	/// Serve metadata lookups ([`Consumer::track_meta`]) from a metadata copy apart from the
+	/// payload one, which this broadcast's [`Requests`] handler fills with frame headers
+	/// alone. Only a handler that can do so sets it: a lite-07 session, asking upstream with
+	/// a metadata subscription, or an origin front, splicing each copy from its routes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn serve_meta(&self) {
+		self.state.lock().meta = true;
+	}
+
 	/// Answer track requests only while `validity` holds, ending the broadcast once it
 	/// lapses. Set when a session mints a source, before any handle is shared.
 	pub(crate) fn with_validity(mut self, validity: RequestValidity) -> Self {
@@ -349,10 +371,11 @@ impl Producer {
 		// ending the readers that hold the old info. Under the lock, so the name passes straight
 		// to the new track; the ended track's producer drops after it, since its last guard looks
 		// this broadcast up.
-		let replaced = match state.requests.get(name.as_ref()) {
+		let key = track::Key::payload(name.clone());
+		let replaced = match state.requests.get(&key) {
 			Some(request) if request.conflicts(&info) => state
 				.requests
-				.take(name.as_ref())
+				.take(&key)
 				.map(|request| request.unlisted().accept(info.clone())),
 			_ => None,
 		};
@@ -372,7 +395,7 @@ impl Producer {
 		// request: its consumers resolve against this very producer. Without
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
-		if let Some(request) = state.requests.take(name.as_ref()) {
+		if let Some(request) = state.requests.take(&track::Key::payload(name.clone())) {
 			// Listed below, under the lock this holds, rather than by the accept.
 			let track = request
 				.unlisted()
@@ -870,15 +893,15 @@ impl Home {
 		let mut state = self.0.lock();
 		let weak = request.weak();
 		if state.closing
-			|| state.requests.join(weak.name()).is_some()
+			|| state.requests.join(weak.key()).is_some()
 			|| state
 				.tracks
-				.get(weak.name())
+				.get(weak.key())
 				.is_some_and(|live| !live.same_channel(&weak))
 		{
 			return Err(request);
 		}
-		state.requests.insert(weak.name().clone(), request)
+		state.requests.insert(weak.key().clone(), request)
 	}
 }
 
@@ -1133,7 +1156,19 @@ impl Consumer {
 	/// has ended, and [`Error::NotFound`] when nothing publishes the track and no
 	/// [`Requests`] would serve a request for it.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
-		let current = {
+		self.lookup(name, false)
+	}
+
+	/// [`Self::track`] for what a metadata subscription reads: the metadata copy where the
+	/// broadcast's handler serves one apart, as a lite-07 session does with a metadata
+	/// subscription upstream, and otherwise the payload copy, whose headers the reader takes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn track_meta(&self, name: &str) -> Result<track::Consumer, Error> {
+		self.lookup(name, true)
+	}
+
+	fn lookup(&self, name: &str, meta: bool) -> Result<track::Consumer, Error> {
+		let (key, current) = {
 			let mut state = self.state.lock();
 			// An ended broadcast serves nothing new, not even a track it still has:
 			// the lookup answers what a fresh `request` for the path would.
@@ -1141,20 +1176,18 @@ impl Consumer {
 			if state.closing {
 				return Err(Error::Unroutable);
 			}
-			let current = BroadcastState::peek(&mut state, name);
+			let key = state.key(name.into(), meta);
+			let current = BroadcastState::peek(&mut state, &key);
 			if current.is_none() && !state.requests.has_handlers() {
 				return Err(Error::NotFound);
 			}
-			current
+			(key, current)
 		};
 		// Bound to *this* handle's view of the broadcast, so a catalog track resolves its
 		// relative references against the path we were handed out at rather than the one
 		// the producer was created at, and tagged with this broadcast's egress scope so its
 		// subscriptions, fetches, and groups are attributed to the same broadcast.
-		Ok(
-			track::Consumer::lookup(name.into(), self.info.clone(), self.clone(), current)
-				.with_stats(self.stats.clone()),
-		)
+		Ok(track::Consumer::lookup(key, self.info.clone(), self.clone(), current).with_stats(self.stats.clone()))
 	}
 
 	/// Consume the datagram track `name`, live from now.
@@ -1236,7 +1269,7 @@ impl Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn publishes_track(&self, name: &str) -> bool {
 		let mut state = self.state.lock();
-		if BroadcastState::live_track(&mut state, name).is_some_and(|live| live.minted()) {
+		if BroadcastState::live_track(&mut state, &track::Key::payload(name)).is_some_and(|live| live.minted()) {
 			return true;
 		}
 		let Some(Some(source)) = state.datagram_source.clone() else {
@@ -1251,7 +1284,7 @@ impl Consumer {
 	/// Errors as [`Self::track`] does.
 	pub(super) fn resolve_track(
 		&self,
-		name: &str,
+		key: &track::Key,
 		subscription: Option<&track::Subscription>,
 	) -> Result<(kio::Consumer<track::TrackState>, Option<track::Preferences>), Error> {
 		let mut state = loop {
@@ -1263,7 +1296,7 @@ impl Consumer {
 
 			// Reuse a live producer if one is already publishing the track. A closed entry
 			// is reclaimed and we fall through to a fresh request.
-			let Some(weak) = BroadcastState::live_track(&mut state, name) else {
+			let Some(weak) = BroadcastState::live_track(&mut state, key) else {
 				break state;
 			};
 			// Join outside the lock: the subscription and the first consumer wake the
@@ -1278,7 +1311,7 @@ impl Consumer {
 			// requested again, rather than handing back a consumer of a dead track.
 		};
 
-		if let Some(pending) = state.requests.join(name) {
+		if let Some(pending) = state.requests.join(key) {
 			// Coalesce onto a queued request for the same name. Joining under the lock
 			// wakes no subscription observer: only a handler that popped the request
 			// can watch its subscriptions, and popping moves it to `tracks`.
@@ -1288,13 +1321,12 @@ impl Consumer {
 		// Allocate the name once and share the same Arc across the request, the
 		// requests map, and the FIFO order. The request inherits the broadcast's
 		// cache pool through its `Arc<Info>`, same as a producer-created track.
-		let name: Arc<str> = name.into();
-		let request = track::Request::new(self.info.clone(), name.clone()).homed(Home(self.state.clone()));
+		let request = track::Request::new(self.info.clone(), key.clone()).homed(Home(self.state.clone()));
 		let resolved = request.join(subscription);
 
 		// With no handler alive to serve it, the request is dropped: `NotFound` beats
 		// handing back a consumer that would only resolve `Dropped`.
-		if state.requests.insert(name, request).is_err() {
+		if state.requests.insert(key.clone(), request).is_err() {
 			return Err(Error::NotFound);
 		}
 
@@ -1305,11 +1337,11 @@ impl Consumer {
 	/// Once the broadcast has ended, `ended` stands in for a track it no longer serves.
 	pub(super) fn peek_track(
 		&self,
-		name: &str,
+		key: &track::Key,
 		ended: Option<&kio::ConsumerWeak<track::TrackState>>,
 	) -> Option<kio::ConsumerWeak<track::TrackState>> {
 		let mut state = self.state.lock();
-		BroadcastState::peek(&mut state, name).or_else(|| ended.filter(|_| state.closing).cloned())
+		BroadcastState::peek(&mut state, key).or_else(|| ended.filter(|_| state.closing).cloned())
 	}
 
 	/// Returns true once the broadcast has ended.

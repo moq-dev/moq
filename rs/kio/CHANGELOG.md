@@ -1,0 +1,205 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- `kio::model`, behind the off-by-default `model` feature: an exhaustive breadth-first model checker for pure state machines (`Machine`, `Explore`, `check`, `find`) that returns the shortest trace to a broken rule.
+
+### Changed
+
+- kio-macros parses with syn 3, the version serde and futures already build, and the `sim` feature builds futures without its executor and macros.
+
+## [0.6.4](https://github.com/moq-dev/moq/compare/kio-v0.6.3...kio-v0.6.4) - 2026-11-03
+
+### Other
+
+- backport main's benchmark cases to release for the pre-cut pairing
+
+## [0.6.3](https://github.com/moq-dev/moq/compare/kio-v0.6.2...kio-v0.6.3) - 2026-10-22
+
+### Fixed
+
+- *(bench)* keep kio's contended bench beside its other bench targets
+
+### Other
+
+- backport main's benchmarks to release for before/after runs
+
+## [0.6.2](https://github.com/moq-dev/moq/compare/kio-v0.6.1...kio-v0.6.2) - 2026-09-30
+
+### Fixed
+
+- *(kio)* keep a lost waiter's recorded lists idempotent ([#4422](https://github.com/moq-dev/moq/pull/4422))
+- *(net)* keep an aborted track's finished groups, expire ended tracks ([#4378](https://github.com/moq-dev/moq/pull/4378))
+
+## [0.6.1](https://github.com/moq-dev/moq/compare/kio-v0.6.0...kio-v0.6.1) - 2026-09-26
+
+### Fixed
+
+- *(moq-net)* serve only the lite routes a request woke, and bound kio waiter lists ([#4216](https://github.com/moq-dev/moq/pull/4216))
+
+### Other
+
+- *(kio)* keep a parked waiter that quiet lists still hold ([#4240](https://github.com/moq-dev/moq/pull/4240))
+
+## [0.6.0](https://github.com/moq-dev/moq/compare/kio-v0.5.9...kio-v0.6.0) - 2026-09-23
+
+### Added
+
+- [**breaking**] refuse released spellings and drop unused deprecated APIs ([#3719](https://github.com/moq-dev/moq/pull/3719))
+
+### Other
+
+- pin rust 1.98.1 so macOS 27 loads our stripped dylibs ([#3904](https://github.com/moq-dev/moq/pull/3904))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- Merge remote-tracking branch 'origin/main' into merge-main-into-dev-20260914
+
+## [0.5.9](https://github.com/moq-dev/moq/compare/kio-v0.5.8...kio-v0.5.9) - 2026-09-13
+
+### Fixed
+
+- *(kio)* bound waiter registration work ([#3635](https://github.com/moq-dev/moq/pull/3635))
+
+## [0.5.8](https://github.com/moq-dev/moq/compare/kio-v0.5.7...kio-v0.5.8) - 2026-09-09
+
+### Other
+
+- *(kio)* pin the waiter-list footprint, and retire the waiter-slots quest ([#3376](https://github.com/moq-dev/moq/pull/3376))
+
+## [0.5.7](https://github.com/moq-dev/moq/compare/kio-v0.5.6...kio-v0.5.7) - 2026-09-01
+
+### Added
+
+- add local regression benchmark suite ([#3093](https://github.com/moq-dev/moq/pull/3093))
+
+### Other
+
+- *(kio)* lazily allocate waiter list IDs ([#3194](https://github.com/moq-dev/moq/pull/3194))
+
+## [0.5.6](https://github.com/moq-dev/moq/compare/kio-v0.5.5...kio-v0.5.6) - 2026-08-24
+
+### Fixed
+
+- *(rs)* select crates by package id so a published workspace crate is not ambiguous ([#2989](https://github.com/moq-dev/moq/pull/2989))
+
+## [0.5.5](https://github.com/moq-dev/moq/compare/kio-v0.5.4...kio-v0.5.5) - 2026-08-20
+
+### Fixed
+
+- *(moq-mux)* compile on wasm32, and gate it so it stays that way
+
+### Other
+
+- *(kio)* dedup waiter registration so Park can reuse a parked waiter ([#2905](https://github.com/moq-dev/moq/pull/2905))
+
+## [0.5.4](https://github.com/moq-dev/moq/compare/kio-v0.5.3...kio-v0.5.4) - 2026-08-05
+
+### Added
+
+- *(kio)* add Fan, a waker for a whole WaiterList ([#2604](https://github.com/moq-dev/moq/pull/2604))
+
+## [0.5.3](https://github.com/moq-dev/moq/compare/kio-v0.5.2...kio-v0.5.3) - 2026-08-03
+
+### Added
+
+- *(kio)* add WaiterCell and Queue ([#2560](https://github.com/moq-dev/moq/pull/2560))
+
+### Other
+
+- *(kio)* rename WaiterCell to Park ([#2583](https://github.com/moq-dev/moq/pull/2583))
+
+## [0.5.2](https://github.com/moq-dev/moq/compare/kio-v0.5.1...kio-v0.5.2) - 2026-07-29
+
+### Other
+
+- *(kio,net)* model-check the concurrent handoffs with loom ([#2543](https://github.com/moq-dev/moq/pull/2543))
+
+## [0.5.1](https://github.com/moq-dev/moq/compare/kio-v0.5.0...kio-v0.5.1) - 2026-07-27
+
+### Added
+
+- *(kio)* add a poll-native Deadline and adopt it in moq-net ([#2536](https://github.com/moq-dev/moq/pull/2536))
+
+### Other
+
+- *(net)* replace the global LRU cache pool with per-track write-time eviction ([#2526](https://github.com/moq-dev/moq/pull/2526))
+
+## [0.5.0](https://github.com/moq-dev/moq/compare/kio-v0.4.4...kio-v0.5.0) - 2026-07-22
+
+### Added
+
+- *(net)* route by cumulative cost on lite-06 announcements ([#2424](https://github.com/moq-dev/moq/pull/2424))
+
+### Other
+
+- Merge branch 'main' into dev
+- *(kio)* [**breaking**] rename Future to Pollable, return Closed from the async API ([#2343](https://github.com/moq-dev/moq/pull/2343))
+- *(net)* [**breaking**] caller-driven sessions via a (Session, Driver) pair ([#2302](https://github.com/moq-dev/moq/pull/2302))
+- *(kio)* [**breaking**] delete Consumer write access, add role-less Shared for reverse queues ([#2074](https://github.com/moq-dev/moq/pull/2074))
+- Merge branch 'main' into dev
+- Merge branch 'main' into dev
+
+## [0.4.4](https://github.com/moq-dev/moq/compare/kio-v0.4.3...kio-v0.4.4) - 2026-07-15
+
+### Fixed
+
+- *(moq-gst)* reconnect the moqsink publisher instead of dying on transport death ([#2240](https://github.com/moq-dev/moq/pull/2240))
+
+## [0.4.3](https://github.com/moq-dev/moq/compare/kio-v0.4.2...kio-v0.4.3) - 2026-07-05
+
+### Other
+
+- [codex] backport moq-wasm to main ([#2086](https://github.com/moq-dev/moq/pull/2086))
+
+## [0.4.2](https://github.com/moq-dev/moq/compare/kio-v0.4.1...kio-v0.4.2) - 2026-07-04
+
+### Other
+
+- [codex] Backport kio tokio sleep wrapper ([#2055](https://github.com/moq-dev/moq/pull/2055))
+
+## [0.4.1](https://github.com/moq-dev/moq/compare/kio-v0.4.0...kio-v0.4.1) - 2026-06-30
+
+### Added
+
+- *(moq-net)* add OriginProducer::dynamic + infallible OriginConsumer::request_broadcast ([#1913](https://github.com/moq-dev/moq/pull/1913))
+
+## [0.4.0](https://github.com/moq-dev/moq/compare/kio-v0.3.0...kio-v0.4.0) - 2026-06-16
+
+### Fixed
+
+- *(kio)* split waiters by condition so writes don't churn closed/consumer waiters ([#1739](https://github.com/moq-dev/moq/pull/1739))
+- *(moq-net)* release cached state when a producer is aborted or dropped ([#1715](https://github.com/moq-dev/moq/pull/1715))
+
+### Other
+
+- rework Producer::poll/wait to a read-only predicate that returns a Mut ([#1735](https://github.com/moq-dev/moq/pull/1735))
+
+### Fixed
+
+- Split the internal waiter list into separate value / closed / consumer lists,
+  so an event only wakes the waiters that care about it. Previously every value
+  modification (the hot path) also woke parked `closed()` and `used`/`unused`
+  waiters, which re-registered and ping-ponged. No public API change.
+
+### Changed
+
+- Reworked `Producer::poll` / `Producer::wait`. They previously handed the
+  closure a `Mut` and auto-notified consumers whenever it touched the value via
+  `DerefMut`. Since a no-op like `Vec::pop` on an empty queue still trips
+  `DerefMut`, a pending poll would wake the polling task's own waiter and spin
+  into an infinite loop. They now take a read-only predicate over a `Ref` and,
+  on `Poll::Ready`, hand back a `Mut` with the lock still held so the caller
+  mutates atomically without the footgun. `Weak::poll_write` / `Weak::wait` had
+  no users and are removed.
+
+## [0.3.0] - 2026-05-29
+
+### Other
+
+- Renamed from `conducer` to `kio`. The API is unchanged; only the crate name differs.

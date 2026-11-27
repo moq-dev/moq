@@ -1276,7 +1276,7 @@ mod tests {
 		// Listing asks the handler for nothing.
 		dynamic.assert_no_request();
 
-		let _resolved = consumer.resolve_track("x", None).unwrap();
+		let _resolved = consumer.resolve_track(&"x".into(), None).unwrap();
 		let _x = dynamic.assert_request().accept(None);
 		assert_eq!(drain(&mut tracks), NONE);
 	}

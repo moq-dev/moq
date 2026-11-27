@@ -15,7 +15,7 @@ ignored = ["bytes", "tokio"]
 [dev-dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
-kio = { workspace = true, features = ["sim"] }
+kio = { path = "../kio", features = ["sim"] }
 moq-json = { path = "../moq-json", features = ["async"] }
 moq-net = { path = "../moq-net", features = ["fuzz", "relay", "test-support"] }
 serde_json = { workspace = true }

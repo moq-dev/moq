@@ -44,8 +44,8 @@ CONSTANTS
     W,          \* the connection receive window
     SW,         \* the stream receive window
     Ahead,      \* `pace::AHEAD`, the most a writer runs ahead of its fastest reader
-    Late,       \* a group's first reader may arrive after its writer started
-    Leave,      \* a group's last reader may leave it
+    Late,       \* a group's first reader may pick it up after its writer started
+    Leave,      \* a group's last reader, or before one its track's last subscriber, may leave
     Plain,      \* streams read with `read()`, never leased
     Shrink      \* how far the connection window may shrink once, or 0
 
@@ -93,7 +93,7 @@ VARIABLES
     \* the group
     wr,         \* units its writer wrote
     rd,         \* where the last frame its fastest reader took ends
-    held,       \* whether a reader holds it: "late" (none yet), "held", or "gone"
+    held,       \* whether a reader is owed it: "late" (none picked it up yet), "held", or "gone"
     \* history
     refused     \* some pause was refused
 
@@ -220,7 +220,7 @@ PausedTotal(ch) == SumTo(LAMBDA s: IF ch[s] = None THEN 0 ELSE ch[s], N)
 Room(s, w) ==
     LET lead == w - rd[s]
         room == IF lead <= PaceWindow THEN PaceWindow - lead
-                ELSE IF held[s] = "held" THEN 0 ELSE None
+                ELSE IF held[s] # "gone" THEN 0 ELSE None
     IN IF room = None THEN None ELSE Max(room - FrameLen, 0)
 
 \* `Budgeted::shape`: let the peer send what the group has `room` for, at least the `unsealed`
@@ -233,13 +233,13 @@ Shape(r, sl, room, unsealed) ==
        ELSE r
 
 \* The pace gate, `w` units in: at a frame's start the admit gate, counting the whole next
-\* frame; inside one, `Frame::poll_ready`, counting what of it is in. Open once no reader holds
-\* the group (`poll_unwanted`).
+\* frame; inside one, `Frame::poll_ready`, counting what of it is in. Open once no reader is
+\* owed the group (`Handle::poll_unowed`): one not yet picked up is owed from the start.
 Paced(s, w) ==
     LET inside == w % FrameLen
         committed == w - inside
         partial == IF inside = 0 THEN FrameLen ELSE inside
-    IN held[s] = "held" /\ rd[s] < committed /\ committed + partial - rd[s] > PaceWindow
+    IN held[s] # "gone" /\ rd[s] < committed /\ committed + partial - rd[s] > PaceWindow
 
 \* `Frame::unsealed` once `w` units of a frame are in: the rest of the segment being written.
 Unsealed(w) ==
@@ -425,18 +425,21 @@ Take(s) ==
     /\ woken' = [woken EXCEPT ![s] = woken[s] \/ pc[s] = "paused"]
     /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, charge, slot, wr, held, refused>>
 
-\* The group's first reader arrives, starting where readers got even.
+\* The group's first reader picks it up, starting where readers got even. The track hands out
+\* every group to a subscriber that keeps reading, so one eventually does, unless the track's
+\* last subscriber leaves first (`Drop`).
 Arrive(s) ==
     /\ pc[s] # "done"
     /\ held[s] = "late"
     /\ held' = [held EXCEPT ![s] = "held"]
     /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, woken, charge, slot, wr, rd, refused>>
 
-\* The group's last reader leaves, which the writer's pace gate watches for.
+\* The group's last reader leaves, or before one picked it up its track's last subscriber does,
+\* which the writer's pace gate watches for.
 Drop(s) ==
     /\ Leave
     /\ pc[s] # "done"
-    /\ held[s] = "held"
+    /\ held[s] # "gone"
     /\ held' = [held EXCEPT ![s] = "gone"]
     /\ woken' = [woken EXCEPT ![s] = woken[s] \/ pc[s] = "paused"]
     /\ UNCHANGED <<q, credited, shrink, stuckWaiting, pc, charge, slot, wr, rd, refused>>
@@ -461,15 +464,15 @@ Init ==
                                        [] OTHER -> {"held"}
     /\ refused = FALSE
 
-\* The steps weak fairness covers: all but a reader arriving or leaving, or the window shrinking,
-\* which may never happen.
+\* The steps weak fairness covers: all but a reader leaving, or the window shrinking, which may
+\* never happen.
 SystemOf(s) == Send(s) \/ Transmit(s) \/ Accept(s) \/ Step(s) \/ HandBack(s) \/ Write(s) \/ Take(s)
-               \/ Read(s)
+               \/ Read(s) \/ Arrive(s)
 System == \E s \in Streams : SystemOf(s)
 
 Next ==
     \/ System
-    \/ \E s \in Streams : Arrive(s) \/ Drop(s)
+    \/ \E s \in Streams : Drop(s)
     \/ ShrinkWindow
     \/ Done /\ UNCHANGED vars
 
@@ -543,6 +546,7 @@ Enabled(s) ==
     \/ pc[s] \in {"loop", "paused"} /\ woken[s]
     \/ pc[s] \in {"out", "write"}
     \/ pc[s] # "done" /\ held[s] = "held" /\ rd[s] + FrameLen <= wr[s] - (wr[s] % FrameLen)
+    \/ pc[s] # "done" /\ held[s] = "late"
 
 Guarded == (\E s \in Streams : Enabled(s)) = ENABLED System
 
