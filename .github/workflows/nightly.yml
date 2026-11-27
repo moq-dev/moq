@@ -442,11 +442,13 @@ jobs:
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `rs rung-disable` proves FFI simulcast disable and recovery on a shaped BBR3 uplink.
         # `test resume-model` sweeps resume against its model from a fresh seed; PRs run a fixed 64.
         # `test route-sweep` checks random lite-07 meshes against the route rules from a fresh seed; PRs run a fixed 8.
-        # It also runs the router's handoff sweeps over 20,000 fixed scenarios; PRs run 150.
-        # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
+        # It also runs the multicast prototype's and router's ignored sweeps.
+        # `test route-bench` prints the route benchmarks' tables (multicast bake-off, warmth, node layers);
+        # its growth sweeps take about 25 minutes, too long to share route-sweep's hour.
         # `test route-race` races a lite-07 relay's session tasks in seeded orders from a fresh seed; PRs run a fixed 16.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
@@ -458,7 +460,7 @@ jobs:
         # `rs v4l2` streams moq-v4l and moq-video V4L2 capture and output from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-bench", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
