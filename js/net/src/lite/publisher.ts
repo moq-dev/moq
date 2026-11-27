@@ -53,7 +53,7 @@ import { GivenUp } from "../util/given_up.ts";
 import { max, min } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import { isEmpty, type Resolved, rangeKey } from "../window.ts";
-import { type Advertised, type Advertisements, sameIdentity, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameIdentity, trackMetaOf, wireOf } from "../wire.ts";
 import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
@@ -120,6 +120,12 @@ const datagramBudget = new Budget();
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+// The track a SUBSCRIBE reads: a metadata subscription reads the copy kept apart for it where the
+// broadcast keeps one, so no payload crosses a hop for it.
+function subscribed(front: broadcast.Consumer, msg: Subscribe): track.Consumer {
+	return msg.meta ? trackMetaOf(msg.track, front) : front.track(msg.track);
 }
 
 /**
@@ -1293,7 +1299,7 @@ export class Publisher {
 			}
 		}
 
-		const consumer = front.track(msg.track);
+		const consumer = subscribed(front, msg);
 		// The live joins already placed, which start where they were placed.
 		const absent = legacyStart(this.version, msg.maxDelay);
 		const placed = requestedPlaced(msg, absent);
@@ -1645,7 +1651,7 @@ export class Publisher {
 				frameStart: req.startFrame,
 				held: true,
 			};
-			const groupPromise = front.track(msg.track).fetchGroup(req.group, options);
+			const groupPromise = subscribed(front, msg).fetchGroup(req.group, options);
 			// Track the resolved group immediately so a failure, revoke, or abort before
 			// `await groupPromise` still releases it without unhandled rejections.
 			groupPromise.then(

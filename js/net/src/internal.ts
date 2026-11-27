@@ -562,7 +562,7 @@ export interface ReadGroupFrame {
 	index: number;
 	/** The frame, holding its DEFLATE slice on a compressed read. */
 	frame: Frame;
-	/** The stored slice's declared plain size, on compressed reads. */
+	/** The declared plain size: a stored slice's on compressed reads, and a metadata copy's on every read. */
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
@@ -828,6 +828,8 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 	/** Whether a metadata-only lookup opened this request, if its broadcast supports them. */
 	lookups?: { opened: boolean };
+	/** Whether it asks for the track's metadata copy, each frame's header alone, rather than its payload. */
+	meta?: boolean;
 }
 
 /**
@@ -905,6 +907,11 @@ export const hooks: {
 	releaseTrack: (producer: Producer) => void;
 	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
 	poolTrack: (producer: Producer, pool: Pool) => void;
+	/**
+	 * Make a new track a metadata copy, before it holds any group: each group it creates holds
+	 * frame headers alone (see {@link metaGroup}). Assigned by `track.ts`.
+	 */
+	metaTrack: (producer: Producer) => void;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -1442,6 +1449,20 @@ export const hooks: {
 	 */
 	skipGroupFrames: (group: GroupConsumer) => void;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
+	/**
+	 * Make a new group a metadata copy, before its first frame: it holds each frame's header alone,
+	 * which {@link writeGroupHeader} writes, and refuses a payload. It stores no compressed stream,
+	 * whatever its track declares. Assigned by `group.ts`.
+	 */
+	metaGroup: (group: GroupProducer) => void;
+	/** Whether a group is a metadata copy; see {@link metaGroup}. Assigned by `group.ts`. */
+	groupMeta: (group: GroupProducer) => boolean;
+	/**
+	 * Write the header of a frame of `size` plain bytes at `timestamp` into a metadata copy, as a
+	 * metadata subscription delivers it: an empty payload, which readers get with `size` as its
+	 * declared plain size. Throws on a payload group. Assigned by `group.ts`.
+	 */
+	writeGroupHeader: (group: GroupProducer, timestamp: Timestamp, size: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
 	/** Record a cached group's accesses to `charge` from now on, or stop with undefined. */
@@ -1556,6 +1577,13 @@ export const hooks: {
 	 * until `hold` aborts; undefined with no such copy. Assigned by `broadcast.ts`.
 	 */
 	resolveHeld: (broadcast: BroadcastConsumer, name: string, hold?: AbortSignal) => Promise<Info> | undefined;
+	/**
+	 * Serve a broadcast's metadata lookups from a metadata copy apart from the payload one, which
+	 * its request handler fills with frame headers alone: set only by a handler that can, a lite-07
+	 * session asking upstream with a metadata subscription. Mirrors the Rust `serve_meta`; assigned
+	 * by `broadcast.ts`.
+	 */
+	serveMeta: (broadcast: BroadcastConsumer) => void;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
@@ -1603,6 +1631,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	metaTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1974,6 +2005,15 @@ export const hooks: {
 	writeGroupFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
+	metaGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupMeta: () => {
+		throw new Error("group.ts not loaded");
+	},
+	writeGroupHeader: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupCacheBytes: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -2083,6 +2123,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	resolveHeld: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	serveMeta: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	keepRequest: () => {

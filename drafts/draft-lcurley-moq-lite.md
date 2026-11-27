@@ -437,8 +437,8 @@ The publisher serves it with the same Ranges, priority, `Group Order`, Group Str
 A metadata frame is not the frame: it never satisfies a payload reader, never fills a cache as a complete frame, and never advances where a subscriber resumes the payload.
 A subscriber moving to the payload opens its own payload subscription from its first missing frame with a `Position` or `Joined` Start, so it is sent no frame it holds.
 
-A relay serves a metadata subscription from a payload copy where that copy proves upstream would answer the same way, and asks upstream for the rest with a metadata subscription, so payload crosses no hop no reader needs it on.
-Only where its upstream session cannot carry the mode (e.g., an earlier version) does it ask with a payload subscription, dropping the payloads for its metadata readers.
+A relay asks upstream for what a metadata subscription needs with a metadata subscription, so payload crosses no hop no reader needs it on; it MAY instead serve any part from a payload copy that proves upstream would answer it the same way.
+Only where its upstream session cannot carry the mode (e.g., an earlier version) does it serve its metadata readers from the Track's payload subscription and copy, dropping the payloads for them; it MUST NOT open a second payload subscription upstream for them.
 A relay never serves a payload reader from what a metadata subscription delivered.
 
 
@@ -1096,7 +1096,7 @@ This document has no IANA actions.
 - A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - Added stream error code `SKIP` (`0x3A`) on `SUBSCRIBE_DROP` for starts the publisher declared it will never produce: final, ends no reader, and cached by relays. A start nothing accounts for is still owed, so a subscriber waits out no grace period.
-- Added `SUBSCRIBE.Meta` for a metadata subscription (`0x1`), fixed for its life, whose `FRAME`s carry no `Inflated Size` or payload, `Payload Length` being the inflated size + 1. A relay serves one from a payload copy or a metadata subscription upstream, from a payload subscription whose payloads it drops only where its upstream cannot carry the mode, and never serves a payload reader from metadata.
+- Added `SUBSCRIBE.Meta` for a metadata subscription (`0x1`), fixed for its life, whose `FRAME`s carry no `Inflated Size` or payload, `Payload Length` being the inflated size + 1. A relay serves one from a payload copy or a metadata subscription upstream, from the Track's one payload subscription only where its upstream cannot carry the mode, and never serves a payload reader from metadata.
 - A publisher that resets a Group Stream with `RESET_STREAM_AT` whose Reliable Size covers the `GROUP` message, over QUIC or QMux, names no such Group in `SUBSCRIBE_DROP`; any other reset, including every reset over WebTransport, may lose the `GROUP` message, so the publisher names the Group with the reset's error, and a reset that may cut a `GROUP_END` names its inner starts again with `SKIP`. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
 - A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.
 

@@ -78,7 +78,7 @@ the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-
 (renaming `Instance` to `Identity` across every wire message, capping it at
 256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
 keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both
-[Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md)
+metadata mode on the lite-07 wire, served ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)),
 and [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) (reversing the
 2026-11-25 deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD
 indexing is an immediate consumer and `moq_subscription` changes the C ABI;

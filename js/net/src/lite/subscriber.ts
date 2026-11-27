@@ -129,6 +129,7 @@ import {
 	hasIdentity,
 	hasLengthFirst,
 	hasMediaTime,
+	hasMeta,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
@@ -231,6 +232,9 @@ interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
 	track: track.Producer;
+	// Whether it fills the track's metadata copy, asking with a metadata subscription for each
+	// frame's header alone.
+	meta: boolean;
 	compress: boolean;
 	// Per-frame timestamp scale (0 = none), resolved before this entry is registered.
 	timescale: number;
@@ -1452,7 +1456,7 @@ export class Subscriber {
 	) {
 		const { valid } = consumed;
 		const { ranges, placed } = wireHeld(request.subscription);
-		const msg = this.#subscribeMessage(id, broadcast, consumed, request.name, request.subscription, ranges, placed);
+		const msg = this.#subscribeMessage(id, broadcast, consumed, request, request.subscription, ranges, placed);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
@@ -1520,14 +1524,15 @@ export class Subscriber {
 		await this.#serveStream(id, broadcast, consumed, state, stream, entry, msg);
 	}
 
-	// The SUBSCRIBE for `subscription`, asking for `ranges`, its wire ranges in the model, each live
-	// join `placed` at a group by index starting there. Its own wire ranges wait for the track's
-	// timescale when they name a time (see `#withRanges`).
+	// The SUBSCRIBE of `target` (a metadata subscription for its metadata copy) for `subscription`,
+	// asking for `ranges`, its wire ranges in the model, each live join `placed` at a group by index
+	// starting there. Its own wire ranges wait for the track's timescale when they name a time (see
+	// `#withRanges`).
 	#subscribeMessage(
 		id: bigint,
 		broadcast: Path.Valid,
 		consumed: Consumed,
-		name: string,
+		target: { name: string; meta: boolean },
 		subscription: Readonly<track.Subscription>,
 		ranges: readonly track.Range[],
 		placed: ReadonlyMap<number, bigint> = new Map(),
@@ -1537,12 +1542,13 @@ export class Subscriber {
 			id,
 			broadcast,
 			identity: consumed.identity,
-			track: name,
+			track: target.name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
 			maxDelay: maxAge(ranges),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
+			meta: target.meta,
 		});
 	}
 
@@ -1842,6 +1848,7 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
+			meta: msg.meta,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			...framing,
@@ -2027,6 +2034,8 @@ export class Subscriber {
 			if (
 				!entry.filling &&
 				!entry.fillGroup &&
+				// A metadata copy holds no payload a payload fetch could take.
+				!entry.meta &&
 				entry.broadcast === broadcast &&
 				entry.consumedId === consumed.id &&
 				entry.track.name === track
@@ -2193,6 +2202,7 @@ export class Subscriber {
 			const entry: SubscribeEntry = {
 				// Unused for fillGroup entries; satisfies the shared SubscribeEntry shape.
 				track: undefined as unknown as track.Producer,
+				meta: false,
 				staleBudget: NO_MAX_DELAY,
 				staleCap: key + 1n,
 				compress: info.compress,
@@ -2576,8 +2586,10 @@ export class Subscriber {
 		const oneStart = !hasGroupEnd(this.version);
 		const oneShot = keepsSubscribeOpen(this.version);
 		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
+		// A metadata copy's fill asks for headers alone too.
+		const target = { name: producer.name, meta: copy.meta };
 		const msg = this.#withRanges(
-			this.#subscribeMessage(id, broadcast, consumed, producer.name, { priority, order: "ascending" }, ranges),
+			this.#subscribeMessage(id, broadcast, consumed, target, { priority, order: "ascending" }, ranges),
 			ranges,
 		);
 		// Lite-07 recovery asks for exact group bounds [Position(start, 0), Position(end, 0))
@@ -2593,6 +2605,7 @@ export class Subscriber {
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
+			meta: copy.meta,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			compress: copy.compress,
@@ -4038,6 +4051,8 @@ class ConsumeBroadcast extends broadcast.Consumer {
 
 	constructor(subscriber: Subscriber, path: Path.Valid, consumed: Consumed, state?: never) {
 		super(state);
+		// A metadata reader gets a copy of its own, filled by a metadata subscription.
+		if (hasMeta(subscriber.version)) hooks.serveMeta(this);
 		const baseFetchGroup = wireOf(this).fetchGroup;
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: async (name, hold) => {
