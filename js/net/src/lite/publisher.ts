@@ -132,7 +132,8 @@ function subscribed(front: broadcast.Consumer, msg: Subscribe): track.Consumer {
  * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
  * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
  * when the track is stamped, and `inflated` when the frame was decompressed. Lite-07 leads with the
- * size plus one, leaving 0 for GROUP_END; earlier versions end the header with the size.
+ * size plus one, leaving 0 for GROUP_END, and carries the delta unsigned, since a group's timestamps
+ * never decrease; earlier versions zigzag it and end the header with the size.
  */
 export function frameHeader(
 	version: StreamVersion,
@@ -143,7 +144,11 @@ export function frameHeader(
 ) {
 	const parts: Uint8Array[] = [];
 	if (lengthFirst) parts.push(encodeVarint(size + 1, version));
-	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
+	if (delta !== undefined) {
+		// A lite-05/06 ingest may still carry a decreasing timestamp, which lite-07 can't encode.
+		if (lengthFirst && delta < 0n) throw new RangeError("timestamp below the previous frame");
+		parts.push(encodeVarint(lengthFirst ? delta : zigzag(delta), version));
+	}
 	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
 	if (!lengthFirst) parts.push(encodeVarint(size, version));
 	return concat(parts);
@@ -151,7 +156,7 @@ export function frameHeader(
 
 /**
  * Lite-07 GROUP_END, after a finished group's last frame: a zero `Payload Length`, where a frame
- * would start, then the group's exclusive `end` as a delta from `base`: the highest timestamp the
+ * would start, then the group's exclusive `end` as a delta from `base`: the last timestamp the
  * stream carried, or the group's start when it carried none. A finished group's end is at or
  * above both, so the delta is never negative.
  */
@@ -3096,9 +3101,8 @@ export class Publisher {
 			}
 		}
 
-		// Lite-07 counts the first delta from the group's start, and GROUP_END from the highest.
+		// Lite-07 counts the first delta from the group's start, and GROUP_END from the last frame.
 		let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
-		let highest: bigint | undefined;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
 			const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!read) break;
@@ -3109,7 +3113,6 @@ export class Publisher {
 				const ts = wireTime(frame.timestamp, stamp);
 				delta = ts - prevTs;
 				prevTs = ts;
-				highest = max(highest ?? ts, ts);
 			}
 
 			const header = frameHeader(
@@ -3130,7 +3133,7 @@ export class Publisher {
 		// Lite-07: a response that reached a finished group's end says so before the FIN.
 		const end = group.end;
 		if (hasGroupEnd(this.version) && end !== undefined && hooks.groupIndex(group) >= group.frameCount)
-			await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
+			await write(() => stream.write(groupEnd(stream.version, end, prevTs)));
 	}
 
 	/**
@@ -3215,9 +3218,8 @@ export class Publisher {
 			if (hasReliableReset(this.version)) held = stream.hold();
 
 			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
-			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
+			// at, and GROUP_END from the last timestamp sent.
 			let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
-			let highest: bigint | undefined;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below. A received tail may already begin there.
 			let reached = hooks.groupIndex(group) === startFrame;
@@ -3299,7 +3301,6 @@ export class Publisher {
 					const ts = wireTime(read.frame.timestamp, stamp);
 					delta = ts - prevTs;
 					prevTs = ts;
-					highest = max(highest ?? ts, ts);
 				}
 
 				const header = options.meta
@@ -3321,7 +3322,7 @@ export class Publisher {
 			if (end !== undefined) {
 				options.ended?.(end);
 				spanEnd = end;
-				await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
+				await write(() => stream.write(groupEnd(stream.version, end, prevTs)));
 			}
 			stream.close();
 			group.close();

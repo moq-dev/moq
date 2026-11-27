@@ -420,6 +420,15 @@ impl Info {
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.properties.as_ref().map(|properties| properties.version)
 	}
+
+	/// Whether the upstream moq-transport publisher's Object IDs encode timestamps (a timed
+	/// track from draft-23), or `None` for a native moq-lite track.
+	#[cfg(feature = "async")]
+	pub(crate) fn timestamp_ids(&self) -> Option<bool> {
+		self.properties
+			.as_ref()
+			.map(|properties| self.timescale.is_some() && properties.version.timestamp_object_ids())
+	}
 }
 
 #[cfg(any(test, feature = "fuzz"))]
@@ -8161,6 +8170,22 @@ impl Consumer {
 		}
 	}
 
+	/// The track's [`Info`] when already resolved, without waiting.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn peek_info(&self) -> Option<Info> {
+		if let Some(serving) = self.serving() {
+			return serving.peek_info();
+		}
+		self.with_state(|state| {
+			let state = state?.read();
+			state
+				.info
+				.as_ref()
+				.filter(|_| state.publication != Publication::Staged)
+				.cloned()
+		})
+	}
+
 	/// The upstream publisher's Largest Object, independently of which groups are cached.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reported_object(&self) -> Option<(u64, u64)> {
@@ -14201,6 +14226,19 @@ impl Subscriber {
 		}
 	}
 
+	/// Peek a cached group by key without advancing the subscription or refreshing cache order.
+	#[cfg(feature = "async")]
+	pub(crate) fn peek_group(&self, key: u64) -> Option<group::Consumer> {
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				let slot = state.lookup.get(&key).filter(|slot| slot.serves_end())?;
+				Some(slot.serving().consume())
+			}
+			Inner::Resume(resume, _) => resume.peek_group(key),
+		}
+	}
+
 	/// The track's declared exclusive end position, or the cause on an abort. See
 	/// [`Producer::finish_at`] for what the position means.
 	///
@@ -17587,7 +17625,7 @@ mod test {
 		let _partial = group
 			.create_frame(frame::Info {
 				size: 2,
-				timestamp: Timestamp::ZERO,
+				timestamp: Timestamp::from_millis(3).unwrap(),
 			})
 			.unwrap();
 		assert_eq!(handle.frame_count(), 2);
@@ -21987,49 +22025,6 @@ mod test {
 		);
 	}
 
-	/// A batch must notify expiry at its highest PTS even when its decode-order tail is lower.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_reordered_batch_wakes_the_group_pts_drift_deadline() {
-		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(
-			Subscription::default()
-				.with_max(Duration::from_secs(10))
-				.with_order(Order::Ascending),
-		);
-		let mut head = producer.append_next().unwrap();
-		head.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
-			.unwrap();
-		append_at(&mut producer, 1000);
-		let mut edge = producer.append_next().unwrap();
-		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::new())
-			.unwrap();
-		let mut held = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
-		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
-		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
-		let mut cx = std::task::Context::from_waker(&waker);
-		let mut next = std::pin::pin!(held.read_frame());
-		assert!(next.as_mut().poll(&mut cx).is_pending());
-		let mut frames = crate::frame::Buffer::<2>::new();
-		for ms in [11_000, 10_000] {
-			frames
-				.push(crate::frame::Frame::new(
-					Timestamp::from_millis(ms).unwrap(),
-					bytes::Bytes::new(),
-				))
-				.unwrap();
-		}
-		edge.write_frames(&mut frames).unwrap();
-		assert!(
-			woken.load(Ordering::SeqCst),
-			"the batch's highest PTS reaches the deadline"
-		);
-		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
-		head.finish().unwrap();
-		edge.finish().unwrap();
-	}
-
 	/// A copy whose readers keep resuming it at groups that never arrive keeps no more than
 	/// twice the loans its pool bills: those the pool reclaimed are forgotten as loans grow.
 	#[test]
@@ -22653,44 +22648,6 @@ mod test {
 		}
 
 		assert_eq!(read, vec![(0, 2), (1, 2), (2, 2), (3, 2)], "every frame of every group");
-	}
-
-	/// Decode-order B-frames cannot rewind the presentation edge and re-admit an old group.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_reordered_tail_keeps_the_group_pts_drift_verdict() {
-		for reordered in [false, true] {
-			let producer = track_producer("test", Info::timed());
-			let mut subscriber = producer.subscribe(
-				Subscription::default()
-					.with_max(Duration::from_millis(80))
-					.with_order(Order::Ascending),
-			);
-			for ms in [0, 100] {
-				let mut group = producer.append_next().unwrap();
-				group
-					.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
-					.unwrap();
-				group.finish().unwrap();
-			}
-			let mut edge = producer.append_next().unwrap();
-			for ms in [150, 200] {
-				edge.write_frame(Timestamp::from_millis(ms).unwrap(), bytes::Bytes::new())
-					.unwrap();
-			}
-			if reordered {
-				edge.write_frame(Timestamp::from_millis(160).unwrap(), bytes::Bytes::new())
-					.unwrap();
-			}
-			edge.finish().unwrap();
-			// Group 0 can reach 100ms: 100ms behind the 200ms edge, past its 80ms budget.
-			// Group 1 can reach 150ms and stays within the same budget.
-			assert_eq!(
-				subscriber.recv_group().await.unwrap().unwrap().start,
-				1,
-				"reordered {reordered}"
-			);
-		}
 	}
 
 	/// A budget is spent from where the reader stands, not from where its group opened.

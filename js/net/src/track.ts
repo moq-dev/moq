@@ -1941,7 +1941,12 @@ export class Producer {
 			if (typeof served.start === "bigint") producer.#arrivals.demand(0n, served.start, now());
 			hooks.startTrack(producer, { ...served, restated: true });
 		};
-		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.cachedLargest = (producer, timescale) => producer.#cachedLargest(timescale);
+		hooks.finishedTimedFrame = (producer, key, id, timescale) => {
+			const group = producer.#cached.get(key)?.group;
+			if (!group || group.closed.peek() !== null) return undefined;
+			return hooks.groupTimedFrame(group, id, timescale) ?? hooks.groupFrameCount(group);
+		};
 		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
 		hooks.holdTrack = (producer) => {
 			producer.#holds++;
@@ -2735,7 +2740,8 @@ export class Producer {
 
 	// The newest frame in the cache, as {@link Subscriber.largest} reads it from a sink:
 	// unknown once the newest group is evicted, since what is left cannot say where the edge is.
-	#cachedLargest(): Position | undefined {
+	// With `timescale`, its frame is the last frame's moq-timestamp Object ID at that scale.
+	#cachedLargest(timescale?: Timescale): Position | undefined {
 		const latest = this.#state.latest;
 		if (latest === undefined || !this.#cached.has(latest)) return undefined;
 
@@ -2743,7 +2749,8 @@ export class Producer {
 		for (const { group } of this.#cache) {
 			const count = hooks.groupFrameCount(group);
 			if (count > hooks.groupOffset(group) && (largest === undefined || group.start > largest.group)) {
-				largest = { group: group.start, frame: count - 1 };
+				const timed = timescale && hooks.groupLastTimedId(group, timescale);
+				largest = { group: group.start, frame: timed === undefined ? count - 1 : Number(timed) };
 			}
 		}
 		return largest;

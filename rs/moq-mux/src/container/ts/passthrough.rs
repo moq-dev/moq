@@ -712,6 +712,7 @@ impl<E: super::Catalog> Passthrough<E> {
 		}
 		self.media.write(crate::container::Frame {
 			timestamp,
+			decode: None,
 			duration: None,
 			payload: object.payload.freeze(),
 			keyframe: start.is_some(),

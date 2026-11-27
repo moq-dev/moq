@@ -2008,6 +2008,7 @@ fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> s
 fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate::container::Frame {
 	crate::container::Frame {
 		timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+		decode: None,
 		payload: bytes::Bytes::from_static(&[0xDE, 0xAD]),
 		keyframe,
 		duration: duration_us.map(|d| moq_net::Timestamp::from_micros(d).unwrap()),

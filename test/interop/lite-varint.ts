@@ -2,9 +2,10 @@
 import assert from "node:assert/strict";
 import { Datagram } from "../../js/net/src/lite/datagram.ts";
 import { frameDecoder, Group } from "../../js/net/src/lite/group.ts";
+import { frameHeader } from "../../js/net/src/lite/publisher.ts";
 import { Setup } from "../../js/net/src/lite/setup.ts";
 import { TrackInfo } from "../../js/net/src/lite/track.ts";
-import { Version } from "../../js/net/src/lite/version.ts";
+import { hasLengthFirst, Version } from "../../js/net/src/lite/version.ts";
 import { Reader, Writer } from "../../js/net/src/stream.ts";
 
 const input: {
@@ -74,28 +75,27 @@ assert.equal(trackInfo.timescale, version === Version.DRAFT_07 ? undefined : 1_0
 const trackInfoBytes = await write((w) => trackInfo.encode(w, version));
 
 // A GROUP header, then frames until the stream ends.
+const lengthFirst = hasLengthFirst(version);
 const g = reader(input.group);
 const group = await Group.decode(g, version);
-const decode = frameDecoder({ scale: 1_000_000 });
+const decode = frameDecoder({ scale: 1_000_000, start: group.key, lengthFirst });
 const frames: { timestamp: bigint; payload: Uint8Array }[] = [];
 for (;;) {
 	const frame = await g.decodeMaybe(decode);
 	if (!frame) break;
-	// Only a length-first frame can be a GROUP_END, and the fixture's frames are not.
 	if ("end" in frame) throw new Error("a fixture frame decoded as GROUP_END");
 	if (!frame.timestamp) throw new Error("a lite-05+ frame decoded without its timestamp");
 	// The fixture's frames fit one segment, so each payload decodes with its header.
 	if (!frame.payload) throw new Error("a fixture frame streamed past its header");
 	frames.push({ timestamp: BigInt(frame.timestamp.value), payload: frame.payload });
 }
-const zigzag = (d: bigint) => (d << 1n) ^ (d >> 63n);
 const groupBytes = await write(async (w) => {
 	await group.encode(w, version);
-	let prev = 0n;
+	let prev = lengthFirst ? group.key : 0n;
 	for (const { timestamp, payload } of frames) {
-		await w.u62(zigzag(timestamp - prev));
+		const delta = timestamp - prev;
 		prev = timestamp;
-		await w.u53(payload.byteLength);
+		await w.write(frameHeader(version, delta, undefined, payload.byteLength, lengthFirst));
 		await w.write(payload);
 	}
 });
@@ -107,7 +107,7 @@ if (untimed) {
 	const untimedGroup = await Group.decode(u, version);
 	const untimedFrames: Uint8Array[] = [];
 	for (;;) {
-		const frame = await u.decodeMaybe(frameDecoder({ scale: 0 }));
+		const frame = await u.decodeMaybe(frameDecoder({ scale: 0, start: untimedGroup.key, lengthFirst }));
 		if (!frame) break;
 		if ("end" in frame) throw new Error("a fixture frame decoded as GROUP_END");
 		assert.equal(frame.timestamp, undefined);
@@ -117,7 +117,7 @@ if (untimed) {
 	untimedGroupBytes = await write(async (w) => {
 		await untimedGroup.encode(w, version);
 		for (const payload of untimedFrames) {
-			await w.u53(payload.byteLength);
+			await w.write(frameHeader(version, undefined, undefined, payload.byteLength, lengthFirst));
 			await w.write(payload);
 		}
 	});

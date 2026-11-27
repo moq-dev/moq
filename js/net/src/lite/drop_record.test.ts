@@ -584,7 +584,8 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 
 	hooks.dropTrackGroups(chained.track, 1n, 1n + BILLIONS, { error: new StreamError(StreamCode.Cancel) });
 	chained.track.skipGroups(1n + BILLIONS, 1n + 2n * BILLIONS);
-	chained.write(1n + 2n * BILLIONS, 1000);
+	// Presented at its key, as a lite-07 group's frames never fall below its start.
+	chained.write(1n + 2n * BILLIONS, Number(1n + 2n * BILLIONS));
 	for (const reader of [narrow, wide]) {
 		const got: unknown[][] = [];
 		for (let i = 0; i < 3; i++) got.push(settled(await within(clock, reader)));
@@ -624,7 +625,7 @@ for (const judged of ["unsettled by a widening", "forgotten by the relay"] as co
 		if (judged === "unsettled by a widening")
 			hooks.dropTrackGroups(chained.track, 1n, 1n + BILLIONS, staleHole(1500));
 		else chained.track.skipGroups(1n, 1n + BILLIONS);
-		chained.write(1n + BILLIONS, 1000);
+		chained.write(1n + BILLIONS, Number(1n + BILLIONS));
 		const expected = judged === "unsettled by a widening" ? StreamCode.Old : StreamCode.NotFound;
 		expect(settled(await next(reader))[3]).toBe(expected);
 		expect(settled(await next(reader))).toEqual(["group", 1n + BILLIONS]);

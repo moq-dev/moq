@@ -1026,23 +1026,22 @@ async function servedSubscription(
 			const times: bigint[] = [];
 			let end: bigint | undefined;
 			let endDelta: bigint | undefined;
-			// Lite-07 counts the first delta from the group's start, and GROUP_END from the highest.
+			// Lite-07 counts the first delta from the group's start, and GROUP_END from the last frame.
 			const lengthFirst = hasLengthFirst(version);
 			let ts = lengthFirst ? header.key : 0n;
-			let highest: bigint | undefined;
 			while (!(await reader.done())) {
 				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
-				// leads with the size plus one instead, where 0 is GROUP_END and its End delta.
+				// leads with the size plus one instead, where 0 is GROUP_END and its End delta, and
+				// carries the timestamp delta unsigned.
 				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				if (length === -1) {
 					endDelta = await reader.u62();
-					end = (highest ?? header.key) + endDelta;
+					end = ts + endDelta;
 					continue;
 				}
-				const zigzag = await reader.u62();
-				ts += (zigzag >> 1n) ^ -(zigzag & 1n);
+				const raw = await reader.u62();
+				ts += lengthFirst ? raw : (raw >> 1n) ^ -(raw & 1n);
 				times.push(ts);
-				if (highest === undefined || ts > highest) highest = ts;
 				const size = length ?? (await reader.u53());
 				if (options.meta) sizes.push(size);
 				else payloads.push(new TextDecoder().decode(await reader.read(size)));
@@ -1534,17 +1533,16 @@ for (const compression of [undefined, "deflate"] as const) {
 	});
 }
 
-// A lite-07 GROUP_END's End is a delta from the highest frame timestamp the stream carried: B-frames
-// send timestamps backwards, so the highest is not the last.
-test("lite-07 GROUP_END counts from the highest frame of a group with B-frames", async () => {
+// Lite-07 carries unsigned timestamp deltas, and a GROUP_END's End counts from the last frame.
+test("lite-07 GROUP_END counts from the last frame", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		const group = sub.track.createGroup(1000n);
-		for (const ms of [1000, 1100, 1033, 1066]) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+		for (const ms of [1000, 1033, 1033, 1100]) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
 		group.finishAt(1133n);
 		expect(await sub.servedGroup()).toMatchObject({
 			key: 1000n,
-			times: [1000n, 1100n, 1033n, 1066n],
+			times: [1000n, 1033n, 1033n, 1100n],
 			endDelta: 33n,
 			end: 1133n,
 		});
@@ -1553,8 +1551,8 @@ test("lite-07 GROUP_END counts from the highest frame of a group with B-frames",
 	}
 });
 
-// A group may end at its highest frame (delta 0), and one with no frame at its start.
-test("lite-07 GROUP_END may end a group at its highest frame or its start", async () => {
+// A group may end at its last frame (delta 0), and one with no frame at its start.
+test("lite-07 GROUP_END may end a group at its last frame or its start", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		const group = sub.track.createGroup(1000n);

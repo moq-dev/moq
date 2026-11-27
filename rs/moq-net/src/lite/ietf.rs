@@ -565,9 +565,9 @@ mod tests {
 		let list: Vec<_> = (0..=max).map(|i| opaque(0x40 + 2 * i)).collect();
 		assert!(decode(&wire(&list[..max as usize], draft18)).is_ok());
 		assert!(decode(&wire(&list, draft18)).is_err(), "more than ingress keeps");
-		// TIMESCALE belongs to TRACK_INFO.
+		// ID_TIMESCALE belongs to TRACK_INFO.
 		assert!(
-			decode(&wire(&[opaque(0x08)], draft18)).is_err(),
+			decode(&wire(&[opaque(0x40B70)], draft18)).is_err(),
 			"an understood property"
 		);
 		assert!(
@@ -995,14 +995,14 @@ mod hop_tests {
 		}
 	}
 
-	/// A sealed TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
+	/// A sealed ID_TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
 	/// times frames by TRACK_INFO, while egress would forward the sealed one.
 	#[kio::test]
 	async fn a_sealed_property_must_match_track_info() {
 		for (timescale, ok) in [(1000, true), (900, false), (0, false)] {
 			let mut sealed = Vec::new();
 			let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
-			e.varint(0x08).unwrap();
+			e.varint(0x40B70).unwrap();
 			e.varint(timescale).unwrap();
 			let res = subscribe_across(vec![Property {
 				id: IMMUTABLE,

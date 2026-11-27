@@ -105,6 +105,15 @@ pub struct Frame {
 	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: moq_net::Timestamp,
 
+	/// Decode timestamp, when it differs from [`timestamp`](Self::timestamp), or `None` when the
+	/// frame decodes at its presentation time.
+	///
+	/// A track's frames are written to the transport at their decode time, which never decreases
+	/// within a group: a group starts at its keyframe's decode time, and a stream with B-frames
+	/// carries each presentation time in its payload. A reordering source must set this, since a
+	/// presentation time below its predecessor's is refused as a decode time.
+	pub decode: Option<moq_net::Timestamp>,
+
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
@@ -157,6 +166,18 @@ pub(crate) fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Ti
 /// The earlier of two timestamps, `a` when they don't compare; see [`later`].
 pub(crate) fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
 	if b < a { b } else { a }
+}
+
+/// The decode time `delay` before `presentation`, in its scale, or the timeline's zero for a
+/// picture that decodes before it, so decode times stay in order and never pass a presentation time.
+pub(crate) fn decode_time(
+	presentation: moq_net::Timestamp,
+	delay: moq_net::Timestamp,
+) -> Result<moq_net::Timestamp, moq_net::Error> {
+	let scale = presentation.scale().ok_or(moq_net::Error::TimestampMismatch)?;
+	let delay = delay.convert(scale).map_err(|_| moq_net::Error::TimestampMismatch)?;
+	moq_net::Timestamp::new(presentation.value().saturating_sub(delay.value()), scale)
+		.map_err(|_| moq_net::Error::TimestampMismatch)
 }
 
 /// Stamp `frame` with the duration that ends at `bound`, unless it already has one.

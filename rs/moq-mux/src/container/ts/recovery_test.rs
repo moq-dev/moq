@@ -544,8 +544,11 @@ fn skips(starts: impl IntoIterator<Item = u64>) -> Vec<std::ops::Range<u64>> {
 /// The presentation time of a published frame, in microseconds on the catalog clock, and
 /// whether it is the marker of a declared discontinuity.
 fn decoded(frame: &moq_net::frame::Frame) -> (u64, bool) {
-	let frame = hang::container::Frame::decode(frame.payload.clone()).unwrap();
-	(frame.timestamp.as_micros().unwrap() as u64, frame.payload.is_empty())
+	use crate::container::Container as _;
+	let frames = crate::container::cts::Wire(crate::container::Kind::Video)
+		.decode(frame.clone())
+		.unwrap();
+	(frames[0].timestamp.as_micros().unwrap() as u64, frames[0].payload.is_empty())
 }
 
 /// The presentation time of a published frame, in microseconds on the catalog clock.

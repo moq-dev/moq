@@ -884,6 +884,7 @@ mod tests {
 	fn frame(millis: u64, payload: &'static [u8], keyframe: bool) -> moq_mux::container::Frame {
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(payload),
 			keyframe,
 			duration: None,

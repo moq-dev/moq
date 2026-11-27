@@ -196,6 +196,7 @@ async fn custom_selected_catalog_drives_export_and_follow() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::ZERO,
+					decode: None,
 					duration: None,
 					payload: Bytes::copy_from_slice(payload),
 					keyframe: true,
@@ -336,6 +337,7 @@ async fn export_aac_roundtrip() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i as u64 * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.clone(),
 				keyframe: true,
@@ -416,6 +418,7 @@ async fn export_skips_a_disabled_rendition() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(payload),
 					keyframe: true,
@@ -482,6 +485,7 @@ async fn export_packs_aac_frames_up_to_their_buffer() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i as u64 * 1_024 * 1_000_000 / 48_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.clone(),
 				keyframe: true,
@@ -638,6 +642,7 @@ async fn export_lead_audio() -> BytesMut {
 
 	let audio_frame = |ms: u64| Frame {
 		timestamp: Timestamp::from_micros(ms * 1_000).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from(vec![0xAAu8; 16]),
 		keyframe: true,
@@ -652,6 +657,7 @@ async fn export_lead_audio() -> BytesMut {
 	video
 		.write(Frame {
 			timestamp: Timestamp::from_micros(100_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: annexb(&[SPS, PPS, &idr]),
 			keyframe: true,
@@ -778,6 +784,7 @@ async fn export_avc3_preserves_multiple_pps() {
 	producer
 		.write(Frame {
 			timestamp: Timestamp::from_millis(0).unwrap(),
+			decode: None,
 			duration: None,
 			payload: annexb(&[SPS, PPS, PPS1, &idr]),
 			keyframe: true,
@@ -838,6 +845,7 @@ async fn export_avc1_out_of_band_reassembles() {
 	producer
 		.write(Frame {
 			timestamp: Timestamp::from_micros(0).unwrap(),
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[&idr]),
 			keyframe: true,
@@ -908,6 +916,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(i as u64 * 40).unwrap(),
+				decode: None,
 				duration: None,
 				payload: annexb(nals),
 				keyframe: i == 0,
@@ -1046,6 +1055,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 			.enumerate()
 			.map(|(index, ms)| Frame {
 				timestamp: Timestamp::from_millis(ms).unwrap(),
+				decode: None,
 				duration: None,
 				keyframe: index == 0,
 				payload: if index == 0 {
@@ -1138,6 +1148,7 @@ async fn export_trims_leading_pictures_after_a_late_drop() {
 		video
 			.write(Frame {
 				timestamp: Timestamp::from_millis(pts).unwrap(),
+				decode: None,
 				duration: None,
 				keyframe,
 				payload: if keyframe {
@@ -1228,6 +1239,7 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 			audio
 				.write(Frame {
 					timestamp: Timestamp::from_micros(sample * AUDIO_US).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from(vec![sample as u8; 180]),
 					keyframe: sample.is_multiple_of(AUDIO_GROUP),
@@ -1242,6 +1254,7 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 		video
 			.write(Frame {
 				timestamp: Timestamp::from_millis(pts).unwrap(),
+				decode: None,
 				duration: None,
 				keyframe: sequence,
 				payload: Bytes::from(pes_with(0xe0, 0x80, 0x80, &pes_clock(2, pts * 90), 0, &payload)),
@@ -1361,6 +1374,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 			.enumerate()
 			.map(|(index, &ms)| Frame {
 				timestamp: Timestamp::from_millis(ms).unwrap(),
+				decode: None,
 				duration: None,
 				keyframe: index == 0,
 				payload: if index == 0 {
@@ -1565,6 +1579,7 @@ async fn export_pcr_wraps_below_zero_at_start() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
 				keyframe: i == 0,
@@ -1669,6 +1684,7 @@ async fn export_pcr_respects_every_rendition() {
 			video
 				.write(Frame {
 					timestamp,
+					decode: None,
 					duration: None,
 					payload: length_prefixed(&[&idr]),
 					keyframe: true,
@@ -1745,6 +1761,7 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(10_000 + i * 400).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&idr]),
 				keyframe: true,
@@ -1835,6 +1852,7 @@ async fn export_scte35_roundtrip() {
 	scte_producer
 		.write(Frame {
 			timestamp: Timestamp::from_millis(1410).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from_static(CUE),
 			keyframe: true,
@@ -1978,6 +1996,7 @@ async fn assert_unknown_stream_type(pes: bool) {
 	producer
 		.write(Frame {
 			timestamp: Timestamp::from_millis(1410).unwrap(),
+			decode: None,
 			duration: None,
 			payload,
 			keyframe: true,
@@ -2076,6 +2095,7 @@ async fn export_pes_packet_roundtrip() {
 	data_producer
 		.write(Frame {
 			timestamp: Timestamp::from_millis(1410).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from(pes.clone()),
 			keyframe: true,
@@ -2663,6 +2683,7 @@ async fn aac_program_config_follows_each_table() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_millis(ms).unwrap(),
+					decode: None,
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -2758,6 +2779,7 @@ async fn aac_program_config_leads_a_packed_pes() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_micros(*offset + i * 1_024 * 1_000_000 / 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from(vec![0x20; *bytes]),
 					keyframe: true,
@@ -2843,6 +2865,7 @@ async fn aac_program_config_follows_a_revision() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_micros(offset + i * 1_024 * 1_000_000 / 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from(vec![0x20; 400]),
 					keyframe: true,
@@ -2970,6 +2993,7 @@ async fn description_less_aac_refuses_raw_payloads() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(&[0x01, 0x02]),
 				keyframe: true,
@@ -3763,6 +3787,7 @@ async fn a_reimport_keeps_the_first_si_across_a_gap() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: length_prefixed(&[&[slice; 300]]),
 					keyframe: sec == 0,
@@ -3904,6 +3929,7 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&idr]),
 				keyframe: true,
@@ -4000,6 +4026,7 @@ async fn inline_si_form_is_re_emitted() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&idr]),
 				keyframe: true,
@@ -4255,6 +4282,7 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_micros(offset + i * 100_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_iter((0..180u16).map(|b| (b ^ i as u16) as u8)),
 					keyframe: i % 10 == 0,
@@ -4447,6 +4475,7 @@ async fn export_reordered_with_sdt() -> (Vec<Frame>, u64) {
 			producer
 				.write(Frame {
 					timestamp: Timestamp::from_micros(index * 40_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: length_prefixed(&[if keyframe { idr.as_slice() } else { slice.as_slice() }]),
 					keyframe,
@@ -4517,6 +4546,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 			video
 				.write(Frame {
 					timestamp: Timestamp::from_micros(MINUTE + sec * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: length_prefixed(&[idr.as_slice()]),
 					keyframe: true,
@@ -4527,6 +4557,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 				audio
 					.write(Frame {
 						timestamp: Timestamp::from_micros(MINUTE + sec * 1_000_000 + tenth * 100_000).unwrap(),
+						decode: None,
 						duration: None,
 						payload: Bytes::from_iter((0..180u16).map(|b| (b ^ tenth as u16) as u8)),
 						keyframe: tenth == 0,
@@ -4551,6 +4582,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 	video
 		.write(Frame {
 			timestamp: Timestamp::from_micros(MINUTE + 4_000_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[idr.as_slice()]),
 			keyframe: true,
@@ -4560,6 +4592,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 	video
 		.write(Frame {
 			timestamp: Timestamp::from_micros(MINUTE + 4_100_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[idr.as_slice()]),
 			keyframe: true,
@@ -5381,6 +5414,7 @@ async fn stale_si_entry_does_not_block_output() {
 	producer
 		.write(Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[&idr]),
 			keyframe: true,
@@ -5482,6 +5516,7 @@ async fn export_opus_roundtrip() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i as u64 * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.clone(),
 				keyframe: true,
@@ -5566,6 +5601,7 @@ async fn opus_export_import_roundtrip() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i as u64 * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.clone(),
 				keyframe: true,
@@ -5645,6 +5681,7 @@ async fn export_opus_track(channel_count: u32, description: Option<Bytes>) -> Re
 	producer
 		.write(Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			duration: None,
 			payload: opus_packet(0x01, 8),
 			keyframe: true,
@@ -5904,6 +5941,7 @@ async fn export_twice(with_video: bool, late_clock: bool) -> (Vec<Frame>, Vec<Fr
 			video
 				.write(Frame {
 					timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+					decode: None,
 					duration: None,
 					payload: length_prefixed(&[&slice]),
 					keyframe,
@@ -5915,6 +5953,7 @@ async fn export_twice(with_video: bool, late_clock: bool) -> (Vec<Frame>, Vec<Fr
 			audio
 				.write(Frame {
 					timestamp: Timestamp::from_micros(audio_index * AUDIO_US).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_iter((0..180u16).map(|i| (i ^ audio_index as u16) as u8)),
 					keyframe: audio_index % AUDIO_GROUP == 0,
@@ -6178,6 +6217,7 @@ impl Interleave {
 		self.video
 			.write(Frame {
 				timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&slice]),
 				keyframe,
@@ -6200,6 +6240,7 @@ impl Interleave {
 		self.audio
 			.write(Frame {
 				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
 				keyframe: index.is_multiple_of(self.audio_group),
@@ -6487,6 +6528,7 @@ async fn a_start_group_cut_short_goes_out() {
 		let slice = vec![if keyframe { 0x65u8 } else { 0x41 }; 400];
 		Frame {
 			timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[&slice]),
 			keyframe,
@@ -6720,6 +6762,7 @@ async fn repointed_si_entry_resubscribes() {
 	let write_key = |producer: &mut Producer<HangContainer>, sec: u64| {
 		producer
 			.write(Frame {
+				decode: None,
 				// A minute in, so a frame can go out the whole recording delay ahead of it.
 				timestamp: Timestamp::from_micros((60 + sec) * 1_000_000).unwrap(),
 				duration: None,
@@ -6851,6 +6894,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 	producer
 		.write(Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[&idr]),
 			keyframe: true,
@@ -6981,6 +7025,7 @@ impl SiCadenceRig {
 		self.producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(millis).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&nal]),
 				keyframe: !self.started,
@@ -7545,6 +7590,7 @@ async fn export_cbr_video() -> Vec<Frame> {
 		}
 		video
 			.write(Frame {
+				decode: None,
 				// A minute in, so a frame can go out the whole delay ahead of it.
 				timestamp: Timestamp::from_micros(60_000_000 + i * 40_000).unwrap(),
 				duration: None,
@@ -7610,6 +7656,7 @@ async fn a_frame_on_a_slot_boundary_finishes_before_it_decodes() {
 		}
 		video
 			.write(Frame {
+				decode: None,
 				// ffmpeg's 1.4 s start, on a slot boundary like every fifth frame after it.
 				timestamp: Timestamp::from_micros(1_400_000 + i * 40_000).unwrap(),
 				duration: None,
@@ -7907,6 +7954,7 @@ async fn a_heavy_passage_fills_the_slots_before_it() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(10_000 + i * 40).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&vec![if i == 0 { 0x65 } else { 0x41 }; size]]),
 				keyframe: i == 0,
@@ -8104,6 +8152,7 @@ async fn export_refuses_an_absurd_catalog_mux_rate() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from(vec![i as u8; 16]),
 				keyframe: i % 50 == 0,
@@ -8277,6 +8326,7 @@ async fn export_pcr_is_its_byte_position_at_the_rate() {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from(vec![i as u8; 16]),
 				keyframe: i % 50 == 0,
@@ -8420,6 +8470,7 @@ impl Reordered {
 		self.video
 			.write(Frame {
 				timestamp: reordered_at(group * GOP + layout[at]),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&slice]),
 				keyframe,
@@ -8437,6 +8488,7 @@ impl Reordered {
 		self.audio
 			.write(Frame {
 				timestamp,
+				decode: None,
 				duration: None,
 				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),
@@ -8825,6 +8877,7 @@ async fn a_skipped_group_flags_the_clock() {
 					for k in 0..5u64 {
 						let frame = Frame {
 							timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
+							decode: None,
 							duration: None,
 							payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
 							keyframe: k == 0,
@@ -8970,6 +9023,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 			let millis = if sequence == 10 && k == 0 { 9_001 } else { base + k * 20 };
 			let frame = Frame {
 				timestamp: Timestamp::from_millis(millis).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
 				keyframe: k == 0,
@@ -9011,6 +9065,7 @@ async fn a_late_join_starts_at_the_live_edge() {
 		audio
 			.write(Frame {
 				timestamp: Timestamp::from_millis(60_000 + k * 20).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
 				keyframe: k % 50 == 0,
@@ -9064,6 +9119,7 @@ fn aac_rendition<E: crate::catalog::hang::CatalogExt>(
 fn write_aac(producer: &mut Producer<HangContainer>, ms: u64) {
 	producer
 		.write(Frame {
+			decode: None,
 			// A minute in, so a frame can go out the whole recording delay ahead of it.
 			timestamp: Timestamp::from_millis(60_000 + ms).unwrap(),
 			duration: None,
@@ -9449,6 +9505,7 @@ fn write_h264(producer: &mut Producer<HangContainer>, ms: u64) {
 	producer
 		.write(Frame {
 			timestamp: Timestamp::from_millis(60_000 + ms).unwrap(),
+			decode: None,
 			duration: None,
 			payload: length_prefixed(&[&slice]),
 			keyframe,
@@ -9878,6 +9935,7 @@ async fn export_stats_count_only_returned_output() {
 	track
 		.write(Frame {
 			timestamp: Timestamp::from_millis(60_200).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from(vec![0; 8185]),
 			keyframe: true,
@@ -9965,6 +10023,7 @@ async fn export_liveness(sample: u64, stop: u64) -> (stats::Export, stats::Expor
 			video
 				.write(Frame {
 					timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+					decode: None,
 					duration: None,
 					payload: length_prefixed(&[&slice]),
 					keyframe,
@@ -9977,6 +10036,7 @@ async fn export_liveness(sample: u64, stop: u64) -> (stats::Export, stats::Expor
 				track
 					.write(Frame {
 						timestamp: Timestamp::from_micros(audio_index * AUDIO_US).unwrap(),
+						decode: None,
 						duration: None,
 						payload: Bytes::from_iter((0..180u16).map(|i| (i ^ audio_index as u16) as u8)),
 						keyframe: audio_index % AUDIO_GROUP == 0,
@@ -10141,6 +10201,7 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::ZERO,
+				decode: None,
 				duration: None,
 				keyframe: true,
 				payload: Bytes::from_static(b"aac"),
@@ -11010,6 +11071,7 @@ async fn a_follower_carries_on_into_a_return_while_it_plays_out() {
 			track
 				.write(Frame {
 					timestamp: Timestamp::from_millis(60_000 + frame * 20).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
 					keyframe: frame.is_multiple_of(10),
@@ -11687,6 +11749,7 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 			.unwrap()
 			.write(Frame {
 				timestamp: Timestamp::from_millis(pts).unwrap(),
+				decode: None,
 				duration: None,
 				payload: length_prefixed(&[&slice]),
 				keyframe: k == 0,
@@ -11705,6 +11768,7 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 		audio
 			.write(Frame {
 				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from(vec![index as u8; 180]),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),
@@ -11715,6 +11779,7 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 	for (ms, pes) in placed.pes {
 		data.write(Frame {
 			timestamp: Timestamp::from_millis(ms).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from(pes),
 			keyframe: true,

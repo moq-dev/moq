@@ -2438,6 +2438,7 @@ mod test {
 			video
 				.write(crate::container::Frame {
 					timestamp: moq_net::Timestamp::from_millis(*start).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"keyframe"),
 					keyframe: true,
@@ -2473,6 +2474,7 @@ mod test {
 			video
 				.write(crate::container::Frame {
 					timestamp: moq_net::Timestamp::from_millis(start).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"keyframe"),
 					keyframe: true,
@@ -2498,6 +2500,7 @@ mod test {
 			video
 				.write(crate::container::Frame {
 					timestamp: moq_net::Timestamp::from_millis(start).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"keyframe"),
 					keyframe: true,
@@ -2617,6 +2620,7 @@ mod test {
 			video
 				.write(crate::container::Frame {
 					timestamp,
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"keyframe"),
 					keyframe: true,
@@ -2679,6 +2683,7 @@ mod test {
 			video
 				.write(crate::container::Frame {
 					timestamp,
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"keyframe"),
 					keyframe: true,
@@ -3128,6 +3133,7 @@ mod test {
 		video
 			.write(crate::container::Frame {
 				timestamp,
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"keyframe"),
 				keyframe: true,

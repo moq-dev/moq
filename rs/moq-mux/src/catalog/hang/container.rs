@@ -20,7 +20,8 @@ pub enum Container {
 	Raw(Kind),
 	/// [`Raw`](Self::Raw) audio whose codec states each packet's duration.
 	RawAudio(legacy::Audio),
-	/// QUIC varint composition time offset (in track timescale) + raw codec bitstream.
+	/// QUIC varint composition time offset (in track timescale) + raw codec bitstream, timed by
+	/// the MoQ transport timestamp as its decode time.
 	Cts(Kind),
 	/// [`Cts`](Self::Cts) audio whose codec states each packet's duration.
 	CtsAudio(legacy::Audio),
@@ -67,16 +68,24 @@ impl TryFrom<&crate::catalog::VideoHint> for Container {
 }
 
 impl Container {
-	/// The bytes preceding a frame's payload, when they depend on nothing but its timestamp, so the
-	/// payload can stream in after them. `None` for CMAF and CTS.
-	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<Option<bytes::Bytes>> {
+	/// The bytes preceding a `frame`'s payload, when they depend on nothing but its times, so the
+	/// payload can stream in after them. `scale` is the track's timescale. `None` for CMAF.
+	pub(crate) fn prefix(
+		&self,
+		frame: &Frame,
+		scale: Option<moq_net::Timescale>,
+	) -> crate::Result<Option<bytes::Bytes>> {
 		match self {
-			Self::Legacy(kind) => legacy::Wire(*kind).prefix(timestamp).map(Some),
-			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).prefix(timestamp).map(Some),
-			Self::Loc(kind) => loc::Wire(*kind).prefix(timestamp).map(Some),
+			Self::Legacy(kind) => legacy::Wire(*kind).prefix(frame.timestamp).map(Some),
+			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).prefix(frame.timestamp).map(Some),
+			Self::Loc(kind) => loc::Wire(*kind).prefix(frame.timestamp).map(Some),
 			Self::Raw(kind) => Ok(Some(raw::Wire(*kind).prefix())),
 			Self::RawAudio(_) => Ok(Some(raw::Wire(Kind::Audio).prefix())),
-			Self::Cmaf(_) | Self::Cts(_) | Self::CtsAudio(_) => Ok(None),
+			Self::Cts(_) | Self::CtsAudio(_) => {
+				let scale = scale.ok_or(moq_net::Error::TimestampMismatch)?;
+				cts::prefix(frame, scale).map(Some)
+			}
+			Self::Cmaf(_) => Ok(None),
 		}
 	}
 }
@@ -119,17 +128,10 @@ impl ContainerTrait for Container {
 		}
 	}
 
-	fn writable(&self) -> Result<(), Self::Error> {
-		match self {
-			Self::Cts(kind) => cts::Wire(*kind).writable(),
-			Self::CtsAudio(_) => cts::Wire(Kind::Audio).writable(),
-			_ => Ok(()),
-		}
-	}
-
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		match self {
 			Self::Raw(kind) => raw::Wire(*kind).check(frame),
+			Self::RawAudio(_) => raw::Wire(Kind::Audio).check(frame),
 			Self::Cts(kind) => cts::Wire(*kind).check(frame),
 			Self::CtsAudio(_) => cts::Wire(Kind::Audio).check(frame),
 			_ => Ok(()),

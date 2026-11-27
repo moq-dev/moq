@@ -216,8 +216,10 @@ export class Producer {
 	 * open, a keyframe landing on the latest group's start (media resuming right at a discontinuity's
 	 * marker) is stamped one unit of the track's timescale later, one inside the span of a group
 	 * {@link cut} ended whole is stamped at that group's end, and so is a frame at its timestamp after
-	 * it, such as the picture its parameter sets precede. Throws if the first frame is not a
-	 * keyframe, a group start goes backwards, or a frame is below the previous group start.
+	 * it, such as the picture its parameter sets precede. A group's transport times never decrease,
+	 * so a frame presenting before the newest of its group, such as a B-frame, rides at that newest
+	 * time while its payload keeps its own. Throws if the first frame is not a keyframe, a group start
+	 * goes backwards, or a frame is below the previous group start.
 	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
 		const source = micros(pts);
@@ -284,9 +286,12 @@ export class Producer {
 			throw new Error("must start with a keyframe");
 		}
 
+		// A group's transport times never decrease, so a B-frame or leading picture rides at the
+		// newest one so far; its payload carries its own presentation time.
+		const transport = this.#end !== undefined && timestamp < this.#end ? this.#end : timestamp;
 		this.#group?.writeFrame({
 			payload: encodeFrame(data, Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(timestamp),
+			timestamp: Time.Timestamp.fromMicros(transport),
 		});
 
 		// The cadence follows the source, so a moved start never stretches the estimate after it.

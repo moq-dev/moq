@@ -1,8 +1,9 @@
 //! The original hang wire format.
 //!
-//! Each moq frame holds one media frame: a varint-encoded timestamp
-//! followed by the raw codec bitstream. Simple but ad-hoc; new
-//! broadcasts should use [`crate::container::loc`] instead.
+//! Each moq frame holds one media frame: a varint-encoded presentation timestamp
+//! followed by the raw codec bitstream, written to the transport at a time that never decreases
+//! within its group.
+//! Simple but ad-hoc; new broadcasts should use [`crate::container::cts`] instead.
 
 use crate::container::{Container, Frame, Kind};
 
@@ -59,7 +60,12 @@ impl Container for Wire {
 				timestamp: frame.timestamp,
 				payload: frame.payload.clone(),
 			};
-			hang_frame.write_to(group)?;
+			// The prefix carries the presentation time, so the transport carries a time that never
+			// decreases within a group: the decode time, which a producer sets to the latest
+			// presentation time so far when the source has none.
+			let mut buf = bytes::BytesMut::with_capacity(8 + frame.payload.len());
+			hang_frame.encode(&mut buf)?;
+			group.write_frame(frame.decode.unwrap_or(frame.timestamp), buf.freeze())?;
 		}
 		Ok(())
 	}
@@ -72,8 +78,10 @@ impl Container for Wire {
 		}
 
 		let hang_frame = hang::container::Frame::decode(frame.payload)?;
+		// The transport time only keeps a group in order, so it says nothing of when a frame decodes.
 		Ok(vec![Frame {
 			timestamp: hang_frame.timestamp,
+			decode: None,
 			payload: hang_frame.payload,
 			// Legacy doesn't carry the keyframe bit on the wire; the
 			// wrapping Consumer fills it in from group position.

@@ -200,7 +200,7 @@ impl AudioStream {
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let container = hang::catalog::Container::default();
+		let container = hang::catalog::Container::Cts;
 		Self {
 			broadcast,
 			catalog: reserved.producer(),
@@ -233,8 +233,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Select the container this importer wraps decoded media renditions in.
 	///
-	/// [`Legacy`](hang::catalog::Container::Legacy) unless selected. It applies to every rendition
-	/// this input demuxes, since the tracks are discovered rather than named by the caller.
+	/// [`Cts`](hang::catalog::Container::Cts) unless selected, which carries each picture's
+	/// presentation time after its decode time. It applies to every rendition this input demuxes,
+	/// since the tracks are discovered rather than named by the caller.
 	pub fn with_container(mut self, container: hang::catalog::Container) -> Self {
 		self.container = container;
 		self
@@ -599,9 +600,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// the track set is declared; release the reservation to publish. An H.264/H.265 rendition
 		// still waiting for its first keyframe holds the catalog back on its own.
 		self.initial_reservation = None;
+		// The tag's own time is when the picture decodes.
+		let decode = match composition_time {
+			0 => None,
+			offset @ 1.. => Some(crate::container::decode_time(
+				timestamp,
+				Timestamp::from_millis(offset as u64)?,
+			)?),
+			offset => Some(timestamp.checked_add(Timestamp::from_millis(offset.unsigned_abs() as u64)?.convert(
+				timestamp.scale().ok_or(moq_net::Error::TimestampMismatch)?,
+			)?)?),
+		};
 		let stream = self.video.get_mut(&track_id).expect("checked above");
 		let result = match stream.write(Frame {
 			timestamp,
+			decode,
 			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe,
@@ -654,6 +667,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			stream.track.write(Frame {
 				timestamp,
+				decode: None,
 				duration,
 				payload: Bytes::copy_from_slice(data),
 				keyframe,

@@ -290,6 +290,22 @@ struct Sample {
 	range: std::ops::Range<usize>,
 }
 
+impl Sample {
+	/// The decode time once the edit list applies, when it differs from the presentation time.
+	///
+	/// An edit list usually starts presentation at the first sample, so the samples decoding before
+	/// it decode at its time instead: decode times stay in order and never pass a presentation time.
+	fn decode(&self) -> Option<Timestamp> {
+		let scale = self.timestamp.scale()?;
+		let value = match self.pts.checked_sub(self.dts) {
+			Some(0) => return None,
+			Some(offset) => self.timestamp.value().saturating_sub(offset),
+			None => self.timestamp.value().checked_add(self.dts - self.pts)?,
+		};
+		Timestamp::new(value, scale).ok()
+	}
+}
+
 /// The samples one `traf` places in its `mdat`.
 struct Run {
 	samples: Vec<Sample>,
@@ -1833,10 +1849,12 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		placement: Placement,
 		land: Land,
 	) -> Result<(moq_net::frame::Producer, bool)> {
-		// Carry the fragment's earliest presentation time as the frame timestamp, in the
-		// track's native timescale and shifted onto the catalog clock. Consumers present the
-		// fragment at it; `tfdt` only places the samples relative to each other.
-		let timestamp = placement.offset.apply(run.earliest)?;
+		// Carry the fragment's first decode time as the frame timestamp, in the track's native
+		// timescale and shifted onto the catalog clock: a group's timestamps never decrease.
+		// Consumers decode the fragment's `tfdt` at it; `tfdt` and `trun` only place the samples
+		// relative to each other.
+		let first = run.samples.first().ok_or(Error::NoKeyframe)?;
+		let timestamp = placement.offset.apply(first.decode().unwrap_or(first.timestamp))?;
 		let group = match land {
 			Land::Opens { start } => {
 				if let Some(prev) = self.group.take() {
@@ -1907,12 +1925,17 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 			Kind::Video => sample.sync,
 			Kind::Audio => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
 		};
-		if sample.pts > sample.dts {
-			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
-		}
 		let timestamp = placement.offset.apply(sample.timestamp)?;
+		let decode = sample.decode().map(|decode| placement.offset.apply(decode)).transpose()?;
 		let duration = sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?;
-		let streamed = producer.open(timestamp, keyframe, duration, sample.range.len())?;
+		let frame = crate::container::Frame {
+			timestamp,
+			decode,
+			duration,
+			payload: bytes::Bytes::new(),
+			keyframe,
+		};
+		let streamed = producer.open(frame, sample.range.len())?;
 		Ok((streamed, keyframe))
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }

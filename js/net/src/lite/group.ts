@@ -97,7 +97,7 @@ export interface GroupEnd {
 
 /** How {@link frameDecoder} reads each frame's optional fields. */
 export interface FrameFormat {
-	/** The wire timescale; non-zero means every frame carries a zigzag-delta timestamp. */
+	/** The wire timescale; non-zero means every frame carries a delta timestamp. */
 	scale: number;
 	/**
 	 * The group's start, which a lite-07 stream's first timestamp delta counts from and a
@@ -109,7 +109,8 @@ export interface FrameFormat {
 	compress?: boolean;
 	/**
 	 * Whether every frame leads with its `Payload Length`, the payload size plus one (lite-07),
-	 * rather than ending its header with the size.
+	 * rather than ending its header with the size. Lite-07 also carries unsigned timestamp deltas,
+	 * where earlier versions zigzag a signed one.
 	 */
 	lengthFirst?: boolean;
 	/**
@@ -126,9 +127,10 @@ export interface FrameFormat {
  * closes the group; before it the size ends the header, and stream end at the frame's first field
  * ends the group.
  *
- * On lite-07 the first delta counts from the group's `start`, whatever frame the stream starts at,
- * and GROUP_END's End counts from the highest timestamp the stream carried (B-frames go
- * backwards), or from `start` when it carried none. Mirrors the Rust `FrameIngest`.
+ * On lite-07 the first delta is an unsigned offset from the group's `start`, whatever frame the
+ * stream starts at, later deltas are unsigned offsets from the prior frame, and GROUP_END's End
+ * counts from the last frame's timestamp, or from `start` when the stream carried none. Mirrors
+ * the Rust `FrameIngest`.
  */
 export function frameDecoder({
 	scale,
@@ -140,20 +142,18 @@ export function frameDecoder({
 	if (meta && !lengthFirst) throw new Error("a metadata Group Stream needs moq-lite-07");
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = lengthFirst ? start : 0n;
-	// The highest timestamp decoded so far, which a GROUP_END's End counts from.
-	let highest: bigint | undefined;
 	return (c) => {
 		let size = 0;
 		if (lengthFirst) {
 			const length = c.u53();
 			if (length === 0) {
-				const end = (highest ?? start) + c.u62();
+				const end = prevTs + c.u62();
 				if (end > RESERVED) throw malformed(`GROUP_END at ${end}, past the largest group end`);
 				return { end };
 			}
 			size = length - 1;
 		}
-		const delta = timescale !== undefined ? unzigzag(c.u62()) : 0n;
+		const delta = timescale !== undefined ? (lengthFirst ? c.u62() : unzigzag(c.u62())) : 0n;
 		const inflated = compress && !meta ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,
@@ -165,7 +165,6 @@ export function frameDecoder({
 		// Commit the delta only after the last read: an incomplete decode gets retried.
 		if (timescale === undefined) return { size, payload, inflated, header };
 		prevTs += delta;
-		if (highest === undefined || prevTs > highest) highest = prevTs;
 		return { size, payload, inflated, header, timestamp: new Time.Timestamp(toNumber(prevTs), timescale) };
 	};
 }

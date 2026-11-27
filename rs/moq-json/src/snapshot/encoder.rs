@@ -190,6 +190,7 @@ impl<T> Drop for Pending<'_, T> {
 /// if let Some(frame) = encoder.update(&value)? {
 ///     container.write(moq_mux::container::Frame {
 ///         timestamp,
+///         decode: None,
 ///         duration: None,
 ///         payload: frame.payload.clone(),
 ///         keyframe: frame.keyframe,

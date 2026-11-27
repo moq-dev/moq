@@ -2015,6 +2015,7 @@ mod tests {
 
 			Ok(vec![Frame {
 				timestamp,
+				decode: None,
 				payload,
 				keyframe: false,
 				duration: Some(duration),
@@ -2029,14 +2030,29 @@ mod tests {
 			.unwrap();
 	}
 
+	/// Each presentation time with a decode time that never decreases: the latest so far, which
+	/// Legacy's prefix leaves the presentation time to.
+	fn decoded(timestamps: &[Timestamp]) -> Vec<(Timestamp, Option<Timestamp>)> {
+		let mut latest: Option<Timestamp> = None;
+		timestamps
+			.iter()
+			.map(|&timestamp| {
+				let decode = latest.filter(|latest| *latest > timestamp);
+				latest = Some(decode.unwrap_or(timestamp));
+				(timestamp, decode)
+			})
+			.collect()
+	}
+
 	/// Append a finished group keyed by its first frame's time, as a container producer keys
 	/// them, so a live join measures it in the track's timescale and the publisher says no group
 	/// starts between it and the last (Container::Legacy(crate::container::Kind::Data) format).
 	fn append_timed(track: &mut moq_net::track::Producer, timestamps: &[Timestamp]) {
 		let mut group = track.append_group(timestamps[0]).unwrap();
-		for &timestamp in timestamps {
+		for (timestamp, decode) in decoded(timestamps) {
 			let frame = Frame {
 				timestamp,
+				decode,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 				duration: None,
@@ -2051,9 +2067,10 @@ mod tests {
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy(crate::container::Kind::Data) format).
 	fn write_group(track: &mut moq_net::track::Producer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-		for &timestamp in timestamps {
+		for (timestamp, decode) in decoded(timestamps) {
 			let frame = Frame {
 				timestamp,
+				decode,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 				duration: None,
@@ -2162,6 +2179,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp,
+					decode: None,
 					payload: Bytes::new(),
 					keyframe: false,
 					duration: None,
@@ -2210,6 +2228,7 @@ mod tests {
 				&mut head,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: true,
 					duration: None,
@@ -2275,6 +2294,7 @@ mod tests {
 		let mut producer = crate::container::Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 		let frame = |micros, payload: &'static [u8]| Frame {
 			timestamp: ts(micros),
+			decode: None,
 			payload: Bytes::from_static(payload),
 			keyframe: true,
 			duration: None,
@@ -2693,6 +2713,7 @@ mod tests {
 		write_group(&mut track, 5, &[ts(40_000)]);
 		let frame = Frame {
 			timestamp: ts(0),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: false,
 			duration: None,
@@ -2959,6 +2980,7 @@ mod tests {
 		let mut stalled = copy.track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let frame = Frame {
 			timestamp: ts(0),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: false,
 			duration: None,
@@ -3274,6 +3296,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
 			let packet = Frame {
 				timestamp: ts(start),
+				decode: None,
 				payload: Bytes::from_static(&[31 << 3, 0]),
 				keyframe: false,
 				duration: None,
@@ -3302,6 +3325,7 @@ mod tests {
 			for at in [start, start + 24_000] {
 				let packet = Frame {
 					timestamp: ts(at),
+					decode: None,
 					payload: Bytes::from_static(&[0xFF, 0xFD]),
 					keyframe: at == start,
 					duration: None,
@@ -3334,6 +3358,7 @@ mod tests {
 			for &micros in *pictures {
 				let frame = Frame {
 					timestamp: ts(micros),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: micros == start,
 					duration: None,
@@ -3422,6 +3447,7 @@ mod tests {
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		let frame = |micros: u64, keyframe| Frame {
 			timestamp: ts(micros),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe,
 			duration: None,
@@ -3464,6 +3490,7 @@ mod tests {
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		let frame = |micros: u64, keyframe| Frame {
 			timestamp: ts(micros),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe,
 			duration: None,
@@ -3540,6 +3567,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -3571,6 +3599,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let frame = |timestamp: u64, payload| Frame {
 				timestamp: ts(timestamp),
+				decode: None,
 				payload,
 				keyframe: timestamp == start,
 				duration: None,
@@ -3607,6 +3636,7 @@ mod tests {
 		let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		let frame = |timestamp: u64, payload| Frame {
 			timestamp: ts(timestamp),
+			decode: None,
 			payload,
 			keyframe: false,
 			duration: None,
@@ -3752,6 +3782,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -3832,6 +3863,7 @@ mod tests {
 					&mut group0,
 					&[Frame {
 						timestamp: ts(f * 2_000),
+						decode: None,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 						keyframe: false,
 						duration: None,
@@ -3874,6 +3906,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -3916,6 +3949,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -3958,6 +3992,7 @@ mod tests {
 		let write = |group: &mut moq_net::group::Producer, timestamp: Timestamp| {
 			let frame = Frame {
 				timestamp,
+				decode: None,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 				duration: None,
@@ -4025,6 +4060,7 @@ mod tests {
 					&mut last,
 					&[Frame {
 						timestamp: ts(5_000_000),
+						decode: None,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 						keyframe: false,
 						duration: None,
@@ -4082,6 +4118,7 @@ mod tests {
 					&mut fifth,
 					&[Frame {
 						timestamp: frame,
+						decode: None,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 						keyframe: false,
 						duration: None,
@@ -4205,6 +4242,7 @@ mod tests {
 		let mut group = copy.track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		let frame = |timestamp, payload| Frame {
 			timestamp,
+			decode: None,
 			payload,
 			keyframe: true,
 			duration: None,
@@ -4263,6 +4301,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -4307,6 +4346,7 @@ mod tests {
 	fn write_marker(group: &mut moq_net::group::Producer, timestamp: Timestamp) {
 		let frame = Frame {
 			timestamp,
+			decode: None,
 			payload: Bytes::new(),
 			keyframe: false,
 			duration: None,
@@ -4336,6 +4376,7 @@ mod tests {
 		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let media = |timestamp| Frame {
 			timestamp,
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: false,
 			duration: None,
@@ -4378,6 +4419,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(20_000),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -4415,6 +4457,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -4451,6 +4494,7 @@ mod tests {
 		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let media = Frame {
 			timestamp: ts(0),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,
@@ -4463,6 +4507,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(33_000),
+					decode: None,
 					payload: Bytes::new(),
 					keyframe: false,
 					duration: None,
@@ -4500,6 +4545,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -4677,6 +4723,7 @@ mod tests {
 				&mut open,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: true,
 					duration: None,
@@ -4763,6 +4810,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -4923,6 +4971,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -5100,6 +5149,7 @@ mod tests {
 		let write = |group: &mut moq_net::group::Producer, micros| {
 			let frame = Frame {
 				timestamp: ts(micros),
+				decode: None,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 				duration: None,
@@ -5458,6 +5508,7 @@ mod tests {
 			}
 			Ok(vec![Frame {
 				timestamp: ts(data.get_u64_le()),
+				decode: None,
 				payload: Bytes::new(),
 				keyframe: false,
 				duration: None,
@@ -5857,6 +5908,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from(payload_bytes.clone()),
 
 					keyframe: false,
@@ -5902,6 +5954,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -6012,6 +6065,7 @@ mod tests {
 					&mut group0,
 					&[Frame {
 						timestamp,
+						decode: None,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 						keyframe: false,
 						duration: None,
@@ -6072,6 +6126,7 @@ mod tests {
 				&mut group7,
 				&[Frame {
 					timestamp: ts(300_000),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -6086,6 +6141,7 @@ mod tests {
 					&mut group7,
 					&[Frame {
 						timestamp: ts(400_000),
+						decode: None,
 						payload: Bytes::from_static(&[0xBE, 0xEF]),
 						keyframe: false,
 						duration: None,
@@ -6224,6 +6280,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -6342,6 +6399,7 @@ mod tests {
 
 		let frame = Frame {
 			timestamp: ts(500_000),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: false,
 			duration: None,
@@ -6426,6 +6484,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xAA]),
 
 					keyframe: false,
@@ -6470,6 +6529,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xAA]),
 
 					keyframe: false,
@@ -6509,6 +6569,7 @@ mod tests {
 				&mut group0,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -6600,6 +6661,7 @@ mod tests {
 		for timestamp in [ts(0), ts(10_000)] {
 			let frame = Frame {
 				timestamp,
+				decode: None,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 				duration: None,
@@ -6644,6 +6706,7 @@ mod tests {
 		let mut group0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let first = Frame {
 			timestamp: ts(0),
+			decode: None,
 			payload: Bytes::from(vec![0xDEu8; 1024]),
 			keyframe: false,
 			duration: None,
@@ -6746,6 +6809,7 @@ mod tests {
 		for i in 0..3u64 {
 			let frame = Frame {
 				timestamp: ts(i * 33_333),
+				decode: None,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 				duration: None,
@@ -6906,6 +6970,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(0),
+					decode: None,
 					payload: Bytes::from_static(b"video"),
 					keyframe: true,
 					duration: None,
@@ -6937,6 +7002,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp,
+					decode: None,
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 					keyframe: false,
 					duration: None,
@@ -7063,6 +7129,7 @@ mod tests {
 				&mut markers,
 				&[Frame {
 					timestamp: ts(20_000),
+					decode: None,
 					payload: Bytes::from_static(b"video"),
 					keyframe: false,
 					duration: None,
@@ -7199,6 +7266,7 @@ mod tests {
 				&mut later,
 				&[Frame {
 					timestamp: ts(20_000),
+					decode: None,
 					payload: Bytes::from(vec![0; 4096]),
 					keyframe: false,
 					duration: None,
@@ -7273,6 +7341,7 @@ mod tests {
 					&mut group,
 					&[Frame {
 						timestamp: ts(sequence * 10_000),
+						decode: None,
 						payload: Bytes::from(vec![0; 4096]),
 						keyframe: false,
 						duration: None,
@@ -7369,6 +7438,7 @@ mod tests {
 					&mut group,
 					&[Frame {
 						timestamp: ts(sequence * 20_000),
+						decode: None,
 						payload: Bytes::from_static(b"payload"),
 						keyframe: true,
 						duration: None,
@@ -7408,6 +7478,7 @@ mod tests {
 				&mut group,
 				&[Frame {
 					timestamp: ts(20_000),
+					decode: None,
 					payload: Bytes::from_static(b"tail"),
 					keyframe: true,
 					duration: None,

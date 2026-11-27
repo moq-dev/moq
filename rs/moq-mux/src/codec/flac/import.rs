@@ -90,6 +90,7 @@ impl Import {
 		let keyframe = self.track.needs_keyframe();
 		self.track.write(Frame {
 			timestamp,
+			decode: None,
 			payload: frame.into_bytes(),
 			keyframe,
 			duration: None,

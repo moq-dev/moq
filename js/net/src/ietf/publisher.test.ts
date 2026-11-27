@@ -35,7 +35,7 @@ import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { framed, unframed } from "./message.test-util.ts";
-import { decodeGroupGap, Frame, Group as GroupMessage } from "./object.ts";
+import { decodeGroupGap, decodeObjectProperties, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
@@ -2732,7 +2732,10 @@ test.each(["nextObject", "unfiltered"] as const)(
 		writeGroup(track, 1);
 		const group = hooks.appendNext(track);
 		for (let i = 0; i < 2; i++) {
-			group.writeFrame({ payload: new TextEncoder().encode(`1.${i}`), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(`1.${i}`),
+				timestamp: Timestamp.fromMillis(Number(group.start) + i),
+			});
 		}
 
 		const { client, ok } = await runSubscribe(
@@ -2762,7 +2765,10 @@ test.each(["nextObject", "unfiltered"] as const)(
 			});
 
 			// Everything past the snapshot belongs to the subscription, not the fill.
-			group.writeFrame({ payload: new TextEncoder().encode("1.2"), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode("1.2"),
+				timestamp: Timestamp.fromMillis(Number(group.start) + 2),
+			});
 			group.finish();
 
 			const live = await nextUni(fx.uni);
@@ -2801,7 +2807,10 @@ test("draft-22: a fill never rewinds an absolute live join", async () => {
 			{ group: 0, id: 1, payload: "0.1" },
 		]);
 		const group = hooks.appendNext(track);
-		group.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode("1.0"),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 		group.finish();
 		const live = await nextUni(fx.uni);
 		expect(await readGroup(live)).toEqual({
@@ -2826,7 +2835,10 @@ test("draft-22: an open group with a shed front refuses a tail join", async () =
 
 	const group = hooks.appendNext(track);
 	for (let i = 0; i < 40; i++) {
-		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new Uint8Array(1024 * 1024),
+			timestamp: Timestamp.fromMillis(Number(group.start) + i),
+		});
 	}
 
 	const { client, ok } = await runSubscribe(
@@ -2919,7 +2931,10 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 		expect(served.reset).toBeInstanceOf(StreamError);
 		expect(served.objects).toEqual([]);
 		const live = hooks.appendNext(track);
-		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
+		live.writeFrame({
+			payload: new TextEncoder().encode("live"),
+			timestamp: Timestamp.fromMillis(Number(live.start)),
+		});
 		live.finish();
 		const objects = [];
 		while (objects.length === 0) {
@@ -2970,7 +2985,10 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 
 	const group = track.createGroup(5n);
 	for (let i = 0; i < 4; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode(`5.${i}`),
+			timestamp: Timestamp.fromMillis(Number(group.start) + i),
+		});
 	}
 	group.finish();
 
@@ -3003,10 +3021,11 @@ test("LARGEST_OBJECT is the live edge", async () => {
 	}
 });
 
-/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; objects carry none either way. */
+/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; objects stay dense without ID_TIMESCALE. */
 test.each([
 	[ALPN.DRAFT_20, Version.DRAFT_20],
 	[ALPN.DRAFT_22, Version.DRAFT_22],
+	[ALPN.DRAFT_23, Version.DRAFT_23],
 ] as const)("%s: opt-out omits the Track Properties", async (_alpn, version) => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture(version);
@@ -3031,9 +3050,11 @@ test.each([
 		const served = await nextUni(fx.uni);
 		const reader = new Reader(served, undefined, version);
 		const header = await GroupMessage.decode(reader, version);
-		expect(header.flags.hasExtensions).toBe(false);
+		const expectsTimedIds = propertiesWanted && version === Version.DRAFT_23;
+		expect(header.flags.hasExtensions).toBe(expectsTimedIds);
 
 		await reader.u53(); // object id delta
+		if (expectsTimedIds) expect(await reader.u53()).toBe(0); // empty properties block
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
 		fx.close();
@@ -3376,7 +3397,10 @@ test("draft-22: a fill works on a dynamically requested track", async () => {
 		const track = request.accept({ timescale: Timescale.MILLI });
 		const group = hooks.appendNext(track);
 		for (let i = 0; i < 2; i++) {
-			group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(`0.${i}`),
+				timestamp: Timestamp.fromMillis(Number(group.start) + i),
+			});
 		}
 		return group;
 	})();
@@ -4561,7 +4585,10 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 	try {
 		expect(ok.largest).toBeUndefined();
 		expect(group.start).toBe(0n);
-		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode("first"),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 		group.finish();
 		const stream = await nextUni(fx.uni);
 		expect((await readGroup(stream)).objects).toEqual([{ id: 0, payload: "first" }]);
@@ -4591,7 +4618,10 @@ test("draft-22: Next Object on an empty group still delivers its first object", 
 	);
 	try {
 		expect(ok.largest).toBeUndefined();
-		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode("first"),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 		group.finish();
 		const stream = await nextUni(fx.uni);
 		expect((await readGroup(stream)).objects).toEqual([{ id: 0, payload: "first" }]);
@@ -4990,7 +5020,10 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 		await RequestOk.decode(client.reader, fx.version);
 		const fill = await nextUni(fx.uni);
 		expect((await readFill(fill, "ascending")).objects).toEqual([{ group: 1, id: 0, payload: "1.0" }]);
-		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
+		open.writeFrame({
+			payload: new TextEncoder().encode("1.1"),
+			timestamp: Timestamp.fromMillis(Number(open.start)),
+		});
 		open.finish();
 		// The live stream still owns the rest of its group, so nothing else repeats it.
 		expect((await reading).objects).toEqual([
@@ -5036,7 +5069,10 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 		await RequestOk.decode(client.reader, fx.version);
 		const fill = await nextUni(fx.uni);
 		expect((await readFill(fill, "ascending")).reset).toBeDefined();
-		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
+		open.writeFrame({
+			payload: new TextEncoder().encode("1.1"),
+			timestamp: Timestamp.fromMillis(Number(open.start)),
+		});
 		open.finish();
 		expect((await reading).objects).toEqual([
 			{ id: 0, payload: "1.0" },
@@ -5078,7 +5114,10 @@ test("draft-22: a fill-only update keeps the subscription's floor", async () => 
 		await RequestOk.decode(client.reader, fx.version);
 		const fill = await nextUni(fx.uni);
 		expect((await readFill(fill, "ascending")).objects).toEqual([{ group: 1, id: 0, payload: "1.0" }]);
-		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
+		open.writeFrame({
+			payload: new TextEncoder().encode("1.1"),
+			timestamp: Timestamp.fromMillis(Number(open.start)),
+		});
 		open.finish();
 		expect((await reading).objects).toEqual([
 			{ id: 0, payload: "1.0" },
@@ -5227,4 +5266,170 @@ test("a max age is never sent as MAX_CACHE_DURATION", () => {
 		true,
 	);
 	expect(properties.maxCacheDuration).toBeUndefined();
+});
+
+test("draft-23: TRACK_STATUS reports sparse objectLargest only when properties are wanted", async () => {
+	const version = Version.DRAFT_23;
+	for (const propertiesWanted of [true, false]) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const broadcast = publish(origin, Path.from("room"));
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
+		const group = track.createGroup(1000n);
+		group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(1000) });
+		group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1033) });
+
+		const { stream, wire } = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("room", propertiesWanted), stream);
+		const r = wire();
+		expect(await r.u53()).toBe(TrackStatusOk.id);
+		const ok = await TrackStatusOk.decode(r, version);
+		expect(ok.largest).toEqual({ groupId: 1000n, objectId: propertiesWanted ? 33n : 1n });
+		origin.close();
+	}
+});
+
+test("draft-23: bounded filter does not emit END_OF_TRACK from an excluded or truncated group", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 1000n, startObject: 0n, endGroup: 1000n, endObject: 10n },
+		}),
+	);
+	try {
+		const group = track.createGroup(1000n);
+		group.writeFrame({ payload: new TextEncoder().encode("f0"), timestamp: Timestamp.fromMillis(1000) });
+		group.writeFrame({ payload: new TextEncoder().encode("f1"), timestamp: Timestamp.fromMillis(1033) });
+		group.finish();
+		track.finish();
+
+		const stream = await nextUni(fx.uni);
+		const reader = new Reader(stream, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
+		expect(header.groupId).toBe(1000n);
+		const idDelta = await reader.u53();
+		expect(idDelta).toBe(0);
+		expect(await reader.u53()).toBe(0); // extensions len
+		expect(new TextDecoder().decode(await reader.read(await reader.u53()))).toBe("f0");
+		// Capped at endObject=10: stream closes right after f0 with no END_OF_TRACK status.
+		expect(await reader.done()).toBe(true);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+// Each Object ID is its frame's timestamp offset from the group start, computed in order from frame
+// 0: a tie takes one past the previous ID and says how far past in TIMESTAMP_TIE. Mirrors the Rust
+// `TimedIds`.
+test("draft-23: a group stream numbers tied frames past each other with TIMESTAMP_TIE", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 7n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const group = track.createGroup(1000n);
+		for (const [ms, payload] of [
+			[1000, "f0"],
+			[1033, "f1"],
+			[1033, "f2"],
+			[1100, "f3"],
+		] as const)
+			group.writeFrame({ payload: new TextEncoder().encode(payload), timestamp: Timestamp.fromMillis(ms) });
+		group.finish();
+
+		const reader = new Reader(await nextUni(fx.uni), undefined, version);
+		expect((await GroupMessage.decode(reader, version)).groupId).toBe(1000n);
+		const objects: { id: number; tie?: bigint; payload: string }[] = [];
+		let id = -1;
+		for (let i = 0; i < 4; i++) {
+			id += (await reader.u53()) + 1;
+			const properties = await reader.read(await reader.u53());
+			const { tie } = new Cursor(properties, version).exact(properties.byteLength, decodeObjectProperties);
+			const payload = new TextDecoder().decode(await reader.read(await reader.u53()));
+			objects.push(tie === undefined ? { id, payload } : { id, tie, payload });
+		}
+		expect(objects).toEqual([
+			{ id: 0, payload: "f0" },
+			{ id: 33, payload: "f1" },
+			{ id: 34, tie: 1n, payload: "f2" },
+			{ id: 100, payload: "f3" },
+		]);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+// A copy that never held frame 0 can't prove the Object IDs its frames take, so it serves none
+// rather than guessing. Mirrors the Rust `TimedIds::at` refusing with Unsupported.
+test("draft-23: a group without its first frame is not served", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 7n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const group = hooks.receiveGroup(track, { start: 1000n, offset: 2 });
+		group.writeFrame({ payload: new TextEncoder().encode("f2"), timestamp: Timestamp.fromMillis(1066) });
+		group.finish();
+
+		const reader = new Reader(await nextUni(fx.uni), undefined, version);
+		expect((await GroupMessage.decode(reader, version)).groupId).toBe(1000n);
+		await expect(reader.done()).rejects.toMatchObject({ code: StreamCode.Internal });
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+test("draft-23: standalone END_OF_TRACK translates final frame ordinal to sparse wire Object ID", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+		}),
+	);
+	try {
+		const group = track.createGroup(1000n);
+		group.writeFrame({ payload: new TextEncoder().encode("f0"), timestamp: Timestamp.fromMillis(1000) });
+		group.writeFrame({ payload: new TextEncoder().encode("f1"), timestamp: Timestamp.fromMillis(1033) });
+		group.finish();
+		// Drain the group stream before finishing the track so END_OF_TRACK goes standalone.
+		const groupStream = await nextUni(fx.uni);
+		await readGroup(groupStream);
+
+		track.finishAt({ group: 1000n, frame: 2 });
+		const endStream = await nextUni(fx.uni);
+		const reader = new Reader(endStream, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
+		expect(header.groupId).toBe(1000n);
+		// Frame 0 -> oid 0, frame 1 -> oid 33 => END_OF_TRACK at wire Object ID 34 (not ordinal 2).
+		expect(await reader.u53()).toBe(34);
+		expect(await reader.u53()).toBe(0);
+		expect(await reader.u53()).toBe(0x04);
+		expect(await reader.done()).toBe(true);
+	} finally {
+		fx.close();
+		client.close();
+	}
 });

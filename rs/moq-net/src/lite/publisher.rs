@@ -5138,9 +5138,9 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	}
 	if let Some(stamp) = stamp {
 		let delta = clock
-			.delta(stamp.wire(timestamp)?)
+			.encode_delta(stamp.wire(timestamp)?)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		writer.buffer_varint(crate::coding::varint::zigzag(delta))?;
+		writer.buffer_varint(delta)?;
 	}
 	// Only a compressed group read in its stored form has one, and only on lite-07.
 	if let Some(inflated) = inflated {
@@ -8817,11 +8817,11 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "finished={finished}: no FIN");
-			// The frame: its length plus one, the timestamp delta from the group's start, and the
-			// payload; then GROUP_END, its End 3 past the frame at 2.
+			// The frame: its length plus one, the unsigned timestamp delta from the group's start,
+			// and the payload; then GROUP_END, its End 3 past the frame at 2.
 			let tail: &[u8] = match finished {
-				true => &[2, 4, b'x', 0, 3],
-				false => &[2, 4, b'x'],
+				true => &[2, 2, b'x', 0, 3],
+				false => &[2, 2, b'x'],
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");
@@ -8869,9 +8869,9 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "{compression:?}: no FIN");
-			// 301 as a two-byte varint, then each delta: 2ms, then 1ms for the empty frame (length
-			// 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame at 4.
-			let tail: &[u8] = &[0x81, 0x2d, 4, 1, 2, 6, 2, 0, 1];
+			// 301 as a two-byte varint, then each unsigned delta: 2ms, then 1ms for the empty frame
+			// (length 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame at 4.
+			let tail: &[u8] = &[0x81, 0x2d, 2, 1, 1, 6, 1, 0, 1];
 			assert!(bytes.ends_with(tail), "{compression:?}: {bytes:?}");
 			let info = crate::track::Info::timed().with_compression(compression);
 			assert_eq!(
@@ -8898,11 +8898,9 @@ mod serve_group_test {
 		let mut ts = header.key;
 		while !r.is_empty() {
 			match r.varint().unwrap() {
-				0 => end = Some(times.iter().copied().max().unwrap_or(header.key) + r.varint().unwrap()),
+				0 => end = Some(ts + r.varint().unwrap()),
 				length => {
-					ts = ts
-						.checked_add_signed(crate::coding::varint::unzigzag(r.varint().unwrap()))
-						.unwrap();
+					ts += r.varint().unwrap();
 					times.push(ts);
 					sizes.push(length - 1);
 				}
