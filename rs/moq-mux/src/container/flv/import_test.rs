@@ -1294,9 +1294,14 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 
 /// An audio-only FLV of raw AAC frames at `timestamps` (ms).
 fn aac_tags(timestamps: &[u32]) -> Vec<u8> {
+	aac_tags_with(&ASC, timestamps)
+}
+
+/// An audio-only FLV of raw AAC frames configured by `asc`, at `timestamps` (ms).
+fn aac_tags_with(asc: &[u8], timestamps: &[u32]) -> Vec<u8> {
 	let mut out = flv_header(0x04);
 	let mut seq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
-	seq.extend_from_slice(&ASC);
+	seq.extend_from_slice(asc);
 	write_tag(&mut out, super::TAG_AUDIO, 0, &seq);
 	for &timestamp in timestamps {
 		write_tag(
@@ -1331,12 +1336,19 @@ fn opus_tags(timestamps: &[u32]) -> Vec<u8> {
 	seq.extend_from_slice(&crate::codec::opus::Config::new(48_000, 2).encode().unwrap());
 	write_tag(&mut out, super::TAG_AUDIO, 0, &seq);
 	for &timestamp in timestamps {
-		let mut frame = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
-		frame.extend_from_slice(b"Opus");
-		// CELT fullband, one 20 ms frame.
-		frame.extend_from_slice(&[0xf8, 0xff, 0xfe]);
-		write_tag(&mut out, super::TAG_AUDIO, timestamp, &frame);
+		out.extend_from_slice(&opus_tag(timestamp));
 	}
+	out
+}
+
+/// One tag of a 20 ms Opus packet at `timestamp` (ms).
+fn opus_tag(timestamp: u32) -> Vec<u8> {
+	let mut frame = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
+	frame.extend_from_slice(b"Opus");
+	// CELT fullband, one 20 ms frame.
+	frame.extend_from_slice(&[0xf8, 0xff, 0xfe]);
+	let mut out = Vec::new();
+	write_tag(&mut out, super::TAG_AUDIO, timestamp, &frame);
 	out
 }
 
@@ -1357,4 +1369,119 @@ async fn an_audio_gap_keeps_the_next_timestamp() {
 async fn a_repeated_audio_timestamp_is_dropped() {
 	let published = audio_published(&aac_tags(&[0, 20, 20, 20, 40])).await;
 	assert_eq!(published, [0, 20_000, 40_000]);
+}
+
+/// AudioSpecificConfig for AAC-LC, 48 kHz, stereo: 1024 samples, 21.333 ms, a packet.
+const ASC_48K: [u8; 2] = [0x11, 0x90];
+
+/// AudioSpecificConfig for HE-AAC with explicit SBR: a 24 kHz core played at 48 kHz, stereo, so
+/// 2048 samples, 42.667 ms, a packet.
+const ASC_HE: [u8; 4] = [0x2b, 0x11, 0x88, 0x00];
+
+/// AudioSpecificConfig for AAC Main, 48 kHz, stereo, whose packets this importer states no
+/// duration for.
+const ASC_MAIN: [u8; 2] = [0x09, 0x90];
+
+/// An audio-only FLV of 24 ms MP3 frames (MPEG-1 Layer III, 48 kHz) at `timestamps` (ms).
+fn mp3_tags(timestamps: &[u32]) -> Vec<u8> {
+	let mut out = flv_header(0x04);
+	for &timestamp in timestamps {
+		let header = (super::AUDIO_FORMAT_MP3 << 4) | (3 << 2) | (1 << 1) | 1;
+		write_tag(
+			&mut out,
+			super::TAG_AUDIO,
+			timestamp,
+			&[header, 0xff, 0xfb, 0x94, 0x44, 0, 0],
+		);
+	}
+	out
+}
+
+/// A gap before the first spacing never sets where a group ends: MP3 frames state their duration
+/// in their header, HE-AAC packets by their SBR, and a codec whose packets state none closes its
+/// group at the next tag.
+#[tokio::test]
+async fn a_gap_before_the_first_spacing_keeps_the_next_timestamp() {
+	let published = audio_published(&mp3_tags(&[0, 72, 96, 120])).await;
+	assert_eq!(published, [0, 72_000, 96_000, 120_000]);
+
+	for asc in [&ASC_HE[..], &ASC_MAIN] {
+		let published = audio_published(&aac_tags_with(asc, &[0, 85, 128, 170])).await;
+		assert_eq!(published, [0, 85_000, 128_000, 170_000], "{asc:x?}");
+	}
+}
+
+/// A group full of Opus packets, whose durations count 48 kHz samples against FLV's ms clock,
+/// closes with the packet that fills it rather than waiting for the next tag.
+#[tokio::test]
+async fn a_full_opus_group_closes_at_once() {
+	use futures::FutureExt;
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	importer.decode(&opus_tags(&[0, 20, 40, 60, 80])).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.audio.renditions.keys().next().unwrap();
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(3600)),
+			max: Some(Duration::from_secs(3600)),
+		},
+	)]);
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut group = track.recv_group().await.unwrap().unwrap();
+	for _ in 0..5 {
+		group.read_frame().await.unwrap().unwrap();
+	}
+	let end = group.read_frame().now_or_never();
+	assert!(
+		matches!(end, Some(Ok(None))),
+		"the fifth packet closes its group: {end:?}"
+	);
+	drop(importer);
+}
+
+/// AAC frames whose ms timestamps truncate their 21.333 ms spacing keep them, so a group closing
+/// before the next tag never ends past where that tag lands.
+#[tokio::test]
+async fn aac_keeps_its_millisecond_timestamps() {
+	let timestamps = [0, 21, 42, 64, 85, 106, 128];
+	let published = audio_published(&aac_tags_with(&ASC_48K, &timestamps)).await;
+	let expected: Vec<u128> = timestamps.iter().map(|&ms| u128::from(ms) * 1000).collect();
+	assert_eq!(published, expected);
+}
+
+/// An AAC import into a microsecond CMAF track publishes, though no whole count of microseconds
+/// holds a packet's 1024/48000 s.
+#[tokio::test]
+async fn aac_imports_to_a_microsecond_cmaf_track() {
+	let mut config = hang::catalog::AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 48_000, 2);
+	config.description = Some(bytes::Bytes::copy_from_slice(&ASC_48K));
+	let trak = crate::container::fmp4::synthesize_audio_trak(1, 1_000_000, &config).unwrap();
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	let init = crate::container::fmp4::encode_init(None, vec![trak], vec![trex]).unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer =
+		Import::new(broadcast, catalog.reserve()).with_container(hang::catalog::Container::Cmaf { init });
+	importer
+		.decode(&aac_tags_with(&ASC_48K, &[0, 21, 42, 64, 85, 106]))
+		.unwrap();
+	let _finished = importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let mut published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	assert_eq!(
+		published.remove(&name).unwrap(),
+		[0, 21_000, 42_000, 64_000, 85_000, 106_000]
+	);
 }

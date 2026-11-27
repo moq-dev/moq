@@ -174,9 +174,11 @@ struct AudioStream {
 	join: crate::container::Join,
 	/// The latest frame's timestamp, whose spacing to the next measures how long frames play.
 	previous: Option<Timestamp>,
-	/// The shortest spacing between frames so far, taken as how long each frame plays: a gap only
-	/// lengthens a spacing, so a frame never ends past the next one's start.
+	/// The shortest spacing between frames so far, which estimates how long a frame plays when its
+	/// codec doesn't say: a gap only lengthens a spacing.
 	spacing: Option<Timestamp>,
+	/// Where the open group's audio ends, estimated from `spacing` where the codec doesn't say.
+	end: Option<Timestamp>,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -596,9 +598,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Write one audio frame, which forwards at once, closing its group once that carries a join.
 	///
-	/// A tag states no duration, so each frame plays as long as its codec says, else as long as the
-	/// shortest spacing seen, which a gap can't stretch past the next frame's start. A frame a gap or
-	/// rewind puts outside the open group opens a new one, so the producer checks it as a group start.
+	/// A tag states no duration, so each frame plays as long as its codec says. A group its stated
+	/// durations fill closes with the frame that fills it. A codec that says nothing leaves its group
+	/// open until the next tag. A frame a gap or rewind puts outside the open group opens a new one,
+	/// so the producer checks it as a group start.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
@@ -617,38 +620,51 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			stream.track.report_skipped(1);
 			return Ok(());
 		}
-		if let Some(delta) = stream
-			.previous
-			.and_then(|previous| timestamp.checked_sub(previous).ok())
-		{
+		let previous = stream.previous.replace(timestamp);
+		if let Some(delta) = previous.and_then(|previous| timestamp.checked_sub(previous).ok()) {
 			stream.spacing = Some(
 				stream
 					.spacing
 					.map_or(delta, |spacing| crate::container::earlier(spacing, delta)),
 			);
 		}
-		stream.previous = Some(timestamp);
-		let stated = crate::container::legacy::Audio::new(&stream.config).and_then(|audio| audio.duration(data));
-		let end = stated
-			.or(stream.spacing)
-			.and_then(|duration| timestamp.checked_add(duration).ok());
+		let stated = stated_duration(&stream.config, data);
+		let stated_end = stated.and_then(|duration| after(timestamp, duration));
+		// Where the frame's audio ends, for a cut before the next tag: as stated, else estimated from
+		// the shortest spacing.
+		let end = stated_end
+			.or_else(|| stream.spacing.and_then(|spacing| after(timestamp, spacing)))
+			.unwrap_or(timestamp);
+		// The frame carries its duration only where the track's timescale counts it in whole units,
+		// as a CMAF track must; elsewhere the producer measures each frame to the next.
+		let duration = stated.filter(|duration| whole(*duration, stream.track.track().info().timescale));
 		let result = (|| {
 			if !stream.track.needs_keyframe() && stream.join.opens(timestamp) {
-				stream.track.cut(None)?;
+				// After a gap the group ends where its audio does, but never past this frame, which
+				// would move it. A rewind leaves the producer to check this frame against the end.
+				let bound = match (stream.end, previous) {
+					(Some(end), Some(previous)) if timestamp > previous => {
+						Some(crate::container::earlier(end, timestamp))
+					}
+					(end, _) => end,
+				};
+				stream.track.cut(bound)?;
 			}
 			let keyframe = stream.track.needs_keyframe();
 			if keyframe {
 				stream.join.reset();
+				stream.end = None;
 			}
 			stream.track.write(Frame {
 				timestamp,
-				duration: stated,
+				duration,
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
 			})?;
-			if let Some(reach) = stream.join.fill(timestamp, end.unwrap_or(timestamp)) {
-				// Bounded where the frames end, so the cut doesn't extrapolate a gap into the next group.
-				stream.track.cut(end.map(|_| reach))?;
+			stream.end = Some(stream.end.map_or(end, |reach| crate::container::later(reach, end)));
+			// Only stated ends fill a group, so an estimate never closes one past the next tag.
+			if let Some(reach) = stream.join.fill(timestamp, stated_end.unwrap_or(timestamp)) {
+				stream.track.cut(Some(reach))?;
 			}
 			Ok(())
 		})();
@@ -788,6 +804,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				join: crate::container::Join::default(),
 				previous: None,
 				spacing: None,
+				end: None,
 			},
 		);
 		Ok(())
@@ -1012,6 +1029,42 @@ fn take_fourcc(cursor: &mut &[u8]) -> Option<[u8; 4]> {
 	let fourcc = cursor.get(0..4)?.try_into().expect("slice is 4 bytes");
 	*cursor = &cursor[4..];
 	Some(fourcc)
+}
+
+/// How long the audio `data` plays, when its codec's header or packet clock says without decoding.
+fn stated_duration(config: &AudioConfig, data: &[u8]) -> Option<Timestamp> {
+	let header = match &config.codec {
+		AudioCodec::Mp3 => return crate::codec::mp3::duration(data),
+		AudioCodec::Ac3 => crate::codec::ac3::parse_header(data).ok()?,
+		AudioCodec::Ec3 => crate::codec::eac3::parse_header(data).ok()?,
+		// SBR and PS decode an AAC packet to 2048 samples, at the extension rate the ASC reports.
+		AudioCodec::AAC(aac) if matches!(aac.profile, 5 | 29) => {
+			return Timestamp::from_scale(2048, config.sample_rate.into()).ok();
+		}
+		_ => return crate::container::legacy::Audio::new(config)?.duration(data),
+	};
+	Timestamp::from_scale(header.samples, header.sample_rate.into()).ok()
+}
+
+/// Where audio from `timestamp` lasting `duration` ends, in microseconds, counting only whole
+/// milliseconds of it: FLV stamps tags in whole milliseconds, truncated or rounded, so the next tag
+/// never lands below that end.
+fn after(timestamp: Timestamp, duration: Timestamp) -> Option<Timestamp> {
+	let micros = timestamp
+		.as_micros()
+		.ok()?
+		.checked_add(duration.as_millis().ok()? * 1000)?;
+	Timestamp::from_micros(u64::try_from(micros).ok()?).ok()
+}
+
+/// Whether `timescale` counts `duration` in whole units.
+fn whole(duration: Timestamp, timescale: Option<moq_net::Timescale>) -> bool {
+	match (duration.scale(), timescale) {
+		(Some(scale), Some(timescale)) => {
+			(u128::from(duration.value()) * u128::from(timescale.as_u64())).is_multiple_of(u128::from(scale.as_u64()))
+		}
+		_ => false,
+	}
 }
 
 /// Build an audio config for AAC from an `AudioSpecificConfig`.
