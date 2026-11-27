@@ -9,10 +9,10 @@ import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamC
 import type { FillGroups } from "./fill.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
+import * as Identity from "./identity.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import * as Instance from "./instance.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
@@ -36,8 +36,8 @@ const INFO: track.Info = {
 /** {@link copy}'s track with a different max age, which a front refuses as a replacement. */
 const INFO_REFUSED = { maxAge: Duration.secs(1) };
 
-const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
-const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
+const IDENTITY = Identity.parse("01900000-0000-7000-8000-000000000001");
+const NEWER = Identity.parse("01900000-0000-7000-8000-000000000002");
 const path = Path.from("live");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -71,9 +71,9 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 	return !settled;
 }
 
-/** A stand-in session announcing `path` under the shared instance at `cost`, serving `source`. */
+/** A stand-in session announcing `path` under the shared identity at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost }));
+	const handle = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
@@ -2402,10 +2402,10 @@ test("a resumed fork shares an on-demand track request", async () => {
 	expect(await extra).toBeUndefined();
 });
 
-test("a lagging same-instance replica resumes from one publisher's bytes exactly once", async () => {
+test("a lagging same-identity replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
-	const originalRoute = publisher.route(path, { instance: { id: INSTANCE, epoch: 0n } });
+	const originalRoute = publisher.route(path, { identity: { id: IDENTITY, epoch: 0n } });
 	const original = originalRoute.broadcast;
 	const source = defined(original.createTrack("seq", { maxAge: null }));
 	const origin = new Producer();
@@ -2551,7 +2551,7 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 	}
 });
 
-test("a subscription reads on across a same-instance route swap, each group once", async () => {
+test("a subscription reads on across a same-identity route swap, each group once", async () => {
 	const { a, b, active, request, swap, close } = await setup();
 	const ta = copy(a);
 	const tb = copy(b);
@@ -2694,7 +2694,7 @@ for (const whole of [true, false]) {
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
-		const handle = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+		const handle = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost: 1n }));
 		void (async () => {
 			for await (const request of handle.requested()) request.serve(inner.consumer);
 		})();
@@ -3748,7 +3748,7 @@ test("a read stranded on a route asks it again once the table moves", async () =
 	expect(sub.tryRecvGroup()).toBeUndefined();
 	expect(sub.closed.peek()).toBeUndefined();
 
-	// A dearer route of the instance moves the table while the same route still wins.
+	// A dearer route of the identity moves the table while the same route still wins.
 	const disposeB = serve(origin, b, 10n);
 	await settle();
 	await settle();
@@ -3776,7 +3776,7 @@ for (const answers of [true, false]) {
 		// The stranded route could serve again, but a cheaper one is announced and has not answered.
 		const second = copy(a);
 		second.write(1n);
-		const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+		const next = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost: 1n }));
 		const asked = next.requested();
 		await settle();
 		await settle();
@@ -3807,9 +3807,9 @@ for (const answers of [true, false]) {
 	});
 }
 
-// The same, after another instance won the path: the request leaves the table, and its own
-// instance's takeover leaving is still the news the stranded read waits for.
-test("a read stranded on a route asks it again once a pending takeover leaves, after another instance won", async () => {
+// The same, after another identity won the path: the request leaves the table, and its own
+// identity's takeover leaving is still the news the stranded read waits for.
+test("a read stranded on a route asks it again once a pending takeover leaves, after another identity won", async () => {
 	const { origin, a, active, close } = await setup();
 	const first = copy(a);
 	const sub = active.track("seq").subscribe();
@@ -3822,14 +3822,14 @@ test("a read stranded on a route asks it again once a pending takeover leaves, a
 	expect(sub.tryRecvGroup()).toBeUndefined();
 	const second = copy(a);
 	second.write(1n);
-	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost: 1n }));
 	await settle();
-	const newer = wireOf(origin).receive(path, WireRoute.normalize({ instance: NEWER, cost: 1n }));
+	const newer = wireOf(origin).receive(path, WireRoute.normalize({ identity: NEWER, cost: 1n }));
 	await settle();
 	await settle();
 	expect(sub.tryRecvGroup()).toBeUndefined();
 
-	// The takeover leaves: the stranded route wins its instance again.
+	// The takeover leaves: the stranded route wins its identity again.
 	next.close();
 	await settle();
 	await settle();
@@ -3891,8 +3891,8 @@ test("a read stranded on a route waits out a takeover that went pending in the s
 	const second = copy(a);
 	second.write(1n);
 	// A dearer route moves the table while the stranded one still wins, then a cheaper one does.
-	const dearer = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 10n }));
-	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	const dearer = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost: 10n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost: 1n }));
 	const asked = next.requested();
 	await settle();
 	await settle();
@@ -4074,7 +4074,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0n]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, WireRoute.normalize({ instance: INSTANCE, cost: 1n }));
+	const next = wireOf(origin).receive(path, WireRoute.normalize({ identity: IDENTITY, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();

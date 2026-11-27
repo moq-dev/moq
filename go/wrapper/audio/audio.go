@@ -137,20 +137,47 @@ type ProducerOptions struct {
 
 // NewProducer opens an audio track on the catalog's broadcast and registers its rendition.
 func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
-	out, err := options.Output.ffi()
+	raw, err := options.ffi()
 	if err != nil {
 		return nil, err
 	}
-	var bw **ffi.MoqAllocator
-	if options.Bandwidth != nil {
-		raw := bridge.Allocator(options.Bandwidth)
-		bw = &raw
-	}
-	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), ffi.MoqAudioProducerOptions{Input: options.Input, Output: out, Track: options.Track, Bandwidth: bw})
+	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), raw)
 	if err != nil {
 		return nil, err
 	}
 	return &Producer{inner}, nil
+}
+
+// NewRequestedProducer opens an audio track on the track a subscriber's request asks for, which
+// names it, so options.Track must be nil. This is how an on-demand publisher serves a track asked
+// for again after its producer was closed while read: pass the options it was first published
+// with. Options that change the track info its readers hold end the track with MalformedTrack and fail
+// here; nothing checks the codec settings, which its readers decode with, so keep those too. The
+// request must belong to the catalog's broadcast, and a config that can't be encoded rejects it
+// with NotFound.
+func NewRequestedProducer(catalog *media.CatalogProducer, request *moq.TrackRequest, options ProducerOptions) (*Producer, error) {
+	raw, err := options.ffi()
+	if err != nil {
+		return nil, err
+	}
+	inner, err := ffi.MoqAudioProducerRequested(bridge.CatalogProducer(catalog), bridge.TrackRequest(request), raw)
+	if err != nil {
+		return nil, err
+	}
+	return &Producer{inner}, nil
+}
+
+func (o ProducerOptions) ffi() (ffi.MoqAudioProducerOptions, error) {
+	out, err := o.Output.ffi()
+	if err != nil {
+		return ffi.MoqAudioProducerOptions{}, err
+	}
+	var bw **ffi.MoqAllocator
+	if o.Bandwidth != nil {
+		raw := bridge.Allocator(o.Bandwidth)
+		bw = &raw
+	}
+	return ffi.MoqAudioProducerOptions{Input: o.Input, Output: out, Track: o.Track, Bandwidth: bw}, nil
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.
@@ -179,14 +206,10 @@ func (p *Producer) Reservation() *moq.Reservation {
 	return bridge.Reservation(*raw).(*moq.Reservation)
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (p *Producer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return p.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it while a request handler is live. The producer is unusable afterwards.
+func (p *Producer) Close() { p.inner.Destroy() }
 
 // Finish flushes pending samples and ends the track.
 func (p *Producer) Finish() error { return p.inner.Finish() }

@@ -1,4 +1,4 @@
-//! RTSP import: pull an IP camera's session, reconnecting under a fresh instance per run.
+//! RTSP import: pull an IP camera's session, reconnecting under a fresh identity per run.
 
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ pub struct ImportArgs {
 
 /// Pull `url` into the Origin as `target.name` until a fatal error, reconnecting with backoff.
 ///
-/// Each run is its own broadcast under a fresh instance, with a fresh catalog starting on a
+/// Each run is its own broadcast under a fresh identity, with a fresh catalog starting on a
 /// keyframe: a new session's RTP time restarts, so it never splices onto the old one.
 pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let client = moq_rtsp::Client::new(url.clone())?;
@@ -84,7 +84,7 @@ fn retries(err: &moq_rtsp::Error) -> bool {
 /// Publish one session as one broadcast, announced once its catalog names a track, setting
 /// `published` then.
 async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> Result<moq_rtsp::End, Failure> {
-	// Each run is a new route under a fresh instance, so a redial replaces the last run.
+	// Each run is a new route under a fresh identity, so a redial replaces the last run.
 	let route = target
 		.origin
 		.route(&target.name, moq_net::origin::RouteOptions::hidden())
@@ -102,7 +102,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 			return std::future::pending().await;
 		}
 		route.announce().context("failed to announce broadcast")?;
-		tracing::info!(name = %target.name, instance = %route.instance(), "publishing RTSP broadcast");
+		tracing::info!(name = %target.name, identity = %route.identity(), "publishing RTSP broadcast");
 		*published = true;
 		std::future::pending::<anyhow::Result<moq_rtsp::End>>().await
 	};
@@ -112,7 +112,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		err = announce => err.map_err(Failure::Local),
 	};
 	// Closed at once even after a clean end: the pull redials and publishes the next run under a
-	// new instance, so a run's end is not the content's, and a retained run's finished catalog
+	// new identity, so a run's end is not the content's, and a retained run's finished catalog
 	// would tell readers to stop if the next run dropped.
 	let finished = match &end {
 		Ok(_) => catalog.finish(),

@@ -1,7 +1,7 @@
 //! Two publishers claiming one path from opposite sides of a mesh, each under its own
-//! Instance: every relay uses its nearest, no request loops, and no reader is moved from
-//! one Instance to the other mid-stream. moq-transport and lite-06 publishers carry no
-//! Instance, so each relay that takes their announcement mints one, and the same holds.
+//! Identity: every relay uses its nearest, no request loops, and no reader is moved from
+//! one Identity to the other mid-stream. moq-transport and lite-06 publishers carry no
+//! Identity, so each relay that takes their announcement mints one, and the same holds.
 
 use super::{Feed, Join, Mesh, Source, readers, reports, ring, shown};
 use crate::path_routes::{lite07, quiesce};
@@ -47,7 +47,7 @@ fn nearest(mesh: &Mesh) -> Vec<Option<usize>> {
 		.collect()
 }
 
-/// `A` on `R0` and `B` on `R8` of [`grid`], each its own minted Instance. Every relay
+/// `A` on `R0` and `B` on `R8` of [`grid`], each its own minted Identity. Every relay
 /// shows and reads its nearest at the cost the links add up to, and no link carries a
 /// group twice. The link from `R0` to `R1` closes, which leaves `A` farther than `B` from
 /// `R1` and `R4`: both show `B` now, a restart, while their readers read on in `A`'s
@@ -66,7 +66,7 @@ async fn opposite_claims_each_serve_their_nearest() {
 	];
 	quiesce().await;
 	let mut readers = readers(&mesh).await;
-	let instances = sources.each_ref().map(|source| source.route.instance());
+	let identities = sources.each_ref().map(|source| source.route.identity());
 	let near = nearest(&mesh);
 	let distances = [mesh.distances(0), mesh.distances(8)];
 	for (i, reader) in readers.iter_mut().enumerate() {
@@ -74,7 +74,7 @@ async fn opposite_claims_each_serve_their_nearest() {
 		let cost = 1 + distances[0][i].unwrap().min(distances[1][i].unwrap());
 		assert_eq!(shown.cost, cost, "R{i} shows its nearest: {shown:?}");
 		if let Some(near) = near[i] {
-			assert_eq!(shown.instance, instances[near], "R{i}");
+			assert_eq!(shown.identity, identities[near], "R{i}");
 			assert_eq!(
 				reader.tag().as_deref(),
 				Some(["A", "B"][near]),
@@ -96,7 +96,7 @@ async fn opposite_claims_each_serve_their_nearest() {
 			&& before != now
 		{
 			let shown = shown(&mesh.relays[i]).await.expect("shown");
-			assert_eq!(shown.instance, instances[now], "R{i} shows its new nearest");
+			assert_eq!(shown.identity, identities[now], "R{i} shows its new nearest");
 			assert_eq!(reader.tag().as_deref(), Some(["A", "B"][before]), "R{i} reads on");
 		}
 	}
@@ -105,7 +105,7 @@ async fn opposite_claims_each_serve_their_nearest() {
 }
 
 /// Two publishers announce [`super::PATH`] to opposite relays of a ring of six over
-/// `versions`, neither carrying an Instance. Each relay reads its nearest; the ring link
+/// `versions`, neither carrying an Identity. Each relay reads its nearest; the ring link
 /// from `R0` to `R1` closes, leaving `R1` nearer `R3`'s, and `R1`'s reader stays in the
 /// broadcast it had. Then the publisher on `R0` goes: the readers on its announcement
 /// restart onto the other, with nothing spliced.
@@ -124,11 +124,11 @@ async fn unversioned(versions: [Version; 2]) {
 	let mut minted = Vec::new();
 	for (i, reader) in readers.iter_mut().enumerate() {
 		assert_eq!(reader.tag().as_deref(), Some(nearest[i]), "{versions:?}: R{i}");
-		minted.push(shown(&mesh.relays[i]).await.expect("shown").instance);
+		minted.push(shown(&mesh.relays[i]).await.expect("shown").identity);
 	}
-	for (i, instance) in minted.iter().enumerate() {
-		let same = (minted.iter().zip(nearest)).all(|(other, tag)| (other == instance) == (tag == nearest[i]));
-		assert!(same, "{versions:?}: one Instance per announcement: {minted:?}");
+	for (i, identity) in minted.iter().enumerate() {
+		let same = (minted.iter().zip(nearest)).all(|(other, tag)| (other == identity) == (tag == nearest[i]));
+		assert!(same, "{versions:?}: one Identity per announcement: {minted:?}");
 	}
 
 	let since = kio::clock::now();
@@ -141,7 +141,7 @@ async fn unversioned(versions: [Version; 2]) {
 		assert_eq!(reader.tag().as_deref(), Some(nearest[i]), "{versions:?}: R{i} reads on");
 	}
 	let r1 = shown(&mesh.relays[1]).await.expect("shown");
-	assert_eq!(r1.instance, minted[3], "{versions:?}: R1 shows R3's announcement now");
+	assert_eq!(r1.identity, minted[3], "{versions:?}: R1 shows R3's announcement now");
 
 	let since = kio::clock::now();
 	crate::path_routes::cut(&a_push);

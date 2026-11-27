@@ -256,7 +256,7 @@ class Run:
 
 
 class Following(Scripted):
-    """A scripted follow of one path: each `run` hands out another instance, `offline` a `None`,
+    """A scripted follow of one path: each `run` hands out another identity, `offline` a `None`,
     and `refuse` an error."""
 
     async def __aenter__(self):
@@ -276,7 +276,7 @@ class Following(Scripted):
         await self.send(moq.Error("refused"))
 
     async def run(self, *messages) -> Run:
-        """Hand out an instance whose control track holds `messages`, then stays open."""
+        """Hand out an identity whose control track holds `messages`, then stays open."""
         run = Run()
         for message in messages:
             run.send(message)
@@ -350,7 +350,7 @@ def test_a_driver_whose_broadcast_goes_absent_loses_the_lease() -> None:
 
         await relay.announcements.absent("abc")
         left = await next_command(commands, gate)
-        assert (left.kind, left.instance) == ("driver_left", command.instance)
+        assert (left.kind, left.identity) == ("driver_left", command.identity)
         assert gate.driver is None
 
     asyncio.run(watching(scenario))
@@ -383,12 +383,12 @@ def test_a_driver_whose_run_goes_offline_loses_the_lease_until_it_returns() -> N
 
         await relay.following("abc").offline()
         left = await next_command(commands, gate)
-        assert (left.kind, left.instance) == ("driver_left", first.instance)
+        assert (left.kind, left.identity) == ("driver_left", first.identity)
         assert gate.driver is None
 
         await relay.following("abc").run(DRIVE)
         second = await next_command(commands, gate)
-        assert second.kind == "drive" and second.instance != first.instance
+        assert second.kind == "drive" and second.identity != first.identity
         assert gate.driver == "abc"
 
     asyncio.run(watching(scenario))
@@ -402,7 +402,7 @@ def test_a_failed_control_track_still_releases_its_lease() -> None:
 
         run.end(moq.Error("reset"))
         left = await next_command(commands, gate)
-        assert (left.kind, left.instance) == ("driver_left", command.instance)
+        assert (left.kind, left.identity) == ("driver_left", command.identity)
         assert gate.driver is None
 
         # The run's own departure is its only one, however the follow ends it later.
@@ -435,7 +435,7 @@ def test_a_refused_driver_is_still_followed() -> None:
     asyncio.run(watching(scenario))
 
 
-def test_a_driver_that_restarts_under_a_new_instance_is_a_new_driver() -> None:
+def test_a_driver_that_restarts_under_a_new_identity_is_a_new_driver() -> None:
     """The old run's lease ends with it, even though the path and id are the same."""
 
     async def scenario(relay: Relay, drivers, commands: asyncio.Queue, gate: Drive) -> None:
@@ -446,14 +446,14 @@ def test_a_driver_that_restarts_under_a_new_instance_is_a_new_driver() -> None:
         await relay.following("abc").run({**DRIVE, "sequence": 2})
         # The old run's departure comes first, after everything it queued.
         left = await next_command(commands, gate)
-        assert (left.kind, left.instance) == ("driver_left", first.instance)
+        assert (left.kind, left.identity) == ("driver_left", first.identity)
         second = await next_command(commands, gate)
-        assert second.kind == "drive" and second.instance != first.instance
+        assert second.kind == "drive" and second.identity != first.identity
         # The path stays present across the restart, so one follow sees both runs.
         assert relay.followed == [f"{PREFIX}/abc"]
 
         assert gate.holds(second)
-        assert not gate.apply(Command(kind="driver_left", driver_id="abc", instance=first.instance))
+        assert not gate.apply(Command(kind="driver_left", driver_id="abc", identity=first.identity))
         assert gate.driver == "abc"
 
     asyncio.run(watching(scenario))
@@ -501,7 +501,7 @@ def test_a_revoked_run_ends_and_nothing_it_sends_reaches_the_gate() -> None:
         # One still in flight stops the pump, which reports the departure last.
         run.send(DRIVE)
         left = await commands.get()
-        assert (left.kind, left.instance) == ("driver_left", claim.instance)
+        assert (left.kind, left.identity) == ("driver_left", claim.identity)
         assert drivers.revoked(left)
         # Reading the departure forgets the run.
         assert not drivers.revoked(left)

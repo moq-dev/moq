@@ -120,7 +120,7 @@ class TruckSession:
         # The route starts hidden; the player discovers trucks by announcement,
         # so advertise once the status and video tracks exist. The stream's are
         # there already: opening it advertised them. The route mints a fresh
-        # instance, so viewers see a restarted worker as a restart rather than
+        # identity, so viewers see a restarted worker as a restart rather than
         # a stalled broadcast.
         route.announce()
 

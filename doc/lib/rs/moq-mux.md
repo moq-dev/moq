@@ -38,7 +38,7 @@ with a new sample rate, continues under a new track name
 such as the coded size, updates the rendition in place. A
 timeline that rewinds ends the import. The MPEG-TS import ends with an error at
 a clock step onto another timeline, or a PAT naming another program;
-`ts::Republish` carries on past it, publishing what follows as a new instance of
+`ts::Republish` carries on past it, publishing what follows as a new identity of
 the broadcast. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
 export. The [MPEG-TS guide](/bin/ts) covers the MPEG-TS specifics: one program

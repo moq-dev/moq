@@ -83,7 +83,7 @@ impl<O: Output> Media<O> {
 		output.send(event);
 	}
 
-	/// Follow the path for as long as the origin lasts: each instance that comes
+	/// Follow the path for as long as the origin lasts: each identity that comes
 	/// online replaces what is playing, and going offline lets what is playing
 	/// finish while waiting for the next one.
 	async fn play(mut self) -> anyhow::Result<()> {
@@ -107,11 +107,11 @@ impl<O: Output> Media<O> {
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						instance = ?broadcast.info().instance,
+						identity = ?broadcast.info().identity,
 						"online"
 					);
 
-					// Another instance's timeline is its own, so nothing of the old one carries over.
+					// Another identity's timeline is its own, so nothing of the old one carries over.
 					drop(playing.take());
 					self.presentation = self.presentation.reset(self.args.video_delay());
 					self.playhead = self.playhead.clone().reset();
@@ -134,7 +134,7 @@ impl<O: Output> Media<O> {
 		}
 	}
 
-	/// Play the instance handed out by the follower until its catalog and tracks end.
+	/// Play the identity handed out by the follower until its catalog and tracks end.
 	async fn play_broadcast(
 		&self,
 		broadcast: moq_net::broadcast::Consumer,
@@ -822,7 +822,7 @@ where
 	// Each candidate's broadcast request, issued up front so every one is asked at once.
 	let mut bound = Vec::new();
 	for (name, config, reference) in candidates {
-		match source.bind(config.broadcast(), config.instance()) {
+		match source.bind(config.broadcast(), config.identity()) {
 			Ok(binding) => bound.push((name, config, reference, binding, Attempt::Waiting)),
 			Err(err) => reject(&name, &err),
 		}
@@ -3177,7 +3177,7 @@ mod tests {
 		}
 	}
 
-	/// Publish an audio-only broadcast at `room` under a fresh instance, returning what keeps
+	/// Publish an audio-only broadcast at `room` under a fresh identity, returning what keeps
 	/// it up and its one rendition.
 	fn publish(
 		origin: &moq_net::origin::Producer,
@@ -3193,7 +3193,7 @@ mod tests {
 		(route, catalog, audio)
 	}
 
-	/// Answer the next request through `claim` with one `audio` rendition, under a fresh instance.
+	/// Answer the next request through `claim` with one `audio` rendition, under a fresh identity.
 	async fn answer(
 		claim: &moq_net::origin::Claim,
 	) -> (
@@ -3245,7 +3245,7 @@ mod tests {
 		player.abort();
 	}
 
-	/// A restarted publisher announces a fresh instance while its old run still
+	/// A restarted publisher announces a fresh identity while its old run still
 	/// stands. The restart drops the old broadcast and plays the new one, whose
 	/// timeline starts over, instead of waiting for it to catch up.
 	#[tokio::test]
@@ -3293,7 +3293,7 @@ mod tests {
 		assert!(recorder.events().iter().any(|event| matches!(event, Event::Failed(_))));
 	}
 
-	/// A restart that overlaps the old route still replaces it: it is a new instance, and
+	/// A restart that overlaps the old route still replaces it: it is a new identity, and
 	/// the newest announcement at the exact path wins it.
 	#[tokio::test]
 	async fn an_overlapping_republish_plays_the_new_broadcast() {
@@ -3457,7 +3457,7 @@ mod tests {
 	}
 
 	/// The exact route goes while the old run still holds its delay, and a covering
-	/// route takes over under another instance. Playback reaches the covering route as
+	/// route takes over under another identity. Playback reaches the covering route as
 	/// a restart.
 	#[tokio::test]
 	async fn a_handoff_to_a_covering_route_plays_on_while_draining() {
@@ -3466,7 +3466,7 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		// One instance, served by the exact route and then answered again behind a covering one.
+		// One identity, served by the exact route and then answered again behind a covering one.
 		let (exact, exact_catalog, mut old) = publish(&origin);
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(500), recorder.clone()).run());
@@ -3491,7 +3491,7 @@ mod tests {
 		drop((mirror, mirror_catalog, copy, pool, exact, exact_catalog, old));
 	}
 
-	/// Re-pricing the same instance is an update, which playback rides through on
+	/// Re-pricing the same identity is an update, which playback rides through on
 	/// one sink rather than starting over.
 	#[tokio::test]
 	async fn a_reprice_keeps_playing() {

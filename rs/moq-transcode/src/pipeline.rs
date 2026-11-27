@@ -72,6 +72,11 @@ pub(crate) struct Pipeline {
 	/// always the newest task for it and a signal sent to one that already ended
 	/// goes nowhere.
 	serving: HashMap<String, tokio::sync::watch::Sender<bool>>,
+	/// Whether the ladder left out a rung whose probe failed, so a later snapshot of the
+	/// same picture tries it again: an encoder out of sessions refuses a size it takes later.
+	incomplete: bool,
+	/// Fires once the source catalog has finished, for every rung served off this ladder.
+	ending: (tokio::sync::watch::Sender<bool>, rung::Retire),
 }
 
 impl Pipeline {
@@ -108,12 +113,15 @@ impl Pipeline {
 			names: Names::default(),
 			probed: VecDeque::new(),
 			serving: HashMap::new(),
+			incomplete: false,
+			ending: rung::Retire::channel(),
 		};
 
 		// `resolve` takes the source it resolves against, since `follow` calls it
 		// with one the ladder has not adopted yet. Here it is the ladder's own.
 		let (name, rendition) = (ladder.name.clone(), ladder.rendition.clone());
-		let rungs = ladder.resolve(&name, &rendition, &[]).await?;
+		let (rungs, complete) = ladder.resolve(&name, &rendition, &[]).await?;
+		ladder.incomplete = !complete;
 		tracing::info!(source = %ladder.name, rungs = rungs.len(), "transcoding");
 		// Publish the ladder before any rung can be asked for, so a cursor holds
 		// every handle and can bill a pipeline too short to show up as an edge.
@@ -131,18 +139,24 @@ impl Pipeline {
 	/// out. Pass an empty slice when every rung is retiring regardless of shape,
 	/// since a name one of them was serving can never come back.
 	///
-	/// Nothing is committed here: a probe that fails leaves the ladder exactly as
-	/// it was. The probes that succeeded before it are remembered regardless,
-	/// since they describe the encoder rather than the ladder.
+	/// A rung whose probe fails is left out: the encoder refusing one geometry, such
+	/// as a sliver below a hardware encoder's minimum, says nothing about the rest.
+	/// Only a ladder whose every fresh probe failed is an error, since that is an
+	/// encoder that opens at no size.
+	///
+	/// Nothing is committed here: an error leaves the ladder exactly as it was. The
+	/// probes that succeeded are remembered regardless, since they describe the
+	/// encoder rather than the ladder. Returns the rungs, and whether none was left out.
 	async fn resolve(
 		&mut self,
 		source_name: &str,
 		source: &VideoConfig,
 		carry: &[Published],
-	) -> Result<Vec<Published>, Error> {
+	) -> Result<(Vec<Published>, bool), Error> {
 		let resolved = catalog::resolve_rungs(&self.config.ladder, source_name, source)?;
 
 		let mut published = Vec::new();
+		let mut refused = None;
 		for mut rung in resolved {
 			let reused = carry.iter().find(|other| other.rung.same_shape(&rung)).cloned();
 			let entry = match reused {
@@ -154,15 +168,27 @@ impl Pipeline {
 					entry.optimize_for_latency = source.optimize_for_latency;
 					entry
 				}
-				None => {
-					rung.name = self.names.mint(rung.short_side);
-					self.probe(&rung, source).await?
-				}
+				None => match self.probe(&rung, source).await {
+					// Named only once it serves, so a skipped rung burns no revision.
+					Ok(entry) => {
+						rung.name = self.names.mint(rung.short_side);
+						entry
+					}
+					Err(err) => {
+						tracing::warn!(%err, size = ?rung.size, short_side = rung.short_side, "skipping a rung the encoder refused");
+						refused = Some(err);
+						continue;
+					}
+				},
 			};
 			published.push(Published { rung, entry });
 		}
+		let complete = match refused {
+			Some(err) if published.is_empty() => return Err(err),
+			refused => refused.is_none(),
+		};
 		catalog::inherit(&mut published, source);
-		Ok(published)
+		Ok((published, complete))
 	}
 
 	/// The catalog entry for a fresh rung, probing an encoder only for a shape
@@ -211,7 +237,13 @@ impl Pipeline {
 			rendition: self.active.rendition(&published.rung),
 			info: published.rung.clone(),
 			retire,
+			ending: self.ending.1.clone(),
 		})
+	}
+
+	/// Tell every rung served off this ladder that the source catalog has finished.
+	pub(crate) fn end(&self) {
+		self.ending.0.send_replace(true);
 	}
 
 	/// Resolve the ladder again against a new source catalog snapshot.
@@ -230,6 +262,11 @@ impl Pipeline {
 			}
 		};
 		if name == self.name && same_picture(&rendition, &self.rendition) {
+			// The picture the ladder already serves, so only a rung left out before is new.
+			if self.incomplete {
+				self.apply(name, rendition, false, self.scale).await;
+				return None;
+			}
 			catalog::inherit(&mut self.rungs, &rendition);
 			self.rendition = rendition;
 			return None;
@@ -265,8 +302,8 @@ impl Pipeline {
 		// Probing opens a real encoder, and a picture this machine cannot encode at
 		// is a reason to keep serving the ladder that works, not to end the
 		// broadcast.
-		let rungs = match self.resolve(&name, &rendition, &carry).await {
-			Ok(rungs) => rungs,
+		let (rungs, complete) = match self.resolve(&name, &rendition, &carry).await {
+			Ok(resolved) => resolved,
 			Err(err) => {
 				tracing::warn!(%err, source = %name, "could not resolve a ladder for the new source");
 				return;
@@ -288,6 +325,7 @@ impl Pipeline {
 		self.name = name;
 		self.rendition = rendition;
 		self.scale = scale;
+		self.incomplete = !complete;
 
 		// Retire whatever the new ladder does not carry forward: a height it has no
 		// room for, and a height it kept at a picture it is no longer serving,
@@ -399,6 +437,47 @@ mod tests {
 		let mut cursor = active.consume();
 		assert_eq!(cursor.try_next().unwrap().rendition.name(), "video/120p.5");
 		assert!(cursor.try_next().is_none());
+	}
+
+	/// A rung the encoder refuses, here one past openh264's largest picture, is left out rather
+	/// than failing the rung beside it. Only a ladder the encoder refuses whole is an error.
+	#[tokio::test]
+	async fn an_unprobeable_rung_leaves_the_rest_of_the_ladder() {
+		let source = moq_net::broadcast::Info::default().produce();
+		let ladder = |rungs: &[u32]| Config {
+			ladder: Ladder::new(
+				rungs
+					.iter()
+					.map(|side| Rung::new(*side, moq_net::bandwidth::Rate::from_bps(u64::from(*side) * 500))),
+			)
+			.unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let pipeline = |config: Config| {
+			let decoders = catalog::Decoders::new(config.decoder());
+			// 16:1, so the 1024p rung is 16384x1024, wider than openh264's 3840.
+			Pipeline::new(
+				source.consume(),
+				config,
+				active::Producer::default(),
+				decoders,
+				"video".into(),
+				video(32768, 2048),
+				hang::container::TIMESCALE,
+			)
+		};
+
+		let both = pipeline(ladder(&[1024, 128])).await.unwrap();
+		let names: Vec<_> = both
+			.rungs()
+			.iter()
+			.map(|published| published.rung.name.as_str())
+			.collect();
+		assert_eq!(names, ["video/128p"]);
+		assert!(pipeline(ladder(&[1024])).await.is_err(), "no rung encodes");
 	}
 
 	/// Each rung keys its groups in its source track's timescale, so a ladder following the source

@@ -765,7 +765,7 @@ Semantic loss also has paused-clock wire checks in `export_test.rs` and
 |---|---|---|
 | Skipped groups, short or longer than PCR backfill | Padded continuing-clock holes stay unflagged; only the first PCR after skipped slots flags the jump; PAT/PMT versions stay unchanged; importer Health reports no unflagged PCR jump | `a_skipped_group_flags_the_clock` |
 | Disjoint A/V outages with different decode reserves | Padded continuing-clock holes carry no flag | `disjoint_outages_across_both_tracks_keep_the_clock` |
-| Same-instance route handoff after a gap | Only a clock jump flags the PCR, with no program change | `a_follower_continues_through_a_same_instance_handoff_after_a_gap` |
+| Same-identity route handoff after a gap | Only a clock jump flags the PCR, with no program change | `a_follower_continues_through_a_same_identity_handoff_after_a_gap` |
 
 These run in `just rs test -p moq-mux --lib` and the selected Rust CI gate.
 The raw lane retains the unchanged-packet loss contract below.
@@ -824,7 +824,7 @@ content is not compared: the PES cut at the switch is corrupt by design.
 
 `--restart <s>` plays the source live into a local UDP port, read by
 `tsp -I ip` into the import, and SIGKILLs the import `<s>` seconds in. It
-restarts 0.5 s after it exits, a new publisher instance, while the export
+restarts 0.5 s after it exits, a new publisher identity, while the export
 (`--stitch`) runs on. `passthrough.py --restart` places each import's input in
 the source and allows the capture one gap, no longer in seconds of the clip
 than the import's downtime plus the restarted import's first group. The
@@ -1004,7 +1004,7 @@ claiming the CBR PCR-accuracy profile.
 ## CI
 
 The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
-publisher and subscribers. Its stream instances allow acquisition to continue
+publisher and subscribers. Its stream identities allow acquisition to continue
 when a session is replaced. Production defaults remain unchanged: Lite-06
 cannot prove publisher identity across session replacement and must refuse a
 pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` covers both

@@ -331,7 +331,7 @@ async fn subscribe_named(
 		.follow(path.as_str(), None)?
 		.available()
 		.await?
-		.ok_or_else(|| anyhow::anyhow!("the first change is an instance"))?;
+		.ok_or_else(|| anyhow::anyhow!("the first change is an identity"))?;
 	drain(broadcast, max_delay, &stats).await
 }
 

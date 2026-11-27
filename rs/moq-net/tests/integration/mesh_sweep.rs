@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 
-use moq_net::{Instance, Timescale, Version, cache, origin, stats, track};
+use moq_net::{Identity, Timescale, Version, cache, origin, stats, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 use crate::support::AppendNext;
@@ -52,7 +52,7 @@ enum Change {
 	/// A relay restarts under a fresh identity, and its links and clients reconnect.
 	RelayRestart,
 	/// A publishing client restarts under a fresh identity, attaches to a random relay,
-	/// and publishes its broadcasts again as new instances.
+	/// and publishes its broadcasts again as new identities.
 	OriginRestart,
 	/// A client joins at a random relay.
 	Join,
@@ -95,7 +95,7 @@ impl Change {
 struct Seen {
 	path: String,
 	kind: origin::RouteKind,
-	instance: Instance,
+	identity: Identity,
 	available: bool,
 }
 
@@ -107,7 +107,7 @@ fn observe(mut routes: origin::Routes) -> mpsc::UnboundedReceiver<Seen> {
 			let seen = Seen {
 				path: event.announce.prefix.to_string(),
 				kind: event.kind,
-				instance: event.announce.route.instance().clone(),
+				identity: event.announce.route.identity().clone(),
 				available: event.announce.route.available(),
 			};
 			if tx.unbounded_send(seen).is_err() {
@@ -121,7 +121,7 @@ fn observe(mut routes: origin::Routes) -> mpsc::UnboundedReceiver<Seen> {
 /// A broadcast as one node currently shows it.
 #[derive(Clone, Debug)]
 struct Shown {
-	instance: Instance,
+	identity: Identity,
 	available: bool,
 }
 
@@ -131,8 +131,8 @@ struct Reader {
 	shown: BTreeMap<String, Shown>,
 	/// The newest generation shown per path, which must never go back.
 	newest: BTreeMap<String, u64>,
-	/// The instances this reader saw END for.
-	ended: BTreeSet<Instance>,
+	/// The identities this reader saw END for.
+	ended: BTreeSet<Identity>,
 }
 
 impl Reader {
@@ -146,10 +146,10 @@ impl Reader {
 	}
 }
 
-/// One publication of a broadcast: a path served by one instance.
+/// One publication of a broadcast: a path served by one identity.
 struct Publication {
 	path: String,
-	/// Counts the path's publications, so a newer instance compares higher.
+	/// Counts the path's publications, so a newer identity compares higher.
 	generation: u64,
 	/// Whether it still serves; once over it never serves again.
 	live: bool,
@@ -194,7 +194,7 @@ struct Mesh {
 	relays: Vec<Relay>,
 	links: Vec<Link>,
 	clients: Vec<Option<Client>>,
-	publications: BTreeMap<Instance, Publication>,
+	publications: BTreeMap<Identity, Publication>,
 	/// Publications per path so far.
 	generations: BTreeMap<String, u64>,
 	/// Broadcasts published so far, so each gets a fresh path.
@@ -352,7 +352,7 @@ impl Mesh {
 		self.announce(client, path);
 	}
 
-	/// Announce `path` from `client` as a new instance, with one frame on its track.
+	/// Announce `path` from `client` as a new identity, with one frame on its track.
 	fn announce(&mut self, client: usize, path: String) {
 		let held = {
 			let client = self.clients[client].as_ref().unwrap();
@@ -375,7 +375,7 @@ impl Mesh {
 		let generation = self.generations.entry(path.clone()).or_default();
 		*generation += 1;
 		self.publications.insert(
-			held.route.instance(),
+			held.route.identity(),
 			Publication {
 				path: path.clone(),
 				generation: *generation,
@@ -389,7 +389,7 @@ impl Mesh {
 	/// Mark every publication `held` serves as over.
 	fn over(&mut self, held: &BTreeMap<String, Held>) {
 		for held in held.values() {
-			self.publications.get_mut(&held.route.instance()).unwrap().live = false;
+			self.publications.get_mut(&held.route.identity()).unwrap().live = false;
 		}
 	}
 
@@ -558,21 +558,21 @@ impl Mesh {
 				}
 			}
 			// Settled: exactly the live broadcasts whose publisher this node reaches.
-			let expected: BTreeMap<&str, &Instance> = (publications.iter())
+			let expected: BTreeMap<&str, &Identity> = (publications.iter())
 				.filter(|(_, publication)| publication.live)
 				.filter(|(_, publication)| {
 					let relay = attached[&publication.client];
 					component == components[relay]
 				})
-				.map(|(instance, publication)| (publication.path.as_str(), instance))
+				.map(|(identity, publication)| (publication.path.as_str(), identity))
 				.collect();
-			let shown: BTreeMap<&str, &Instance> = (reader.shown.iter())
-				.map(|(path, shown)| (path.as_str(), &shown.instance))
+			let shown: BTreeMap<&str, &Identity> = (reader.shown.iter())
+				.map(|(path, shown)| (path.as_str(), &shown.identity))
 				.collect();
-			// A minted instance names only the session that showed it, so only its path counts.
+			// A minted identity names only the session that showed it, so only its path counts.
 			let matches = shown.len() == expected.len()
 				&& (shown.iter().zip(&expected))
-					.all(|((path, shown), (want, instance))| path == want && (shown.is_minted() || shown == instance));
+					.all(|((path, shown), (want, identity))| path == want && (shown.is_minted() || shown == identity));
 			if !matches {
 				failures.push(format!("{name}: not settled: shows {shown:?}, reaches {expected:?}"));
 			}
@@ -601,7 +601,7 @@ impl Mesh {
 			};
 			let read = async {
 				let broadcast = (client.origin.consume())
-					.request(path.as_str(), shown.instance.clone())
+					.request(path.as_str(), shown.identity.clone())
 					.await
 					.map_err(|err| format!("request: {err}"))?;
 				let mut track = (broadcast.track(TRACK).map_err(|err| format!("track: {err}"))?)
@@ -639,10 +639,10 @@ fn close(pair: MockPair) {
 }
 
 /// Apply one event to what `reader` shows, checking the per-event rules.
-fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, seen: &Seen) -> Result<(), String> {
+fn apply(reader: &mut Reader, publications: &BTreeMap<Identity, Publication>, seen: &Seen) -> Result<(), String> {
 	use origin::RouteKind::*;
 
-	// An UPDATE names the instance shown and a RESTART another. A session keeps the instance
+	// An UPDATE names the identity shown and a RESTART another. A session keeps the identity
 	// it minted for a path while it holds the path, so this holds on a moq-lite-06 wire too.
 	// A retraction names the last route advertised, which may be a minted RESTART the update
 	// hold kept back and the retraction overtook (see `RouteEvent::announce`).
@@ -650,27 +650,27 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 	match (seen.kind, current) {
 		(Start, Some(_)) => return Err("START for a shown broadcast".into()),
 		(Update | Restart | End | Offline, None) => return Err("an event for a broadcast not shown".into()),
-		(End | Offline, Some(_)) if seen.instance.is_minted() => {}
-		(Update | End | Offline, Some(shown)) if shown.instance != seen.instance => {
-			return Err(format!("the event names another instance than {:?}", shown.instance));
+		(End | Offline, Some(_)) if seen.identity.is_minted() => {}
+		(Update | End | Offline, Some(shown)) if shown.identity != seen.identity => {
+			return Err(format!("the event names another identity than {:?}", shown.identity));
 		}
-		(Restart, Some(shown)) if shown.instance == seen.instance => {
-			return Err("RESTART to the same instance".into());
+		(Restart, Some(shown)) if shown.identity == seen.identity => {
+			return Err("RESTART to the same identity".into());
 		}
 		_ => {}
 	}
 
-	// A moq-lite-06 wire carries no instance, so each session mints one per path, and a
+	// A moq-lite-06 wire carries no identity, so each session mints one per path, and a
 	// reader can hold only the path to what was published: the settled check below still
 	// requires exactly the paths it reaches.
-	if seen.instance.is_minted() {
+	if seen.identity.is_minted() {
 		if !publications.values().any(|publication| publication.path == seen.path) {
 			return Err("a path nobody published".into());
 		}
 		match seen.kind {
 			Start | Update | Restart => {
 				let shown = Shown {
-					instance: seen.instance.clone(),
+					identity: seen.identity.clone(),
 					available: seen.available,
 				};
 				reader.shown.insert(seen.path.clone(), shown);
@@ -683,15 +683,15 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 		return Ok(());
 	}
 
-	// Truthful: every instance shown is one some client published at that path.
-	let publication = publications.get(&seen.instance).ok_or("an instance nobody published")?;
+	// Truthful: every identity shown is one some client published at that path.
+	let publication = publications.get(&seen.identity).ok_or("an identity nobody published")?;
 	if publication.path != seen.path {
-		return Err(format!("the instance of {}", publication.path));
+		return Err(format!("the identity of {}", publication.path));
 	}
 	match seen.kind {
 		Start | Update | Restart => {
-			// NoRevival: an instance this reader saw end never starts again.
-			if reader.ended.contains(&seen.instance) {
+			// NoRevival: an identity this reader saw end never starts again.
+			if reader.ended.contains(&seen.identity) {
 				return Err("revived after END".into());
 			}
 			// NoRegression: a reader never goes back to an older publication.
@@ -703,7 +703,7 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 			reader.shown.insert(
 				seen.path.clone(),
 				Shown {
-					instance: seen.instance.clone(),
+					identity: seen.identity.clone(),
 					available: seen.available,
 				},
 			);
@@ -713,7 +713,7 @@ fn apply(reader: &mut Reader, publications: &BTreeMap<Instance, Publication>, se
 			if publication.live {
 				return Err("END while its publisher still serves it".into());
 			}
-			reader.ended.insert(seen.instance.clone());
+			reader.ended.insert(seen.identity.clone());
 			reader.shown.remove(&seen.path);
 		}
 		Offline => {

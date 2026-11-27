@@ -107,7 +107,7 @@ fn acquisition(c: &mut Criterion) {
 	group.finish();
 }
 
-/// An independent instance acquires while the old tracks still hold their tail.
+/// An independent identity acquires while the old tracks still hold their tail.
 fn handoff(c: &mut Criterion) {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_time()
@@ -126,8 +126,8 @@ fn handoff(c: &mut Criterion) {
 						let start = kio::clock::now();
 						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 						buffer.expect(1..=tracks);
-						for instance in 0..2 {
-							if instance == 1 {
+						for identity in 0..2 {
+							if identity == 1 {
 								let keys = tracks + 1..=2 * tracks;
 								buffer.expect(keys.clone());
 								buffer.start(keys.clone(), keys);
@@ -136,12 +136,12 @@ fn handoff(c: &mut Criterion) {
 								for frame in 0..frames {
 									buffer
 										.push(
-											instance * tracks + track,
+											identity * tracks + track,
 											jitter::Arrival {
 												arrived: start,
 												read: start,
 												decode: Timestamp::from_millis(
-													u64::from(instance) * 10_000 + frame * 20,
+													u64::from(identity) * 10_000 + frame * 20,
 												)
 												.unwrap()
 												.try_into()

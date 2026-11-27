@@ -201,7 +201,7 @@ export class Connection {
 	 * The send-side bandwidth allocator for the current URL, or undefined
 	 * while disabled or URL-less.
 	 *
-	 * Every handle on this URL shares the same instance, so publishers reserve
+	 * Every handle on this URL shares the same identity, so publishers reserve
 	 * against one registry. Borrowed, not owned: the type has no close, since
 	 * closing it would starve every other handle.
 	 */
@@ -210,7 +210,7 @@ export class Connection {
 	/**
 	 * The receive-side registry for the current URL, or undefined while disabled or URL-less.
 	 *
-	 * Every handle on this URL shares the same instance, so players watching over one
+	 * Every handle on this URL shares the same identity, so players watching over one
 	 * connection split its receive estimate instead of each selecting against all of it,
 	 * and their ceilings summed are the PROBE target. Borrowed, not owned: it has no close.
 	 */
