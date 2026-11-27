@@ -171,8 +171,9 @@ fn prepare(track: &moq_net::track::Producer, config: &mut impl AsMut<JsonConfig>
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest value.
 /// For a log where every record survives, use [`Stream`].
 pub struct Snapshot<T> {
-	inner: moq_json::snapshot::Producer<T>,
+	// Dropped before the track, so a handler asked for the track again finds the name free.
 	listing: Listing,
+	inner: moq_json::snapshot::Producer<T>,
 }
 
 impl<T: Serialize> Snapshot<T> {
@@ -240,20 +241,6 @@ impl<T: Serialize> Snapshot<T> {
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
 	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
-	/// unchanged, entry included, when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the handle back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
-	}
 }
 
 /// Publishes an append-log JSON track, advertised in the catalog for as long as this handle lives.
@@ -261,13 +248,14 @@ impl<T: Serialize> Snapshot<T> {
 /// Every [`append`](Self::append) is preserved and delivered in order. For a latest-value document,
 /// use [`Snapshot`].
 pub struct Stream<T> {
-	inner: moq_json::stream::Producer<T>,
-	name: String,
-
 	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
-	/// discovers it afterwards.
+	/// discovers it afterwards. Dropped before the track, so a handler asked for the track again
+	/// finds the name free.
 	listing: Option<Listing>,
+
+	inner: moq_json::stream::Producer<T>,
+	name: String,
 }
 
 impl<T: Serialize> Stream<T> {
@@ -354,20 +342,6 @@ impl<T: Serialize> Stream<T> {
 	/// catalog entry.
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
-	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
-	/// unchanged, entry included, when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the handle back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
 	}
 }
 
@@ -749,6 +723,43 @@ mod test {
 			!catalog.snapshot().json.tracks.contains_key("chat"),
 			"a track with no publisher must not stay advertised"
 		);
+	}
+
+	/// A snapshot dropped while read retires its entry before its track is asked for again, so a
+	/// handler serving the renewal can publish it anew under the same name.
+	#[test]
+	fn dropping_a_read_snapshot_retires_the_entry_before_the_renewal() {
+		struct Listed {
+			catalog: crate::catalog::Producer,
+			at_wake: std::sync::Mutex<Option<bool>>,
+		}
+		impl std::task::Wake for Listed {
+			fn wake(self: std::sync::Arc<Self>) {
+				let listed = self.catalog.snapshot().json.tracks.contains_key("status");
+				*self.at_wake.lock().unwrap() = Some(listed);
+			}
+		}
+
+		let (mut broadcast, catalog) = catalog();
+		let mut requests = broadcast.requests();
+		let listed = std::sync::Arc::new(Listed {
+			catalog: catalog.clone(),
+			at_wake: Default::default(),
+		});
+		let status = catalog
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
+			.unwrap();
+		let _reader = status.consume();
+		let waiter = kio::Waiter::new(std::task::Waker::from(listed.clone()));
+		assert!(requests.poll_requested_track(&waiter).is_pending());
+
+		drop(status);
+		assert_eq!(
+			*listed.at_wake.lock().unwrap(),
+			Some(false),
+			"the entry outlived the renewal"
+		);
+		assert!(requests.poll_requested_track(&kio::Waiter::noop()).is_ready());
 	}
 
 	/// `finish` consumes the handle, so the entry goes with it: an entry advertising a closed track

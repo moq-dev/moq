@@ -3202,20 +3202,16 @@ pub unsafe extern "C" fn moq_publish_media_demand(
 	})
 }
 
-/// Abort a media track with an application error code, but only while nobody wants it.
+/// Release a media track handle without finishing it.
 ///
 /// This is how an on-demand publisher ends a track once its [moq_publish_media_demand] watcher
-/// reports `MOQ_DEMAND_UNWANTED`: releasing the track instead fails a reader that joined in
-/// between. Returns 1 once the track is closed, which releases the handle, and `0` when a reader
-/// wants it again, which leaves the handle serving: wait for `MOQ_DEMAND_UNWANTED` from a new
-/// watcher, since one that already reported it misses a reader that came and went. A container
-/// handle is refused, as for [moq_publish_media_demand]. A negative code is a failure.
+/// reports `MOQ_DEMAND_UNWANTED`: see [moq_publish_track_free]. A container handle is refused.
+/// Returns zero, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_media_abort_unwanted(media: u32, error_code: u16) -> i32 {
+pub extern "C" fn moq_publish_media_free(media: u32) -> i32 {
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
-		let closed = State::lock().publish.media_abort_unwanted(media, error_code)?;
-		Ok(i32::from(closed))
+		State::lock().publish.media_free(media)
 	})
 }
 
@@ -3864,20 +3860,20 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 	})
 }
 
-/// Abort a raw track with an application error code, but only while nobody wants it.
+/// Release a raw track handle without finishing or aborting it.
 ///
 /// This is how an on-demand publisher ends a track once its [moq_publish_track_demand] watcher
-/// reports `MOQ_DEMAND_UNWANTED`: releasing the track instead fails a reader that joined in
-/// between, which reads a drop rather than the track. Returns 1 once the track is closed, which
-/// releases the handle, and `0` when a reader wants it again, which leaves the handle serving:
-/// wait for `MOQ_DEMAND_UNWANTED` from a new watcher, since one that already reported it misses
-/// a reader that came and went. A negative code is a failure.
+/// reports `MOQ_DEMAND_UNWANTED`: a track nobody wants ends cleanly, and a subscriber that joined
+/// since is served by the broadcast's next track request ([moq_publish_requests]), or fails
+/// without a live handler, or when this handle served such a request and no subscriber joined
+/// since. A live [moq_publish_track_requests] handler on the track keeps it open like another
+/// handle, so cancel it with [moq_publish_requests_cancel] too. Returns zero, or a negative
+/// code if the handle is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_abort_unwanted(track: u32, error_code: u16) -> i32 {
+pub extern "C" fn moq_publish_track_free(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		let closed = State::lock().publish.track_abort_unwanted(track, error_code)?;
-		Ok(i32::from(closed))
+		State::lock().publish.track_free(track)
 	})
 }
 
@@ -4024,6 +4020,11 @@ pub unsafe extern "C" fn moq_track_request_requests(
 /// `moq_publish_track_*` function, or a negative code on failure. Once the request's
 /// broadcast closed, the track ends with `UNROUTABLE` and the call fails with
 /// `MOQ_ERROR_BROADCAST_NOT_FOUND`.
+///
+/// A track asked for again, because its handle was freed while read, must be accepted with the
+/// `info` it was published with, which its readers hold: another ends the track, and writes
+/// through the returned handle fail. It keeps the groups its last handle finished, so number
+/// new groups past them rather than from zero again.
 ///
 /// # Safety
 /// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.

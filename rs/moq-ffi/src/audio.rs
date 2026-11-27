@@ -397,13 +397,14 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 
 /// Producer for a raw-audio track.
 ///
-/// Constructed from a broadcast's media catalog. Each
-/// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
-/// is PCM in the format declared by the [`MoqAudioEncoderInput`]
+/// Constructed from a broadcast's media catalog. Each [`write`](Self::write) accepts an
+/// [`MoqAudioFrame`] whose `data` is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
@@ -415,7 +416,7 @@ pub struct MoqAudioProducer {
 	children: crate::producer::Children,
 }
 
-// Dropped or closed before its finish, the track ends the way a publisher leaving does.
+// Closed with its broadcast before its finish, the track ends with the close's cause.
 impl crate::producer::Child for MoqAudioProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::runtime().enter();
@@ -428,7 +429,9 @@ impl crate::producer::Child for MoqAudioProducer {
 
 impl Drop for MoqAudioProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Dropped);
+		let _guard = crate::ffi::runtime().enter();
+		self.reservation.get_mut().unwrap().take();
+		drop(self.inner.get_mut().unwrap().take());
 	}
 }
 
@@ -478,31 +481,6 @@ impl MoqAudioProducer {
 		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?)))
 	}
 
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::runtime().enter();
-		let mut guard = self.inner.lock().unwrap();
-		let producer = guard.take().ok_or(MoqError::Closed)?;
-		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
-			Ok(()) => {
-				self.reservation.lock().unwrap().take();
-				Ok(true)
-			}
-			Err(producer) => {
-				*guard = Some(producer);
-				Ok(false)
-			}
-		}
-	}
-
 	/// Drain the encoder and finish the audio track.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
@@ -533,6 +511,35 @@ impl MoqAudioProducer {
 	#[uniffi::constructor]
 	pub fn new(
 		catalog: &crate::media::MoqMediaCatalogProducer,
+		options: MoqAudioProducerOptions,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
+		Self::open(catalog, None, options)
+	}
+
+	/// Open an audio track on the track a subscriber's `request` asks for, as [`new`](Self::new)
+	/// does on a track of its own.
+	///
+	/// This is how an on-demand publisher serves a track asked for again after its producer was
+	/// released while read: serve it with the options it was first published with. Options that
+	/// change the track info its readers hold end the track with `MalformedTrack` and fail here;
+	/// nothing checks the codec settings, which its readers decode with, so keep those too. The
+	/// request names the track, so [`MoqAudioProducerOptions::track`] must be `None`, and it
+	/// must belong to the catalog's broadcast. A config the codec refuses rejects the request
+	/// with `NotFound`.
+	#[uniffi::constructor]
+	pub fn requested(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Arc<crate::producer::MoqTrackRequest>,
+		options: MoqAudioProducerOptions,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
+		Self::open(catalog, Some(request), options)
+	}
+}
+
+impl MoqAudioProducer {
+	fn open(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Option<Arc<crate::producer::MoqTrackRequest>>,
 		options: MoqAudioProducerOptions,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
@@ -573,11 +580,23 @@ impl MoqAudioProducer {
 			options.bandwidth = bandwidth.inner().clone();
 		}
 
-		let (producer, children) = broadcast.with_state(|state| {
-			let producer =
-				moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
-			Ok((producer, state.children.clone()))
-		})?;
+		let (producer, children) = match request {
+			None => broadcast.with_state(|state| {
+				let producer =
+					moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
+				Ok((producer, state.children.clone()))
+			})?,
+			Some(request) => {
+				let (catalog, children) =
+					broadcast.with_state(|state| Ok((state.catalog.clone(), state.children.clone())))?;
+				let producer = request.answer_in(&children, |request| {
+					Ok(moq_audio::encode::Producer::requested(
+						request, catalog, input, &options,
+					)?)
+				})?;
+				(producer, children)
+			}
+		};
 
 		// Producer::new does not reserve today (only capture does), so the
 		// binding holds the claim itself. Passing the allocator into Options

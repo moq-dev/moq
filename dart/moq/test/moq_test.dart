@@ -135,31 +135,41 @@ void main() {
     broadcast.close();
   });
 
-  test('abortUnwanted keeps a reader that joined late', () async {
+  test('releasing a producer ends an on-demand track', () async {
     final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+
+    final idle = broadcast.publishTrack(name: 'idle', info: null);
+    final idleDemand = idle.demand();
+    while (await idleDemand.wantedChanged().timeout(timeout)) {}
+    idle.dispose();
+    await expectLater(
+      idleDemand.wantedChanged().timeout(timeout),
+      throwsA(isA<ClosedMoqException>()),
+    );
+
     final track = broadcast.publishTrack(name: 'status', info: null);
     final demand = track.demand();
     while (await demand.wantedChanged().timeout(timeout)) {}
+    final late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'status', subscription: null)
+        .timeout(timeout);
+    track.dispose();
 
-    final late = track.consume(subscription: null);
-    expect(track.abortUnwanted(errorCode: 7), isFalse);
-    track.writeFrame(
+    final request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'status');
+    final next = request.accept(info: null);
+    next.writeFrame(
       frame: Frame(
-        payload: utf8.encode('still serving'),
+        payload: utf8.encode('served again'),
         timestamp: Timestamp.unscaled(0),
       ),
     );
     final frame = await late.readFrame().timeout(timeout);
-    expect(utf8.decode(frame!.payload), 'still serving');
-
-    while (!await demand.wantedChanged().timeout(timeout)) {}
+    expect(utf8.decode(frame!.payload), 'served again');
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout)) {}
-    expect(track.abortUnwanted(errorCode: 7), isTrue);
-    expect(
-      () => track.abortUnwanted(errorCode: 7),
-      throwsA(isA<ClosedMoqException>()),
-    );
+    requests.cancel();
     broadcast.close();
   });
 
@@ -1052,14 +1062,94 @@ void main() {
     broadcast.close();
   });
 
-  test('JSON abortUnwanted keeps a reader that joined late', () async {
+  test('native encoders serve a renewal', () async {
+    final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+
+    moq_audio.ProducerOptions mic(String? track) => moq_audio.ProducerOptions(
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()),
+      track: track,
+    );
+    final audio = moq_audio.Producer(catalog: catalog, options: mic('mic'));
+    var late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'mic', subscription: null)
+        .timeout(timeout);
+    audio.dispose();
+    var request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'mic');
+    final served = moq_audio.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: mic(null),
+    );
+    for (var i = 0; i < 3; i++) {
+      served.write(
+        frame: moq_audio.Frame(
+          timestamp: Timestamp(value: i * 20000, scale: 1000000),
+          data: Uint8List(960 * 4),
+        ),
+      );
+    }
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+
+    moq_video.ProducerOptions camera(String? track) =>
+        moq_video.ProducerOptions(
+          input: moq_video.EncoderInput(
+            format: moq_video.PixelFormat.rgba(),
+            width: 320,
+            height: 240,
+            framerate: moq_video.FrameRate(numerator: 30, denominator: 1),
+          ),
+          output: moq_video.EncoderOutput(
+            codec: moq_video.Codec.h264(),
+            kind: moq_video.SoftwareEncoder(),
+          ),
+          track: track,
+        );
+    final video = moq_video.Producer(
+      catalog: catalog,
+      options: camera('camera'),
+    );
+    late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'camera', subscription: null)
+        .timeout(timeout);
+    video.dispose();
+    request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'camera');
+    final next = moq_video.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: camera(null),
+    );
+    next.write(
+      frame: moq_video.Frame(
+        timestamp: Timestamp(value: 0, scale: 1000000),
+        data: Uint8List(320 * 240 * 4)..fillRange(0, 320 * 240 * 4, 0x80),
+      ),
+    );
+    next.finish();
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+    requests.cancel();
+    broadcast.close();
+  });
+
+  test('JSON release serves a reader that joined late', () async {
     final broadcast = MoqBroadcastProducer();
+    final requests = broadcast.requests();
+    final info = MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh());
     final producer = moq_json.StreamProducer(
       broadcast: broadcast,
-      track: broadcast.publishTrack(
-        name: 'events',
-        info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
-      ),
+      track: broadcast.publishTrack(name: 'events', info: info),
     );
     final demand = producer.demand();
     while (await demand.wantedChanged().timeout(timeout)) {}
@@ -1070,22 +1160,22 @@ void main() {
           .subscribeTrack(name: 'events', subscription: null)
           .timeout(timeout),
     );
-    expect(producer.abortUnwanted(errorCode: 7), isFalse);
-    producer.append(
-      value: jsonEncode('still serving'),
+    producer.dispose();
+
+    final request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'events');
+    final next = moq_json.StreamProducer(
+      broadcast: broadcast,
+      track: request.accept(info: info),
+    );
+    next.append(
+      value: jsonEncode('served again'),
       timestamp: Duration.zero.toTimestamp(),
     );
     final record = await late.next().timeout(timeout);
-    expect(jsonDecode(record!.value), 'still serving');
-
-    while (!await demand.wantedChanged().timeout(timeout)) {}
+    expect(jsonDecode(record!.value), 'served again');
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout)) {}
-    expect(producer.abortUnwanted(errorCode: 7), isTrue);
-    expect(
-      () => producer.abortUnwanted(errorCode: 7),
-      throwsA(isA<ClosedMoqException>()),
-    );
+    requests.cancel();
     broadcast.close();
   });
 

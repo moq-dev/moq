@@ -37,7 +37,8 @@ pub enum MoqDecodeStart {
 
 /// Catalog properties shared by every video rendition.
 ///
-/// Passing an absent field clears it from the next catalog snapshot rather than preserving the previous value.
+/// Passing an absent field clears it from the next catalog snapshot rather than preserving the
+/// previous value.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoProperties {
 	/// Final rendered size after rotation, or absent to clear the explicit display size.
@@ -308,7 +309,8 @@ pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
 	#[uniffi(default = None)]
 	pub coded: Option<MoqDimensions>,
-	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the decoded shape.
+	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the
+	/// decoded shape.
 	#[uniffi(default = None)]
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum bitrate in bits per second.
@@ -1043,9 +1045,10 @@ struct MediaStreamProducer {
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
 ///
-/// Released before its finish, it ends its tracks with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends them with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends each track with `Dropped` (seen elsewhere as `Internal`):
+/// its input stopped mid-stream, and it serves no on-demand track. Still open when its broadcast
+/// closes, it ends them with `Unroutable`, which a moq-transport reader sees as `Internal`: its
+/// wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
@@ -1055,8 +1058,10 @@ pub struct MoqMediaContainerProducer {
 
 /// Imports complete encoded frames onto one track.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
@@ -1066,8 +1071,10 @@ pub struct MoqMediaTrackProducer {
 
 /// Imports a video byte stream onto one track.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
@@ -1075,8 +1082,10 @@ pub struct MoqMediaTrackStreamProducer {
 	children: Children,
 }
 
-// A media handle dropped or closed before its finish ends its tracks the way a publisher
-// leaving does, never as a cause-less drop.
+// A media handle closed with its broadcast before its finish ends its tracks with the close's
+// cause. A released track handle lets its track end the way a dropped track does; a released
+// container ends its tracks with `Dropped`, since its importer would otherwise finish them as if
+// the input had ended, and it serves no on-demand track.
 impl Child for MoqMediaContainerProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::enter();
@@ -1103,7 +1112,8 @@ impl Child for MoqMediaTrackProducer {
 
 impl Drop for MoqMediaTrackProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Dropped);
+		let _guard = crate::ffi::enter();
+		drop(self.inner.get_mut().unwrap().take());
 	}
 }
 
@@ -1118,7 +1128,8 @@ impl Child for MoqMediaTrackStreamProducer {
 
 impl Drop for MoqMediaTrackStreamProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Dropped);
+		let _guard = crate::ffi::enter();
+		drop(self.inner.get_mut().unwrap().take());
 	}
 }
 
@@ -1367,31 +1378,6 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let MediaProducer { import, video } = guard.take().ok_or(MoqError::Closed)?;
-		match import.abort_unwanted(moq_net::Error::App(error_code)) {
-			Ok(()) => Ok(true),
-			Err(import) => {
-				*guard = Some(MediaProducer {
-					import: Box::new(import),
-					video,
-				});
-				Ok(false)
-			}
-		}
-	}
-
 	/// Finish this track and finalize encoding.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
@@ -1527,31 +1513,6 @@ impl MoqMediaTrackStreamProducer {
 			reason: format!("set enabled failed: {err}"),
 		})?;
 		Ok(())
-	}
-
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let MediaStreamProducer { import, priority } = guard.take().ok_or(MoqError::Closed)?;
-		match import.abort_unwanted(moq_net::Error::App(error_code)) {
-			Ok(()) => Ok(true),
-			Err(import) => {
-				*guard = Some(MediaStreamProducer {
-					import: Box::new(import),
-					priority,
-				});
-				Ok(false)
-			}
-		}
 	}
 
 	/// Finalize the track, publishing the last access unit still waiting for a following start code.

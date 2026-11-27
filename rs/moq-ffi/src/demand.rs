@@ -43,8 +43,8 @@ impl MoqTrackDemand {
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
 	///
-	/// End a track nobody wants with its producer's `abort_unwanted`, which keeps it for a reader
-	/// that joined since.
+	/// End a track nobody wants by releasing its producer once this returns false: a reader that
+	/// joined since is served by the next request for the track while a request handler is live.
 	pub async fn wanted_changed(&self) -> Result<bool, MoqError> {
 		self.changes
 			.wait(|changes, waiter| changes.poll_wanted_changed(waiter).map(gone))

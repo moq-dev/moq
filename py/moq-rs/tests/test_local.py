@@ -514,25 +514,72 @@ async def test_finish_serves_until_closed():
     assert isinstance(await next_route(announced), moq.AnnounceEventAbsent)
 
 
-async def test_abort_unwanted_keeps_a_late_reader():
-    """An idle track ends only once a reader that joined after it went unwanted has left."""
+async def test_release_ends_an_on_demand_track():
+    """Released once unwanted, a track ends; a reader that joined since is served by the next request."""
     broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
+
+    idle = broadcast.publish_track("idle")
+    demand = idle.demand()
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
+    del idle
+    with pytest.raises(moq.Error.Closed):
+        await asyncio.wait_for(demand.wanted_changed(), timeout=5.0)
+
     track = broadcast.publish_track("status")
     demand = track.demand()
     await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
-
-    late = track.consume()
-    assert track.abort_unwanted(7) is False
-    track.write_frame(b"still serving", moq.Timestamp.unscaled(0))
+    late = await broadcast.consume().subscribe_track("status")
+    del track
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "status"
+    track = request.accept()
+    track.write_frame(b"served again", moq.Timestamp.unscaled(0))
     frame = await asyncio.wait_for(late.read_frame(), timeout=5.0)
-    assert frame is not None and frame.payload == b"still serving"
-
-    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    assert frame is not None and frame.payload == b"served again"
     late.cancel()
-    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
-    assert track.abort_unwanted(7) is True
-    with pytest.raises(moq.Error.Closed):
-        track.abort_unwanted(7)
+    broadcast.close()
+
+
+async def test_native_encoders_serve_a_renewal():
+    """A native encoder serves a track asked for again after its producer was released while read."""
+    broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
+    catalog = moq.media.CatalogProducer(broadcast)
+
+    mic = moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1)
+    opus = moq.audio.EncoderOutput(codec=moq.AudioCodec.opus())
+    audio = moq.audio.Producer(catalog, mic, opus, track="mic")
+    late = await broadcast.consume().subscribe_track("mic")
+    del audio
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "mic"
+    audio = moq.audio.Producer.requested(catalog, request, mic, opus)
+    for i in range(3):
+        audio.write(moq.audio.Frame(timestamp=moq.Timestamp(20 * i, 1_000), data=bytes(960 * 4)))
+    assert await asyncio.wait_for(late.read_frame(), timeout=5.0) is not None
+    late.cancel()
+
+    camera = moq.VideoEncoderInput(
+        format=moq.VideoPixelFormat.rgba(),
+        width=320,
+        height=240,
+        framerate=moq.video.FrameRate(numerator=30, denominator=1),
+    )
+    h264 = moq.VideoEncoderOutput(
+        codec=moq.VideoCodec.h264(),
+        kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
+    )
+    video = moq.video.Producer(catalog, camera, h264, track="camera")
+    late = await broadcast.consume().subscribe_track("camera")
+    del video
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "camera"
+    video = moq.video.Producer.requested(catalog, request, camera, h264)
+    video.write(moq.video.Frame(timestamp=moq.Timestamp(0, 1_000_000), data=bytes([0x80]) * (320 * 240 * 4)))
+    video.finish()
+    assert await asyncio.wait_for(late.read_frame(), timeout=5.0) is not None
+    late.cancel()
     broadcast.close()
 
 
@@ -740,25 +787,23 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
-async def test_json_abort_unwanted_keeps_a_late_reader():
-    """An idle JSON stream ends only once a reader that joined after it went unwanted has left."""
+async def test_json_release_ends_an_on_demand_track():
+    """A released JSON stream ends like a raw track: a reader that joined since is served by the next request."""
     broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
     producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", moq.TrackInfo(timescale=1_000)))
     demand = producer.demand()
     await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
 
     late = moq.json.StreamConsumer(await broadcast.consume().subscribe_track("events"))
-    assert producer.abort_unwanted(7) is False
-    producer.append("still serving", moq.Timestamp(0, 1_000))
+    del producer
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "events"
+    producer = moq.json.StreamProducer(broadcast, request.accept(moq.TrackInfo(timescale=1_000)))
+    producer.append("served again", moq.Timestamp(0, 1_000))
     record = await asyncio.wait_for(anext(late), timeout=5.0)
-    assert record == moq.json.Timed("still serving", moq.Timestamp(0, 1_000))
-
-    await asyncio.wait_for(until_wanted(demand), timeout=5.0)
+    assert record == moq.json.Timed("served again", moq.Timestamp(0, 1_000))
     late.cancel()
-    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
-    assert producer.abort_unwanted(7) is True
-    with pytest.raises(moq.Error.Closed):
-        producer.abort_unwanted(7)
     broadcast.close()
 
 

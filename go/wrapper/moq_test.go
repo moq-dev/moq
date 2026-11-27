@@ -1678,38 +1678,72 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	}
 }
 
-// TestAbortUnwantedKeepsALateReader ends an idle track only once a reader that
-// joined after its demand went unwanted has left.
-func TestAbortUnwantedKeepsALateReader(t *testing.T) {
+// TestCloseEndsAnOnDemandTrack closes an idle track, which ends, then one a reader
+// joined after its demand went unwanted, which the broadcast asks for again.
+func TestCloseEndsAnOnDemandTrack(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer broadcast.Close()
-
-	track, err := broadcast.PublishTrack("status", timedInfo())
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
-	demand, err := track.Demand()
+	defer dynamic.Cancel()
+	consumer, err := broadcast.Consume()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	if err := untilWanted(ctx, demand, false); err != nil {
-		t.Fatal(err)
-	}
 
-	late, err := track.Consume(nil)
+	idle, err := broadcast.PublishTrack("idle", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if aborted, err := track.AbortUnwanted(7); err != nil || aborted {
-		t.Fatalf("AbortUnwanted = %v, %v; want false with a reader", aborted, err)
+	demand, err := idle.Demand()
+	if err != nil {
+		t.Fatal(err)
 	}
-	payload := []byte("still serving")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	idle.Close()
+	if err := untilWanted(ctx, demand, true); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("untilWanted after Close = %v, want ErrClosed", err)
+	}
+
+	track, err := broadcast.PublishTrack("status", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand, err = track.Demand(); err != nil {
+		t.Fatal(err)
+	}
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	late, err := consumer.SubscribeTrack(ctx, "status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer late.Cancel()
+	track.Close()
+
+	request, err := dynamic.RequestedTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, err := request.Name(); err != nil || name != "status" {
+		t.Fatalf("request name = %q, %v; want status", name, err)
+	}
+	next, err := request.Accept(timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("served again")
+	if err := next.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := late.ReadFrame(ctx)
@@ -1719,20 +1753,102 @@ func TestAbortUnwantedKeepsALateReader(t *testing.T) {
 	if frame == nil || string(frame.Payload) != string(payload) {
 		t.Fatalf("frame = %+v, want payload=%q", frame, payload)
 	}
+}
 
-	if err := untilWanted(ctx, demand, true); err != nil {
+// TestNativeEncodersServeARenewal serves a track asked for again after its encoder was closed
+// while read with an encoder on the request, published with the same options.
+func TestNativeEncodersServeARenewal(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
 		t.Fatal(err)
 	}
-	late.Cancel()
-	if err := untilWanted(ctx, demand, false); err != nil {
+	defer broadcast.Close()
+	dynamic, err := broadcast.Requests()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if aborted, err := track.AbortUnwanted(7); err != nil || !aborted {
-		t.Fatalf("AbortUnwanted = %v, %v; want true once unwanted", aborted, err)
+	defer dynamic.Cancel()
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := track.AbortUnwanted(7); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("AbortUnwanted after abort = %v, want ErrClosed", err)
+	catalog, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	// Close the producer published as name once a reader joined, returning the request for it.
+	renewal := func(name string, close func()) (*moq.TrackConsumer, *moq.TrackRequest) {
+		t.Helper()
+		late, err := consumer.SubscribeTrack(ctx, name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		close()
+		request, err := dynamic.RequestedTrack(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := request.Name(); err != nil || got != name {
+			t.Fatalf("request name = %q, %v; want %s", got, err, name)
+		}
+		return late, request
+	}
+	read := func(late *moq.TrackConsumer) {
+		t.Helper()
+		frame, err := late.ReadFrame(ctx)
+		if err != nil || frame == nil {
+			t.Fatalf("frame = %+v, %v; want one", frame, err)
+		}
+		late.Cancel()
+	}
+
+	mic := "mic"
+	audioOptions := moqaudio.ProducerOptions{
+		Input:  moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		Output: moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 20 * time.Millisecond},
+	}
+	named := audioOptions
+	named.Track = &mic
+	audio, err := moqaudio.NewProducer(catalog, named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, request := renewal(mic, audio.Close)
+	if audio, err = moqaudio.NewRequestedProducer(catalog, request, audioOptions); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(uint64(i)*960, 48_000), Data: make([]byte, 960*4)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read(late)
+
+	camera := "camera"
+	videoOptions := moqvideo.ProducerOptions{
+		Input:  moqvideo.EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30, Denominator: 1}},
+		Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.SoftwareEncoder()},
+	}
+	namedVideo := videoOptions
+	namedVideo.Track = &camera
+	video, err := moqvideo.NewProducer(catalog, namedVideo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, request = renewal(camera, video.Close)
+	if video, err = moqvideo.NewRequestedProducer(catalog, request, videoOptions); err != nil {
+		t.Fatal(err)
+	}
+	if err := video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(0, 30), Data: make([]byte, 320*240*4)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := video.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	read(late)
 }
 
 // TestCancelDoesNotLeakGoroutines parks many subscribes on a dynamic producer

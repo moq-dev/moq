@@ -386,27 +386,33 @@ class SmokeTest {
     }
 
     @Test
-    fun `abortUnwanted keeps a reader that joined late`() = runTest {
+    fun `releasing a producer ends an on-demand track`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", null)
-            val demand = track.demand()
-            while (demand.wantedChanged()) {}
+            broadcast.requests().use { requests ->
+                val idle = broadcast.publishTrack("idle", null)
+                val idleDemand = idle.demand()
+                while (idleDemand.wantedChanged()) {}
+                idle.close()
+                assertFailsWith<MoqException.Closed> { idleDemand.wantedChanged() }
 
-            val late = track.consume(null)
-            assertFalse(track.abortUnwanted(7u))
-            track.writeFrame(
-                Frame(
-                    payload = "still serving".encodeToByteArray(),
-                    timestamp = Timestamp.unscaled(0uL),
+                val track = broadcast.publishTrack("status", null)
+                val demand = track.demand()
+                while (demand.wantedChanged()) {}
+                val late = broadcast.consume().subscribeTrack("status", null)
+                track.close()
+
+                val request = requests.requestedTrack()
+                assertEquals("status", request.name())
+                val next = request.accept(null)
+                next.writeFrame(
+                    Frame(
+                        payload = "served again".encodeToByteArray(),
+                        timestamp = Timestamp.unscaled(0uL),
+                    )
                 )
-            )
-            assertEquals("still serving", late.readFrame()?.payload?.decodeToString())
-
-            while (!demand.wantedChanged()) {}
-            late.cancel()
-            while (demand.wantedChanged()) {}
-            assertTrue(track.abortUnwanted(7u))
-            assertFailsWith<MoqException.Closed> { track.abortUnwanted(7u) }
+                assertEquals("served again", late.readFrame()?.payload?.decodeToString())
+                late.cancel()
+            }
         }
     }
 
@@ -712,28 +718,91 @@ class SmokeTest {
         }
     }
 
+    /**
+     * A native encoder serves a track asked for again after its producer was released while read.
+     */
     @Test
-    fun `json abortUnwanted keeps a reader that joined late`() = runTest {
+    fun `native encoders serve a renewal`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track =
-                broadcast.publishTrack(
-                    "events",
-                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+            broadcast.requests().use { requests ->
+                val catalog = CatalogProducer(broadcast)
+                val mic =
+                    AudioProducerOptions(
+                        input =
+                            AudioEncoderInput(
+                                format = AudioSampleFormat.F32,
+                                sampleRate = 48_000u,
+                                channels = 1u,
+                            ),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus()),
+                    )
+                val audio = AudioProducer(catalog, mic.copy(track = "mic"))
+                var late = broadcast.consume().subscribeTrack("mic", null)
+                audio.close()
+                var request = requests.requestedTrack()
+                assertEquals("mic", request.name())
+                val served = AudioProducer.requested(catalog, request, mic)
+                repeat(3) { index ->
+                    served.write(
+                        AudioFrame(
+                            timestamp = Timestamp(index.toULong() * 960uL, 48_000uL),
+                            data = ByteArray(960 * 4),
+                        )
+                    )
+                }
+                assertNotNull(late.readFrame())
+                late.cancel()
+
+                val camera =
+                    VideoProducerOptions(
+                        input =
+                            VideoEncoderInput(
+                                format = VideoPixelFormat.rgba(),
+                                width = 320u,
+                                height = 240u,
+                                framerate = VideoFrameRate(30u, 1u),
+                            ),
+                        output =
+                            VideoEncoderOutput(codec = VideoCodec.h264(), kind = softwareEncoder),
+                    )
+                val video = VideoProducer(catalog, camera.copy(track = "camera"))
+                late = broadcast.consume().subscribeTrack("camera", null)
+                video.close()
+                request = requests.requestedTrack()
+                assertEquals("camera", request.name())
+                val next = VideoProducer.requested(catalog, request, camera)
+                next.write(
+                    VideoFrame(
+                        timestamp = Timestamp(0uL, 1_000_000uL),
+                        data = ByteArray(320 * 240 * 4) { 0x80.toByte() },
+                    )
                 )
-            val producer = StreamProducer(broadcast, track)
-            val demand = producer.demand()
-            while (demand.wantedChanged()) {}
+                next.finish()
+                assertNotNull(late.readFrame())
+                late.cancel()
+            }
+        }
+    }
 
-            val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
-            assertFalse(producer.abortUnwanted(7u))
-            producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
-            assertEquals("\"still serving\"", late.next()?.value)
+    @Test
+    fun `json release serves a reader that joined late`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.requests().use { requests ->
+                val info = TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL)
+                val producer = StreamProducer(broadcast, broadcast.publishTrack("events", info))
+                val demand = producer.demand()
+                while (demand.wantedChanged()) {}
 
-            while (!demand.wantedChanged()) {}
-            late.cancel()
-            while (demand.wantedChanged()) {}
-            assertTrue(producer.abortUnwanted(7u))
-            assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
+                val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
+                producer.close()
+
+                val request = requests.requestedTrack()
+                assertEquals("events", request.name())
+                val next = StreamProducer(broadcast, request.accept(info))
+                next.append("\"served again\"", Timestamp(0uL, 1_000uL))
+                assertEquals("\"served again\"", late.next()?.value)
+                late.cancel()
+            }
         }
     }
 

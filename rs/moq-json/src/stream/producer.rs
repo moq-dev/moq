@@ -18,6 +18,9 @@ pub use super::Config;
 ///
 /// Cheaply clonable: clones share one underlying track and publishing state, so multiple owners
 /// (e.g. several producers feeding one log) append into a single ordered stream.
+///
+/// [`finish`](Self::finish) or [`abort`](Self::abort) the log: dropping the last clone unfinished
+/// is not supported, and once it published, its readers read [`moq_net::Error::Dropped`].
 pub struct Producer<T> {
 	inner: Arc<Mutex<Inner<T>>>,
 	_marker: PhantomData<fn(T)>,
@@ -100,24 +103,6 @@ impl<T: Serialize> Producer<T> {
 	/// it closed: their next [`append`](Self::append) fails.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		self.inner.lock().unwrap().track.abort(err);
-		Ok(())
-	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
-	/// [`abort`](Self::abort) leaves it.
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		let mut inner = self.inner.lock().unwrap();
-		// The check and the abort are one step on the track; the rest is the same cleanup.
-		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
-			drop(inner);
-			return Err(self);
-		}
-		inner.track.abort(err);
 		Ok(())
 	}
 }
@@ -296,5 +281,15 @@ impl Track {
 		group?;
 		track?;
 		Ok(())
+	}
+}
+
+// A log is one group, so the next producer of this track could not continue it for a reader
+// handed over: an unfinished log ends with `Dropped` instead of being requested again.
+impl Drop for Track {
+	fn drop(&mut self) {
+		if self.group.is_some() && self.inner.finished().is_none() {
+			self.abort(moq_net::Error::Dropped);
+		}
 	}
 }
