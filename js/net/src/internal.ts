@@ -1356,6 +1356,11 @@ export const hooks: {
 	 * `track::Subscriber::hole_end`.
 	 */
 	holeEnd: (subscriber: Subscriber, key: bigint, dropped: boolean) => bigint | undefined;
+	/**
+	 * The abort that closed the subscriber's track after its declared end settled, which its
+	 * readers saw as a clean end. Mirrors the Rust crate-private `track::Consumer::aborted`.
+	 */
+	trackAborted: (subscriber: Subscriber) => Error | undefined;
 	/** The error the subscriber's track gave `key` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, key: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
@@ -1872,6 +1877,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	staleHeld: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackAborted: () => {
 		throw new Error("track.ts not loaded");
 	},
 	givenUp: () => {

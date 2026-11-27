@@ -842,6 +842,10 @@ class TrackState {
 	// end does not end readers yet. Mirrors the Rust `awaits_tail`.
 	owed = new Signal(false);
 	closed = new Once<Error | null>();
+	// The abort that closed the track after its declared end settled, which ends readers cleanly:
+	// it still says the route failed, so a group it closed short may hold more on another route.
+	// Mirrors the Rust `Outcome::Aborted` keeping its error past a settled end.
+	aborted?: Error;
 	// The producer's outcome, settled by its close or by a reached and settled end, whichever
 	// is first. Only the producer's own state uses it.
 	outcome = new Once<Error | null>();
@@ -2475,6 +2479,7 @@ export class Producer {
 		sink.end.set(this.#state.end.peek());
 		sink.owed.set(this.#state.owed.peek());
 		if (closed !== undefined) {
+			sink.aborted = this.#state.aborted;
 			closeTrackState(sink, closed instanceof Error ? closed : undefined);
 		}
 	}
@@ -3406,7 +3411,11 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#state.end.peek()?.tail === "pending") this.#arrivals.expire(now(), this.#grace());
-		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
+		let hidden: Error | undefined;
+		if (abort && (this.#state.outcome.peek() === null || this.#settled())) {
+			hidden = abort;
+			abort = undefined;
+		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
@@ -3414,6 +3423,7 @@ export class Producer {
 		this.#refreshTimer?.abort.abort();
 		this.#refreshTimer = undefined;
 		this.#endRefresh(abort ?? this.#closedBeforeSent());
+		this.#state.aborted = hidden;
 		closeTrackState(this.#state, abort);
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
@@ -3433,7 +3443,11 @@ export class Producer {
 		// A group still buffered for a subscriber is left to it: the abort above already ended an
 		// unfinished one, a finished one stays readable, and a front that takes either continues it
 		// from another copy. Releasing it here would end that continuation at its next short close.
-		for (const sink of this.#sinks) closeTrackState(sink, abort);
+		for (const sink of this.#sinks) {
+			// Only a sink this close ends records why: one already closed keeps its own end.
+			if (sink.closed.peek() === undefined) sink.aborted = hidden;
+			closeTrackState(sink, abort);
+		}
 		this.#sinks.clear();
 		this.#reportWanted();
 		// The former live edge becomes evictable too, its idle window restarted, so the close
@@ -5535,6 +5549,7 @@ export class Subscriber {
 			}
 			return held;
 		};
+		hooks.trackAborted = (subscriber) => subscriber.#state.aborted;
 		hooks.givenUp = (subscriber, key) => {
 			const { drops, refused } = subscriber.#state;
 			const drop = drops.at(key);

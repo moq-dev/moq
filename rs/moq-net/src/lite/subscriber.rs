@@ -1111,8 +1111,9 @@ impl SubscriptionCleanup {
 impl Drop for SubscriptionCleanup {
 	fn drop(&mut self) {
 		// A session that ended with an error already aborted these with it; what
-		// remains was cancelled with the driver.
-		self.abort(&Error::Cancel);
+		// remains was cancelled with the driver, which ends the session: a route replacing
+		// it continues what these copies closed short.
+		self.abort(&crate::SessionError::Cancel.into());
 	}
 }
 
