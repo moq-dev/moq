@@ -13402,10 +13402,8 @@ impl Subscriber {
 	pub(crate) fn rescan_drops(&mut self) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.record.rescan = true,
-			Inner::Resume(resume, logical) => {
-				logical.record.rescan = true;
-				resume.rescan_drops();
-			}
+			// Each copy scans its own drops; the logical record holds none to rescan.
+			Inner::Resume(resume, _) => resume.rescan_drops(),
 		}
 	}
 
