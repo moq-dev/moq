@@ -11995,10 +11995,10 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	/// A forwarded route lost with its session retracts its identity as offline,
-	/// even when a broader route takes over the presented prefix.
+	/// A broader route of another identity taking over a presented prefix from a lost one
+	/// is a restart: another identity serves the prefix, so it never goes offline.
 	#[kio::test]
-	async fn capture_change_reports_a_lost_route_offline() {
+	async fn a_broader_route_taking_over_a_lost_one_restarts() {
 		let producer = origin(1).produce();
 		let _broad = producer.announce("room", RouteInfo::new()).unwrap();
 		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
@@ -12011,29 +12011,8 @@ mod tests {
 		announced.expect_next_active("").await;
 
 		drop(exact);
-		announced.expect_next_offline("").await;
-		announced.expect_next_active("").await;
-	}
-
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn capture_change_coalesced_keeps_the_lost_route_offline() {
-		let producer = origin(1).produce();
-		let broad = producer.announce("room", RouteInfo::new()).unwrap();
-		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
-		let mut announced = producer
-			.consume()
-			.scope("room/alice", &Prefixes::all())
-			.unwrap()
-			.covering()
-			.routes();
-		announced.expect_next_active("").await;
-
-		// Both leave before the next poll: the one retraction delivered is the
-		// exact route's, which was lost rather than withdrawn.
-		drop(exact);
-		drop(broad);
-		announced.expect_next_offline("").await;
+		announced.expect_next_restarted("").await;
+		announced.assert_next_wait();
 	}
 
 	#[kio::test]

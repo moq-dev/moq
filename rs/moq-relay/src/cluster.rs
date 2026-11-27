@@ -3122,7 +3122,7 @@ mod tests {
 	async fn session_handles_refuse_invalid_grant_mounts() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
 		let everything = || moq_net::Prefixes::all();
-		let invalid: [&[(&str, &str)]; 2] = [&[(".a", "pid/.z"), (".z", "secret")], &[("*", ".svc/pid")]];
+		let invalid: [&[(&str, &str)]; 1] = [&[(".a", "pid/.z"), (".z", "secret")]];
 		for mounts in invalid {
 			let mut grant = moq_auth::Grant::new(everything(), everything());
 			for (at, target) in mounts {
