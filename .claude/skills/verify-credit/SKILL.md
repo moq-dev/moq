@@ -9,7 +9,7 @@ Two models, one per direction of a connection's flow control.
 
 `rs/moq-net/verify/credit/ReceiveCredit.tla` models one connection's receive credit, from moq-quic's leases and stuck-window eviction to moq-net's ingest, which paces each group stream by its group's fastest reader. Bytes are units. The peer sends a unit once stream and connection credit allow, and it arrives in order. A reader leases what arrived and takes one chunk, at most to the next segment seal. It then hands the lease back: released at a seal, which returns the credit, or restored short of one, which keeps it. A grant is queued as moq-quic queues it, and the driver computes its limit when it builds the packet, at any later point (`Transmit`).
 
-Ingest checks the group's pace gate, only at a seal. Past the pace window, the stream reserves the credit it holds from the session's paused budget (half the connection window) and parks until the reader catches up, the reader leaves, or the stream is evicted. Refused a reservation, it reads on. A pause is charged what the stream holds once shaped to its slot's allowance (`cap / ((i + 1)(i + 2))`), and ingest shapes each stream's window to its group's room plus that allowance. Every moq-quic transport shapes; a transport that cannot (`Budgeted::unshaped`) has no stuck-window eviction to model.
+Ingest checks the group's pace gate, only at a seal. Past the pace window, the stream reserves the credit it holds from the session's paused budget (half the connection window) and parks until the reader catches up, the reader leaves, or the stream is evicted. A group no reader has picked up yet is owed to its track's subscribers, so its gate closes from the start, and opens once its readers leave or, before one picks it up, its track's last subscriber does. Refused a reservation, it reads on. A pause is charged what the stream holds once shaped to its slot's allowance (`cap / ((i + 1)(i + 2))`), and ingest shapes each stream's window to its group's room plus that allowance. Every moq-quic transport shapes; a transport that cannot (`Budgeted::unshaped`) has no stuck-window eviction to model.
 
 When the peer has no connection credit left, moq-quic evicts the lowest-ranked stream holding credit, newest first. It holds off while an evicted reader has not stopped its stream, or while some reader has data it has not looked at, and reruns at every release, read, stop, and arrival, and at a restore when an earlier pass waited on that lease while it was out. A reader arrives late or leaves only under `Late` and `Leave`. Streams in `Plain` are read with `read()`, returning credit as they read. Under `Shrink` the window shrinks once, a debt the next returned credit pays before the peer sees any.
 
@@ -24,7 +24,7 @@ Each step is one poll of the code that handles one event, under the connection's
 | `Books` | Receive | Every unit arrived is held by one stream or was credited back. | Credit leaks, and the connection window shrinks for good. |
 | `WithinWindow` | Receive | What all streams hold together (unread units, leased units not released, a frame partly in) stays within the connection window. | The peer is promised credit the receiver never returns: a flow-control error or a hang. |
 | `PausedWithinCap` | Receive | Paused streams hold at most what they reserved, and that at most half the window. | Paused streams starve the rest of the connection's credit. |
-| `EveryPauseFits` | Receive | No pause is refused under the cap, whatever order streams pause in (`ReceiveCreditWide.cfg` and `ReceiveCreditThree.cfg`, whose readers hold each group from the start). | A stream that could pause reads on and sheds while a slow reader holds back the rest. |
+| `EveryPauseFits` | Receive | No pause is refused under the cap, whatever order streams pause in and however late a group's first reader picks it up (`ReceiveCredit.cfg`, `ReceiveCreditSegments.cfg`, `ReceiveCreditWide.cfg`, and `ReceiveCreditThree.cfg`). | A stream that could pause reads on and sheds while a slow reader holds back the rest. |
 | `ChargedAllowance` | Receive | A pause is charged no more than its slot's allowance (same configs). | The paused streams stop summing to under the cap, so a later one is refused. |
 | `evict`'s assertion | Receive | Eviction never picks a stream whose reader may still progress (`Assert` in `EvictLoop`). | A reader that would have finished loses its group. |
 | `Progress` and `Ends` | Receive | Every stream is read whole or evicted, and stopped (`AllEnd`). | A stream holds credit forever: the connection hangs. |
@@ -47,12 +47,12 @@ quest gate just rs tla moq-net/verify/credit/ReceiveCredit.tla -config rs/moq-ne
 
 | Config | Covers | States | Time |
 | --- | --- | --- | --- |
-| `ReceiveCredit.cfg` | Two streams of two one-segment frames, a window two streams exhaust, readers late or leaving | 382k | 5 s |
+| `ReceiveCredit.cfg` | Two streams of two one-segment frames, a window two streams exhaust, readers late or leaving; also the allowance rules | 404k | 3 s |
 | `ReceiveCreditMixed.cfg` | A plain-read stream beside two leased ones of one three-unit segment, under a window that may shrink to a quarter | 633k | 11 s |
-| `ReceiveCreditSegments.cfg` | Frames of two segments, so a reader arriving mid-frame closes the gate there | 1.28M | 17 s |
+| `ReceiveCreditSegments.cfg` | Frames of two segments, with readers late; also the allowance rules | 462k | 2 s |
 | `ReceiveCreditWide.cfg` | A wider window, where the two slots' allowances differ; also the allowance rules | 143k | 3 s |
 | `ReceiveCreditThree.cfg` | Three streams, readers from the start; also the allowance rules | 1.62M | 30 s |
-| `ReceiveCreditGuards.cfg` | `Guarded`, on one-unit frames | 10.3k | 8 min |
+| `ReceiveCreditGuards.cfg` | `Guarded`, on one-unit frames | 12.1k | 4 min |
 | `ReceiveCreditMixedGuards.cfg` | `Guarded`, on one frame of a plain-read and a leased stream, with a shrink | 1.1k | 2 s |
 | `SendCredit.cfg` | two subscriptions, one newest first and one oldest first, one stream of credit | 89k | 6 s |
 | `SendCreditPriority.cfg` | one subscription at a higher priority, so its opens preempt; also `Guarded` | 99k | 46 s |
@@ -61,9 +61,7 @@ quest gate just rs tla moq-net/verify/credit/ReceiveCredit.tla -config rs/moq-ne
 
 Every config passes. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
-The allowance rules are checked only where readers hold each group from the start (`Late = FALSE`), because of the gap below.
-
-A gap is inherent, so it is no rule: a group with no reader, whose writer ran past the pace window, has no room (`Pace::room` is None). Its stream is granted a whole stream window. A reader arriving later closes the gate, and the pause is charged that credit, up to a stream window.
+The allowance rules hold however late a group's first reader picks it up, since a group nobody picked up yet is owed from the start: `Pace::room` is None, granting its stream a whole stream window, only once nobody is owed the group, and then no reader arrives to close the gate.
 
 ## Reading a failure
 
@@ -89,6 +87,7 @@ Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b
 | `rs/moq-quic/src/connection/streams/recv.rs` `Chunks::finalize_inner`; `rs/moq-quic/src/connection/streams/state.rs` `StreamsState::set_receive_window`, `StreamsState::add_read_credits` | `Read`, `ShrinkWindow`, `MaxData` |
 | `rs/moq-net/src/coding/reader.rs` `Reader::poll_read_frame`, `Reader::poll_admit`, `Reader::poll_pace` | `Step`, `Park`, `Write` |
 | `rs/moq-net/src/model/frame.rs` `Producer::poll_ready`, `Producer::unsealed`, `Producer::room`, `Producer::unsealed_after`; `rs/moq-net/src/model/pace.rs` `window`, `Pace::paced`, `Pace::ahead`, `Pace::took`, `Pace::park`, `Pace::room` | `Paced`, `Unsealed`, `PaceWindow`, `Take`, `Room` |
+| `rs/moq-net/src/model/group.rs` `Producer::poll_paced`, `Producer::room`, `Handle::poll_unowed`, `Handle::owed`; `rs/moq-net/src/model/pace.rs` `Pace::hold`, `Pace::held` | `Paced`, `Room`, `Arrive`, `Drop` |
 | `rs/moq-net/src/transport/boxed.rs` `Budgeted::window`, `Budgeted::pause`, `Budgeted::held`, `Budgeted::release`, `Shared::reserve`, `Pacing::cap`, `Pacing::allowance`, `Slots::take`, `Budgeted::shape`, `Budgeted::shaper`, `Shaper::window` | `PaceWindow`, `Charge`, `charge`, `Stop`, `Cap`, `Allowance`, `LowestFree`, `Shape` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::opening`, `GroupServe::poll_open`, `TrackRun::stuck`, `TrackRun::give_way`, `TrackRun::shed`, `TrackRun::poll_step` | `PollOpen`, `Stuck`, `Admitted`, `Cursor`, `Step` |
 | `rs/moq-net/src/transport/open.rs` `Rank::preempts`, `Line::join`, `Line::leave`, `Line::wake_head`, `Line::resets`, `Lines::make_room`; `rs/moq-net/src/priority.rs` `in_group` | `Rank`, `Above`, `Join`, `Leave`, `Preempts`, `MakeRoom`, `InGroup` |
@@ -96,6 +95,7 @@ Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b
 What the model relies on in that code:
 
 - A stopped stream returns its paused credit and frees its slot (`Stop`), so a reader that never returns cannot pin the paused budget.
+- A track hands every group to a subscriber that keeps reading, so a group owed to one is eventually picked up (`Arrive`, under weak fairness) unless the track's last subscriber leaves first (`Drop`). A subscriber that never picks a group up leaves it paused until it closes, which the model leaves out with a group's expiry.
 - Eviction passes over a reader that may still progress, and an evicted reader's taken units keep their credit until it stops (`evicted_held`).
 - Only the head of the line asks the transport, and leaving the line wakes the next head (`Line::leave`).
 - A waiting group gives way to one that outranks it (`give_way`), and while it is `stuck` the cursor hands such a group out. Without either, `SendCreditLive.cfg` breaks `TopDelivered`, which the configs without a live group miss.

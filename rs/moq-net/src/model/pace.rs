@@ -57,6 +57,9 @@ pub(super) struct Pace {
 	front: AtomicU64,
 	// Set while the writer waits on `read`, so a read wakes it without locking otherwise.
 	parked: AtomicBool,
+	// Set once a reader first holds the group, before it counts as one: until then the group
+	// is still owed to its track's subscribers (see `group::Handle::poll_unowed`).
+	held: AtomicBool,
 	// The writer's waker: a group has one writer, so one slot, far smaller than a list.
 	writer: Mutex<Option<Waker>>,
 	// Told when the fastest reader takes a frame the copy still holds, set only while its
@@ -134,6 +137,19 @@ impl Pace {
 		}
 	}
 
+	/// A reader is about to hold the group, so its readers all leaving means nobody is owed the
+	/// rest.
+	pub fn hold(&self) {
+		// SeqCst pairs with the writer's check after it registers for a reader arriving: a
+		// reader that came and left before then still shows here.
+		self.held.store(true, Ordering::SeqCst);
+	}
+
+	/// Whether a reader ever held the group.
+	pub fn held(&self) -> bool {
+		self.held.load(Ordering::SeqCst)
+	}
+
 	/// A reader took every frame committed so far, such as by taking the open one.
 	pub fn took_committed(&self) {
 		self.took(self.written());
@@ -183,20 +199,20 @@ impl Pace {
 
 	/// How many more bytes a writer `partial` bytes into an uncommitted frame may take
 	/// before it is more than `window` past the fastest reader, or `None` once nothing holds
-	/// it back: that reader fell off, or the writer is past the window with no reader
-	/// (`wanted` false), so it reads on and sheds.
+	/// it back: that reader fell off, or the writer is past the window with no reader owed
+	/// the group (`owed` false, asked only then), so it reads on and sheds.
 	///
 	/// Measured from where readers got even before one holds the group, since the first to
 	/// arrive starts there.
-	pub fn room(&self, partial: u64, window: u64, wanted: bool) -> Option<u64> {
+	pub fn room(&self, partial: u64, window: u64, owed: impl FnOnce() -> bool) -> Option<u64> {
 		let read = self.read.load(Ordering::SeqCst);
 		if read < self.front.load(Ordering::SeqCst) {
 			return None;
 		}
 		let lead = self.written().saturating_add(partial).saturating_sub(read);
 		match window.checked_sub(lead) {
-			None if !wanted => None,
-			room => Some(room.unwrap_or(0)),
+			Some(room) => Some(room),
+			None => owed().then_some(0),
 		}
 	}
 
@@ -425,6 +441,58 @@ mod tests {
 		drop(reader);
 		assert!(flag.woken(), "the last reader leaving wakes the writer");
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
+	}
+
+	/// A group its track has not handed out yet is owed to the track's subscribers, so its
+	/// writer keeps to the window until one picks it up, however late. Once that reader
+	/// leaves, or the track's last subscriber does first, nobody is owed the rest.
+	#[test]
+	fn a_group_not_yet_handed_out_waits_for_its_subscribers() {
+		let (flag, waiter) = flag();
+		let window = MB as u64;
+		let track = crate::track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::default(),
+		);
+		let subscriber = track.subscribe(None);
+		let fill = |start| {
+			let mut group = track.create_group(group::Info { start }).unwrap();
+			for _ in 0..2 {
+				group
+					.write_frame(crate::Timestamp::unscaled(start), Bytes::from(vec![0u8; MB]))
+					.unwrap();
+			}
+			group
+		};
+
+		let group = fill(0);
+		assert_eq!(
+			group.poll_paced(&waiter, 0, window),
+			Poll::Pending,
+			"owed, not yet picked up"
+		);
+		assert_eq!(group.room(0, window), Some(0), "owed, so shaped to no room");
+		let reader = group.consume();
+		assert_eq!(
+			group.poll_paced(&waiter, 0, window),
+			Poll::Pending,
+			"a reader that took nothing"
+		);
+		drop(reader);
+		assert!(flag.woken(), "the reader leaving wakes the writer");
+		assert_eq!(group.poll_paced(&waiter, 0, window), Poll::Ready(()), "the reader left");
+		assert_eq!(group.room(0, window), None);
+
+		let group = fill(1);
+		assert_eq!(group.poll_paced(&waiter, 0, window), Poll::Pending);
+		drop(subscriber);
+		assert!(flag.woken(), "the last subscriber leaving wakes the writer");
+		assert_eq!(
+			group.poll_paced(&waiter, 0, window),
+			Poll::Ready(()),
+			"nobody to hand it to"
+		);
 	}
 
 	/// A local writer waits for a reader before it writes, then for room in the window, and
