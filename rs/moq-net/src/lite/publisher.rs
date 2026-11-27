@@ -8948,7 +8948,7 @@ mod serve_group_test {
 			let subscribe = lite::Subscribe {
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				track: "video".into(),
 				priority: 0,
