@@ -26880,11 +26880,9 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn an_ordered_read_takes_a_join_answered_as_the_track_ends() {
-		let mut ordered = answered_and_ended_mid_read(
-			Order::Ascending,
-			Subscriber::ordered,
-			|ordered, waiter| ordered.poll_next_item(waiter).is_pending(),
-		);
+		let mut ordered = answered_and_ended_mid_read(Order::Ascending, Subscriber::ordered, |ordered, waiter| {
+			ordered.poll_next_item(waiter).is_pending()
+		});
 		assert_eq!(items(&mut ordered), ["group 10", "group 11", "group 12"]);
 	}
 
