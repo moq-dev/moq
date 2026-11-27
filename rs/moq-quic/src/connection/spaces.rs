@@ -48,6 +48,9 @@ pub(super) struct PacketSpace {
 	/// distinguishing between ECN bleaching and counts having been updated by a near-simultaneous
 	/// ACK already processed in another space.
 	pub(super) ecn_feedback: frame::EcnCounts,
+	/// Whether a packet sent marked on an earlier path was acknowledged since the last ECN
+	/// feedback was read, so the next increase may hold its marks
+	pub(super) ecn_prior_path: bool,
 
 	/// Incoming cryptographic handshake stream
 	pub(super) crypto_stream: Assembler,
@@ -85,6 +88,7 @@ impl PacketSpace {
 			lost_packets: Slots::default(),
 			ecn_counters: frame::EcnCounts::ZERO,
 			ecn_feedback: frame::EcnCounts::ZERO,
+			ecn_prior_path: false,
 
 			crypto_stream: Assembler::new(),
 			crypto_offset: 0,
@@ -276,6 +280,8 @@ pub(super) struct SentPacket {
 pub(super) struct LostPacket {
 	/// The time the packet was sent.
 	pub(super) time_sent: Instant,
+	/// The generation of the path it was sent marked ECT(0) on, if marked
+	pub(super) ecn_path: Option<u64>,
 }
 
 /// Retransmittable data queue

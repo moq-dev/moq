@@ -2034,9 +2034,6 @@ impl Connection {
 		let mut ack_eliciting_acked = false;
 		// Newly acknowledged packets sent marked on this path, which the peer's ECN counts cover
 		let mut ecn_acked = 0;
-		// Whether any newly acknowledged packet went out on an earlier path, whose marks the
-		// counts may also hold
-		let mut prior_path_acked = false;
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
 		for packet in newly_acked.elts() {
@@ -2052,7 +2049,7 @@ impl Connection {
 				ack_eliciting_acked |= info.ack_eliciting;
 				let this_path = info.path_generation == self.path.generation();
 				ecn_acked += u64::from(info.ecn && this_path);
-				prior_path_acked |= !this_path;
+				self.spaces[space].ecn_prior_path |= info.ecn && !this_path;
 
 				// Notify MTU discovery that a packet was acked, because it might be an MTU probe
 				let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
@@ -2116,7 +2113,7 @@ impl Connection {
 				// of newly acked packets that remains well-defined in the presence of arbitrary packet
 				// reordering.
 				if new_largest {
-					self.process_ecn(now, space, ecn_acked, ecn, prior_path_acked);
+					self.process_ecn(now, space, ecn_acked, ecn);
 				}
 			} else if ecn_acked > 0 {
 				// A marked packet acknowledged without counts means the marks went unseen
@@ -2131,17 +2128,20 @@ impl Connection {
 	}
 
 	fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId) -> bool {
-		let lost_packets = &mut self.spaces[space].lost_packets;
+		let generation = self.path.generation();
+		let space = &mut self.spaces[space];
 
-		if lost_packets.is_empty() {
+		if space.lost_packets.is_empty() {
 			return false;
 		}
 
 		for range in ack.iter() {
-			let spurious_losses: Vec<u64> = lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
+			let spurious_losses: Vec<u64> = space.lost_packets.range(range.clone()).map(|(pn, _info)| pn).collect();
 
 			for pn in spurious_losses {
-				lost_packets.remove(pn);
+				// A late packet still carried its mark into the peer's counts
+				let lost = space.lost_packets.remove(pn).expect("listed above");
+				space.ecn_prior_path |= lost.ecn_path.is_some_and(|path| path != generation);
 			}
 		}
 
@@ -2149,7 +2149,7 @@ impl Connection {
 		// then we have raised a spurious congestion event in the past.
 		// We cannot conclude when there are remaining packets,
 		// but future ACK frames might indicate a spurious loss detection.
-		lost_packets.is_empty()
+		space.lost_packets.is_empty()
 	}
 
 	/// Drain lost packets that we reasonably think will never arrive
@@ -2168,9 +2168,9 @@ impl Connection {
 		}
 	}
 
-	/// Process a new ECN block from an in-order ACK, which also acknowledged packets sent on an
-	/// earlier path when `prior_path`
-	fn process_ecn(&mut self, now: Instant, space: SpaceId, newly_acked: u64, ecn: frame::EcnCounts, prior_path: bool) {
+	/// Process a new ECN block from an in-order ACK
+	fn process_ecn(&mut self, now: Instant, space: SpaceId, newly_acked: u64, ecn: frame::EcnCounts) {
+		let prior_path = mem::take(&mut self.spaces[space].ecn_prior_path);
 		match self.spaces[space].detect_ecn(newly_acked, ecn) {
 			Err(e) => {
 				debug!("halting ECN due to verification failure: {}", e);
@@ -2479,6 +2479,7 @@ impl Connection {
 					packet,
 					LostPacket {
 						time_sent: info.time_sent,
+						ecn_path: info.ecn.then_some(info.path_generation),
 					},
 				);
 			}
