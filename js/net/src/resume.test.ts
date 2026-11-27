@@ -6015,6 +6015,63 @@ test("a replaced copy's unread late groups outlive the serving copy's stale verd
 	}
 });
 
+// A replaced copy's unread late groups stay owed while it is past the reader's budget, so a later
+// widened budget still reads them though the serving copy handed out groups meanwhile, as one
+// track's skipped groups stay owed to a wider budget. Mirrors the Rust
+// `a_widened_budget_reads_an_expired_copys_groups_past_a_hand_out`.
+test("a widened budget reads an expired copy's groups past a hand-out", async () => {
+	for (const routed of [false, true]) {
+		const clock = new Manual();
+		const installed = install(clock);
+		try {
+			const front = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			front.serve(a.consume());
+			const budget = withMax({ delay: { max: Duration.millis(1_000) } });
+			const sub = routed ? front.consumer.track("seq").subscribe(budget) : ta.producer.subscribe(budget);
+			ta.write(0n);
+			ta.write(5n);
+			// Held, so the replaced copy stays subscribed once it expires.
+			const held = defined(sub.tryRecvGroup());
+			expect(held.start).toBe(5n);
+			expect(drain(sub)).toEqual([0n]);
+			if (routed) {
+				front.serve(b.consume());
+				await settle();
+			}
+			const serving = routed ? tb : ta;
+			serving.write(6n);
+			await clock.advance(Duration.millis(900));
+			expect(drain(sub)).toEqual([6n]);
+			await clock.advance(Duration.millis(50));
+			for (const key of [4n, 2n, 1n]) ta.write(key);
+			serving.write(7n);
+			// Newest first, so the late groups are left unread.
+			const seven = defined(sub.tryRecvGroup());
+			expect(seven.start, `routed ${routed}`).toBe(7n);
+			// The replaced copy expires, and 2 and 1 go stale by 4 under the reader's budget.
+			await clock.advance(Duration.millis(1_450));
+			serving.write(8n);
+			expect(drain(sub), `routed ${routed}`).toEqual([8n]);
+			// Wide enough to read the copy again and keep 2 and 1, not 4: 5 arrived past it.
+			sub.update(withMax({ delay: { max: Duration.millis(2_000) } }));
+			expect(drain(sub), `routed ${routed}`).toEqual([2n, 1n]);
+
+			seven.close();
+			held.close();
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		} finally {
+			installed.close();
+		}
+	}
+});
+
 test("an arrival read takes a replaced copy's buffered group before the new copy's later one", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

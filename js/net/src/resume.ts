@@ -2242,15 +2242,17 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
-	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
-	// holds unread: as one cursor keeps what it owes, since a late group there may be fresh by its
-	// own successor on that copy. Nor past `keep`, an outer reader's own such group.
+	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader,
+	// or that would under a wider budget, holds unread: as one cursor keeps what it owes, since a
+	// late group there may be fresh by its own successor on that copy. A widened budget reads an
+	// expired copy again, so only a copy whose channel ran out is passed over. Nor past `keep`, an
+	// outer reader's own such group.
 	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
 		let kept = keep;
 		for (const copy of this.#copies) {
-			if (copy === newest || !copy.replaced || !this.#feeds(copy)) continue;
+			if (copy === newest || !copy.replaced || copy.done !== undefined) continue;
 			const key = hooks.lowestBuffered(copy.sub, delivered);
 			if (key !== undefined) kept = min(kept ?? key, key);
 		}
