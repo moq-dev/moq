@@ -288,11 +288,12 @@ Each endpoint MAY open one unidirectional Announce Stream (`0x3`) carrying all d
 Opened by a publisher per Group served to a Subscribe Stream: `GROUP`, zero or more `FRAME`s, and `GROUP_END` + `FIN` if finished (or `FIN` alone if closed, or reset if aborted).
 A publisher MUST NOT send `GROUP_END` for an unfinished Group, MUST NOT send two Group Streams for the same Group Start on one subscription, and a subscriber treats bytes after `GROUP_END` as a malformed Track.
 
-A publisher that resets a Group Stream after sending its `GROUP` message, toward a peer that negotiated `RESET_STREAM_AT` {{reliable-reset}}, SHOULD send it with a Reliable Size at the end of the `GROUP` message.
+A publisher that resets a Group Stream after sending its `GROUP` message, toward a peer that negotiated `RESET_STREAM_AT` {{reliable-reset}} over QUIC or QMux, SHOULD send it with a Reliable Size at the end of the `GROUP` message.
 The `GROUP` message then accounts for the Group and the reset ends its readers with its error, so the publisher names it in no `SUBSCRIBE_DROP`.
 A reset after a `GROUP_END` may cut the `GROUP_END`, so the publisher names the starts it accounted for again in `SUBSCRIBE_DROP(SKIP)`.
 Any other reset may lose the `GROUP` message, since a `RESET_STREAM` lets the peer's transport discard data it has not delivered, even data it acknowledged.
-So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT` or over a browser's WebTransport, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
+So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT`, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
+Over WebTransport it names every Group whose stream it resets after the `GROUP` message, Reliable Size or not: a browser's WebTransport API may discard a reset stream's data unread even when its QUIC connection negotiated `RESET_STREAM_AT`, and the publisher cannot tell a browser from any other peer.
 A subscriber that read the `GROUP` message first already accounted for the Group, and the drop ends its readers with the reset's error.
 
 A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder subscribe again from the first Position they lack).
@@ -881,7 +882,7 @@ SUBSCRIBE_DROP Message {
 }
 ~~~
 
-Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up before their `GROUP` message was sent ([Group Stream](#group-stream)) as aborted, evicted, or expired `OLD`, starts it declared it will never produce as `SKIP` ({{subscribe-skip}}), and `NOT_FOUND` for undeclared gaps.
+Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up as aborted, evicted, or expired `OLD`, before their `GROUP` message was sent or with a reset that may lose it ([Group Stream](#group-stream)), starts it declared it will never produce as `SKIP` ({{subscribe-skip}}), and `NOT_FOUND` for undeclared gaps.
 For every start in range, a publisher MUST send a Group Stream, cover it inside a `GROUP_END` span, or name it in `SUBSCRIBE_DROP`, and SHOULD name a start as soon as it gives it up or skips it.
 A Group Stream the subscriber stopped (`STOP_SENDING`) with `EVICTED` before the publisher's transport acknowledged its `GROUP` message, which the subscriber may have discarded unread, is named in a drop with `EVICTED`; no other stop is, since the subscriber sent it knowing the Group or wanting none of it.
 Dropping a whole held Group names `[start, max(End, start + 1))`.
@@ -1096,7 +1097,7 @@ This document has no IANA actions.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - Added stream error code `SKIP` (`0x3A`) on `SUBSCRIBE_DROP` for starts the publisher declared it will never produce: final, ends no reader, and cached by relays. A start nothing accounts for is still owed, so a subscriber waits out no grace period.
 - Added `SUBSCRIBE.Meta` for a metadata subscription (`0x1`), fixed for its life, whose `FRAME`s carry no `Inflated Size` or payload, `Payload Length` being the inflated size + 1. A relay serves one from a payload copy or a metadata subscription upstream, from the Track's one payload subscription only where its upstream cannot carry the mode, and never serves a payload reader from metadata.
-- A publisher that resets a Group Stream with `RESET_STREAM_AT` whose Reliable Size covers the `GROUP` message names no such Group in `SUBSCRIBE_DROP`; any other reset may lose the `GROUP` message, so the publisher names the Group with the reset's error, and a reset that may cut a `GROUP_END` names its inner starts again with `SKIP`. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
+- A publisher that resets a Group Stream with `RESET_STREAM_AT` whose Reliable Size covers the `GROUP` message, over QUIC or QMux, names no such Group in `SUBSCRIBE_DROP`; any other reset, including every reset over WebTransport, may lose the `GROUP` message, so the publisher names the Group with the reset's error, and a reset that may cut a `GROUP_END` names its inner starts again with `SKIP`. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
 - A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.
 
 ## moq-lite-06

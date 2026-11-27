@@ -108,7 +108,8 @@ mod tests {
 			.await
 			.expect("output catalog timed out")
 			.expect("read output catalog")
-			.expect("output catalog ended");
+			.expect("output catalog ended")
+			.value;
 		let (track_name, config) = catalog.audio.renditions.iter().next().expect("output Opus rendition");
 		let track = broadcast
 			.track(track_name)

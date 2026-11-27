@@ -1161,6 +1161,8 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/** How many runs the subscriber holds for its fills: asked, given up, heads, and adopted verdicts. */
+	fillRuns: (subscriber: Subscriber) => number;
 	/**
 	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
 	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
@@ -1363,6 +1365,11 @@ export const hooks: {
 	 * `track::Subscriber::hole_end`.
 	 */
 	holeEnd: (subscriber: Subscriber, key: bigint, dropped: boolean) => bigint | undefined;
+	/**
+	 * The abort that closed the subscriber's track after its declared end settled, which its
+	 * readers saw as a clean end. Mirrors the Rust crate-private `track::Consumer::aborted`.
+	 */
+	trackAborted: (subscriber: Subscriber) => Error | undefined;
 	/** The error the subscriber's track gave `key` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, key: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
@@ -1809,6 +1816,9 @@ export const hooks: {
 	tryDrop: () => {
 		throw new Error("track.ts not loaded");
 	},
+	fillRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
 	askUnproven: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1903,6 +1913,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	staleHeld: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackAborted: () => {
 		throw new Error("track.ts not loaded");
 	},
 	givenUp: () => {

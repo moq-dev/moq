@@ -143,6 +143,15 @@ function copyFailed(copy: Copy): boolean {
 	return error instanceof Error && routeFailed(error);
 }
 
+// Whether the copy's route failed, even after its declared end settled, which ends its readers
+// cleanly: a group it closed short may hold more on the route replacing it. Only a route going
+// away counts then: a subscription reset alone leaves the route serving, and nothing replaces
+// it. Mirrors the Rust `route_lost`, whose copies abort after their end only with the session.
+function routeLost(copy: Copy): boolean {
+	const aborted = hooks.trackAborted(copy.sub);
+	return copyFailed(copy) || (aborted !== undefined && closing(aborted));
+}
+
 // Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
 // listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
 // lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
@@ -2895,10 +2904,13 @@ class Recover implements GroupRecover {
 		if (!copy) return false;
 		const route = this.#reader.route;
 		if (cause.kind === "failed" && this.#undelivered(cause.error, copy)) return true;
-		// A short close on a copy whose route failed, or while the front stages the copy to
-		// replace it, looks to the route replacing it. Mirrors the Rust `Recover::wants`.
-		if (cause.kind !== "failed" && copyFailed(copy)) return true;
-		if (cause.kind === "closed" && route.staged) return true;
+		// A refusal is terminal: no route continues a short close, which stands.
+		if (cause.kind === "closed" && route.refusal) return false;
+		// A stall or a short close on a copy whose route failed, or a short close while the front
+		// stages the copy to replace it, looks to the route replacing it. Mirrors the Rust
+		// `Recover::wants`.
+		if (cause.kind === "stalled" && copyFailed(copy)) return true;
+		if (cause.kind === "closed" && (routeLost(copy) || route.staged)) return true;
 		if (route.concluded) return true;
 		if (route.generation !== this.#generation) {
 			// A route that returned serves the copy being read again, which a stalled group reuses.
@@ -2978,14 +2990,15 @@ class Recover implements GroupRecover {
 			const withdrawn = failed !== undefined && generation === this.#generation && unroutable(failed);
 			if (!serving) {
 				// Nothing replaced a copy that closed the group, as when its track parks, so its
-				// close stands.
-				if (closed) throw standing();
+				// close stands, unless its route failed: then it waits for a route as a failed
+				// copy does, unless none will come.
+				if (closed && (!routeLost(current) || route.concluded)) throw standing();
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
 			} else if (closed && generation === this.#generation) {
 				// It serves on with no front to replace it, so its close stands, unless its route
 				// failed or the front stages the copy to replace it: then that one may hold more.
-				if ((!copyFailed(current) && !route.staged) || route.concluded) throw standing();
+				if ((!routeLost(current) && !route.staged) || route.concluded) throw standing();
 			} else if (generation !== this.#generation || failed) {
 				// The serving route gave the group up, which ends it with that route's error however
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with

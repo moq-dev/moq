@@ -120,9 +120,9 @@ pub struct Limits<T> {
 /// unimpaired and 80 ms round-trip links kept RTT at most 107 ms and headroom above 4.6; a 12 Mb/s
 /// link kept headroom at 1.67 or more and lost at most 0.23% of media bytes with delivery intact;
 /// a 10 Mb/s link fell to 1.35. The RTT limits double ITU-T G.114's one-way delays for interactive
-/// use. No CLI reporter emits the rendition counters, so their shares are not measured; a 1% rise
-/// in time spent buffering cost viewers of a 90-minute live event over three minutes of watching
-/// (Dobrian et al., SIGCOMM 2011).
+/// use. The rendition shares are not measured against real traffic; a 1% rise in time spent
+/// buffering cost viewers of a 90-minute live event over three minutes of watching (Dobrian et al.,
+/// SIGCOMM 2011).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Thresholds {

@@ -1751,7 +1751,7 @@ mod tests {
 
 			let mut latest = None;
 			while let std::task::Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
-				latest = Some(catalog);
+				latest = Some(catalog.value);
 			}
 			let published = latest.expect("catalog published");
 			assert!(published.video.renditions.contains_key("v"));

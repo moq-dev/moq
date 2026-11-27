@@ -333,6 +333,10 @@ route-proof:
 route-sweep:
     bash ../sh/local.sh bash route-sweep.sh
 
+# Print the route benchmarks' tables: the multicast bake-off, warmth, and node layers.
+route-bench:
+    bash ../sh/local.sh bash route-bench.sh
+
 # Race a lite-07 relay's session tasks in seeded orders from a fresh replayable seed.
 route-race:
     bash ../sh/local.sh bash route-race.sh

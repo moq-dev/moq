@@ -2848,10 +2848,10 @@ impl Connection {
 					.exempt_probes
 					.filter(|&(since, _)| acked < since)
 					.unwrap_or((now, 0));
-				if count < limit {
+				// A reservation still waiting to leave, as behind a stalled socket, already covers this.
+				if count < limit && self.spaces[space].loss_probes == 0 {
 					self.exempt_probes = Some((since, count + 1));
-					let space = &mut self.spaces[space];
-					space.loss_probes = space.loss_probes.max(1);
+					self.spaces[space].loss_probes = 1;
 				}
 				self.timers.set(Timer::KeepAlive, now.saturating_add(after));
 			}
@@ -4650,6 +4650,12 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn has_prev_path(&self) -> bool {
 		self.prev_path.is_some()
+	}
+
+	/// How many keep-alive probes past the congestion window count against the current budget
+	#[cfg(test)]
+	pub(crate) fn exempt_probes_spent(&self) -> u32 {
+		self.exempt_probes.map_or(0, |(_, count)| count)
 	}
 
 	/// Bytes in flight on the current path, and its congestion window

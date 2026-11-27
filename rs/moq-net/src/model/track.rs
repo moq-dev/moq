@@ -2555,7 +2555,8 @@ impl TrackState {
 	}
 
 	/// Take in the live groups that arrived at or after `index`, for a reader reading `window`
-	/// from `min_key` to pick from in its Group Order: their keys, in arrival order.
+	/// from `min_key` to pick from in its Group Order: their keys, in arrival order, appended
+	/// to `arrived`, which the reader keeps so a group arriving allocates nothing.
 	///
 	/// Moves `index` past every entry it looks at, the dead ones and those below `min_key`
 	/// included, which a lower floor re-offers from the cache instead. It stays only on a
@@ -2563,9 +2564,15 @@ impl TrackState {
 	/// only that trailing run and what arrived since, however many stale entries did. The run
 	/// holds only groups that arrived cut short after the last readable one.
 	///
-	/// Ready with nothing once the track completed, or with its abort.
-	fn poll_arrivals(&self, index: &Cell<usize>, min_key: u64, window: &Window) -> Poll<Result<Option<Vec<u64>>>> {
-		let mut arrived = Vec::new();
+	/// Ready with `true` once it took some in, `false` once the track completed, or with its abort.
+	fn poll_arrivals(
+		&self,
+		index: &Cell<usize>,
+		min_key: u64,
+		window: &Window,
+		arrived: &mut Vec<u64>,
+	) -> Poll<Result<bool>> {
+		let taken = arrived.len();
 		if self.serves_bounded(window) {
 			let mut stop = None;
 			let mut past = index.get();
@@ -2585,13 +2592,13 @@ impl TrackState {
 			}
 			index.set(stop.unwrap_or(past));
 		}
-		if !arrived.is_empty() {
-			return Poll::Ready(Ok(Some(arrived)));
+		if arrived.len() > taken {
+			return Poll::Ready(Ok(true));
 		}
 
 		// TODO once we have drop notifications, check if index == final_key.
 		if self.is_complete() {
-			Poll::Ready(Ok(None))
+			Poll::Ready(Ok(false))
 		} else if let Some(err) = self.outcome.aborted() {
 			Poll::Ready(Err(err.clone()))
 		} else {
@@ -8837,6 +8844,12 @@ impl Consumer {
 		self.with_state(|state| state?.read().resume_position())
 	}
 
+	/// The error that aborted the track, kept even when the abort came after its declared end
+	/// settled and so ended its readers cleanly.
+	pub(super) fn aborted(&self) -> Option<Error> {
+		self.with_state(|state| state?.read().outcome.aborted().cloned())
+	}
+
 	/// Poll for the track closing: no producer is left to write it, so nothing more
 	/// will ever arrive. A name the broadcast serves nothing under reads as closed.
 	pub(super) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -10811,6 +10824,9 @@ fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTree
 	keys.into_iter().map(|key| (key, prefs.joining(key))).collect()
 }
 
+/// The capacity, in keys, a reader keeps in [`Filter::arrived`] between arrival walks.
+const ARRIVED_KEPT: usize = 4;
+
 /// A cursor's own ranges, resolved, and what keeps them current.
 struct Filter {
 	/// Only the groups in it are read.
@@ -10833,6 +10849,10 @@ struct Filter {
 	/// budget. Scanned in the cache in the subscription's order, so each cached group in
 	/// them is visited once.
 	owed: RangeInclusiveSet<u64>,
+	/// The keys the arrival walk just took in, until [`Cursor::owe_arrivals`] owes them.
+	/// Empty between reads, and kept at up to [`ARRIVED_KEPT`] keys of capacity so a wake
+	/// taking in a few groups allocates nothing.
+	arrived: Vec<u64>,
 	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
 	lookups: Vec<Lookup>,
 }
@@ -10865,6 +10885,7 @@ impl Cursor {
 				admitted: Admitted::default(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
+				arrived: Vec::new(),
 				lookups: Vec::new(),
 			};
 			(filter, state.cache.clone())
@@ -11830,15 +11851,11 @@ impl Cursor {
 		Poll::Ready(())
 	}
 
-	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
+	/// Whether the drift budget says to skip group `key`, against a [`Drift`] already resolved
 	/// for this poll.
-	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+	fn poll_stale(&self, key: u64, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		self.poll(waiter, |state| {
-			Poll::Ready(Ok(state.is_stale(
-				group.start,
-				&drift.edge,
-				drift.budget.at(group.start),
-			)))
+			Poll::Ready(Ok(state.is_stale(key, &drift.edge, drift.budget.at(key))))
 		})
 	}
 
@@ -12264,17 +12281,16 @@ impl Cursor {
 			// What arrived since the last look is owed too, so the pick below sees every group
 			// held unread, buffered or re-offered by a widening, and hands out the first in the
 			// subscription's order. A late lower group is owed once it arrives, never passed over.
-			let arrived = {
+			let took = {
 				let index = Cell::new(self.index);
-				let arrived = self
-					.state
-					.read()
-					.poll_arrivals(&index, self.floor(), &self.filter.window);
+				let floor = self.floor();
+				let filter = &mut *self.filter;
+				let took = (self.state.read()).poll_arrivals(&index, floor, &filter.window, &mut filter.arrived);
 				self.index = index.get();
-				arrived
+				took
 			};
-			if let Poll::Ready(Ok(Some(arrived))) = arrived
-				&& self.owe_arrivals(arrived)
+			if let Poll::Ready(Ok(true)) = took
+				&& self.owe_arrivals()
 			{
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 			}
@@ -12309,7 +12325,11 @@ impl Cursor {
 				None => {
 					let index = Cell::new(self.index);
 					let floor = self.floor();
-					let polled = self.poll(waiter, |state| state.poll_arrivals(&index, floor, &self.filter.window));
+					let arrived = std::cell::RefCell::new(std::mem::take(&mut self.filter.arrived));
+					let polled = self.poll(waiter, |state| {
+						state.poll_arrivals(&index, floor, &self.filter.window, &mut arrived.borrow_mut())
+					});
+					self.filter.arrived = arrived.into_inner();
 					self.index = index.get();
 					// A moved window moved the servable edge `drift` was judged against.
 					if polled.is_pending() && self.watch_time() {
@@ -12318,7 +12338,7 @@ impl Cursor {
 						self.expire_heads(&drift, waiter);
 						continue;
 					}
-					let Some(arrived) = ready!(polled)? else {
+					if !ready!(polled)? {
 						// The feed ended, but a fill still owes a group. Its answer wakes us.
 						if self.awaits_fill() {
 							return Poll::Pending;
@@ -12326,8 +12346,8 @@ impl Cursor {
 						// Nothing reads the kept-out keys now: a read polled again asks anew.
 						self.kept_out = None;
 						return Poll::Ready(Ok(None));
-					};
-					if self.owe_arrivals(arrived) {
+					}
+					if self.owe_arrivals() {
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 					}
 					continue;
@@ -12336,7 +12356,7 @@ impl Cursor {
 
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
-			if ready!(self.poll_stale(&consumer, &drift, waiter))? {
+			if ready!(self.poll_stale(consumer.start, &drift, waiter))? {
 				self.advance_arrival(consumer.start, taken);
 				self.write_off_stale(consumer.start, consumer.content(), &drift);
 				continue;
@@ -12379,27 +12399,31 @@ impl Cursor {
 				.into_iter()
 				.flatten()
 				.reduce(|first, next| if next.0 < first.0 { next } else { first });
-			let (consumer, taken) = match lowest.map(|(_, taken)| taken) {
-				Some(Taken::Owed) => (owed.expect("picked").consume(), Taken::Owed),
-				Some(Taken::Filled) => (filled.expect("picked").consume(), Taken::Filled),
-				Some(Taken::Head) => (head.expect("picked"), Taken::Head),
-				None => break,
+			let Some((key, taken)) = lowest else {
+				break;
 			};
-			if !ready!(self.poll_stale(&consumer, drift, waiter))? {
+			if !ready!(self.poll_stale(key, drift, waiter))? {
 				break;
 			}
-			self.advance_arrival(consumer.start, taken);
-			self.write_off_stale(consumer.start, consumer.content(), drift);
+			// Only a group written off is consumed, for the content it gives up: the fresh one
+			// usually goes out next, consumed by the pick.
+			let content = match taken {
+				Taken::Owed => owed.expect("picked").consume().content(),
+				Taken::Filled => filled.expect("picked").consume().content(),
+				Taken::Head => head.expect("picked").content(),
+			};
+			self.advance_arrival(key, taken);
+			self.write_off_stale(key, content, drift);
 		}
 		Poll::Ready(Ok(()))
 	}
 
-	/// Owe the `arrived` groups this cursor reads, for [`Self::next_owed`] to pick from. A
-	/// group beyond the cap or outside the ranges is passed holding nothing: a widening finds
-	/// it in the cache again. The first group to arrive places a live join, which may land
-	/// above it, and a later one may settle where a time end falls. Returns whether that
-	/// moved a placed window, and with it the servable edge a drift was judged against.
-	fn owe_arrivals(&mut self, arrived: Vec<u64>) -> bool {
+	/// Owe the [`Filter::arrived`] groups this cursor reads, for [`Self::next_owed`] to pick
+	/// from, emptying it. A group beyond the cap or outside the ranges is passed holding
+	/// nothing: a widening finds it in the cache again. The first group to arrive places a live
+	/// join, which may land above it, and a later one may settle where a time end falls. Returns
+	/// whether that moved a placed window, and with it the servable edge a drift was judged against.
+	fn owe_arrivals(&mut self) -> bool {
 		let moved = !self.filter.window.is_settled() && {
 			self.sync();
 			self.admit();
@@ -12407,11 +12431,16 @@ impl Cursor {
 			!self.filter.window.is_pending()
 		};
 		let floor = self.floor();
-		for key in arrived {
+		let mut arrived = std::mem::take(&mut self.filter.arrived);
+		for key in arrived.drain(..) {
 			if key >= floor && self.admits(key) {
 				self.filter.owed.insert(key..=key);
 			}
 		}
+		// A catch-up walk can take in a whole cache at once: keep only what a wake that takes
+		// in a few groups needs, so an idle reader holds no more than that.
+		arrived.shrink_to(ARRIVED_KEPT);
+		self.filter.arrived = arrived;
 		self.prune_owed();
 		moved
 	}
@@ -12746,7 +12775,7 @@ impl Cursor {
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
 			// walks a whole backlog off rather than handing it out group by group.
-			if ready!(self.poll_stale(&group, &drift, waiter))? {
+			if ready!(self.poll_stale(group.start, &drift, waiter))? {
 				// Not counted yet: a conviction is not permanent (the budget can widen,
 				// the edge can be evicted), so the group may still be delivered.
 				// Re-snapshot on every re-examination so the eventual count reflects the
@@ -13900,14 +13929,14 @@ impl Subscriber {
 
 	/// Whether the publisher declared every start in `groups` skipped, never to be produced
 	/// (see [`Producer::skip_groups`], which appending does between groups), so no group can
-	/// arrive there: true for an empty range. Unlike [`Self::next_in_range`], this ignores the
-	/// subscriber's ranges. A copy knows only the skips its wire forwarded.
+	/// arrive there: true for an empty range. This ignores the subscriber's ranges. A copy
+	/// knows only the skips its wire forwarded.
 	///
 	/// What tells a reader that nothing lies between two groups, or before a track's first.
 	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
 	/// still in flight reads `false`, as does one a local producer's cache expired below its
 	/// edge. A reader that asks once treats such a group as one with something before it.
-	pub(crate) fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
 			return true;
 		};
@@ -14194,9 +14223,11 @@ impl Subscriber {
 	/// empty range. Both bounds are assigned, in either direction: an omitted start is
 	/// group 0 and an omitted end removes the cap. Lowering the floor or raising the cap
 	/// offers the groups it newly covers that the cache still holds and this reader never
-	/// handed out, in its [`Order`]; a group is never handed out twice. Groups past the cap
-	/// stay cached, and lowering the cap below the cursor waits until it rises again or
-	/// the track finishes. [`Self::poll_largest`] reports within these bounds.
+	/// handed out, in its [`Order`]; a group is never handed out twice while the
+	/// subscription's ranges hold it (see [`Self::update`]). Groups past the cap stay cached,
+	/// and lowering the cap below the cursor waits until it rises again or the track
+	/// finishes, unless bounded subscription ranges have nothing left to deliver, which
+	/// ends the read. [`Self::poll_largest`] reports within these bounds.
 	///
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set
@@ -14262,9 +14293,10 @@ impl Subscriber {
 	/// here (see [`Producer::subscription`]). Replaced ranges resolve again here, a live
 	/// join placed behind the latest group now, and widening them offers
 	/// the cached groups they newly cover, even ones that arrived before the groups
-	/// already read. Returns [`Error::Closed`]
-	/// if the track already ended; the update is meaningless at that point and can usually
-	/// be ignored.
+	/// already read. A group read stays read while the ranges hold it; ranges replaced off it
+	/// may forget it, so ranges holding it again may hand it out again, as a new subscription
+	/// would. Returns [`Error::Closed`] if the track already ended; the update is meaningless
+	/// at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.update_stamped(subscription, [])
 	}
@@ -31269,11 +31301,10 @@ mod test {
 			let state = producer.state.read();
 			Window::new(&replay().ranges, None, &*state)
 		};
-		let walked = producer.state.read().poll_arrivals(&index, 0, &window);
-		assert!(
-			matches!(walked, Poll::Ready(Ok(Some(ref keys))) if keys == &[0, 2]),
-			"{walked:?}"
-		);
+		let mut keys = Vec::new();
+		let walked = producer.state.read().poll_arrivals(&index, 0, &window, &mut keys);
+		assert!(matches!(walked, Poll::Ready(Ok(true))), "{walked:?}");
+		assert_eq!(keys, [0, 2]);
 		// A reader takes it as the fill answer for the group the feed gave up, as it would
 		// have asked a fill for it, and the stale arrival entry adds nothing.
 		let mut subscriber = producer.subscribe(replay());

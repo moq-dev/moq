@@ -207,6 +207,11 @@ export class Delivered {
 		return first[0] === 0n ? this.#runs[1]?.[0] : first[0];
 	}
 
+	/** The lowest key handed out above a gap past `key`. */
+	nextAboveGap(key: bigint): bigint | undefined {
+		return this.#runs[this.#below(key) + 1]?.[0];
+	}
+
 	/** One past the last key of the run holding `key`, if it was handed out. */
 	runEnd(key: bigint): bigint | undefined {
 		const index = this.#below(key);

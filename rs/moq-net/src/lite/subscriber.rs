@@ -1111,8 +1111,9 @@ impl SubscriptionCleanup {
 impl Drop for SubscriptionCleanup {
 	fn drop(&mut self) {
 		// A session that ended with an error already aborted these with it; what
-		// remains was cancelled with the driver.
-		self.abort(&Error::Cancel);
+		// remains was cancelled with the driver, which ends the session: a route replacing
+		// it continues what these copies closed short.
+		self.abort(&crate::SessionError::Cancel.into());
 	}
 }
 
@@ -3936,6 +3937,47 @@ mod tests {
 			};
 			assert_eq!(read, placed, "max {max:?}, retuned from {retuned_from:?}");
 		}
+	}
+
+	/// A live join answered under the max it was first asked with, before the update retuning
+	/// it wider goes out, places no reader waiting with the wider max, so that join goes out on
+	/// a probe of its own. Mirrors the JS `a join answered before its retune goes out is probed`.
+	#[kio::test]
+	async fn a_join_answered_before_its_retune_is_probed() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let asked = |max: Duration| lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Some(Duration::ZERO),
+				max: Some(max),
+			}),
+			end: None,
+		};
+		active.live = lite::LiveRanges::new(Version::Lite07, &[asked(Duration::ZERO)]);
+		active.starts = [(0, Some(20))].into();
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
+		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		serving.received();
+		serving.anchored();
+		active.report_starts(&serving);
+
+		// The retune goes out after the answer to the first max.
+		let wider = asked(Duration::from_millis(100));
+		active.live = lite::LiveRanges::new(Version::Lite07, &[wider]);
+		let join = track::JoinAsk {
+			min: Some(Duration::ZERO),
+			end: None,
+			budget: Duration::from_millis(100),
+			since: 0,
+		};
+		let (probes, _) = join_probes(Some(&active), &[join], &[wider]);
+		assert_eq!(
+			probes,
+			[join_probe(&join)],
+			"an answer under 0 ms places no reader at 100 ms"
+		);
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -12332,7 +12374,7 @@ struct SubStream {
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
 	/// [`track::Producer::answer_join`]): one with none is still unanswered.
 	join_ticks: std::collections::BTreeMap<u64, u64>,
-	/// The narrowest max age each live join range was asked under before its answer, or each
+	/// The narrowest max age each live join range was asked under up to its answer, or each
 	/// placed one ever, by Range ID, beside the one it asks now: its publisher starts it past the groups
 	/// that max expired, so the answer places only readers within it.
 	join_budgets: std::collections::BTreeMap<u64, Duration>,
@@ -12422,6 +12464,8 @@ impl SubStream {
 					if let std::collections::btree_map::Entry::Vacant(entry) = self.join_ticks.entry(id) {
 						let asked = self.join_budgets.get(&id).copied().unwrap_or(Duration::MAX);
 						let budget = asked.min(crate::track::budget(max));
+						// Kept with it, so a retune wider after it lands still finds the answer narrower.
+						self.join_budgets.insert(id, budget);
 						entry.insert(serving.answer_join(min, through(range.end), start, budget));
 					}
 					continue;
