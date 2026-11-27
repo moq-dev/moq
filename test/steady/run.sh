@@ -119,6 +119,9 @@ malloc_conf() {
     printf 'prof:true,prof_active:true,prof_prefix:%s' "$HARNESS_RUN/heap/$1"
 }
 
+# Pin `moq_tokio::jemalloc=info` so an inherited `RUST_LOG=warn` cannot silence the sampler logs.
+STEADY_LOG="${RUST_LOG:-info},moq_tokio::jemalloc=info"
+
 # ── relay ───────────────────────────────────────────────────────────────────
 harness_port relay
 PORT="$HARNESS_PORT"
@@ -127,7 +130,7 @@ if harness_probe "$URL/certificate.sha256"; then
     echo "error: something is already listening on 127.0.0.1:$PORT (stale relay?)" >&2
     exit 1
 fi
-harness_spawn relay "$HARNESS_RUN/relay.log" env "MALLOC_CONF=$(malloc_conf relay)" \
+harness_spawn relay "$HARNESS_RUN/relay.log" env "RUST_LOG=$STEADY_LOG" "MALLOC_CONF=$(malloc_conf relay)" \
     "$RELAY" "$STEADY_DIR/relay.toml" --listen-version "$VERSION" --listen "127.0.0.1:$PORT" --web-http-listen "127.0.0.1:$PORT"
 RELAY_PID="$HARNESS_PID"
 if ! harness_ready "$URL/certificate.sha256" 30 "$RELAY_PID"; then
@@ -145,13 +148,13 @@ mkfifo "$SOURCE"
 # Each `exec`s so the spawned PID is moq's own, which the sampler reads and signals.
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 export_run() {
-    exec env "MALLOC_CONF=$(malloc_conf export)" "$MOQ" --connect "$URL" --connect-version "$VERSION" \
+    exec env "RUST_LOG=$STEADY_LOG" "MALLOC_CONF=$(malloc_conf export)" "$MOQ" --connect "$URL" --connect-version "$VERSION" \
         --broadcast "$BROADCAST" export ts --passthrough >/dev/null
 }
 # Opened read-write, which never blocks on a FIFO, so moq is running before the source opens it.
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 import_run() {
-    exec env "MALLOC_CONF=$(malloc_conf import)" "$MOQ" --connect "$URL" --connect-version "$VERSION" \
+    exec env "RUST_LOG=$STEADY_LOG" "MALLOC_CONF=$(malloc_conf import)" "$MOQ" --connect "$URL" --connect-version "$VERSION" \
         --broadcast "$BROADCAST" import ts --passthrough <>"$SOURCE"
 }
 

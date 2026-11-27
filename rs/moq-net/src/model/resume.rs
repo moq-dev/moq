@@ -1647,7 +1647,18 @@ impl Subscriber {
 	pub(super) fn rescan_drops(&mut self) {
 		self.reader().rescan_drops()
 	}
+}
 
+impl super::record::SkipLookup for Subscriber {
+	fn with_skips(&self, f: &mut dyn FnMut(super::record::SkipEnd<'_>)) {
+		let reader = self.reader();
+		if let Some(copy) = reader.copies.last() {
+			copy.track.with_skips(f);
+		}
+	}
+}
+
+impl Subscriber {
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
 	/// `delivered` says which groups a lowered floor newly owes.
 	pub(super) fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
@@ -3467,7 +3478,8 @@ impl Reader {
 		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
 		// each poll reports one run, so such a pass would cost the queue squared to drain it,
 		// and a new reader can be handed one run per cached group and per gap between them.
-		while let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone())
+		while let Some((run, hole)) = self.drops.first_range_value().map(|(run, hole)| (run.clone(), hole))
+			&& !matches!(hole, track::Hole::Skip)
 			&& delivered.covers(run.clone())
 		{
 			self.remove_drop(run);
@@ -3496,15 +3508,24 @@ impl Reader {
 		}
 		let mut passed = Vec::new();
 		let next = self.drops.iter().find_map(|(run, err)| {
-			if delivered.covers(run.clone()) {
+			// Declared skips pass through even when `delivered` covers them (for example after
+			// an ordered read's `forget_below` or debt compaction), so the logical `reported`
+			// map still receives and coalesces them rather than fragmenting per group.
+			if !matches!(err, track::Hole::Skip) && delivered.covers(run.clone()) {
 				passed.push(run.clone());
 				return None;
 			}
 			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
-			let open = delivered
-				.gaps(run)
-				.into_iter()
-				.find_map(|gap| feeding.gaps(&gap).next())?;
+			if run.is_empty() {
+				return None;
+			}
+			let open = match err {
+				track::Hole::Skip => feeding.gaps(&run).next()?,
+				_ => delivered
+					.gaps(run)
+					.into_iter()
+					.find_map(|gap| feeding.gaps(&gap).next())?,
+			};
 			Some((open, err.clone()))
 		});
 		for run in passed {
@@ -16242,5 +16263,136 @@ mod test {
 			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
 		}
 		assert!(most <= 60, "front copy + logical record grew to {most} runs");
+	}
+
+	/// An arrival-order routed subscriber with `Start::Oldest`, unlimited budget, and no
+	/// publisher `max_age` compacts its logical `delivered` runs across the serving route's
+	/// declared skips under pool debt, and if it later begins polling drops, those compacted
+	/// skips are still emitted rather than silently dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unlimited_front_reader_compacts_sparse_delivered_runs_under_debt() {
+		const BASE: u64 = 1_000_003;
+		const SPACING: u64 = 17;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(64 * 1024));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed().with_max_age(None));
+		let source = track::Producer::new(broadcast, "sparse", crate::track::Info::timed().with_max_age(None));
+		source.received();
+		routes.serve(source.consume());
+
+		let mut sub = match logical
+			.consume()
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: track::Start::Oldest,
+				end: None,
+			}]))
+			.poll_ok(&kio::Waiter::noop())
+		{
+			Poll::Ready(Ok(sub)) => sub,
+			_ => panic!("logical subscription should resolve"),
+		};
+
+		let mut most_delivered = 0;
+		let mut compacted = false;
+		for n in 0..800u64 {
+			let key = BASE + n * SPACING;
+			let mut group = source.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), vec![0u8; 4 * 1024]).unwrap();
+			group.finish_at(key + SPACING).unwrap();
+			source.skip_groups(key + 1..key + SPACING);
+			assert!(matches!(
+				sub.poll_recv_group(&kio::Waiter::noop()),
+				Poll::Ready(Ok(Some(g))) if g.start == key
+			));
+			let runs = sub.delivered_runs();
+			if n > 100 && runs < most_delivered {
+				compacted = true;
+			}
+			most_delivered = most_delivered.max(runs);
+		}
+		assert!(
+			compacted,
+			"logical delivered runs never compacted (peaked at {most_delivered})"
+		);
+		assert!(
+			most_delivered <= 20,
+			"logical delivered runs grew unboundedly to {most_delivered}"
+		);
+
+		// Starting `poll_drop` after debt compaction must still emit the serving route's skips.
+		let key = BASE + 800 * SPACING;
+		let mut group = source.create_group(group::Info { start: key }).unwrap();
+		group.write_frame(ts(key), &b"x"[..]).unwrap();
+		group.finish_at(key + SPACING).unwrap();
+		source.skip_groups(key + 1..key + SPACING);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(g))) if g.start == key
+		));
+		let mut emitted = Vec::new();
+		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+			if hole == track::Hole::Skip {
+				emitted.push(run);
+			}
+		}
+		assert!(
+			emitted.iter().any(|run| run.contains(&(key + 1))),
+			"expected latest skip after compaction to be emitted, got {emitted:?}"
+		);
+	}
+
+	/// An ordered reader over a front (as `moq export` uses) coalesces declared skips into the
+	/// logical `reported` map even after `delivered.forget_below(key)` passes them, so neither
+	/// the logical record nor the copy's record grows on a steady sparse live track.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_front_reader_coalesces_skips_in_logical_reported() {
+		const BASE: u64 = 1_000_003;
+		const SPACING: u64 = 17;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 40));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "video")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let source = track::Producer::new(broadcast, "video", crate::track::Info::timed());
+		source.received();
+		routes.serve(source.consume());
+
+		let mut ordered = match logical
+			.consume()
+			.subscribe(Subscription::default().with_max(Duration::from_millis(200)))
+			.poll_ok(&kio::Waiter::noop())
+		{
+			Poll::Ready(Ok(sub)) => sub.ordered(),
+			_ => panic!("logical subscription should resolve"),
+		};
+		let mut most = 0;
+		for n in 0..500u64 {
+			let key = BASE + n * SPACING;
+			let mut group = source.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), &b"x"[..]).unwrap();
+			group.finish_at(key + SPACING).unwrap();
+			source.skip_groups(key + 1..key + SPACING);
+			assert!(matches!(
+				ordered.poll_next_item(&kio::Waiter::noop()),
+				Poll::Ready(Ok(Some(track::Item::Group(g)))) if g.start == key
+			));
+			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
+		}
+		assert!(
+			most <= 60,
+			"ordered front reader record grew to {most} runs (logical reported did not coalesce)"
+		);
 	}
 }

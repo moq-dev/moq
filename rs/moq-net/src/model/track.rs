@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use super::delivered::Delivered;
 use super::idle;
-use super::record::{Beside, Pending, Record, Report, Standing};
+use super::record::{Beside, Pending, Record, Report, SkipEnd, SkipLookup, Standing};
 use crate::ledger::{self, Ledger};
 
 use super::subscription;
@@ -7934,6 +7934,28 @@ enum Source {
 	Broadcast(Box<broadcast::Consumer>, Option<kio::ConsumerWeak<TrackState>>),
 }
 
+impl SkipLookup for kio::Consumer<TrackState> {
+	fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+		let state = self.read();
+		f(&|key| state.skip_end(key));
+	}
+}
+
+impl Consumer {
+	/// Look up declared skips on this track (or its serving route) under a single read lock.
+	pub(super) fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+		if let Some(serving) = self.serving() {
+			serving.with_skips(f);
+			return;
+		}
+		let _ = self.with_state(|state| {
+			let state = state?.read();
+			f(&|key| state.skip_end(key));
+			Some(())
+		});
+	}
+}
+
 impl Consumer {
 	/// Whether these handles resolve to the same cached track, without subscribing.
 	pub(super) fn same_channel(&self, other: &Self) -> bool {
@@ -11777,7 +11799,6 @@ impl Cursor {
 	/// Record `key` as handed out. An ordered read never goes back, and any reader
 	/// stops expecting what is past its budget, so only the gaps within it cost memory.
 	fn hand_out(&mut self, key: u64, ordered: bool) {
-		let before = self.record.delivered.floor();
 		if ordered {
 			self.record.delivered.forget_below(key);
 		}
@@ -11793,12 +11814,56 @@ impl Cursor {
 		self.retire_written_off();
 		// Only prune `misses.given_up` once drops are being polled (so any give-up was already
 		// queued into `record.pending` and will not be lost if `poll_drop` is called later).
+		// Behind an ordered reader, keep stale verdicts for buffered unreturned gaps intact so
+		// a budget widening between reads can still withdraw them.
 		if self.drops.is_some()
 			&& let Some(misses) = &mut self.misses
 		{
-			let after = self.record.delivered.floor();
-			if after > before {
-				misses.forget(before..after);
+			let floor = self.record.delivered.floor();
+			let limit = match self.withdrawn {
+				Some(_) => {
+					let reported = &self.record.reported;
+					let unreturned_stale = misses.stale_runs().find_map(|run| {
+						if run.start >= floor {
+							return None;
+						}
+						// Any key in `run` not yet settled as `Report::Final` may still be
+						// withdrawn on a budget widening.
+						let end = run.end.min(floor);
+						let mut at = run.start;
+						for (rep, kind) in reported.overlapping(at..end) {
+							if rep.start > at {
+								return Some(at);
+							}
+							if *kind != Report::Final {
+								return Some(at.max(rep.start));
+							}
+							at = at.max(rep.end);
+						}
+						(at < end).then_some(at)
+					});
+					[
+						unreturned_stale,
+						reported
+							.overlapping(0..floor)
+							.find(|(_, report)| **report == Report::Withdrawable)
+							.map(|(run, _)| run.start),
+						self.record
+							.pending
+							.overlapping(0..floor)
+							.find(|(_, pending)| pending.hole.stale_budget().is_some())
+							.map(|(run, _)| run.start),
+					]
+					.into_iter()
+					.flatten()
+					.min()
+					.unwrap_or(u64::MAX)
+				}
+				None => u64::MAX,
+			};
+			let after = floor.min(limit);
+			if after > 0 {
+				misses.forget(0..after);
 			}
 			if key >= after
 				&& let Some(end) = key.checked_add(1)
@@ -12028,6 +12093,9 @@ impl Cursor {
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
 		self.let_go_kept_out();
 		self.look_up(waiter);
+		if let Some(drops) = &mut self.drops {
+			drops.drift = Some((drift.budget.clone(), drift.coverage.clone()));
+		}
 		self.rejudge(drift);
 		let (window, cap, revision) = (&self.filter.window, self.end_key, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
@@ -13381,15 +13449,14 @@ impl Subscriber {
 					handed,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
 				};
-				let no_drops = cursor.drops.is_none() && cursor.record.reported.is_empty();
-				let skip_end = |k: u64| no_drops.then(|| state.read().skip_end(k)).flatten();
+				let skips: Option<&dyn SkipLookup> = cursor.drops.is_none().then_some(state);
 				match cursor.misses.as_deref_mut() {
 					Some(misses) => cursor
 						.record
-						.settle_with(|| state.read().cache.clone(), misses, reader, &skip_end),
+						.settle_with(|| state.read().cache.clone(), misses, reader, skips),
 					None => cursor
 						.record
-						.settle_with(|| state.read().cache.clone(), &mut (), reader, &skip_end),
+						.settle_with(|| state.read().cache.clone(), &mut (), reader, skips),
 				}
 			}
 			Inner::Resume(resume, logical) => {
@@ -13399,7 +13466,10 @@ impl Subscriber {
 					ranges: resume.ranges(),
 				};
 				let state = &logical.state;
-				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
+				let skips: Option<&dyn SkipLookup> = Some(&**resume);
+				logical
+					.record
+					.settle_with(|| state.read().cache.clone(), &mut (), reader, skips)
 			}
 		}
 	}
@@ -13569,11 +13639,10 @@ impl Subscriber {
 
 	/// Record `keys` as served or reported, so no cut or drop of them is reported again.
 	fn settle_range(&mut self, keys: ops::Range<u64>) {
-		let record = match &mut self.inner {
-			Inner::Plain(cursor) => &mut cursor.record,
-			Inner::Resume(_, logical) => &mut logical.record,
-		};
-		record.tell(keys, Report::Final);
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.tell(keys, Report::Final),
+			Inner::Resume(_, logical) => logical.record.tell(keys, Report::Final),
+		}
 	}
 
 	/// Pending while a waiting time start below `end` holds back a gap an [`Ordered`] read at
@@ -36406,6 +36475,51 @@ mod test {
 		}]))
 		.unwrap();
 		assert_eq!(drained_drops(&mut sub), [(1, 10)]);
+	}
+
+	/// When an ordered reader buffers two stale gaps before taking a newer group internally,
+	/// `hand_out` must keep the second gap's stale verdict in `misses` until that gap is
+	/// returned or withdrawn, so widening the budget between reads still withdraws it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_reader_keeps_second_buffered_stale_gap_withdrawable_after_budget_widening() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let _fills = producer.requests();
+		producer.skip_groups(0..100);
+		producer.give_up(100..200, Hole::stale(Duration::from_millis(100)));
+		producer.skip_groups(200..300);
+		producer.give_up(300..400, Hole::stale(Duration::from_millis(100)));
+		producer.skip_groups(400..2000);
+		write_group(&producer, 2000);
+
+		let mut ord = producer.subscribe(within(Duration::from_millis(100), None)).ordered();
+
+		// First poll: `find_gap(true)` adopts both stale runs (100..200 and 300..400) into
+		// `misses.stale` and buffers them as withdrawable gaps; then `read()` takes group 2000
+		// internally (`hand_out(2000, ordered=true)` advances `delivered.floor()` past 300..400)
+		// and returns the first gap (100..200) while keeping 300..400 buffered behind it.
+		assert!(matches!(
+			ord.poll_next_item(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(Item::Gap { range, .. }))) if range == (100..200)
+		));
+
+		// Widen the budget before reading the next item: gap 300..400 must be withdrawn
+		// rather than returned as `Old`.
+		ord.update(within(Duration::from_secs(60), None)).unwrap();
+		let mut items = Vec::new();
+		while let Poll::Ready(Ok(Some(item))) = ord.poll_next_item(&kio::Waiter::noop()) {
+			match item {
+				Item::Group(g) => items.push(Ok(g.start)),
+				Item::Gap { range, .. } => items.push(Err(range)),
+			}
+		}
+		assert_eq!(
+			items,
+			[Ok(2000)],
+			"widening budget must withdraw buffered second stale gap 300..400"
+		);
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

@@ -44,6 +44,9 @@ pub(crate) struct Record {
 	/// A fold forgot the runs copied from the track's drop set, which the next drop scan
 	/// folds in again in full.
 	pub(super) rescan: bool,
+	/// Run count at which a non-reporting reader next attempts skip compaction (doubles when
+	/// nothing compacts so unskipped sparse feeds pay O(1) amortized work).
+	compact_at: usize,
 }
 
 /// A run a reader has yet to report, and whether it was copied from the track's runs, which a
@@ -177,6 +180,15 @@ pub(super) struct Standing {
 	pub ranges: Option<Cover>,
 }
 
+/// One past the declared skip run holding `key`, if `key` was declared skipped.
+pub(super) type SkipEnd<'a> = &'a dyn Fn(u64) -> Option<u64>;
+
+/// Declared-skip lookup used under a single lock acquisition when pool debt compacts a
+/// non-reporting reader's `delivered` runs.
+pub(super) trait SkipLookup {
+	fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>));
+}
+
 /// Runs a reader keeps beside its record, billed with it and settled by its fold: the
 /// misses it gave up, which it never asks a fill for again.
 pub(super) trait Beside {
@@ -262,13 +274,14 @@ impl Record {
 	/// asked, or lies in the ranges the reader asks for now.
 	///
 	/// Call with no track lock held: a growing bill settles the track's debt.
+	#[cfg(test)]
 	pub(super) fn settle(
 		&mut self,
 		account: impl FnOnce() -> Arc<cache::Track>,
 		beside: &mut dyn Beside,
 		reader: Standing,
 	) {
-		self.settle_with(account, beside, reader, &|_| None);
+		self.settle_with(account, beside, reader, None);
 	}
 
 	/// Like [`Self::settle`], passing a declared-skip lookup so a non-reporting reader under
@@ -279,7 +292,7 @@ impl Record {
 		account: impl FnOnce() -> Arc<cache::Track>,
 		beside: &mut dyn Beside,
 		reader: Standing,
-		skip_end: &dyn Fn(u64) -> Option<u64>,
+		skips: Option<&dyn SkipLookup>,
 	) {
 		let moved = reader.ranges.is_some() && reader.ranges != self.retired;
 		if moved {
@@ -297,7 +310,11 @@ impl Record {
 		};
 		bill.set(bytes);
 		let owed = bill.debt() > 0;
-		if !owed && !moved {
+		let compact = skips.is_some()
+			&& self.reported.is_empty()
+			&& self.pending.is_empty()
+			&& (owed || self.delivered.runs() >= self.compact_at.max(16));
+		if !owed && !moved && !compact {
 			return;
 		}
 		let mut folded = Vec::new();
@@ -305,7 +322,15 @@ impl Record {
 			folded.extend(self.retire(&reader, &*beside));
 		}
 		if owed {
-			folded.extend(self.fold(&reader, &*beside, skip_end));
+			folded.extend(self.fold(&reader, &*beside));
+		}
+		if compact
+			&& self.reported.is_empty()
+			&& self.pending.is_empty()
+			&& let Some(skips) = skips
+		{
+			skips.with_skips(&mut |skip_end| self.compact_delivered_skips(skip_end, &mut folded));
+			self.compact_at = self.delivered.runs().saturating_mul(2).max(16);
 		}
 		for folded in folded {
 			beside.forget(folded);
@@ -400,12 +425,7 @@ impl Record {
 	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
 	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
 	/// ask allowance bounds in turn. Returns the runs it folded, below the floor and above.
-	fn fold(
-		&mut self,
-		reader: &Standing,
-		beside: &dyn Beside,
-		skip_end: &dyn Fn(u64) -> Option<u64>,
-	) -> Vec<std::ops::Range<u64>> {
+	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -421,12 +441,15 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let budget = self.delivered.budget_floor();
-		if budget > self.floor {
-			// Keys retired by the delivery budget are already in `delivered` and never offered
-			// again; under pool debt, drop stale write-offs below that prefix without raising
-			// the report floor over keys that were never reported.
-			self.written_off.remove(0..budget);
+		// Keys retired below the delivered floor by the delivery budget are already closed in
+		// `delivered` and never offered again; under pool debt, drop stale write-offs and
+		// given-up misses within them without raising the report floor over unreported keys.
+		let unreported = self.delivered.unreported();
+		let closed = self.delivered.floor().min(unreported.end);
+		if closed > unreported.start {
+			let span = unreported.start..closed;
+			self.written_off.remove(span.clone());
+			folded.push(span);
 		}
 		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
 		if floor > self.floor {
@@ -443,7 +466,7 @@ impl Record {
 			}
 			let next = stretch.end.max(start + 1);
 			from = [
-				self.delivered.next_from(next.max(budget)),
+				self.delivered.next_settled_from(next),
 				self.reported
 					.overlapping(&(next..u64::MAX))
 					.next()
@@ -453,20 +476,14 @@ impl Record {
 			.flatten()
 			.min();
 		}
-		if self.reported.is_empty() && self.pending.is_empty() {
-			self.compact_delivered_skips(skip_end, &mut folded);
-		}
 		folded
 	}
 
 	/// Compact fragmented `delivered` runs across declared skips for a non-reporting reader
-	/// under pool debt, starting strictly above the `0` prefix so `self.floor` and `reported`
-	/// stay untouched.
+	/// under pool debt, starting strictly above the `0` prefix and marking each compacted span
+	/// unreported so `self.floor`, `reported`, and future `poll_drop` calls stay unaffected.
 	fn compact_delivered_skips(&mut self, skip_end: &dyn Fn(u64) -> Option<u64>, folded: &mut Vec<Range<u64>>) {
-		let mut from = self
-			.delivered
-			.above_gap()
-			.and_then(|start| self.delivered.next_from(start.max(self.delivered.budget_floor())));
+		let mut from = self.delivered.above_gap();
 		while let Some(start) = from {
 			let mut end = start;
 			let mut last_delivered = start;
@@ -483,7 +500,7 @@ impl Record {
 				}
 			}
 			if runs > 1 {
-				self.delivered.insert_run(start..last_delivered);
+				self.delivered.compact_skip(start..last_delivered);
 				self.skipped.forget(start..last_delivered);
 				self.written_off.remove(start..last_delivered);
 				folded.push(start..last_delivered);
@@ -604,9 +621,7 @@ impl Record {
 				None => {
 					let local = match fold {
 						Fold::Debt => [
-							(end >= self.delivered.budget_floor())
-								.then(|| self.delivered.run_end(end))
-								.flatten(),
+							self.delivered.settled_run_end(end),
 							self.written_off.get(&end).map(|run| run.end),
 							self.skipped.run_end(end),
 							beside.given_up_end(end),
@@ -1367,9 +1382,18 @@ mod test {
 	}
 
 	/// A non-reporting reader under pool debt compacts sparse `delivered` runs across declared
-	/// skips without touching `reported` or raising the report floor over unreported keys.
+	/// skips without touching `reported` or raising the report floor over unreported keys, and
+	/// even a later debt fold after pending received drops arrive never promotes those compacted
+	/// skips into `Report::Final`.
 	#[test]
 	fn a_debt_compacts_non_reporting_delivered_across_declared_skips() {
+		struct FnSkips<F>(F);
+		impl<F: Fn(u64) -> Option<u64>> SkipLookup for FnSkips<F> {
+			fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+				f(&self.0);
+			}
+		}
+
 		let (pool, track) = account();
 		let mut record = Record::default();
 		const SPACING: u64 = 17;
@@ -1378,18 +1402,88 @@ mod test {
 		for n in 1..=200u64 {
 			record.delivered.insert(n * SPACING);
 		}
-		let skip_end = |key: u64| {
+		let skips = FnSkips(|key: u64| {
 			let rem = key % SPACING;
 			(rem != 0).then(|| key + (SPACING - rem))
-		};
-		record.settle_with(|| track.clone(), &mut (), Standing::default(), &skip_end);
-		assert_eq!(record.delivered.runs(), 201);
-		owe(&track, pool.used());
-		record.settle_with(|| track.clone(), &mut (), Standing::default(), &skip_end);
+		});
+		record.settle_with(|| track.clone(), &mut (), Standing::default(), Some(&skips));
 		assert!(record.delivered.runs() <= 2, "compacted runs above 0 into one run");
 		assert!(record.reported.is_empty(), "reported stays empty");
 		assert!(!record.told(1), "skip 1..17 stays unreported");
 		assert!(!record.told(SPACING + 1), "compacted skips stay unreported");
 		assert!(record.delivered.contains(SPACING * 100));
+
+		// If this reader later starts reporting drops and hits pool debt again after received
+		// pending skips are cleared, compacted skip keys still must not become `Report::Final`.
+		record.tell(SPACING..SPACING + 1, Report::Final);
+		record.pending.insert(
+			SPACING + 1..2 * SPACING,
+			Pending {
+				hole: Hole::Skip,
+				received: true,
+			},
+		);
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert!(
+			!record.told(SPACING + 1),
+			"compacted skips stay unreported across later debt folds until reported"
+		);
+	}
+
+	/// Under debt, given-up `Beside` runs below a budget-retired prefix are forgotten without
+	/// raising the report floor, and keys reopened by `Delivered::reopen` then handed out again
+	/// become eligible for debt folding while remaining budget-retired keys stay protected.
+	#[test]
+	fn debt_forgets_beside_under_budget_and_folds_reopened_keys() {
+		struct GivenUp(RangeSet<u64>);
+		impl Beside for GivenUp {
+			fn runs(&self) -> u64 {
+				self.0.len() as u64
+			}
+			fn given_up_end(&self, key: u64) -> Option<u64> {
+				self.0.get(&key).map(|run| run.end)
+			}
+			fn next_held(&self, key: u64) -> Option<u64> {
+				self.0
+					.overlapping(&(key..u64::MAX))
+					.next()
+					.map(|run| run.start.max(key))
+			}
+			fn forget(&mut self, folded: Range<u64>) {
+				self.0.remove(folded);
+			}
+		}
+
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(10);
+		record.delivered.fold_below(10, None);
+		let mut beside = GivenUp(RangeSet::new());
+		beside.0.insert(3..4);
+		beside.0.insert(6..7);
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		assert!(beside.0.is_empty(), "given-up runs under budget prefix are forgotten");
+		assert!(!record.told(3), "report floor stays below unreported budget keys");
+
+		// Reopen 0..3, re-hand-out 0..3, and bill a run above: debt folds 0..3 into `floor`
+		// while keeping budget-retired 3..10 out of the report floor.
+		record.delivered.reopen(&Cover::new(std::iter::once(0..=2)));
+		for k in 0..3 {
+			assert!(!record.delivered.contains(k));
+			record.delivered.insert(k);
+		}
+		record.tell(20..21, Report::Final);
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		assert!(record.told(0) && record.told(2), "reopened and re-handed-out keys fold");
+		assert!(
+			!record.told(3),
+			"remaining budget-retired keys stay out of report floor"
+		);
 	}
 }

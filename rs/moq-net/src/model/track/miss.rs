@@ -428,6 +428,11 @@ impl Misses {
 		&self.skipped
 	}
 
+	/// The stale verdicts still held, in key order.
+	pub fn stale_runs(&self) -> impl Iterator<Item = &ops::Range<u64>> {
+		self.stale.iter().map(|(run, _)| run)
+	}
+
 	/// The exclusive end of the run from `key` this reader's fills refused or it gave
 	/// up, `None` when it may still be read.
 	pub fn gone(&self, key: u64) -> Option<u64> {

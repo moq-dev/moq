@@ -17,7 +17,7 @@ export class Runs<R extends Run> {
 	#runs: R[] = [];
 	#same: (a: R, b: R) => boolean;
 
-	constructor(same: (a: R, b: R) => boolean = () => true) {
+	constructor(same: (a: R, b: R) => boolean) {
 		this.#same = same;
 	}
 

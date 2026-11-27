@@ -16,10 +16,11 @@ use super::subscription::{Cover, minus};
 pub(super) struct Delivered {
 	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
-	/// Highest key retired solely by the reader's freshness budget (see [`Self::fold_below`]).
-	/// Kept apart from handed-out keys so debt folding never promotes a budget-retired prefix
-	/// into the report floor.
-	budget: u64,
+	/// Span covering keys closed into `runs` by budget retirement ([`Self::fold_below`]) or
+	/// debt skip compaction ([`Self::compact_skip`]) without having been handed out or reported.
+	/// Kept as one bounding range (zero heap overhead) so debt folding never promotes unreported
+	/// keys into the report floor.
+	unreported: std::ops::Range<u64>,
 	/// The keys a fold counted as handed out that no range held then, so no budget judged
 	/// them: a range added later owes each it holds (see [`Self::reopen`]). Always within `runs`,
 	/// and never more runs than [`Self::fold_below`] leaves.
@@ -89,6 +90,27 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
+	/// Compact `groups` across declared skips under pool debt, extending `unreported` so
+	/// debt folding never promotes compacted skips into the report floor.
+	pub fn compact_skip(&mut self, groups: std::ops::Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.insert_run(groups.clone());
+		self.mark_unreported(groups);
+	}
+
+	fn mark_unreported(&mut self, span: std::ops::Range<u64>) {
+		if span.is_empty() {
+			return;
+		}
+		if self.unreported.is_empty() {
+			self.unreported = span;
+		} else {
+			self.unreported = self.unreported.start.min(span.start)..self.unreported.end.max(span.end);
+		}
+	}
+
 	/// Forget that any key in `groups` was handed out, splitting the runs it cuts.
 	pub fn remove(&mut self, groups: std::ops::Range<u64>) {
 		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
@@ -108,6 +130,20 @@ impl Delivered {
 			}
 			if end > last {
 				self.runs.insert(last + 1, end);
+			}
+		}
+		// Shrink both ends of `unreported` past any keys `remove` just vacated in `runs`, so
+		// keys later handed out there are not permanently blocked from debt folding.
+		if !self.unreported.is_empty() {
+			let start = self.next_from(self.unreported.start);
+			let end = self
+				.runs
+				.range(..self.unreported.end)
+				.next_back()
+				.map(|(_, last)| (*last + 1).min(self.unreported.end));
+			match (start, end) {
+				(Some(start), Some(end)) if start < end => self.unreported = start..end,
+				_ => self.unreported = 0..0,
 			}
 		}
 	}
@@ -157,8 +193,8 @@ impl Delivered {
 	/// identity makes harmless, as [`Record::retire`](super::record::Record) trades, rather than
 	/// miss one never handed out.
 	pub fn fold_below(&mut self, floor: u64, judged: Option<&Cover>) {
-		self.budget = self.budget.max(floor);
-		let gaps: Vec<std::ops::Range<u64>> = self.gaps(self.floor()..floor).collect();
+		let prev = self.floor();
+		let gaps: Vec<std::ops::Range<u64>> = self.gaps(prev..floor).collect();
 		let added = !gaps.is_empty();
 		for gap in gaps {
 			match judged {
@@ -169,6 +205,9 @@ impl Delivered {
 				}
 				None => self.unjudged.insert(gap),
 			}
+		}
+		if prev < floor {
+			self.mark_unreported(prev..floor);
 		}
 		self.forget_below(floor);
 		// Placed ranges say what joins; a fold while they're placed is followed by one that is.
@@ -191,9 +230,34 @@ impl Delivered {
 		}
 	}
 
-	/// Highest key retired by the reader's freshness budget.
-	pub fn budget_floor(&self) -> u64 {
-		self.budget
+	/// Bounding span covering keys closed by budget retirement or skip compaction without
+	/// having been reported.
+	pub fn unreported(&self) -> std::ops::Range<u64> {
+		self.unreported.clone()
+	}
+
+	/// One past the contiguous settled run in `delivered` starting at `key`, stopping before
+	/// `unreported` so debt folding never promotes unreported keys.
+	pub fn settled_run_end(&self, key: u64) -> Option<u64> {
+		if self.unreported.contains(&key) {
+			return None;
+		}
+		let end = self.run_end(key)?;
+		if !self.unreported.is_empty() && key < self.unreported.start && end > self.unreported.start {
+			Some(self.unreported.start)
+		} else {
+			Some(end)
+		}
+	}
+
+	/// The lowest key from `key` on that is in `delivered` and outside `unreported`.
+	pub fn next_settled_from(&self, key: u64) -> Option<u64> {
+		let start = self.next_from(key)?;
+		if self.unreported.contains(&start) {
+			self.next_from(self.unreported.end)
+		} else {
+			Some(start)
+		}
 	}
 
 	/// Whether a fold counted `key` as handed out while no range held it.
@@ -218,6 +282,11 @@ impl Delivered {
 	pub fn settle_below(&mut self, floor: u64) {
 		self.forget_below(floor);
 		self.unjudged.remove(0..floor);
+		if self.unreported.end <= floor {
+			self.unreported = 0..0;
+		} else if self.unreported.start < floor {
+			self.unreported.start = floor;
+		}
 	}
 
 	/// Count every key below `floor` as handed out.

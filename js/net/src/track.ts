@@ -3648,7 +3648,7 @@ export class Subscriber {
 		budget: Budget;
 		coverage?: Coverage;
 	};
-	#reported = new Runs<Run>();
+	#reported = new Runs<Run>(() => true);
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
 	// under pool pressure; a key-order read folds at where it is instead (see #fold).
@@ -5431,7 +5431,11 @@ export class Subscriber {
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.settleIfDropping = (subscriber, key) => {
-			if (subscriber.#dropsSeen !== undefined || subscriber.#reported.size > 0) {
+			if (
+				subscriber.#resume !== undefined
+					? subscriber.#reported.size > 0 || subscriber.#floor > 0n
+					: subscriber.#dropsSeen !== undefined
+			) {
 				subscriber.#settled(key, key + 1n);
 			}
 		};

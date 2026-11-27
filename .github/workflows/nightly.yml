@@ -432,7 +432,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -504,13 +504,14 @@ jobs:
           # The runner user is not in the video group.
           sudo chmod a+rw /dev/video*
       - name: Test
+        id: test
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci
           CI_STRICT: 1
       - name: Upload the steady run
         # Its samples, heap dumps, and binaries name the stacks that grew (`jeprof --base`).
-        if: failure() && matrix.recipe == 'test steady'
+        if: ${{ always() && steps.test.outcome != 'success' && matrix.recipe == 'test steady' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: steady
