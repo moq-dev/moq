@@ -2153,7 +2153,7 @@ export class Publisher {
 				const around = hooks.wholeAround(track, gap.start);
 				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
-				record.tell(from, gap.end);
+				record.tell(from, gap.end, hole.skip);
 				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
@@ -2163,9 +2163,10 @@ export class Publisher {
 		// nothing went out over it. A drop of a group held whole names its span.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
-			if (!hole.skip) end = reach(end);
-			record.tell(start, end);
-			return sendHole(holeMessage(start, end, hole));
+			const reached = hole.skip ? end : reach(end);
+			record.tell(start, reached, hole.skip);
+			if (reached > end) record.tell(end, reached, true);
+			return sendHole(holeMessage(start, reached, hole));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
@@ -2304,7 +2305,7 @@ export class Publisher {
 					skipped = new Runs<DropRun>(sameHole);
 				}
 				for (const { start, end } of pendingCuts.splice(0)) {
-					record?.tell(start, end);
+					record?.tell(start, end, true);
 					if (
 						!(await sendHole({
 							drop: SubscribeDrop.given(start, end, new StreamError(StreamCode.Skip), this.version),
@@ -2316,6 +2317,7 @@ export class Publisher {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
 						// The rest of the span is told with it; the served start keeps its record.
 						for (const gap of record?.untold(start, end) ?? []) record?.tell(gap.start, gap.end);
+						if (end > start + 1n) record?.tell(start + 1n, end, true);
 						if (!(await sendHole({ drop: SubscribeDrop.given(start, end, error, this.version) })))
 							return false;
 					}
@@ -2633,7 +2635,7 @@ export class Publisher {
 					// The starts inside a group sent whole are accounted for by its GROUP_END, so the
 					// end-of-track scan never drops them.
 					ended: (end) => {
-						if (end > group.start + 1n) record?.tell(group.start + 1n, end);
+						if (end > group.start + 1n) record?.tell(group.start + 1n, end, true);
 					},
 					cut: (start, end) => {
 						pendingCuts.push({ start, end });

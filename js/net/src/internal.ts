@@ -731,8 +731,13 @@ export interface ResumeSource {
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
 	 */
 	untell(start: bigint, end: bigint): void;
-	/** One past the declared skip run holding `key` on the serving copy, if `key` is skipped. */
-	skipEnd(key: bigint): bigint | undefined;
+	/** Bridge declared skips on the serving copy into the logical reader's `delivered` set. */
+	bridgeSkips(
+		delivered: Delivered,
+		key: bigint,
+		allow: (start: bigint, end: bigint) => boolean,
+		onBridge?: (start: bigint, end: bigint) => void,
+	): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1276,8 +1281,15 @@ export const hooks: {
 	 * `Subscriber::settle_if_dropping`.
 	 */
 	settleIfDropping: (subscriber: Subscriber, key: bigint) => void;
-	/** One past the declared skip run holding `key` on `subscriber`'s track, if `key` is skipped. */
-	skipEnd: (subscriber: Subscriber, key: bigint) => bigint | undefined;
+	/** Bridge declared skips on `subscriber`'s track into `delivered`, returning the new drops revision. */
+	bridgeSkips: (
+		subscriber: Subscriber,
+		delivered: Delivered,
+		key: bigint,
+		seen: number,
+		allow: (start: bigint, end: bigint) => boolean,
+		onBridge?: (start: bigint, end: bigint) => void,
+	) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1815,7 +1827,7 @@ export const hooks: {
 	settleIfDropping: () => {
 		throw new Error("track.ts not loaded");
 	},
-	skipEnd: () => {
+	bridgeSkips: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

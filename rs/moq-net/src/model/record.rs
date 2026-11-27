@@ -161,6 +161,25 @@ impl Record {
 		}
 	}
 
+	/// Record that the wire was told of declared skip `range` (for example a `GROUP_END` inner
+	/// span or `SUBSCRIBE_DROP(SKIP)`), bridging it in `delivered` if it connects handed-out runs.
+	pub fn tell_skip(&mut self, range: Range<u64>) {
+		if !range.is_empty() {
+			self.reported.insert(range.clone(), Report::Final);
+			self.delivered.bridge_skip(range);
+		}
+	}
+
+	/// Bridge a declared skip `range` in `delivered` after it was told to the wire.
+	pub fn bridge_skip(&mut self, range: Range<u64>) {
+		self.delivered.bridge_skip(range);
+	}
+
+	/// Whether this record has already recorded reports or folded a report floor.
+	pub fn has_reports(&self) -> bool {
+		self.floor > 0 || !self.reported.is_empty()
+	}
+
 	/// Forget every report of `range`, which the wire was never told: a run given up below
 	/// where delivery starts, which a later widening may still serve or report.
 	pub fn untell(&mut self, range: Range<u64>) {

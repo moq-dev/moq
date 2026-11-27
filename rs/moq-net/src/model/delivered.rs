@@ -95,58 +95,82 @@ impl Delivered {
 		false
 	}
 
-	/// Bridge declared-skip gaps around `key` and at the oldest gap (`above_gap`), invoking
-	/// `on_bridge` for each bridged gap. Only connects already-handed-out runs; never extends
-	/// `delivered` below the lowest or above the highest handed-out group.
-	pub fn bridge_skips(
+	/// Bridge the immediate declared-skip gaps adjacent to `key`'s run that satisfy `allow`,
+	/// invoking `on_bridge` for each bridged gap. Only connects already-handed-out runs; never
+	/// extends `delivered` below the lowest or above the highest handed-out group.
+	pub fn bridge_adjacent_skips(
 		&mut self,
 		key: u64,
 		mut skip_end: impl FnMut(u64) -> Option<u64>,
+		mut allow: impl FnMut(std::ops::Range<u64>) -> bool,
 		mut on_bridge: impl FnMut(std::ops::Range<u64>),
 	) {
-		// Walk backward from the run holding `key`, allowing one still-open gap right below it so
-		// overlapping live groups still collapse even if a permanent hole sits lower down.
-		let mut cur = self.runs.range(..=key).next_back().map_or(key, |(&first, _)| first);
-		let mut allowed_open = true;
-		while let Some((&prev_start, &prev_last)) = self.runs.range(..cur).next_back() {
-			let Some(prev_end) = prev_last.checked_add(1).filter(|end| *end < cur) else {
-				break;
-			};
-			if skip_end(prev_end).is_some_and(|end| end >= cur) {
-				self.insert_run(prev_end..cur);
-				on_bridge(prev_end..cur);
-				cur = prev_start;
-			} else if allowed_open {
-				allowed_open = false;
-				cur = prev_start;
-			} else {
-				break;
-			}
+		if self.runs.len() < 2 {
+			return;
 		}
-		// Bridge the immediate gap above the run holding `key`, if `key` landed below an
-		// already-handed-out group.
+		if let Some((&cur_start, _)) = self.runs.range(..=key).next_back()
+			&& let Some((_, &prev_last)) = self.runs.range(..cur_start).next_back()
+			&& let Some(prev_end) = prev_last.checked_add(1).filter(|end| *end < cur_start)
+			&& skip_end(prev_end).is_some_and(|end| end >= cur_start)
+			&& allow(prev_end..cur_start)
+		{
+			self.insert_run(prev_end..cur_start);
+			on_bridge(prev_end..cur_start);
+		}
 		if let Some(after) = self.run_end(key)
 			&& let Some(next_start) = self.next_from(after)
 			&& next_start > after
 			&& skip_end(after).is_some_and(|end| end >= next_start)
+			&& allow(after..next_start)
 		{
 			self.insert_run(after..next_start);
 			on_bridge(after..next_start);
 		}
-		// Collapse any oldest gap that became skipped since the groups around it were handed out.
-		while let Some(above) = self.above_gap() {
-			let Some((_, &prev_last)) = self.runs.range(..above).next_back() else {
+	}
+
+	/// Bridge every gap inside declared skip `skip` that sits strictly between two
+	/// already-handed-out runs of `self` and satisfies `allow`, invoking `on_bridge` for each
+	/// bridged gap. Never extends `delivered` below the lowest or above the highest handed-out
+	/// group.
+	pub fn bridge_skip_gaps(
+		&mut self,
+		skip: std::ops::Range<u64>,
+		mut allow: impl FnMut(std::ops::Range<u64>) -> bool,
+		mut on_bridge: impl FnMut(std::ops::Range<u64>),
+	) {
+		if skip.is_empty() || self.runs.len() < 2 {
+			return;
+		}
+		let Some(mut gap_start) = self
+			.runs
+			.range(..=skip.start)
+			.next_back()
+			.and_then(|(_, &last)| last.checked_add(1).filter(|end| *end >= skip.start))
+			.or_else(|| {
+				self.runs
+					.range(skip.start..skip.end)
+					.next()
+					.and_then(|(_, &last)| last.checked_add(1))
+			})
+		else {
+			return;
+		};
+		while gap_start < skip.end {
+			let Some(next_start) = self.next_from(gap_start) else {
 				break;
 			};
-			let Some(below) = prev_last.checked_add(1).filter(|end| *end < above) else {
-				break;
-			};
-			if skip_end(below).is_some_and(|end| end >= above) {
-				self.insert_run(below..above);
-				on_bridge(below..above);
-			} else {
+			if next_start > skip.end {
 				break;
 			}
+			let gap = gap_start..next_start;
+			if allow(gap.clone()) {
+				self.insert_run(gap.clone());
+				on_bridge(gap);
+			}
+			let Some(next_end) = self.run_end(next_start) else {
+				break;
+			};
+			gap_start = next_end;
 		}
 	}
 

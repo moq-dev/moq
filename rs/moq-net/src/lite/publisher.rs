@@ -6558,7 +6558,7 @@ impl TrackRun {
 		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
 		if !cut.is_empty() && self.start.emits_range() {
 			for inner in cut {
-				self.track.record_mut().tell(inner.clone(), Report::Final);
+				self.track.record_mut().tell_skip(inner.clone());
 				self.buffer_hole(inner, Hole::Skip, writer)?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -6574,6 +6574,11 @@ impl TrackRun {
 					let record = self.track.record_mut();
 					for gap in record.untold(span.clone()).iter() {
 						record.tell(gap.clone(), Report::Final);
+					}
+					if let Some(inner_start) = span.start.checked_add(1)
+						&& inner_start < span.end
+					{
+						record.bridge_skip(inner_start..span.end);
 					}
 				}
 				self.buffer_hole(span, hole, writer)?;
@@ -6812,7 +6817,7 @@ impl TrackRun {
 	/// span a whole group's GROUP_END accounted for.
 	fn mark_served(&mut self, groups: Range<u64>) {
 		if self.start.emits_range() {
-			self.track.record_mut().tell(groups, Report::Final);
+			self.track.record_mut().tell_skip(groups);
 		}
 	}
 
@@ -6828,11 +6833,21 @@ impl TrackRun {
 		if !self.start.emits_range() || range.is_empty() {
 			return Ok(false);
 		}
+		let end = range.end;
 		let range = match hole {
 			Hole::Skip => range,
-			Hole::Drop { .. } => range.start..self.track.span_end(range.end),
+			Hole::Drop { .. } => range.start..self.track.span_end(end),
 		};
-		self.track.record_mut().tell(range.clone(), Report::Final);
+		let record = self.track.record_mut();
+		match hole {
+			Hole::Skip => record.tell_skip(range.clone()),
+			Hole::Drop { .. } => {
+				record.tell(range.clone(), Report::Final);
+				if range.end > end {
+					record.bridge_skip(end..range.end);
+				}
+			}
+		}
 		self.buffer_hole(range, hole.clone(), writer)?;
 		Ok(true)
 	}
@@ -6850,7 +6865,10 @@ impl TrackRun {
 		}
 		let gaps = self.track.record_mut().untold(range);
 		for gap in gaps.iter() {
-			self.track.record_mut().tell(gap.clone(), Report::Final);
+			match hole {
+				Hole::Skip => self.track.record_mut().tell_skip(gap.clone()),
+				Hole::Drop { .. } => self.track.record_mut().tell(gap.clone(), Report::Final),
+			}
 			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())

@@ -81,68 +81,72 @@ export class Delivered {
 	}
 
 	/**
-	 * Bridge declared-skip gaps around `key` and at the oldest gap (`aboveGap`), invoking
-	 * `onBridge` for each bridged gap. Only connects already-handed-out runs; never extends
-	 * `delivered` below the lowest or above the highest handed-out group. Mirrors the Rust
-	 * `Delivered::bridge_skips`.
+	 * Bridge the immediate declared-skip gaps adjacent to `key`'s run that satisfy `allow`,
+	 * invoking `onBridge` for each bridged gap. Only connects already-handed-out runs; never
+	 * extends `delivered` below the lowest or above the highest handed-out group. Mirrors the
+	 * Rust `Delivered::bridge_adjacent_skips`.
 	 */
-	bridgeSkips(
+	bridgeAdjacentSkips(
 		key: bigint,
 		skipEnd: (from: bigint) => bigint | undefined,
+		allow: (start: bigint, end: bigint) => boolean,
 		onBridge?: (start: bigint, end: bigint) => void,
 	): void {
-		// Walk backward from the run holding `key`, allowing one still-open gap right below it so
-		// overlapping live groups still collapse even if a permanent hole sits lower down.
+		if (this.#runs.length < 2) return;
 		const at = this.#below(key);
-		let cur = at >= 0 ? this.#runs[at][0] : key;
-		let allowedOpen = true;
-		for (;;) {
-			const prev = this.#below(cur - 1n);
-			if (prev < 0) break;
-			const [prevStart, prevLast] = this.#runs[prev];
-			const prevEnd = prevLast + 1n;
-			if (prevEnd >= cur) break;
+		if (at > 0) {
+			const curStart = this.#runs[at][0];
+			const prevEnd = this.#runs[at - 1][1] + 1n;
 			const end = skipEnd(prevEnd);
-			if (end !== undefined && end >= cur) {
-				this.addRun(prevEnd, cur);
-				onBridge?.(prevEnd, cur);
-				cur = prevStart;
-			} else if (allowedOpen) {
-				allowedOpen = false;
-				cur = prevStart;
-			} else {
-				break;
+			if (prevEnd < curStart && end !== undefined && end >= curStart && allow(prevEnd, curStart)) {
+				this.addRun(prevEnd, curStart);
+				onBridge?.(prevEnd, curStart);
 			}
 		}
-		// Bridge the immediate gap above the run holding `key`, if `key` landed below an
-		// already-handed-out group.
 		const after = this.runEnd(key);
 		if (after !== undefined) {
 			const nextIdx = this.#below(after) + 1;
 			if (nextIdx < this.#runs.length) {
 				const nextStart = this.#runs[nextIdx][0];
 				const end = skipEnd(after);
-				if (nextStart > after && end !== undefined && end >= nextStart) {
+				if (nextStart > after && end !== undefined && end >= nextStart && allow(after, nextStart)) {
 					this.addRun(after, nextStart);
 					onBridge?.(after, nextStart);
 				}
 			}
 		}
-		// Collapse any oldest gap that became skipped since the groups around it were handed out.
-		for (;;) {
-			const above = this.aboveGap();
-			if (above === undefined) break;
-			const prev = this.#below(above - 1n);
-			if (prev < 0) break;
-			const below = this.#runs[prev][1] + 1n;
-			if (below >= above) break;
-			const end = skipEnd(below);
-			if (end !== undefined && end >= above) {
-				this.addRun(below, above);
-				onBridge?.(below, above);
-			} else {
-				break;
+	}
+
+	/**
+	 * Bridge every gap inside declared skip `[skipStart, skipEnd)` that sits strictly between
+	 * two already-handed-out runs of `this` and satisfies `allow`, invoking `onBridge` for each
+	 * bridged gap. Never extends `delivered` below the lowest or above the highest handed-out
+	 * group. Mirrors the Rust `Delivered::bridge_skip_gaps`.
+	 */
+	bridgeSkipGaps(
+		skipStart: bigint,
+		skipEnd: bigint,
+		allow: (start: bigint, end: bigint) => boolean,
+		onBridge?: (start: bigint, end: bigint) => void,
+	): void {
+		if (skipStart >= skipEnd || this.#runs.length < 2) return;
+		let gapStart: bigint | undefined;
+		const below = this.#below(skipStart);
+		if (below >= 0 && this.#runs[below][1] + 1n >= skipStart) {
+			gapStart = this.#runs[below][1] + 1n;
+		} else if (below + 1 < this.#runs.length && this.#runs[below + 1][0] < skipEnd) {
+			gapStart = this.#runs[below + 1][1] + 1n;
+		}
+		while (gapStart !== undefined && gapStart < skipEnd) {
+			const nextIdx = this.#below(gapStart) + 1;
+			if (nextIdx >= this.#runs.length) break;
+			const nextStart = this.#runs[nextIdx][0];
+			if (nextStart > skipEnd) break;
+			if (allow(gapStart, nextStart)) {
+				this.addRun(gapStart, nextStart);
+				onBridge?.(gapStart, nextStart);
 			}
+			gapStart = this.runEnd(nextStart);
 		}
 	}
 

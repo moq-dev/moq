@@ -2120,6 +2120,30 @@ impl TrackState {
 		}
 	}
 
+	/// Bridge immediate declared skips adjacent to `key` and any gaps in `delivered` touched by
+	/// newly declared skips since `seen` (updating `seen`), calling `allow` before bridging each
+	/// gap and `on_bridge` after.
+	fn bridge_skips(
+		&self,
+		delivered: &mut Delivered,
+		key: u64,
+		seen: &mut u64,
+		mut allow: impl FnMut(ops::Range<u64>) -> bool,
+		mut on_bridge: impl FnMut(ops::Range<u64>),
+	) {
+		delivered.bridge_adjacent_skips(key, |k| self.skip_end(k), &mut allow, &mut on_bridge);
+		if delivered.runs() > 1 && self.drops_changes.revision() != *seen {
+			for changed in self.drops_changes.since(*seen) {
+				for (skip, hole) in self.drops.overlapping(&changed) {
+					if *hole == Hole::Skip {
+						delivered.bridge_skip_gaps(skip.clone(), &mut allow, &mut on_bridge);
+					}
+				}
+			}
+			*seen = self.drops_changes.revision();
+		}
+	}
+
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
 	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
@@ -8429,11 +8453,25 @@ impl Consumer {
 	}
 
 	/// One past the declared skip run holding `key`, if `key` was declared skipped.
-	pub(super) fn skip_end(&self, key: u64) -> Option<u64> {
+	/// Bridge declared skips on this track (or its serving route) into `delivered`; see
+	/// [`TrackState::bridge_skips`].
+	pub(super) fn bridge_skips(
+		&self,
+		delivered: &mut Delivered,
+		key: u64,
+		seen: &mut u64,
+		allow: impl FnMut(ops::Range<u64>) -> bool,
+		on_bridge: impl FnMut(ops::Range<u64>),
+	) {
 		if let Some(serving) = self.serving() {
-			return serving.skip_end(key);
+			serving.bridge_skips(delivered, key, seen, allow, on_bridge);
+			return;
 		}
-		self.with_state(|state| state?.read().skip_end(key))
+		self.with_state(|state| {
+			if let Some(state) = state {
+				state.read().bridge_skips(delivered, key, seen, allow, on_bridge);
+			}
+		});
 	}
 
 	/// When the latest group cached at `keys` landed; see [`Subscriber::landed`].
@@ -10096,6 +10134,8 @@ struct Cursor {
 	record: Record,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
+	/// The [`TrackState::drops_changes`] revision revisited for bridging declared skips in `delivered`.
+	drops_bridged: u64,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
 	/// The keys a bounded window owes that the local floor or cap keeps out and the track
@@ -10689,6 +10729,7 @@ impl Cursor {
 			seek_pending: BTreeMap::new(),
 			record: Record::default(),
 			drops: None,
+			drops_bridged: 0,
 			misses: None,
 			kept_out: None,
 			routed_out: None,
@@ -11646,12 +11687,28 @@ impl Cursor {
 		}
 		self.prune_skipped();
 		self.record.delivered.insert(key);
+		let reporting = self.drops.is_some() || self.record.has_reports();
 		let mut delivered = std::mem::take(&mut self.record.delivered);
 		let mut bridged = Vec::new();
 		if !ordered {
 			if delivered.runs() > 1 {
 				let state = self.state.read();
-				delivered.bridge_skips(key, |k| state.skip_end(k), |gap| bridged.push(gap));
+				let record = &self.record;
+				let window = &self.filter.window;
+				state.bridge_skips(
+					&mut delivered,
+					key,
+					&mut self.drops_bridged,
+					|gap| match reporting {
+						true => record.told_all(gap),
+						false => window.groups().is_none_or(|groups| {
+							groups
+								.first(gap.start, gap.end - 1)
+								.is_some_and(|run| *run.start() <= gap.start && *run.end() >= gap.end - 1)
+						}),
+					},
+					|gap| bridged.push(gap),
+				);
 				if delivered.above_gap().is_some() {
 					self.forget_past_budget_with(&state, &mut delivered, self.filter.window.budget(), None);
 				}
@@ -13235,15 +13292,18 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.hand_out(key, ordered),
 			Inner::Resume(resume, logical) => {
-				let delivered = &mut logical.record.delivered;
+				let reporting = logical.record.has_reports();
+				let mut delivered = std::mem::take(&mut logical.record.delivered);
 				if ordered {
 					delivered.forget_below(key);
 				}
 				delivered.insert(key);
 				if !ordered && delivered.runs() > 1 {
-					delivered.bridge_skips(key, |k| resume.skip_end(k), |_| {});
+					let record = &logical.record;
+					resume.bridge_skips(&mut delivered, key, reporting, |gap| record.told_all(gap));
 				}
-				resume.forget_past_budget(delivered);
+				resume.forget_past_budget(&mut delivered);
+				logical.record.delivered = delivered;
 			}
 		}
 	}
@@ -35527,7 +35587,10 @@ mod test {
 							assert_eq!(drain_groups(subscriber), [key], "{reader:?} received={received}");
 							match reader {
 								Reader::Told => {
-									subscriber.record_mut().tell(span, Report::Final);
+									subscriber.record_mut().tell(key..key + 1, Report::Final);
+									if span.end > key + 1 {
+										subscriber.record_mut().tell_skip(key + 1..span.end);
+									}
 								}
 								Reader::Dropped => {
 									drained_drops(subscriber);
@@ -35852,6 +35915,52 @@ mod test {
 		}
 		assert!(most <= 4, "delivered/reported grew to {most} runs");
 		assert_eq!(sub.delivered_runs(), 1);
+	}
+
+	/// A wire publisher serving disjoint ranges `[0, 0]` and `[10, 10]` must not bridge the
+	/// out-of-range unreported skip `[1, 10)` into `delivered`, so folding under cache debt
+	/// cannot advance the report floor over `[1, 10)` and widening to `[0, 10]` still emits it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn disjoint_wire_publisher_does_not_fold_unreported_skip_bridge() {
+		let (producer, pool) = pooled_producer(1);
+		producer.received();
+		let mut g0 = producer.create_group(group::Info { start: 0 }).unwrap();
+		g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..]).unwrap();
+		g0.finish_at(10).unwrap();
+		producer.skip_groups(1..10);
+		let mut g10 = producer.create_group(group::Info { start: 10 }).unwrap();
+		g10.write_frame(Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
+		g10.finish().unwrap();
+
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([
+			Range {
+				start: Start::Time(0),
+				end: Some(0),
+			},
+			Range {
+				start: Start::Time(10),
+				end: Some(10),
+			},
+		]));
+		// Serve group 0, record on wire, then serve group 10 and record on wire.
+		assert_eq!(drain_groups(&mut sub), [10, 0]);
+		sub.record_mut().tell(0..1, Report::Final);
+		sub.record_mut().tell(10..11, Report::Final);
+		// Force pool pressure and a poll that settles the record.
+		let _ = pool.recorded();
+		assert!(drained_drops(&mut sub).is_empty());
+		assert!(
+			!sub.record_mut().told(5),
+			"unreported out-of-range skip must never be folded into the report floor"
+		);
+		// Widening to [0, 10] must still report [1, 10).
+		sub.update(Subscription::default().with_ranges([Range {
+			start: Start::Time(0),
+			end: Some(10),
+		}]))
+		.unwrap();
+		assert_eq!(drained_drops(&mut sub), [(1, 10)]);
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

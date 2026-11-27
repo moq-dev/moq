@@ -772,6 +772,9 @@ struct Copy {
 	resolved: BTreeMap<u64, Resolved>,
 	/// Replaced by a newer route.
 	replaced: bool,
+	/// The serving copy's [`track::TrackState::drops_changes`] revision revisited for bridging
+	/// declared skips into the logical reader's `delivered` set.
+	drops_bridged: u64,
 	/// Capped when replaced, at the boundary the copy replacing it starts at, or for a
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
@@ -1641,10 +1644,33 @@ impl Subscriber {
 		self.reader().drops.len()
 	}
 
-	/// One past the declared skip run holding `key` on the serving copy, if `key` is skipped.
-	pub(super) fn skip_end(&self, key: u64) -> Option<u64> {
-		let reader = self.reader();
-		reader.copies.last()?.track.skip_end(key)
+	/// Bridge declared skips on the serving copy into the logical reader's `delivered` set.
+	pub(super) fn bridge_skips(
+		&mut self,
+		delivered: &mut Delivered,
+		key: u64,
+		reporting: bool,
+		mut told_all: impl FnMut(std::ops::Range<u64>) -> bool,
+	) {
+		let mut reader = self.reader();
+		let Reader { copies, window, .. } = &mut *reader;
+		let Some(copy) = copies.last_mut() else {
+			return;
+		};
+		copy.track.bridge_skips(
+			delivered,
+			key,
+			&mut copy.drops_bridged,
+			|gap| match reporting {
+				true => told_all(gap),
+				false => window.groups().is_none_or(|groups| {
+					groups
+						.first(gap.start, gap.end - 1)
+						.is_some_and(|run| *run.start() <= gap.start && *run.end() >= gap.end - 1)
+				}),
+			},
+			|_| {},
+		);
 	}
 
 	/// Rescan drops on every copy; see [`track::Subscriber::rescan_drops`].
@@ -2622,6 +2648,7 @@ impl Reader {
 			resume,
 			resolved,
 			replaced: false,
+			drops_bridged: 0,
 			until: None,
 			cap: None,
 			done: None,
@@ -3482,53 +3509,89 @@ impl Reader {
 			}
 		}
 		let window = start..end.unwrap_or(u64::MAX);
-		if !window.is_empty() && !self.drops.is_empty() {
+		let mut revoked = Vec::new();
+		if !self.drops.is_empty() {
 			let mut passed = Vec::new();
-			let next = self.drops.overlapping(&window).find_map(|(run, err)| {
+			let mut next = None;
+			for (run, err) in self.drops.iter() {
 				let done = match err {
 					track::Hole::Skip => record.told_all(run.clone()),
 					track::Hole::Drop { .. } => delivered.covers(run.clone()),
 				};
 				if done {
 					passed.push(run.clone());
-					return None;
+					continue;
+				}
+				if *err == track::Hole::Skip {
+					let clipped = run.start.max(start)..run.end.min(window.end);
+					let keep = self.window.possible_runs(clipped);
+					let mut cur = run.start;
+					for part in &keep {
+						if cur < part.start {
+							revoked.push(cur..part.start);
+						}
+						cur = part.end;
+					}
+					if cur < run.end {
+						revoked.push(cur..run.end);
+					}
+					if let Some(open) = keep
+						.into_iter()
+						.find_map(|part| record.find_untold_gap(part, |gap| feeding.gaps(&gap).next()))
+					{
+						next = Some((open, err.clone()));
+						break;
+					}
+					continue;
 				}
 				let clipped = run.start.max(start)..run.end.min(window.end);
-				let open = match err {
-					track::Hole::Skip => record.find_untold_gap(clipped, |gap| feeding.gaps(&gap).next())?,
-					track::Hole::Drop { .. } => delivered
-						.gaps(clipped)
-						.into_iter()
-						.find_map(|gap| feeding.gaps(&gap).next())?,
-				};
-				Some((open, err.clone()))
-			});
+				if clipped.is_empty() {
+					continue;
+				}
+				if let Some(open) = delivered
+					.gaps(clipped)
+					.into_iter()
+					.find_map(|gap| feeding.gaps(&gap).next())
+				{
+					next = Some((open, err.clone()));
+					break;
+				}
+			}
 			for run in passed {
 				self.remove_drop(run);
+			}
+			for run in &revoked {
+				self.remove_drop(run.clone());
 			}
 			if let Some((open, err)) = next {
 				// Reported once. As on a plain cursor, the report is not final: a miss (a fill
 				// given up) may still land, and is handed out if it does.
 				self.remove_drop(open.clone());
+				for run in revoked {
+					self.untell(run);
+				}
 				return Poll::Ready((open, err));
 			}
 		}
 		// Pull lazily from the serving copy one drop at a time until one can be returned now: on
 		// a stable route with no replaced copies feeding, nothing unreturned is pre-queued into
-		// `self.drops`, so range updates and route switches never strand or need to revoke skips.
+		// `self.drops`, so range updates and route switches never strand skips.
 		if !ready {
+			for run in revoked {
+				self.untell(run);
+			}
 			return Poll::Pending;
 		}
-		loop {
+		let found = loop {
 			let Some(Sub::Ready(sub)) = self.copies.last_mut().map(|copy| &mut copy.sub) else {
-				return Poll::Pending;
+				break None;
 			};
 			let polled = match probe {
 				true => sub.poll_drop(waiter),
 				false => sub.poll_queued_drop(waiter),
 			};
 			let Poll::Ready((run, hole)) = polled else {
-				return Poll::Pending;
+				break None;
 			};
 			if Error::Stream(hole.error()).retryable() {
 				continue;
@@ -3541,30 +3604,53 @@ impl Reader {
 				continue;
 			}
 			let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
+			if hole == track::Hole::Skip {
+				let clipped = run.start.max(start)..run.end.min(window.end);
+				let keep = self.window.possible_runs(clipped);
+				let mut cur = run.start;
+				for part in &keep {
+					if cur < part.start {
+						revoked.push(cur..part.start);
+					}
+					cur = part.end;
+				}
+				if cur < run.end {
+					revoked.push(cur..run.end);
+				}
+				let open = keep
+					.iter()
+					.find_map(|part| record.find_untold_gap(part.clone(), |gap| feeding.gaps(&gap).next()));
+				if let Some(open) = open {
+					for part in keep {
+						for rem in [part.start..open.start.min(part.end), open.end.max(part.start)..part.end] {
+							if !rem.is_empty() && !record.told_all(rem.clone()) {
+								self.received.remove(rem.clone());
+								self.drops.insert(rem, hole.clone());
+							}
+						}
+					}
+					break Some((open, hole));
+				}
+				for part in keep {
+					if !part.is_empty() && !record.told_all(part.clone()) {
+						self.received.remove(part.clone());
+						self.drops.insert(part, hole.clone());
+					}
+				}
+				continue;
+			}
 			let clipped = run.start.max(start)..run.end.min(window.end);
 			let open = (!clipped.is_empty())
-				.then(|| match hole {
-					track::Hole::Skip => record.find_untold_gap(clipped.clone(), |gap| feeding.gaps(&gap).next()),
-					track::Hole::Drop { .. } => delivered
-						.gaps(clipped.clone())
+				.then(|| {
+					delivered
+						.gaps(clipped)
 						.into_iter()
-						.find_map(|gap| feeding.gaps(&gap).next()),
+						.find_map(|gap| feeding.gaps(&gap).next())
 				})
 				.flatten();
 			if let Some(open) = open {
-				// Keep only the unreturned remainder of this single run (for example when split
-				// around `feeding` or an already-reported key).
-				let (rem_start, rem_end) = match hole {
-					track::Hole::Skip => (clipped.start..open.start, open.end..clipped.end),
-					track::Hole::Drop { .. } => (run.start..open.start, open.end..run.end),
-				};
-				for rem in [rem_start, rem_end] {
-					let keep = !rem.is_empty()
-						&& match hole {
-							track::Hole::Skip => !record.told_all(rem.clone()),
-							track::Hole::Drop { .. } => !delivered.covers(rem.clone()),
-						};
-					if keep {
+				for rem in [run.start..open.start, open.end..run.end] {
+					if !rem.is_empty() && !delivered.covers(rem.clone()) {
 						match received {
 							true => self.received.insert(rem.clone()),
 							false => self.received.remove(rem.clone()),
@@ -3572,13 +3658,20 @@ impl Reader {
 						self.drops.insert(rem, hole.clone());
 					}
 				}
-				return Poll::Ready((open, hole));
+				break Some((open, hole));
 			}
 			match received {
 				true => self.received.insert(run.clone()),
 				false => self.received.remove(run.clone()),
 			}
 			self.drops.insert(run, hole);
+		};
+		for run in revoked {
+			self.untell(run);
+		}
+		match found {
+			Some(drop) => Poll::Ready(drop),
+			None => Poll::Pending,
 		}
 	}
 
@@ -3724,6 +3817,7 @@ impl Reader {
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
+			drops_bridged: 0,
 			until: Some(lowered.end.checked_sub(1)),
 			cap: None,
 			since: Some(track.now()),
@@ -16727,5 +16821,142 @@ mod test {
 			);
 		}
 		prev.finish().unwrap();
+	}
+
+	/// A queued split skip remainder `[16, 20)` (left over after `[15, 16)` was reported on an
+	/// earlier route) must not emit once `[10, 19]` is replaced by `[20, 29]` alongside an
+	/// unrelated unanswered time range ending at `5`, and must replay when `[10, 19]` returns.
+	#[test]
+	#[cfg(feature = "async")]
+	fn split_skip_remainder_checks_possible_range_coverage_and_replays_on_widen() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast.clone(), "sparse", crate::track::Info::timed());
+		a.received();
+		let b = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		b.received();
+		routes.serve(a.consume());
+
+		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
+		g0.write_frame(ts(0), &b"x"[..]).unwrap();
+		g0.finish().unwrap();
+		a.skip_groups(15..16);
+
+		let mut b0 = b.create_group(group::Info { start: 0 }).unwrap();
+		b0.write_frame(ts(0), &b"x"[..]).unwrap();
+		b0.finish().unwrap();
+		b.skip_groups(11..20);
+		let mut b20 = b.create_group(group::Info { start: 20 }).unwrap();
+		b20.write_frame(ts(20), &b"x"[..]).unwrap();
+		b20.finish().unwrap();
+
+		let mut sub = logical
+			.consume()
+			.subscribe(Subscription::default().with_ranges([
+				track::Range {
+					start: track::Start::Time(0),
+					end: Some(0),
+				},
+				track::Range {
+					start: track::Start::Time(10),
+					end: Some(19),
+				},
+			]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		// Route A reports `[15, 16)` to the logical reader.
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((15..16, track::Hole::Skip))
+		);
+		// Switch to route B, which holds `[11, 20)`: polling once emits `[11, 15)` and queues
+		// the split remainder `[16, 20)`.
+		routes.serve(b.consume());
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((11..15, track::Hole::Skip))
+		);
+		// Replace `[10, 19]` with `[20, 29]` while adding an unanswered time range ending at `5`.
+		sub.update(Subscription::default().with_ranges([
+			track::Range {
+				start: track::Start::Time(0),
+				end: Some(0),
+			},
+			track::Range {
+				start: track::Start::Time(20),
+				end: Some(29),
+			},
+			track::Range {
+				start: track::Start::Time(3),
+				end: Some(5),
+			},
+		]))
+		.unwrap();
+		assert!(
+			sub.poll_drop(&kio::Waiter::noop()).is_pending(),
+			"retired split remainder [16, 20) must not emit even with an unresolved range ending at 5"
+		);
+		assert_eq!(sub.queued_drops(), 0);
+		// Re-covering `[10, 19]` replays `[16, 20)` cleanly.
+		sub.update(Subscription::default().with_ranges([
+			track::Range {
+				start: track::Start::Time(0),
+				end: Some(0),
+			},
+			track::Range {
+				start: track::Start::Time(10),
+				end: Some(19),
+			},
+		]))
+		.unwrap();
+		assert_eq!(
+			sub.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((16..20, track::Hole::Skip))
+		);
+	}
+
+	/// Three or more overlapping sparse live groups (G0, G1, G2 handed out before G0 finishes
+	/// and declares its skip) starting above group 0 still coalesce via revisited skips.
+	#[test]
+	#[cfg(feature = "async")]
+	fn three_group_overlapping_sparse_live_stream_keeps_delivered_bounded() {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "sparse")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
+		a.received();
+		routes.serve(a.consume());
+
+		let mut sub = subscribe(&logical, HOUR);
+		let mut open: std::collections::VecDeque<(u64, group::Producer)> = std::collections::VecDeque::new();
+		for i in 0..200u64 {
+			let key = 1_000 + i * 10;
+			let mut g = a.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(ts(key), &b"x"[..]).unwrap();
+			let Poll::Ready(Ok(Some(recv))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("expected group {key}");
+			};
+			assert_eq!(recv.start, key);
+			open.push_back((key, g));
+			if open.len() >= 3 {
+				let (oldest_key, oldest) = open.pop_front().unwrap();
+				oldest.finish_at(oldest_key + 10).unwrap();
+				a.skip_groups(oldest_key + 1..oldest_key + 10);
+			}
+			assert!(
+				sub.delivered_runs() <= 4,
+				"three-group overlapping live stream must stay bounded, got {} at i={i}",
+				sub.delivered_runs()
+			);
+		}
+		for (_, g) in open {
+			g.finish().unwrap();
+		}
 	}
 }

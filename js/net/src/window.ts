@@ -11,7 +11,7 @@
 
 import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
-import { NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
+import { insertRun, NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
 import type { Range, Start, Subscription } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
@@ -1056,6 +1056,42 @@ export class Window {
 	 */
 	placed(from = 0n, end = UNBOUNDED): Run[] {
 		return from >= end ? [] : this.#groups.runs(from, end);
+	}
+
+	/**
+	 * The parts of `[from, end)` that any current range (placed or still resolving) can still
+	 * name. Unlike {@link runs}, an unresolved range contributes only up to its own end (and from
+	 * its lookup floor when known), so an unrelated unresolved range never keeps retired skips
+	 * outside it alive. Mirrors the Rust `Window::possible_runs`.
+	 */
+	possibleRuns(from = 0n, end = UNBOUNDED): Run[] {
+		if (from >= end) return [];
+		const out: Run[] = [];
+		for (const run of this.#groups.runs(from, end)) insertRun(out, run.start, run.end);
+		for (const key of [...this.#pending, ...this.#reaching]) {
+			const range = this.#ranges.get(key);
+			if (range === undefined || isEmpty(range)) continue;
+			const to = range.end === undefined ? end : min(range.end + 1n, end);
+			if (from < to) insertRun(out, from, to);
+		}
+		for (const { keys } of this.#waiting.all()) {
+			for (const key of keys) {
+				const span = this.#spans.get(key);
+				if (!span) continue;
+				const to = min(span.end, end);
+				if (from < to) insertRun(out, from, to);
+			}
+		}
+		for (const { keys } of this.#looking.all()) {
+			for (const key of keys) {
+				const span = this.#spans.get(key);
+				if (!span?.looking) continue;
+				const start = max(span.looking.floor, from);
+				const to = min(span.end, end);
+				if (start < to) insertRun(out, start, to);
+			}
+		}
+		return out;
 	}
 
 	/**

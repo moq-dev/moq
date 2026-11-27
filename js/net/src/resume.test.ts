@@ -7886,6 +7886,7 @@ test("narrowing around a wide skip on a closed copy does not spin", () => {
 		ranges: [{ start: 0n, end: 10n }],
 	});
 	try {
+		producer2.finish();
 		producer2.close();
 		sub2.update({
 			ranges: [
@@ -7893,17 +7894,52 @@ test("narrowing around a wide skip on a closed copy does not spin", () => {
 				{ start: 10n, end: 10n },
 			],
 		});
-		// Must terminate in bounded steps (never spin in `#tryDrop`).
-		let steps = 0;
-		while (hooks.tryDrop(sub2)) {
-			steps++;
-			expect(steps).toBeLessThanOrEqual(4);
-		}
+		// Must neither emit out-of-range skips nor spin while narrowed to [0, 0] + [10, 10].
+		expect(hooks.tryDrop(sub2)).toBeUndefined();
+		// Widening back to [0, 10] replays the parked skip cleanly.
+		sub2.update({ ranges: [{ start: 0n, end: 10n }] });
+		expect(hooks.tryDrop(sub2)).toMatchObject({ kind: "drop", start: 1n, end: 10n, skip: true });
+		expect(hooks.tryDrop(sub2)).toBeUndefined();
 	} finally {
 		sub2.close();
 		front2.consumer.close();
 		handle2.close();
 		source2.close();
+	}
+});
+
+// Three or more overlapping sparse live groups (G0, G1, G2 handed out before G0 finishes and
+// declares its skip) starting above group 0 still coalesce via revisited skips under an unlimited
+// budget.
+test("three-group overlapping sparse live stream keeps delivered bounded", () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	front.serve(handle);
+	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
+	try {
+		const open: { key: bigint; group: ReturnType<typeof producer.createGroup> }[] = [];
+		for (let i = 0n; i < 200n; i++) {
+			const key = 1_000n + i * 10n;
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
+			expect(drain(sub)).toEqual([key]);
+			open.push({ key, group });
+			if (open.length >= 3) {
+				const oldest = defined(open.shift());
+				const end = oldest.key + 10n;
+				oldest.group.finishAt(end);
+				producer.skipGroups(oldest.key + 1n, end);
+			}
+			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(4);
+		}
+		for (const item of open) item.group.finish();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
 	}
 });
 

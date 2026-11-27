@@ -7413,7 +7413,8 @@ test("a sparse live track keeps a bounded record", () => {
 						if (item && item.kind === "group") item.group.close();
 					} else {
 						expect(drainGroups(sub)).toEqual([key]);
-						wire?.tell(key, end);
+						wire?.tell(key, key + 1n);
+						if (end > key + 1n) wire?.tell(key + 1n, end, true);
 						while (hooks.tryDrop(sub));
 					}
 				}
