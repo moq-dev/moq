@@ -329,8 +329,8 @@ export interface ConnectProps {
 
 	/**
 	 * Probe a quiet peer and report it through the session's `liveness` before closing on it.
-	 * Only the WebSocket fallback can probe, so a connect with one dials the WebSocket alone, and
-	 * a supplied WebTransport `transport` refuses it. See {@link KeepAlive.KeepAlive}.
+	 * WebTransport cannot probe, so the connect throws wherever it would dial WebTransport (any
+	 * browser that supports it) or is handed one as `transport`. See {@link KeepAlive.KeepAlive}.
 	 */
 	keepAlive?: KeepAlive.KeepAlive;
 
@@ -412,6 +412,7 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	// Fail before dialing; the session checks again when it attaches.
 	if (props.auth) vacant(props.auth);
 	checkCost(props.cost);
+	KeepAlive.check(props);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 
 	// Resolves on abort or timeout so every in-flight transport tears itself down.
@@ -599,11 +600,9 @@ async function dialRace(
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
 
-	// WebTransport cannot probe its peer, so a keep-alive dials the WebSocket alone.
-	const webtransport =
-		isWebTransportSupported() && !props.keepAlive
-			? hedgeWebTransport(url, cancel, offered.alpns, props.webtransport)
-			: undefined;
+	const webtransport = isWebTransportSupported()
+		? hedgeWebTransport(url, cancel, offered.alpns, props.webtransport)
+		: undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket won the last race
 	// to this server. NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.

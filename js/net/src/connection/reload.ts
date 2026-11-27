@@ -26,7 +26,7 @@ import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
 import { checkCost, DEFAULT_TIMEOUT } from "./handshake.ts";
-import type { KeepAlive } from "./keep_alive.ts";
+import { check as checkKeepAlive, type KeepAlive } from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
@@ -451,6 +451,7 @@ export class Reload {
 		this.urlAuth = props?.urlAuth;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
+		checkKeepAlive({ keepAlive: props?.keepAlive });
 		this.keepAlive = props?.keepAlive;
 		// Validated here, like the versions, rather than by every attempt.
 		this.timeout = props?.timeout;
@@ -904,8 +905,7 @@ export class Reload {
 	 */
 	async #probe(connection: Session, dialing: URL, signal: AbortSignal): Promise<Reached> {
 		const never = new Promise<never>(() => {});
-		// WebTransport cannot run a keep-alive, so a session under one stays on the WebSocket.
-		if (connection.transport !== "websocket" || !isWebTransportSupported() || connection.liveness) return never;
+		if (connection.transport !== "websocket" || !isWebTransportSupported()) return never;
 		try {
 			for (let delay = PROBE_INITIAL; ; delay = delay.mul(2).min(PROBE_MAX)) {
 				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });

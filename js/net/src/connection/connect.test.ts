@@ -549,6 +549,22 @@ test("urlAuth cannot reach a supplied transport, which never dials the URL", asy
 	);
 });
 
+test("a keep-alive refuses a connect that would dial WebTransport, before dialing", async () => {
+	let dialed = false;
+	function StubWebTransport() {
+		dialed = true;
+	}
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	try {
+		const keepAlive = { soft: Duration.secs(2), hard: Duration.secs(10) };
+		await expect(connect(url, { keepAlive })).rejects.toThrow("would dial WebTransport");
+		expect(dialed).toBe(false);
+	} finally {
+		globalThis.WebTransport = original;
+	}
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);

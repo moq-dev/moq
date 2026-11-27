@@ -68,8 +68,8 @@ export interface ConnectionProps {
 
 	/**
 	 * The keep-alive each connection runs (not reactive), reported through the established
-	 * session's `liveness`. Implies a private loop that stays on the WebSocket fallback; see
-	 * {@link Connection.KeepAlive}.
+	 * session's `liveness`. Implies a private loop, and throws wherever the loop would dial
+	 * WebTransport; see {@link Connection.KeepAlive}.
 	 */
 	keepAlive?: KeepAliveType;
 

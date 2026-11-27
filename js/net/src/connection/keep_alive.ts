@@ -1,15 +1,16 @@
 import type { Duration } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
+import { isWebTransportSupported } from "./browser.ts";
 
 /**
  * How long a session may go without hearing from its peer: `stale` after `soft`, closed after
- * `hard`. Mirrors Rust's `moq_net::session::KeepAlive`.
+ * `hard`. Mirrors Rust's `moq_net::transport::KeepAlive`.
  *
  * The transport probes a peer that stays quiet for half of `soft`, and anything the peer sends
- * counts as hearing it, so a busy session pays nothing. Only the WebSocket fallback on qmux-01
- * and newer can probe; WebTransport has no ping, so a connect with a keep-alive dials the
- * WebSocket alone, and a supplied WebTransport refuses it. A `hard` longer than the negotiated
- * idle timeout is refused too, since the idle timeout stays in force as a backstop.
+ * counts as hearing it, so a busy session pays nothing. Only qmux-01 and newer (the WebSocket
+ * transport) can probe: WebTransport has no ping, so a connect that would use it refuses the
+ * keep-alive, as does a supplied WebTransport. A `hard` longer than the negotiated idle timeout
+ * is refused too, since the idle timeout stays in force as a backstop.
  */
 export interface KeepAlive {
 	/** How long the peer may go unheard before the session turns `stale`. */
@@ -30,6 +31,18 @@ interface Probing {
 	readonly stale: boolean;
 	staleChanged(): Promise<void>;
 	readonly closed: Promise<unknown>;
+}
+
+/**
+ * Refuse a keep-alive on a dial that would use WebTransport, before anything opens. Only a
+ * supplied `transport` skips the race, and {@link start} checks that one.
+ */
+export function check(props: { keepAlive?: KeepAlive; transport?: unknown }): void {
+	if (props.keepAlive && !props.transport && isWebTransportSupported()) {
+		throw new TypeError(
+			"keepAlive cannot run here: this browser would dial WebTransport, which has no ping to probe its peer",
+		);
+	}
 }
 
 /**
