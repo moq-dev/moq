@@ -182,12 +182,6 @@ impl Group {
 			timestamp: frame.timestamp,
 		})))
 	}
-
-	/// Resolves once the group is final: its frame count once finished, or the abort error.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		self.inner.poll_finished(waiter)
-	}
 }
 
 impl std::fmt::Debug for Group {
