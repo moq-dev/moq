@@ -1585,6 +1585,13 @@ impl Subscriber {
 		serving.map_or(end, |serving| serving.span_end(end))
 	}
 
+	/// The freshness bound the serving copy holds its readers to; see
+	/// [`track::Subscriber::max_age_bound`].
+	pub(super) fn max_age_bound(&self) -> Option<std::time::Duration> {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		serving.and_then(|serving| serving.max_age_bound())
+	}
+
 	/// When the latest group any copy caches at `keys` landed: a group a replaced copy
 	/// delivered landed all the same.
 	pub(super) fn landed(&self, keys: std::ops::Range<u64>) -> Option<crate::time::Instant> {
