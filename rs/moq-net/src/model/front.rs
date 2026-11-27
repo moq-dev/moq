@@ -29,7 +29,6 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
-	sync::Arc,
 	time::Duration,
 };
 
@@ -250,10 +249,9 @@ pub(super) struct Front {
 	resolved: bool,
 	tracks: BTreeMap<track::Key, Track>,
 	parked: BTreeSet<(Instant, track::Key)>,
-	/// Immutable track metadata, fixed by the first copy of each track name, in either mode,
-	/// until both modes are forgotten. Every source of the broadcast must serve the same
-	/// content.
-	info: BTreeMap<Arc<str>, track::Info>,
+	/// Immutable track metadata, fixed by the first copy of each track until it is
+	/// forgotten. Every source of the broadcast must serve the same content.
+	info: BTreeMap<track::Key, track::Info>,
 	/// How long an unread track stays before it is forgotten.
 	linger: Duration,
 	/// The deadline last armed, so a step only re-arms on change.
@@ -395,17 +393,10 @@ impl Front {
 			Event::Wanted { track } => self.wanted(track, &mut actions),
 			Event::Unwanted { track, now } => self.unwanted(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
-			// Its metadata goes too once its other mode is gone, so a peer naming endless
-			// tracks grows nothing.
+			// Its metadata goes too, so a peer naming endless tracks grows nothing.
 			Event::Forgotten { track } => {
 				self.tracks.remove(&track);
-				let other = track::Key {
-					name: track.name.clone(),
-					meta: !track.meta,
-				};
-				if !self.tracks.contains_key(&other) {
-					self.info.remove(&track.name);
-				}
+				self.info.remove(&track);
 			}
 			Event::Held => {
 				self.held = true;
@@ -612,7 +603,7 @@ impl Front {
 				return;
 			}
 			let verdict = match result {
-				Ok(info) if self.info.get(&name.name) == Some(&info) => Ok(()),
+				Ok(info) if self.info.get(&name) == Some(&info) => Ok(()),
 				Ok(_) => Err(Error::Unsupported),
 				Err((err, _)) => Err(err),
 			};
@@ -638,11 +629,11 @@ impl Front {
 		let verdict = match result {
 			// A copy of the same identity claims identical content, so any difference
 			// in its metadata is refused rather than reinterpreted.
-			Ok(info) => match self.info.get(&name.name) {
+			Ok(info) => match self.info.get(&name) {
 				Some(expected) if *expected != info => Err((Error::Unsupported, None)),
 				Some(_) => Ok(()),
 				None => {
-					self.info.insert(name.name.clone(), info);
+					self.info.insert(name.clone(), info);
 					Ok(())
 				}
 			},
@@ -1127,43 +1118,6 @@ mod tests {
 			}],
 		);
 		front
-	}
-
-	/// A track's metadata copy claims the properties its payload copy recorded: one logical
-	/// track has one set, whichever mode fixed it, until both modes are forgotten.
-	#[test]
-	fn a_metadata_copy_claims_the_payload_copys_properties() {
-		let mut front = serving(remote(1), 100);
-		let meta = track::Key {
-			name: "video".into(),
-			meta: true,
-		};
-		let t0 = Instant::now();
-		front.step(Event::TrackAssigned {
-			track: meta.clone(),
-			now: t0,
-		});
-		front.step(Event::Wanted { track: meta.clone() });
-		assert_actions(
-			front.step(Event::TrackInfo {
-				track: meta.clone(),
-				source: 100,
-				closing: false,
-				result: Ok(info().with_compression(track::Compression::Deflate)),
-				retry: None,
-			}),
-			&[Action::Abort {
-				track: meta.clone(),
-				err: Error::Unsupported,
-				retry: None,
-			}],
-		);
-
-		// Forgetting one mode keeps the record for the other.
-		front.step(Event::Forgotten { track: meta });
-		assert!(front.info.contains_key("video"));
-		front.step(Event::Forgotten { track: name("video") });
-		assert!(!front.info.contains_key("video"));
 	}
 
 	#[test]
@@ -2563,11 +2517,11 @@ mod tests {
 			}),
 			&[Action::Forget { track: name("video") }],
 		);
-		assert!(front.info.contains_key("video"));
+		assert!(front.info.contains_key(&name("video")));
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[]);
 		assert!(!front.tracks.contains_key(&name("video")));
 		// Its metadata goes with it, so endless track names grow nothing.
-		assert!(!front.info.contains_key("video"));
+		assert!(!front.info.contains_key(&name("video")));
 	}
 
 	/// A reader that looked the track up before the driver could forget it keeps

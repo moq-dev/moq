@@ -2169,7 +2169,8 @@ impl FrameIngest {
 				if header.info.timestamp.scale().is_some() {
 					max_ts = max_ts.max(header.info.timestamp.value());
 				}
-				header.info.size
+				// A metadata FRAME paused to admit has no payload behind it to skip.
+				if meta { 0 } else { header.info.size }
 			}
 			other @ (IngestPhase::Inflated { timestamp, .. } | IngestPhase::Size { timestamp, .. }) => {
 				if let Some(ts) = timestamp {
@@ -3522,6 +3523,67 @@ mod tests {
 	use crate::lite::test_transport::{Sent, SinkSession};
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
+
+	/// A metadata group dropped while its ingest waits to admit a header still finds the
+	/// GROUP_END buffered behind it: no payload follows that header, so the drain skips none.
+	#[test]
+	fn a_paused_metadata_frame_drains_to_its_group_end() {
+		/// The rest of the stream in one read, then its FIN.
+		struct Once(Option<bytes::Bytes>);
+		impl crate::transport::poll::Chunks for Once {
+			type Error = Error;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+				Poll::Ready(Ok(self.0.take()))
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let version = Version::Lite07;
+		let info = crate::track::Info::default();
+		// Untimed headers each declaring 4 MiB, more than the whole stream holds, so skipping one
+		// header's declared size would swallow the GROUP_END. More headers than the pace window
+		// holds, then a GROUP_END and the FIN.
+		let headers = 400_000;
+		let mut header = Vec::new();
+		crate::coding::Encoder::new(&mut header, version.into())
+			.varint((4 << 20) + 1)
+			.unwrap();
+		let mut stream = header.repeat(headers);
+		stream.extend_from_slice(&[0, 0]);
+		let mut reader = crate::coding::Reader::new(
+			crate::transport::poll::Buffered::new(Once(Some(bytes::Bytes::from(stream)))),
+			version,
+		);
+		let track = crate::track::Producer::new_meta(Arc::new(crate::broadcast::Info::default()), "test", info.clone());
+		let producer = track.create_group(crate::group::Info { start: 0 }).unwrap();
+		let _idle = producer.consume();
+		let mut group = crate::recv::Group::new(producer);
+		let mut ingest = FrameIngest::new(
+			lite::Framing::new(&info, version),
+			false,
+			0,
+			lite::Clock::new(version, 0),
+		);
+		let waiter = kio::Waiter::noop();
+		let mut written = 0;
+		loop {
+			let polled = ingest.poll(&mut reader, &mut group, &waiter);
+			assert!(polled.is_pending(), "{polled:?}");
+			if group.frame_count() == written {
+				break;
+			}
+			written = group.frame_count();
+		}
+		assert!(matches!(ingest.phase, IngestPhase::Admit { .. }), "paused to admit");
+		assert!(
+			ingest.try_drain_end(&mut reader, false, true).is_some(),
+			"the GROUP_END was lost"
+		);
+	}
 
 	/// A burst's answers naming the same largest position keep it ended if any says so, in
 	/// either order: a later one from a copy yet to see the end can't reopen the group.
