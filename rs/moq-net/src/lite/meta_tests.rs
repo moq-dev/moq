@@ -308,6 +308,7 @@ async fn metadata_over_an_older_session_reads_headers() {
 	write_group(&chain.track, 0);
 	let mut sub = meta(&chain.remote, None).await;
 	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
+	settle().await;
 	assert_eq!(
 		sent(&chain.downstream),
 		(BIG as u64, 2),
