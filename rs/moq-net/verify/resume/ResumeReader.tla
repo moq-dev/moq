@@ -311,7 +311,8 @@ Retains(c, dlv) ==
         THEN "keep"
     ELSE "no"
 
-\* `Reader::let_go`: drop the replaced copies nothing needs; whether any waits.
+\* `Reader::let_go`: drop the replaced copies nothing needs; whether any waits,
+\* and whether one it dropped was left a group to drain, which re-arms the walk.
 LetGo(r) ==
     LET n == Len(r.copies)
         ret == [i \in 1 .. n |->
@@ -320,7 +321,8 @@ LetGo(r) ==
         order == CHOOSE s \in [1 .. Cardinality(kept) -> kept] :
                     \A a, b \in 1 .. Cardinality(kept) : a < b => s[a] < s[b]
     IN [copies |-> [k \in 1 .. Cardinality(kept) |-> r.copies[order[k]]],
-        waits |-> \E i \in 1 .. n : ret[i] = "wait"]
+        waits |-> \E i \in 1 .. n : ret[i] = "wait",
+        gaveUp |-> \E i \in 1 .. n : ret[i] = "no" /\ r.copies[i].drains # None]
 
 \* `Reader::poll_end`, with `poll_first`'s guard: a drained serving copy ends
 \* the track only once no copy it replaced may still deliver below the end.
@@ -347,7 +349,9 @@ Pass(r1) ==
         LET drained == \E c \in Serving(r2) : c.done = "ok"
             lg == LetGo(r2)
             r4 == [r2 EXCEPT !.copies = lg.copies]
-        IN [r |-> [r4 EXCEPT !.ended = PollEnd(r4, drained, lg.waits)], cid |-> 0, g |-> None]
+        IN
+        IF lg.gaveUp THEN Pass(BackfillGaps([r4 EXCEPT !.resumed = TRUE]))
+        ELSE [r |-> [r4 EXCEPT !.ended = PollEnd(r4, drained, lg.waits)], cid |-> 0, g |-> None]
 
 Poll(r) == Pass(BackfillGaps(Sync(r, front)))
 

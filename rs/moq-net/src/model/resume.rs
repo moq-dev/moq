@@ -796,7 +796,8 @@ struct Copy {
 	/// judged: a drop under its bound waits for it.
 	feeds: bool,
 	/// The track's [`track::Consumer::evicted`] count when [`Reader::backfill_gaps`] last left
-	/// it a group the reader lacks to drain, so an eviction since asks the serving route again.
+	/// it a group the reader lacks to drain, so an eviction since, or letting the copy go, asks
+	/// the serving route again.
 	drains: Option<u64>,
 }
 
@@ -2730,6 +2731,7 @@ impl Reader {
 			waiter,
 		};
 		let mut waits = false;
+		let mut gave_up = false;
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
 		for (index, mut copy) in std::mem::take(&mut self.copies).into_iter().enumerate() {
 			let mut retains = copy.replaced.then(|| copy.retains(&reader));
@@ -2743,8 +2745,13 @@ impl Reader {
 					waits = true;
 					self.copies.push(copy);
 				}
-				Some(Retains::No) => {}
+				Some(Retains::No) => gave_up |= copy.drains.is_some(),
 			}
+		}
+		// A copy let go with a group a walk left it to drain gave that group up by its own
+		// verdict: the serving route is asked for it after all, as when the copy's cache loses it.
+		if gave_up && !matches!(self.resumed, Some(Resumed::Route)) {
+			self.resumed = Some(Resumed::Route);
 		}
 		waits
 	}
@@ -3171,6 +3178,10 @@ impl Reader {
 		}
 		let drained = self.drained();
 		let waits = self.let_go(delivered, waiter);
+		// A copy let go with a group left to drain: the serving route is asked for it now.
+		if self.resumed.is_some() && self.window().floor().is_some() {
+			return None;
+		}
 		if !parks && !waits && self.exhausted(&[delivered], ordered, waiter) {
 			return Some(Poll::Ready(Ok(None)));
 		}
@@ -10423,6 +10434,43 @@ mod test {
 			write(&b, 2);
 			assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "debt {debt}");
 			assert_eq!(drain(&mut sub, false), [2], "debt {debt}");
+		}
+	}
+
+	/// A group the switch left to a replaced copy to drain is asked of the serving route once that
+	/// copy is let go without handing it out, as when its cache loses the group: whether the reader
+	/// gets it never depends on what the copy happens to hold.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_group_a_draining_copy_gives_up_is_backfilled() {
+		for evicted in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(1));
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, false), [0]);
+			write(&a, 1);
+			write(&a, 2);
+			let b = received_copy();
+			write(&b, 1);
+			routes.serve(b.consume());
+			write(&b, 3);
+			// The switch leaves group 1 to the replaced copy, which hands out only group 2 for now.
+			assert_eq!(recv(&mut sub).start, 3);
+			assert_eq!(recv(&mut sub).start, 2);
+			// A budget later, the replaced copy no longer offers group 1, while the serving route
+			// still does.
+			kio::clock::sleep(Duration::from_millis(1200)).await;
+			if evicted {
+				a.evict(1);
+			}
+			let mut read = Vec::new();
+			while let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&fresh()) {
+				read.push(group.start);
+			}
+			assert_eq!(read, [1], "evicted {evicted}");
 		}
 	}
 
