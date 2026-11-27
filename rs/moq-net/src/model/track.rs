@@ -13815,14 +13815,14 @@ impl Subscriber {
 
 	/// Whether the publisher declared every start in `groups` skipped, never to be produced
 	/// (see [`Producer::skip_groups`], which appending does between groups), so no group can
-	/// arrive there: true for an empty range. Unlike [`Self::next_in_range`], this ignores the
-	/// subscriber's ranges. A copy knows only the skips its wire forwarded.
+	/// arrive there: true for an empty range. This ignores the subscriber's ranges. A copy
+	/// knows only the skips its wire forwarded.
 	///
 	/// What tells a reader that nothing lies between two groups, or before a track's first.
 	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
 	/// still in flight reads `false`, as does one a local producer's cache expired below its
 	/// edge. A reader that asks once treats such a group as one with something before it.
-	pub(crate) fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
 			return true;
 		};

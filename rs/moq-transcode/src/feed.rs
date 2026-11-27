@@ -43,6 +43,10 @@ const CAPACITY: usize = 128;
 /// One item of the shared live feed, in stream order.
 #[derive(Clone)]
 pub(crate) enum Item {
+	/// Source starts its publisher declared it never produces, sent ahead of the group above
+	/// them. A rung mirroring the source declares them too, so a lite-07 reader of its output
+	/// never waits on a pause between groups.
+	Skip(std::ops::Range<u64>),
 	/// A new source group started; the frames that follow belong to it. Carries its key, which
 	/// the output group mirroring it shares.
 	Group(u64),
@@ -214,6 +218,9 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		})]);
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
+	// One past the newest group read, and where the next pause may start: that group's End once
+	// it ended whole, since no group starts inside a whole group's span.
+	let mut after: Option<(u64, u64)> = None;
 	while let Some(mut group) = subscriber.recv_group().await? {
 		let sink = match &mut decoder {
 			Some(sink) => sink,
@@ -222,6 +229,13 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
+		//
+		// Asked once, as the group arrives: a skip still in flight reads as unknown, which only
+		// leaves the run to a fill, never declares a group that exists.
+		let (from, pause) = after.unwrap_or((0, 0));
+		if pause < group.start && subscriber.is_skipped(pause..group.start) {
+			let _ = sender.send(Item::Skip(from..group.start));
+		}
 		let _ = sender.send(Item::Group(group.start));
 
 		// A lost group is never finished short, and every rung hears of it now
@@ -238,6 +252,15 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				Item::Lost
 			}
 		};
+		// A group arriving late below a newer one moves nothing back.
+		let next = group.start.saturating_add(1);
+		let pause = match &item {
+			Item::End(Some(end)) => (*end).max(next),
+			_ => next,
+		};
+		if after.is_none_or(|(from, _)| next > from) {
+			after = Some((next, pause));
+		}
 		let _ = sender.send(item);
 	}
 	Ok(())
@@ -361,7 +384,7 @@ mod tests {
 				Item::Frame(_) => frames += 1,
 				Item::End(_) => return (key, frames, true),
 				Item::Lost => return (key, frames, false),
-				Item::Group(_) | Item::Finished => panic!("group {key} never ended"),
+				Item::Skip(_) | Item::Group(_) | Item::Finished => panic!("group {key} never ended"),
 			}
 		}
 	}
@@ -388,6 +411,73 @@ mod tests {
 
 		assert_eq!(read_group(&mut eager).await, (0, 60, true));
 		assert_eq!(read_group(&mut slow).await, (0, 60, true), "the slow rung lost the GOP");
+	}
+
+	/// What the feed says around a source's groups, its frames left out.
+	#[derive(Debug, PartialEq)]
+	enum Seen {
+		Skip(std::ops::Range<u64>),
+		Group(u64),
+		End(Option<u64>),
+		Lost,
+	}
+
+	/// The next item that isn't a frame.
+	async fn next_seen(listener: &mut Listener) -> Seen {
+		loop {
+			match listener.recv().await.expect("the feed died") {
+				Item::Frame(_) => {}
+				Item::Skip(groups) => return Seen::Skip(groups),
+				Item::Group(key) => return Seen::Group(key),
+				Item::End(end) => return Seen::End(end),
+				Item::Lost => return Seen::Lost,
+				Item::Finished => panic!("the source ended"),
+			}
+		}
+	}
+
+	/// The starts a source skips between its media-timed groups reach every listener ahead of the
+	/// group above them, across a pause past a whole group's End and past a lost group too.
+	#[tokio::test]
+	async fn the_source_skips_reach_the_listeners() {
+		const FRAME: u64 = 33_333;
+		let source = moq_net::broadcast::Info::default().produce();
+		let track = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let feed = feed(&source);
+		let mut listener = feed.listen();
+		let mut demand = track.demand();
+		while !demand.wanted_changed().await.unwrap() {}
+		let at = |index: u64| moq_net::Timestamp::from_micros(index * FRAME).unwrap();
+
+		// Two frames, then a pause: the group ends whole well before the next one starts.
+		let mut first = track.append_group(at(0)).unwrap();
+		write(&mut first, 0, 2);
+		first.finish_at(2 * FRAME).unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(0));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(Some(2 * FRAME)));
+
+		// Appending says nothing starts since the previous group, which the feed names in full.
+		let mut lost = track.append_group(at(60)).unwrap();
+		write(&mut lost, 60, 2);
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(1..60 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(60 * FRAME));
+		lost.abort(moq_net::Error::Cancel).unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Lost);
+
+		let mut last = track.append_group(at(150)).unwrap();
+		write(&mut last, 150, 2);
+		last.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(60 * FRAME + 1..150 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(150 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+
+		// A group the source created without skipping below it may still have neighbors there.
+		let mut unproven = track.create_group((200 * FRAME).into()).unwrap();
+		write(&mut unproven, 200, 2);
+		unproven.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(200 * FRAME));
 	}
 
 	/// A source packet that fails to decode costs its own group: every listener hears it lost,
