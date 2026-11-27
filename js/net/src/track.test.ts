@@ -7384,8 +7384,9 @@ test("an arrival read holds fill verdicts only within its budget", async () => {
 			for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) group.close();
 			most = Math.max(most, hooks.fillRuns(reader));
 		}
-		// One per skipped stretch the 100 ms budget spans, where it held one per group since the join.
-		expect(most).toBeLessThanOrEqual(100 / 20);
+		// One per skipped stretch the 100 ms budget spans, plus the one its oldest group's successor
+		// still reaches into, where it held one per group since the join.
+		expect(most).toBeLessThanOrEqual(100 / 20 + 1);
 		reader.close();
 	} finally {
 		requests.close();

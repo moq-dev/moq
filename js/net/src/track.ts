@@ -3879,11 +3879,17 @@ export class Subscriber {
 		const deadline = arrived.since(Instant.ZERO).asNanos() + budget * 1_000_000;
 		if (now().since(Instant.ZERO).asNanos() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
-		// A closed subscriber keeps no timeline to bound the reach with, and only a live edge
-		// above `key` convicts it by media time.
+		return this.#staleByMedia(key, drift);
+	}
+
+	// Whether the live edge presents a full budget past where group `key` could still reach. Unlike
+	// the wall clock, which judges a key by when its successor arrived, this only grows with the key's
+	// age, since timestamps never rewind: a key past it has every key below past it too. A closed
+	// subscriber keeps no timeline to bound the reach with, and only a live edge above `key` convicts.
+	#staleByMedia(key: bigint, drift: Drift): boolean {
 		if (this.#arrivals || drift.presentation === undefined || drift.presentation.key <= key) return false;
 		const reach = this.#reach(key, drift.end, drift.scope);
-		return reach !== undefined && drift.presentation.at - reach >= budget;
+		return reach !== undefined && drift.presentation.at - reach >= drift.budget.at(key);
 	}
 
 	// Where a live join this reader placed at `placed` starts for a reader within `budget`
@@ -4860,16 +4866,16 @@ export class Subscriber {
 	}
 
 	// The lowest key a fill could still bring this reader: its hand-out floor, raised to each group
-	// it handed out above a gap once that group is past the widest budget, since every key below is
-	// older and so past it too, as #forgetPastBudget reasons. That floor holds below a cached group
-	// no range covers, and an arrival read never raises its key cursor, so without this its fill
-	// verdicts since the join pile up and are judged again on every change. Only a widening lowers it,
-	// found by bisecting what it passed, since staleness only grows with age.
+	// it handed out above a gap once media time puts that group past the widest budget, which puts
+	// every key below past it too (see #staleByMedia). That floor holds below a cached group no range
+	// covers, and an arrival read never raises its key cursor, so without this its fill verdicts since
+	// the join pile up and are judged again on every change. A scale-less track has no media time, so
+	// its floor stays. Only a widening lowers it, found by bisecting what it passed.
 	#pastBudget(drift: Drift): bigint {
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		const widest = drift.budget.widest();
 		const judge = { ...drift, budget: Budget.uniform(widest) };
-		const stale = (key: bigint) => this.#staleAt(key, judge);
+		const stale = (key: bigint) => this.#staleByMedia(key, judge);
 		if (!this.#passed) this.#passed = { widest, key: floor };
 		const passed = this.#passed;
 		if (widest > passed.widest) passed.key = this.#delivered.lastAboveGap(floor, passed.key, stale) ?? floor;
