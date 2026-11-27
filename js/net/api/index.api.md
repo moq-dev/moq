@@ -497,19 +497,15 @@ export namespace Meta {
 	}
 	export class Group {
 		close(): void;
-		get end(): bigint | undefined;
 		get index(): number;
 		nextHeader(): Promise<Frame.Info | undefined>;
 		readonly start: bigint;
 	}
 	export class Subscriber {
 		close(abort?: Error): void;
-		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
 		info(): Promise<Track.Info>;
-		largest(): Promise<Track.Position | undefined>;
 		recvGroup(): Promise<Meta.Group | undefined>;
-		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;
 	}
 }

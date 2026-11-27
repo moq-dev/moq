@@ -451,3 +451,28 @@ test("metadata names a compressed frame by its plain size", async () => {
 		await chained.close();
 	}
 });
+
+// A metadata subscription takes the track's info, an update to its ranges, and the declared end as a
+// payload subscription does.
+test("a metadata subscription updates and finishes like a payload one", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const reader = broadcast.consume().meta("video").subscribe({ ranges: [] });
+	expect((await reader.info()).timescale).toEqual(Timescale.MILLI);
+	for (const key of [0n, 1n]) {
+		const group = track.createGroup(key);
+		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.fromMillis(Number(key)) });
+		group.finish();
+	}
+	track.finishAt({ group: 2n, frame: 0 });
+	reader.update({ ranges: [{}], order: "ascending" });
+	for (const key of [0n, 1n]) {
+		const group = defined(await reader.recvGroup());
+		expect([group.start, defined(await group.nextHeader()).size]).toEqual([key, 3]);
+		group.close();
+	}
+	expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
+	expect(await reader.recvGroup()).toBeUndefined();
+	reader.close();
+	broadcast.close();
+});

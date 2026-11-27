@@ -114,18 +114,6 @@ impl Subscriber {
 		self.inner.poll_finished(waiter)
 	}
 
-	/// The track's largest location: the current one, then each newer one, as
-	/// [`track::Subscriber::poll_largest`] reports it.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<track::Position>> {
-		self.inner.poll_largest(waiter)
-	}
-
-	/// This subscriber's current preferences.
-	pub fn subscription(&self) -> track::Subscription {
-		self.inner.subscription()
-	}
-
 	/// Replace this subscriber's delivery preferences; see [`track::Subscriber::update`].
 	pub fn update(&mut self, subscription: track::Subscription) -> Result<()> {
 		self.inner.update(subscription)
@@ -159,12 +147,6 @@ impl Group {
 	/// The index of the next frame this reader returns.
 	pub fn index(&self) -> u64 {
 		self.inner.index()
-	}
-
-	/// Where the group ends in its track's timescale, once its producer finished it whole
-	/// with [`group::Producer::finish_at`]; see [`group::Consumer::end`].
-	pub fn end(&self) -> Option<u64> {
-		self.inner.end()
 	}
 
 	/// The next frame's header: its timestamp and declared plain size, without its payload.

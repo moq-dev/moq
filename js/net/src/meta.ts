@@ -15,7 +15,6 @@
  * @module
  */
 
-import type { GetPromise, Getter } from "@moq/signals";
 import type * as frame from "./frame.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { hooks } from "./internal.ts";
@@ -82,24 +81,9 @@ export class Subscriber {
 		return this.#inner.info();
 	}
 
-	/** Settles once the track closes. */
-	get closed(): GetPromise<Error | null> {
-		return this.#inner.closed;
-	}
-
-	/** This subscriber's current options. */
-	get subscription(): Getter<track.Subscription | undefined> {
-		return this.#inner.subscription;
-	}
-
 	/** Resolve with the track's exclusive end once it is known, as `Track.Subscriber.finished` does. */
 	finished(): Promise<track.Position> {
 		return this.#inner.finished();
-	}
-
-	/** The track's largest location: the current one, then each newer one, as `Track.Subscriber.largest` reports it. */
-	largest(): Promise<track.Position | undefined> {
-		return this.#inner.largest();
 	}
 
 	/** Receive the next group, as `Track.Subscriber.recvGroup` does. */
@@ -143,14 +127,6 @@ export class Group {
 	/** The index of the next frame this reader returns. */
 	get index(): number {
 		return this.#index;
-	}
-
-	/**
-	 * Where the group ends in its track's timescale, once its producer finished it whole with an
-	 * end, as `Group.Consumer.end` reports it.
-	 */
-	get end(): bigint | undefined {
-		return this.#inner.end;
 	}
 
 	/**
