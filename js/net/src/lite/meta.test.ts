@@ -370,7 +370,8 @@ test("a payload subscription continues from a metadata position", async () => {
 	try {
 		const reader = chained.remote.meta("video").subscribe();
 		const written = chained.track.createGroup(0n);
-		for (const at of [0, 1]) written.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(at) });
+		for (const at of [0, 1])
+			written.writeFrame({ payload: new Uint8Array(BIG), timestamp: Timestamp.fromMillis(at) });
 		const group = defined(await clock.drive(timeout(TIMEOUT, reader.recvGroup())));
 		for (let i = 0; i < 2; i++) defined(await clock.drive(timeout(TIMEOUT, group.nextHeader())));
 		expect([group.start, group.index]).toEqual([0n, 2]);

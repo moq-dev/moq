@@ -176,7 +176,10 @@ async fn recv(sub: &mut crate::meta::Subscriber) -> crate::meta::Group {
 		.expect("the track ended")
 }
 
-async fn meta(broadcast: &crate::broadcast::Consumer, subscription: impl Into<Option<crate::track::Subscription>>) -> crate::meta::Subscriber {
+async fn meta(
+	broadcast: &crate::broadcast::Consumer,
+	subscription: impl Into<Option<crate::track::Subscription>>,
+) -> crate::meta::Subscriber {
 	kio::clock::timeout(TIMEOUT, broadcast.meta("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -305,7 +308,11 @@ async fn metadata_over_an_older_session_reads_headers() {
 	write_group(&chain.track, 0);
 	let mut sub = meta(&chain.remote, None).await;
 	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
-	assert_eq!(sent(&chain.downstream), (BIG as u64, 2), "the older session carried the payload");
+	assert_eq!(
+		sent(&chain.downstream),
+		(BIG as u64, 2),
+		"the older session carried the payload"
+	);
 	assert_eq!(subscriptions(&chain.downstream).0, 1);
 }
 
@@ -317,12 +324,18 @@ async fn payload_subscription_continues_from_a_metadata_position() {
 	let mut sub = meta(&chain.remote, None).await;
 	let mut group = chain.track.append_next().unwrap();
 	for at in 0..2 {
-		group.write_frame(Timestamp::from_millis(at).unwrap(), vec![b'a' + at as u8; BIG]).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(at).unwrap(), vec![b'a' + at as u8; BIG])
+			.unwrap();
 	}
 
 	let mut headers = recv(&mut sub).await;
 	for _ in 0..2 {
-		kio::clock::timeout(TIMEOUT, headers.next_header()).await.unwrap().unwrap().unwrap();
+		kio::clock::timeout(TIMEOUT, headers.next_header())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
 	}
 	let (key, next) = (headers.start, headers.index());
 	assert_eq!((key, next), (0, 2));
@@ -331,13 +344,16 @@ async fn payload_subscription_continues_from_a_metadata_position() {
 	let mut payload = kio::clock::timeout(
 		TIMEOUT,
 		chain.remote.track("video").unwrap().subscribe(
-			crate::track::Subscription::default().with_ranges([crate::track::Range::from(crate::track::Start::Time(key))]),
+			crate::track::Subscription::default()
+				.with_ranges([crate::track::Range::from(crate::track::Start::Time(key))]),
 		),
 	)
 	.await
 	.expect("subscribe timeout")
 	.expect("subscribe");
-	group.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'c'; BIG]).unwrap();
+	group
+		.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'c'; BIG])
+		.unwrap();
 	group.finish().unwrap();
 
 	let mut reading = kio::clock::timeout(TIMEOUT, payload.recv_group())
@@ -352,11 +368,25 @@ async fn payload_subscription_continues_from_a_metadata_position() {
 		.expect("frame timeout")
 		.expect("frame")
 		.expect("a frame");
-	assert_eq!(frame.payload, vec![b'c'; BIG], "the payload reader resumes at the first missing frame");
+	assert_eq!(
+		frame.payload,
+		vec![b'c'; BIG],
+		"the payload reader resumes at the first missing frame"
+	);
 
-	let header = kio::clock::timeout(TIMEOUT, headers.next_header()).await.unwrap().unwrap().unwrap();
+	let header = kio::clock::timeout(TIMEOUT, headers.next_header())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
 	assert_eq!((header.size, header.timestamp.as_millis().unwrap()), (BIG as u64, 2));
-	assert!(kio::clock::timeout(TIMEOUT, headers.next_header()).await.unwrap().unwrap().is_none());
+	assert!(
+		kio::clock::timeout(TIMEOUT, headers.next_header())
+			.await
+			.unwrap()
+			.unwrap()
+			.is_none()
+	);
 }
 
 /// A history range while only metadata demand stands fills its groups as metadata: every header
@@ -394,7 +424,9 @@ async fn metadata_names_a_compressed_frame_by_its_plain_size() {
 	let mut near = meta(&local.consume(), None).await;
 	for producer in [&chain.track, &track] {
 		let mut group = producer.append_next().unwrap();
-		group.write_frame(Timestamp::from_millis(0).unwrap(), vec![b'z'; BIG]).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), vec![b'z'; BIG])
+			.unwrap();
 		group.finish().unwrap();
 	}
 	assert_eq!(read_headers(&mut remote).await, (0, vec![(BIG as u64, 0)]));
@@ -414,6 +446,14 @@ async fn dropping_a_metadata_reader_closes_its_subscriptions() {
 
 	drop(sub);
 	settle().await;
-	assert_eq!(subscriptions(&chain.downstream).1, 0, "the relay still serves the reader");
-	assert_eq!(subscriptions(&chain.upstream).1, 0, "the publisher still serves the relay");
+	assert_eq!(
+		subscriptions(&chain.downstream).1,
+		0,
+		"the relay still serves the reader"
+	);
+	assert_eq!(
+		subscriptions(&chain.upstream).1,
+		0,
+		"the publisher still serves the relay"
+	);
 }

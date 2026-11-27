@@ -5213,7 +5213,9 @@ pub unsafe extern "C" fn moq_consume_meta(
 			.map(|subscription| unsafe { parse_subscription(subscription) })
 			.transpose()?;
 		let on_header = unsafe { ffi::OnStatus::new(user_data, on_header)? };
-		State::lock().consume.meta_track(broadcast, name, subscription, on_header)
+		State::lock()
+			.consume
+			.meta_track(broadcast, name, subscription, on_header)
 	})
 }
 

@@ -48,9 +48,19 @@ if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "compress", "datagram", "status", "cached", "history", "late", "fetch", "meta"].includes(
-		mode,
-	)
+	![
+		undefined,
+		"drop",
+		"join",
+		"compress",
+		"datagram",
+		"status",
+		"cached",
+		"history",
+		"late",
+		"fetch",
+		"meta",
+	].includes(mode)
 ) {
 	throw new Error(
 		"usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status|cached|history|late|fetch|meta]]",
@@ -256,7 +266,11 @@ try {
 							for (const [index, want] of frames(Number(group.start)).entries()) {
 								const header = await group.nextHeader();
 								assert(header, "short group");
-								assert.equal(header.size, want.length, `wrong size of frame ${index} in group ${group.start}`);
+								assert.equal(
+									header.size,
+									want.length,
+									`wrong size of frame ${index} in group ${group.start}`,
+								);
 							}
 							assert.equal(await group.nextHeader(), undefined, "extra frame");
 							seen.push(Number(group.start));

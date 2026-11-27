@@ -22,6 +22,15 @@ import { hooks } from "./internal.ts";
 import { readSize } from "./payload.ts";
 import type * as track from "./track.ts";
 
+let makeConsumer: (track: track.Consumer) => Consumer;
+let makeSubscriber: (inner: track.Subscriber) => Subscriber;
+let makeGroup: (inner: GroupConsumer) => Group;
+
+/** A metadata handle to `track`, which must resolve the copy a metadata reader takes. @internal */
+export function consumerOf(track: track.Consumer): Consumer {
+	return makeConsumer(track);
+}
+
 /**
  * A lazy handle to a track's metadata, from `Broadcast.Consumer.meta`. Like `Track.Consumer`,
  * holding it requests nothing: only a {@link subscribe} made from it is demand.
@@ -34,10 +43,13 @@ export class Consumer {
 
 	#track: track.Consumer;
 
-	/** @internal */
-	constructor(track: track.Consumer) {
+	private constructor(track: track.Consumer) {
 		this.name = track.name;
 		this.#track = track;
+	}
+
+	static {
+		makeConsumer = (track) => new Consumer(track);
 	}
 
 	/**
@@ -45,7 +57,7 @@ export class Consumer {
 	 * `Track.Consumer.subscribe` does, each frame as its header alone.
 	 */
 	subscribe(options?: track.Subscription): Subscriber {
-		return new Subscriber(this.#track.subscribe(options));
+		return makeSubscriber(this.#track.subscribe(options));
 	}
 }
 
@@ -57,9 +69,12 @@ export class Consumer {
 export class Subscriber {
 	#inner: track.Subscriber;
 
-	/** @internal */
-	constructor(inner: track.Subscriber) {
+	private constructor(inner: track.Subscriber) {
 		this.#inner = inner;
+	}
+
+	static {
+		makeSubscriber = (inner) => new Subscriber(inner);
 	}
 
 	/** The track's publisher properties, once the subscription is established. */
@@ -90,7 +105,7 @@ export class Subscriber {
 	/** Receive the next group, as `Track.Subscriber.recvGroup` does. */
 	async recvGroup(): Promise<Group | undefined> {
 		const group = await this.#inner.recvGroup();
-		return group ? new Group(group) : undefined;
+		return group ? makeGroup(group) : undefined;
 	}
 
 	/** Replace this subscription's options; see `Track.Subscriber.update`. */
@@ -116,10 +131,13 @@ export class Group {
 	#inner: GroupConsumer;
 	#index = 0;
 
-	/** @internal */
-	constructor(inner: GroupConsumer) {
+	private constructor(inner: GroupConsumer) {
 		this.start = inner.start;
 		this.#inner = inner;
+	}
+
+	static {
+		makeGroup = (inner) => new Group(inner);
 	}
 
 	/** The index of the next frame this reader returns. */

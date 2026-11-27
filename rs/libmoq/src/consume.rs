@@ -13,8 +13,8 @@ use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_header, moq_json_value,
-	moq_json_window_event,
-	moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config, moq_video_properties,
+	moq_json_window_event, moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config,
+	moq_video_properties,
 };
 
 struct DatagramTaskEntry {
