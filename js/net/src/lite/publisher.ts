@@ -2302,7 +2302,8 @@ export class Publisher {
 					// bound what a stale verdict was judged within, a run stale under the track's own max age is
 					// final all the same, since no budget reaches past it: a relay reading from the oldest group
 					// would otherwise wait on it forever. Earlier drafts name a drop with no range, which a
-					// capped read could still serve, so they stop there. Mirrors the Rust `TrackRun::resolve`.
+					// capped read could still serve, so they stop there. Mirrors the Rust `TrackRun::resolve`, whose
+					// bound also takes in the hop's cache ceiling, which a TypeScript publisher does not have.
 					const bound = hasRanges(this.version) ? serving.maxAge : undefined;
 					const finalStale = (stale: number) => bound !== undefined && stale >= bound;
 					let reach = startKey;
