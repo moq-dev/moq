@@ -26,6 +26,8 @@ mod group;
 mod identity;
 pub(crate) mod ietf;
 mod info;
+#[cfg(all(test, feature = "async"))]
+mod meta_tests;
 pub mod message;
 mod parameters;
 pub(crate) mod priority;

@@ -2451,8 +2451,14 @@ impl Request for SubscribeServe {
 		peer_fin: bool,
 	) -> Result<Self, Error> {
 		let one_shot = single_group_position(&msg, shared.version);
+		// A metadata subscription reads the copy apart for it where the broadcast keeps one,
+		// so payload crosses no hop for it.
+		let lookup = |broadcast: &crate::broadcast::Consumer| match msg.meta {
+			true => broadcast.track_meta(track),
+			false => broadcast.track(track),
+		};
 		if peer_fin && let Some((group, start_frame, end_frame)) = one_shot {
-			let track = broadcast.track(track)?;
+			let track = lookup(&broadcast)?;
 			return Ok(Self::Fetch(Box::new(OneShotFetch::new(
 				msg,
 				track,
@@ -2463,7 +2469,7 @@ impl Request for SubscribeServe {
 		}
 		let legacy =
 			Legacy::new(shared.version, &broadcast, track).map(|legacy| legacy.adopting(&shared.held_datagrams));
-		let track = match broadcast.track(track) {
+		let track = match lookup(&broadcast) {
 			Ok(track) => track,
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
 		};

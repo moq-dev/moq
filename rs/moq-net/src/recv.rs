@@ -26,9 +26,23 @@ impl Group {
 		self.handle.frame_count()
 	}
 
-	/// Whether the parent track compresses, readable while a frame holds the writer.
+	/// Whether frames arrive as compressed slices, readable while a frame holds the writer.
 	pub fn compressed(&self) -> bool {
 		self.handle.compressed()
+	}
+
+	/// Whether this is a metadata copy, whose frames arrive as their headers alone.
+	pub fn is_meta(&self) -> bool {
+		self.handle.is_meta()
+	}
+
+	/// Write a metadata copy's next frame header, as [`group::Producer::write_header`].
+	#[cfg(feature = "async")]
+	pub fn write_header(&mut self, timestamp: crate::Timestamp, size: u64) -> Result<(), Error> {
+		self.writer
+			.as_mut()
+			.expect("group writer is available between frames")
+			.write_header(timestamp, size)
 	}
 
 	/// The relay state of the group, readable while a frame holds the writer.
