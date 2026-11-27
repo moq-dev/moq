@@ -20,6 +20,9 @@ closes this:
 - The bucket's size and monthly download bytes after its first 30 days,
   against B2's free egress (3x stored bytes, then $0.01/GB), so the cost
   once the Flamethrower credits end (about 2027-11-17) is known before then.
+- How many reads B2 throttles with `503 SlowDown` per Nightly, and whether
+  the prefetches and action lookups that fail after retries cost hits (see
+  Plan).
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
@@ -33,6 +36,16 @@ from the R2 verification for B2, whose API calls are free, so request counts
 no longer matter; storage and egress do. The R2 history (expiry waves, the
 download budget, per-job Linux baselines through 2026-11-14) is in this
 file's git history as `quest/m0/ci/mbx-r2-verify.md`.
+
+Found 2026-11-27 (R2 teardown): B2 throttles, so request rate matters even
+though requests are free. The first B2 Nightly
+([run 45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463))
+retried about 16,000 GETs on `503 Service Unavailable (SlowDown)` and still
+failed 912 blob prefetches, 238 action prefetches, and 103 action lookups
+after retries, plus 41 PUT retries on `500 InternalError`. Its 469 "remote
+failures" were 55 on the last R2 Nightly, yet it hit as much (17,028 hits
+against 16,677). If throttling costs hits in later Nightlies, look first at
+how many prefetches the jobs run in parallel against one bucket.
 
 Decided 2026-11-24 (maintainer, /quest-run on
 [moq-dev/moq#9558](https://github.com/moq-dev/moq/pull/9558)): ✅ after the
