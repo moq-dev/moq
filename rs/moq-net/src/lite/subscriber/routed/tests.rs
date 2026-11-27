@@ -1,6 +1,6 @@
 use crate::lite::{AnnounceBroadcast as Wire, PathRef, test_transport::SinkSession};
 use crate::{
-	Error, Instance, Path,
+	Error, Identity, Path,
 	auth::Permit,
 	route::{
 		NodeId,
@@ -63,7 +63,7 @@ fn claim(above: u64) -> Claim<Attr> {
 fn start(path: &'static str) -> Wire {
 	Wire::Start {
 		suffix: PathRef::literal(Path::from_static(path)),
-		instance: Instance::random(),
+		identity: Identity::random(),
 		claim: claim(0),
 	}
 }
@@ -720,7 +720,7 @@ async fn an_unresolved_claim_outlives_another_prefixs_removal() {
 	let long = "x".repeat(Path::MAX_BYTES - 8);
 	let literal = Wire::Start {
 		suffix: PathRef::literal(Path::new(&format!("a/{long}")).unwrap()),
-		instance: Instance::random(),
+		identity: Identity::random(),
 		claim: claim(0),
 	};
 	let unresolved = || Wire::Start {
@@ -729,7 +729,7 @@ async fn an_unresolved_claim_outlives_another_prefixs_removal() {
 			keep: 2,
 			rest: Path::new(&long).unwrap(),
 		},
-		instance: Instance::random(),
+		identity: Identity::random(),
 		claim: claim(0),
 	};
 	routed.receive(literal).unwrap();
@@ -906,7 +906,7 @@ async fn a_claim_back_through_this_relay_counts_as_looped() {
 	looped.chain = vec![routed.me.relay];
 	let start = |claim| Wire::Start {
 		suffix: PathRef::literal(Path::from_static("live/a")),
-		instance: Instance::random(),
+		identity: Identity::random(),
 		claim,
 	};
 	routed.receive(start(looped)).unwrap();

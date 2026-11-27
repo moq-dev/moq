@@ -335,18 +335,278 @@ fn rtt_after_rebinding(ip: IpAddr) -> (Duration, Duration) {
 	(before, pair.server_conn_mut(server_ch).rtt())
 }
 
-/// A port change on the same IPv4 address looks like NAT rebinding and keeps the path's RTT and
-/// congestion state
+/// A port change on the same address looks like NAT rebinding and keeps the path's RTT and
+/// congestion state: over IPv4, over IPv6, and over IPv4 that a dual-stack socket reports as
+/// IPv4-mapped IPv6
 #[test]
-fn ipv4_rebinding_keeps_path_state() {
-	let (before, after) = rtt_after_rebinding(Ipv4Addr::LOCALHOST.into());
-	assert_eq!(before, after);
+fn rebinding_keeps_path_state() {
+	for ip in [
+		IpAddr::from(Ipv4Addr::LOCALHOST),
+		Ipv6Addr::LOCALHOST.into(),
+		Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(),
+	] {
+		let (before, after) = rtt_after_rebinding(ip);
+		assert_eq!(before, after, "{ip}");
+	}
 }
 
-/// The same port change over IPv6 starts the path over from the initial RTT
+/// A move to another IP address starts the path over from the initial RTT
 #[test]
-fn ipv6_rebinding_resets_path_state() {
-	let (before, after) = rtt_after_rebinding(Ipv6Addr::LOCALHOST.into());
-	assert_ne!(before, after);
-	assert_eq!(after, transport::Config::default().initial_rtt);
+fn address_change_resets_path_state() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	assert_ne!(
+		pair.server_conn_mut(server_ch).rtt(),
+		transport::Config::default().initial_rtt
+	);
+
+	pair.client.addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	pair.server.drive(now, pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).rtt(),
+		transport::Config::default().initial_rtt
+	);
+}
+
+/// A copy of the client's packet an attacker forwards from another address moves the server
+/// there, and the client's next packet from the address it never left moves the server back to
+/// the path it validated, with that path's RTT and congestion state (RFC 9000 §9.3.3)
+#[test]
+fn spurious_migration_returns_to_the_validated_path() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	let client = pair.client.addr;
+	let rtt = pair.server_conn_mut(server_ch).rtt();
+	assert_ne!(rtt, transport::Config::default().initial_rtt);
+
+	// The forwarded copy arrives first, so the client's own is a duplicate
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let forwarded = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 1).into(), 4433);
+	let now = pair.time;
+	pair.server.drive(now, forwarded);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).rtt(),
+		transport::Config::default().initial_rtt
+	);
+
+	// The server challenges the address it left, and the client answers from it
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.remote_address(), client);
+	assert_eq!(server.rtt(), rtt);
+	assert!(!server.has_prev_path());
+}
+
+/// Once the path a client moved to validates, the server lets go of the one it left
+#[test]
+fn validated_migration_releases_the_previous_path() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	pair.client.addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	pair.server.drive(now, pair.client.addr);
+	assert!(pair.server_conn_mut(server_ch).has_prev_path());
+
+	pair.drive();
+	let client = pair.client.addr;
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.remote_address(), client);
+	assert!(!server.has_prev_path());
+}
+
+/// Data the server sent toward a forwarded copy's address goes again once the client, back on
+/// the address it never left, returns the server to the path it validated, including data sent
+/// toward an earlier forwarded address another copy moved the server on from
+#[test]
+fn falling_back_resends_what_the_abandoned_paths_sent() {
+	for hops in [1, 2] {
+		resend_after_falling_back(hops);
+	}
+}
+
+/// Moves the server across `hops` forwarded addresses, sending data toward the first, then back
+fn resend_after_falling_back(hops: u8) {
+	let _guard = subscribe();
+	// Nothing ack-eliciting follows the fall back to show the data lost: no MTU probe, and no
+	// spare connection ID to retire, as a client with zero-length ones has none
+	let cids: fn() -> Box<dyn ConnectionIdGenerator> = || Box::new(RandomConnectionIdGenerator::new(0));
+	let client = Endpoint::new(
+		crate::endpoint::Config {
+			cid_generator: Some(Arc::new(cids)),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut server = server_config();
+	server.transport.mtu = None;
+	let server = Endpoint::new(
+		crate::endpoint::Config {
+			server: Some(server),
+			..Default::default()
+		},
+		true,
+	)
+	.unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	let (client_ch, server_ch) = pair.connect_with(client_with(|t| t.mtu = None));
+	pair.drive();
+	let client = pair.client.addr;
+
+	// A PING padded large enough that the anti-amplification limit lets the server send data
+	// toward it, which the client does not track, so nothing it sent waits on the server's ACK
+	let forward = |pair: &mut Pair, hop: u8| {
+		let mut ping = vec![0; 1000];
+		ping[0] = 0x01;
+		let now = pair.time;
+		let packet = pair.client_conn_mut(client_ch).forge_packet(now, SpaceId::Data, &ping);
+		pair.server.inbound.push_back((now, None, packet.as_slice().into()));
+		let forwarded = SocketAddr::new(Ipv4Addr::new(192, 0, 2, hop).into(), 4433);
+		pair.server.drive(now, forwarded);
+		assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
+	};
+	forward(&mut pair, 1);
+
+	// Sent toward the forwarded address, which never delivers it
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &MSG[..]).unwrap();
+	// The client hears nothing until the server's pacer lets the data go
+	loop {
+		pair.drive_server();
+		if pair.server_conn_mut(server_ch).stats().frame_tx.stream > 0 {
+			break;
+		}
+		pair.time = pair.server.next_wakeup().expect("the pacer releases the data");
+	}
+	for hop in 2..=hops {
+		forward(&mut pair, hop);
+	}
+
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), client, "{hops} hops");
+	assert_eq!(pair.client_streams(client_ch).accept(Dir::Uni), Some(s), "{hops} hops");
+}
+
+/// A pair connecting until the server's first MTU probe, the only datagram past the initial MTU,
+/// which it returns undelivered
+fn hold_first_probe() -> (
+	Pair,
+	ConnectionHandle,
+	ConnectionHandle,
+	(Instant, Option<EcnCodepoint>, BytesMut),
+) {
+	let mut pair = pair_with(|_| {});
+	let client_ch = pair.begin_connect(client_with(|_| {}));
+	let probe = loop {
+		assert!(pair.step(), "no probe sent");
+		let i = pair
+			.client
+			.inbound
+			.iter()
+			.position(|(_, _, packet)| packet.len() > usize::from(INITIAL_MTU));
+		if let Some(i) = i {
+			break pair.client.inbound.remove(i).unwrap();
+		}
+	};
+	pair.drive_client();
+	pair.drive_server();
+	let server_ch = pair.server.assert_accept();
+	(pair, client_ch, server_ch, probe)
+}
+
+/// An MTU probe the server sent before a forwarded copy moved it stays the validated path's, so
+/// the client's ACK of it, arriving while the server is away, still completes it there
+#[test]
+fn probe_acked_while_away_completes_on_its_path() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch, probe) = hold_first_probe();
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let client = pair.client.addr;
+	let forwarded = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 1).into(), 4433);
+	let now = pair.time;
+	pair.server.drive(now, forwarded);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
+
+	// The client acknowledges the probe from the address it never left
+	pair.client.inbound.push_back(probe);
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.remote_address(), client);
+	assert!(server.path_mtu() > INITIAL_MTU, "{}", server.path_mtu());
+}
+
+/// A port change while an MTU probe is in flight leaves that probe to the path that sent it, and
+/// the new path searches on from the MTU confirmed so far
+#[test]
+fn rebinding_with_a_probe_in_flight_keeps_searching() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch, probe) = hold_first_probe();
+	let port = pair.next_port();
+	pair.client.addr.set_port(port);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	let client = pair.client.addr;
+	pair.server.drive(now, client);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), client);
+
+	// The client acknowledges the probe from its new port, while the old path is still kept
+	pair.client.inbound.push_back(probe);
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert!(!server.has_prev_path());
+	assert!(server.path_mtu() > INITIAL_MTU, "{}", server.path_mtu());
+}
+
+/// Losses among full-size packets the old path sent, interleaved with ACKs of others, are that
+/// path's feedback, so a port change while they are in flight finds no black hole on the new
+/// path
+#[test]
+fn rebinding_amid_old_path_losses_finds_no_black_hole() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	let mtu = pair.server_conn_mut(server_ch).path_mtu();
+	assert!(mtu > INITIAL_MTU, "{mtu}");
+
+	// Full-size packets the client receives only every other one of
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &[0; 10_000][..]).unwrap();
+	pair.drive_server();
+	let sent = mem::take(&mut pair.client.inbound);
+	assert!(sent.len() >= 8, "{}", sent.len());
+
+	// The client's port changes before it acknowledges any of them
+	let port = pair.next_port();
+	pair.client.addr.set_port(port);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	let client = pair.client.addr;
+	pair.server.drive(now, client);
+	assert!(pair.server_conn_mut(server_ch).has_prev_path());
+
+	pair.client.inbound.extend(sent.into_iter().skip(1).step_by(2));
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.stats().path.black_holes_detected, 0);
+	assert_eq!(server.path_mtu(), mtu);
 }

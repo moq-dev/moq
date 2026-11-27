@@ -4649,12 +4649,12 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
-		// One publisher instance behind every route, so each may resume the others.
-		let instance = moq_net::Instance::random();
+		// One publisher identity behind every route, so each may resume the others.
+		let identity = moq_net::Identity::random();
 		let origin = crate::source::produce_origin();
 		let route = |cost: u64| {
 			moq_net::origin::RouteOptions::hidden()
-				.with_instance(instance.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_cost(cost)
 		};
 		let first = origin.route("live", route(5)).unwrap();

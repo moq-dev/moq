@@ -72,6 +72,7 @@ pub(super) mod id {
 	pub const BLOCK_GROUP: u32 = 0xA0;
 	pub const BLOCK: u32 = 0xA1;
 	pub const REFERENCE_BLOCK: u32 = 0xFB;
+	pub const BLOCK_DURATION: u32 = 0x9B;
 }
 
 /// The longest element header: a 4-byte ID (EBMLMaxIDLength) and an 8-byte size.

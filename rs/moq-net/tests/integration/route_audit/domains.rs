@@ -31,7 +31,7 @@ async fn meshes(ring: bool) -> Mesh {
 	mesh
 }
 
-/// [`meshes`], with a publisher on `R0`. Every relay shows its claim under its Instance and
+/// [`meshes`], with a publisher on `R0`. Every relay shows its claim under its Identity and
 /// reads it, nothing changes once settled (no claim circles the ring of meshes), and no
 /// link carries a group twice. Ended at its source, the claim ends everywhere, never
 /// left to go offline.
@@ -51,7 +51,7 @@ async fn joined_meshes(ring: bool) {
 	for (i, relay) in mesh.relays.iter().enumerate() {
 		let shown = shown(relay).await.expect("shown");
 		assert!(shown.available, "ring {ring}: R{i}: {shown:?}");
-		assert_eq!(shown.instance, source.route.instance(), "ring {ring}: R{i}");
+		assert_eq!(shown.identity, source.route.identity(), "ring {ring}: R{i}");
 		let report = readers[i].report(since);
 		assert!(
 			report.seamless() && report.stall.is_zero(),

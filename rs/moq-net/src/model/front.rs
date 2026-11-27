@@ -10,12 +10,12 @@
 //! `origin::run_front`.
 //!
 //! The driver only offers a front routes that serve its broadcast: those of the
-//! instance it first resolved, at its newest epoch, whose tracks resume where they
-//! stopped since the instance promises one continuous key space. An instance a
+//! identity it first resolved, at its newest epoch, whose tracks resume where they
+//! stopped since the identity promises one continuous key space. An identity a
 //! session minted, for a wire that carries none, promises nothing past its route:
 //! that route can answer a re-request with another stream, so a track whose copy
 //! fails there ends with the error instead of re-splicing. Another
-//! instance winning the path leaves the front alone: its readers stay until they
+//! identity winning the path leaves the front alone: its readers stay until they
 //! leave or its routes go, and new requests get a fresh front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
@@ -36,14 +36,14 @@ use std::{
 use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, whether it is a
-/// broadcast published on this origin, and whether its instance was carried rather
+/// broadcast published on this origin, and whether its identity was carried rather
 /// than minted by a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
 	pub local: bool,
 	/// Whether a track whose copy failed may be asked for again through the route:
-	/// a carried instance says the answer is the same stream. A minted one names the
+	/// a carried identity says the answer is the same stream. A minted one names the
 	/// announcement, and the route could answer with whatever stream now wins upstream.
 	pub carried: bool,
 	/// Whether the route is a lite-07 claim, which the route layer keeps in the table
@@ -628,7 +628,7 @@ impl Front {
 			return;
 		}
 		let verdict = match result {
-			// A copy of the same instance claims identical content, so any difference
+			// A copy of the same identity claims identical content, so any difference
 			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
 				Some(expected) if *expected != info => Err((Error::Unsupported, None)),
@@ -719,11 +719,11 @@ impl Front {
 				track.ended = Some(Ended::Finished);
 				finish(name, actions);
 			}
-			// Died mid-serve after delivering from the same instance: normal failover,
+			// Died mid-serve after delivering from the same identity: normal failover,
 			// re-splice at the first missing group from the serving source, or from the
 			// route a switch already under way moves to, whatever the error, since the
 			// route it leaves may be what failed. A copy still read from a source that
-			// closed during the switch has no serving source to judge the instance by, so
+			// closed during the switch has no serving source to judge the identity by, so
 			// the route the switch asks speaks for it. What that copy died of is no
 			// serving copy's loss: the route's answer is its own verdict, as while waiting.
 			Err(err)
@@ -748,7 +748,7 @@ impl Front {
 				track.state = TrackState::Idle;
 				track.closed.get_or_insert(err);
 			}
-			// The route lost the content, which another route of the instance continues:
+			// The route lost the content, which another route of the identity continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
 			// drained from a replaced source leaves the track to the serving one.
 			Err(err) if delivered && err.unroutable() && strands => {
@@ -760,7 +760,7 @@ impl Front {
 					self.redispatch(name, actions);
 				}
 			}
-			// A content verdict survives every copy. Under a minted instance, even a route
+			// A content verdict survives every copy. Under a minted identity, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
@@ -798,7 +798,7 @@ impl Front {
 			return;
 		}
 		// A route that lost the content says nothing of the track: wait for another of its
-		// instance, keeping a draining copy meanwhile. A replaced source's loss leaves the
+		// identity, keeping a draining copy meanwhile. A replaced source's loss leaves the
 		// track to the serving one, whose own answer stands.
 		if refusal.0.unroutable() && strands {
 			if let Some(draining) = track.draining {
@@ -877,7 +877,7 @@ impl Front {
 	/// Whether an unroutable end from the serving source judges its route rather than the
 	/// track, so the track waits for the table to move. Only a received route can be stale:
 	/// a local publisher's word is the track's verdict, and no news about it is in flight. A
-	/// minted instance has no other route to wait for.
+	/// minted identity has no other route to wait for.
 	fn strands(&self) -> bool {
 		self.serving
 			.is_some_and(|(_, candidate)| candidate.carried && !candidate.local)
@@ -1934,7 +1934,7 @@ mod tests {
 			);
 			assert_eq!(front.lost("video").map(|err| err.to_string()), Some(err.to_string()));
 
-			// A minted instance has no other route, and a local publisher's word is the track's
+			// A minted identity has no other route, and a local publisher's word is the track's
 			// verdict with no news in flight to overtake it: either refusal ends the track, as
 			// does a local copy failing so.
 			for (local, carried) in [(false, false), (true, true)] {
@@ -2185,10 +2185,10 @@ mod tests {
 		);
 	}
 
-	/// Under a minted instance a re-request could reach another stream, so the track ends
+	/// Under a minted identity a re-request could reach another stream, so the track ends
 	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
-	fn a_copy_dying_under_a_minted_instance_ends_the_track() {
+	fn a_copy_dying_under_a_minted_identity_ends_the_track() {
 		for (local, closing) in [(false, false), (false, true), (true, false)] {
 			let mut front = serving(
 				Candidate {
@@ -2265,7 +2265,7 @@ mod tests {
 
 	/// A track still asking a source when it closes is spliced to that source's copy once
 	/// its info arrives, while the switch away is under way. When that copy fails, no
-	/// source serves to judge the instance by, so the route the switch asks does: the
+	/// source serves to judge the identity by, so the route the switch asks does: the
 	/// track waits for it rather than ending.
 	#[test]
 	fn a_copy_of_a_closed_source_failing_during_a_switch_waits_for_it() {
@@ -2427,7 +2427,7 @@ mod tests {
 
 	#[test]
 	fn incompatible_copy_is_refused() {
-		// A copy of the same instance claims identical content, so every field counts, `refresh` too.
+		// A copy of the same identity claims identical content, so every field counts, `refresh` too.
 		let differing = [
 			track::Info {
 				max_age: Some(Duration::from_secs(1)),

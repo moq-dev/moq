@@ -22,7 +22,7 @@ from moq_ffi import (
 from ._stream import _Stream
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
-from .types import Instance
+from .types import Identity
 
 if TYPE_CHECKING:
     from .session import Credential
@@ -41,7 +41,7 @@ AnnounceEvent = MoqAnnounceEvent
 """What :class:`AnnounceConsumer` yields: :data:`AnnounceEventPresent` or
 :data:`AnnounceEventAbsent`, each carrying an :data:`Announce` as ``announce``.
 
-Another publisher instance taking a path over keeps it present; hold
+Another publisher identity taking a path over keeps it present; hold
 :meth:`OriginConsumer.follow` to see the broadcast change.
 """
 
@@ -72,10 +72,10 @@ class AnnounceConsumer(_Stream[MoqAnnounceEvent]):
 
 
 class Following:
-    """Follows a specific path across the publisher instances that serve it.
+    """Follows a specific path across the publisher identities that serve it.
 
     ``await`` it (or call :meth:`available`) to get the :class:`BroadcastConsumer`
-    once the broadcast becomes available, again for each instance that takes over,
+    once the broadcast becomes available, again for each identity that takes over,
     and ``None`` while the path is offline. Usable as an async context manager.
     """
 
@@ -89,13 +89,13 @@ class Following:
         self.cancel()
 
     async def available(self) -> BroadcastConsumer | None:
-        """Await the next change to the publisher instance serving the path.
+        """Await the next change to the publisher identity serving the path.
 
-        The first call resolves the instance serving the path once one is announced, and
-        never returns ``None``. Each later call returns another instance taking over (a
+        The first call resolves the identity serving the path once one is announced, and
+        never returns ``None``. Each later call returns another identity taking over (a
         restarted publisher, or a replacement session), or ``None`` once the path goes
-        offline (or, when following an ``instance``, another one takes it over), then
-        whatever serves it next. Drop what was read from the previous instance then: its
+        offline (or, when following an ``identity``, another one takes it over), then
+        whatever serves it next. Drop what was read from the previous identity then: its
         tracks end when its session does.
         """
         broadcast = await self._inner.available()
@@ -109,8 +109,8 @@ class Following:
         self._inner.cancel()
 
 
-def _options(*, hidden: bool, cost: int, instance: Instance | None, epoch: int) -> MoqRouteOptions:
-    return MoqRouteOptions(hidden=hidden, cost=cost, instance=instance, epoch=epoch)
+def _options(*, hidden: bool, cost: int, identity: Identity | None, epoch: int) -> MoqRouteOptions:
+    return MoqRouteOptions(hidden=hidden, cost=cost, identity=identity, epoch=epoch)
 
 
 class BroadcastRequest:
@@ -124,19 +124,19 @@ class BroadcastRequest:
         """The requested broadcast path."""
         return self._inner.path()
 
-    def route(self, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0) -> Route:
+    def route(self, *, hidden: bool = False, cost: int = 0, identity: Identity | None = None, epoch: int = 0) -> Route:
         """Answer with the path's own exact :class:`Route`, owning a new broadcast.
 
-        Unless ``instance`` names one, the route takes the instance its claim lends when it
-        first announces or :attr:`Route.instance` first reads it, so readers that resolved the
+        Unless ``identity`` names one, the route takes the identity its claim lends when it
+        first announces or :attr:`Route.identity` first reads it, so readers that resolved the
         path through the claim continue on it; its end then moves the claim to a fresh
-        instance, so a job that restarts is a new stream. A claim that names its instance lends
+        identity, so a job that restarts is a new stream. A claim that names its identity lends
         none, and the route mints its own. Created visible, it announces now and answers the
         waiting requesters; created ``hidden``, they wait until :meth:`Route.announce`, so the
         job can fill its catalog first, and cancelling the route before then refuses them.
         Ending the route withdraws only this path.
         """
-        return Route(self._inner.route(_options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
+        return Route(self._inner.route(_options(hidden=hidden, cost=cost, identity=identity, epoch=epoch)))
 
     def serve(self, broadcast: BroadcastConsumer) -> None:
         """Serve held content under the claim's continuous start space, without an exact route."""
@@ -171,15 +171,15 @@ class Route:
         return self._broadcast
 
     @property
-    def instance(self) -> Instance | None:
+    def identity(self) -> Identity | None:
         """The stream this route serves now.
 
-        A named instance never changes. A job's route takes its claim's current one when it
+        A named identity never changes. A job's route takes its claim's current one when it
         first announces or when this first reads it. Read first, the job announces under it,
         and :meth:`announce` fails with ``Unroutable`` once the claim has moved past it, so a
         signer built from it stays valid. Withdrawing and announcing keep it. Once cancelled,
         it is the last one read or announced, or ``None`` for a hidden route that did neither."""
-        return self._inner.instance_id()
+        return self._inner.identity()
 
     def announce(self) -> None:
         """Make the route visible, or keep it so.
@@ -190,7 +190,7 @@ class Route:
         self._inner.announce()
 
     def withdraw(self) -> None:
-        """Hide the route from everyone, keeping its broadcast and instance.
+        """Hide the route from everyone, keeping its broadcast and identity.
 
         :meth:`announce` brings the same stream back; tracks already in flight carry on.
         """
@@ -234,19 +234,19 @@ class Claim(_Stream[BroadcastRequest]):
         self._inner = inner
 
     @property
-    def instance(self) -> Instance:
+    def identity(self) -> Identity:
         """The stream this claim serves now.
 
-        A named instance never changes. Unnamed, the claim moves to a fresh one each time a
+        A named identity never changes. Unnamed, the claim moves to a fresh one each time a
         job holding its current one ends. Withdrawing and announcing keep it."""
-        return self._inner.instance_id()
+        return self._inner.identity()
 
     def announce(self) -> None:
         """Make the claim visible, or keep it so."""
         self._inner.announce()
 
     def withdraw(self) -> None:
-        """Hide the claim from everyone, keeping its instance: :meth:`announce` brings it back.
+        """Hide the claim from everyone, keeping its identity: :meth:`announce` brings it back.
 
         Requests beneath it are rejected meanwhile.
         """
@@ -289,8 +289,8 @@ class OriginConsumer:
     """The discovery side of an origin: find and subscribe to broadcasts.
 
     Iterate :meth:`announced` to watch broadcasts appear, :meth:`follow` a
-    specific path across its publisher instances, or :meth:`request` one
-    instance as soon as it can be served.
+    specific path across its publisher identities, or :meth:`request` one
+    identity as soon as it can be served.
     """
 
     def __init__(self, inner: MoqOriginConsumer) -> None:
@@ -303,27 +303,27 @@ class OriginConsumer:
         """
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
-    def follow(self, path: str, *, instance: Instance | None = None) -> Following:
-        """Follow the broadcast at ``path``, resolving each publisher instance that serves it.
+    def follow(self, path: str, *, identity: Identity | None = None) -> Following:
+        """Follow the broadcast at ``path``, resolving each publisher identity that serves it.
 
         A broadcast created on this origin resolves once it is announced, like a
-        remote one. Pass an ``instance`` to follow only that stream: another one
+        remote one. Pass an ``identity`` to follow only that stream: another one
         taking over reads as ``None`` and is never handed out, and the stream is
         handed out again if it returns.
         """
-        return Following(self._inner.follow(path, instance))
+        return Following(self._inner.follow(path, identity))
 
-    async def request(self, path: str, *, instance: Instance | None = None) -> BroadcastConsumer:
-        """Request the broadcast at ``path``, resolving one publisher instance as soon as it can be served.
+    async def request(self, path: str, *, identity: Identity | None = None) -> BroadcastConsumer:
+        """Request the broadcast at ``path``, resolving one publisher identity as soon as it can be served.
 
         Resolves through the best announced route covering the path: an
         announced broadcast on this origin, a route a session announced (served
         on demand by that session), or a dynamic handler on the origin. An
         unannounced broadcast is unroutable. Unlike :meth:`follow`, this
         answers for what is reachable now and raises if nothing can serve the
-        path. Pass an ``instance`` to refuse any other stream.
+        path. Pass an ``identity`` to refuse any other stream.
         """
-        return BroadcastConsumer(await self._inner.request(path, instance))
+        return BroadcastConsumer(await self._inner.request(path, identity))
 
 
 class OriginProducer:
@@ -349,21 +349,21 @@ class OriginProducer:
         return OriginConsumer(self._inner.consume())
 
     def route(
-        self, path: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
+        self, path: str, *, hidden: bool = False, cost: int = 0, identity: Identity | None = None, epoch: int = 0
     ) -> Route:
         """Create a :class:`Route` at exactly ``path``, owning a new broadcast to fill.
 
         Visible at once unless ``hidden``: a hidden route is invisible and unroutable, for
         this origin's consumers and peers alike, until :meth:`Route.announce`, so create it
         hidden to fill the catalog first. ``cost`` prices it: lower wins. The route serves a
-        fresh instance unless ``instance`` names a stable one, whose runs raise ``epoch``.
+        fresh identity unless ``identity`` names a stable one, whose runs raise ``epoch``.
         Hold the route: dropping or cancelling it retracts it, and
         :meth:`BroadcastProducer.close` ends both.
         """
-        return Route(self._inner.route(path, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
+        return Route(self._inner.route(path, _options(hidden=hidden, cost=cost, identity=identity, epoch=epoch)))
 
     def claim(
-        self, prefix: str, *, hidden: bool = False, cost: int = 0, instance: Instance | None = None, epoch: int = 0
+        self, prefix: str, *, hidden: bool = False, cost: int = 0, identity: Identity | None = None, epoch: int = 0
     ) -> Claim:
         """Claim ``prefix`` and yield the requests beneath it as a :class:`Claim`.
 
@@ -371,4 +371,4 @@ class OriginProducer:
         path). A service that only serves some of them rejects the rest as they
         are requested. Hold the claim while it should stay advertised.
         """
-        return Claim(self._inner.claim(prefix, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
+        return Claim(self._inner.claim(prefix, _options(hidden=hidden, cost=cost, identity=identity, epoch=epoch)))

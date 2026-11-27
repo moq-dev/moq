@@ -19,7 +19,7 @@ export type DecoderConfig = Pick<
 /** The routing and decoder state whose changes require a replacement subscription. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.AudioConfig["broadcast"];
-	instance: Catalog.AudioConfig["instance"];
+	identity: Catalog.AudioConfig["identity"];
 	track: Catalog.AudioConfig["track"];
 	decoder: DecoderConfig;
 };
@@ -45,7 +45,7 @@ export function decoderConfigKey(config: Catalog.AudioConfig): string {
 export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
-		instance: config.instance,
+		identity: config.identity,
 		track: config.track,
 		decoder: decoderConfig(config),
 	};
@@ -73,12 +73,16 @@ export function decoderDescription(codec: string, description: Uint8Array | unde
 }
 
 /**
- * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it.
+ * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it. AAC
+ * with an AudioSpecificConfig is reckoned by its core's frame length and rate instead, which SBR
+ * may double.
  *
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
-export function frameDuration(config: { readonly codec: string; readonly sampleRate: number }): Duration | undefined {
+export function frameDuration(config: FrameConfig): Duration | undefined {
+	const aac = aacFrameDuration(config);
+	if (aac !== undefined) return aac;
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -96,7 +100,14 @@ export function packetDuration(codec: string, frame: Container.Frame): Duration 
 	return samples === undefined ? undefined : Duration.millis((samples * 1000) / OPUS_RATE);
 }
 
-function frameSamples(config: { readonly codec: string; readonly sampleRate: number }): number | undefined {
+// A catalog rendition (hex `description`) or the WebCodecs config built from one (bytes).
+type FrameConfig = {
+	readonly codec: string;
+	readonly sampleRate: number;
+	readonly description?: string | AllowSharedBufferSource;
+};
+
+function frameSamples(config: FrameConfig): number | undefined {
 	switch (Util.Aac.objectType(config.codec)) {
 		case 2:
 			return AAC_LC_FRAME_SAMPLES;
@@ -110,4 +121,19 @@ function frameSamples(config: { readonly codec: string; readonly sampleRate: num
 		return config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;
 	}
 	return undefined;
+}
+
+// How long an AAC track's AudioSpecificConfig codes each frame, or undefined without an AAC-LC core.
+function aacFrameDuration(config: FrameConfig): Duration | undefined {
+	const description = config.description;
+	if (!description || Util.Aac.objectType(config.codec) === undefined) return undefined;
+	const bytes =
+		typeof description === "string"
+			? Util.Hex.toBytes(description)
+			: ArrayBuffer.isView(description)
+				? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+				: new Uint8Array(description);
+	const asc = Util.Aac.parseConfig(bytes);
+	if (asc?.frameSamples === undefined) return undefined;
+	return Duration.millis((asc.frameSamples * 1000) / asc.coreSampleRate);
 }

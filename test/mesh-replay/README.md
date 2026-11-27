@@ -37,7 +37,7 @@ presenting the token `peer.<relay>` as a cluster peer.
 
 On each relay, `moq-bench replay` publishes the relay's broadcasts
 (`replay/<relay>/<n>`, one single-frame group every 100ms) and another follows every
-other relay's, across every instance that serves it, the way a viewer waiting on a
+other relay's, across every identity that serves it, the way a viewer waiting on a
 stream would. The reader writes when its groups paused or skipped, and every second
 its state, which is how a stall is told apart from a route that is gone.
 
@@ -143,7 +143,7 @@ reports and logs together with `HARNESS_KEEP=1`. For each event:
   out, and the column reads n/a when none had one.
 - **Readers hit**: reader paths that paused longer than 0.5s, of them **bystanders**,
   whose relay and source were both outside the fault, the **longest** pause, and the
-  groups **missed** within one instance.
+  groups **missed** within one identity.
 
 For a roll it also reports, per link of the drained relay, whether the neighbour heard a
 GOAWAY before the link closed (DRAIN) or only saw it close (DEAD), read from the

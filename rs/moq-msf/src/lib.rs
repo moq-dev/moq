@@ -533,6 +533,10 @@ pub enum Packaging {
 	MediaTimeline,
 	/// Event timeline.
 	EventTimeline,
+	/// Raw codec payload with no header, presented at the transport timestamp.
+	Raw,
+	/// A QUIC varint composition time offset (in the track's timescale), then the raw codec payload.
+	Cts,
 	/// Unknown packaging type.
 	Unknown(String),
 }
@@ -545,6 +549,8 @@ impl fmt::Display for Packaging {
 			Packaging::Legacy => write!(f, "legacy"),
 			Packaging::MediaTimeline => write!(f, "mediatimeline"),
 			Packaging::EventTimeline => write!(f, "eventtimeline"),
+			Packaging::Raw => write!(f, "raw"),
+			Packaging::Cts => write!(f, "cts"),
 			Packaging::Unknown(s) => write!(f, "{s}"),
 		}
 	}
@@ -560,6 +566,8 @@ impl FromStr for Packaging {
 			"legacy" => Packaging::Legacy,
 			"mediatimeline" => Packaging::MediaTimeline,
 			"eventtimeline" => Packaging::EventTimeline,
+			"raw" => Packaging::Raw,
+			"cts" => Packaging::Cts,
 			other => Packaging::Unknown(other.to_string()),
 		})
 	}
@@ -784,6 +792,8 @@ mod test {
 			("legacy", Packaging::Legacy),
 			("mediatimeline", Packaging::MediaTimeline),
 			("eventtimeline", Packaging::EventTimeline),
+			("raw", Packaging::Raw),
+			("cts", Packaging::Cts),
 			("custom", Packaging::Unknown("custom".to_string())),
 		] {
 			let packaging: Packaging = s.parse().unwrap();

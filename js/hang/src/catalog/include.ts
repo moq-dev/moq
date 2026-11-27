@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { IdentitySchema, RelativeBroadcastSchema } from "./path.ts";
 
 /**
  * A whole broadcast whose own catalog describes its renditions, listed without opening it.
@@ -15,9 +15,9 @@ import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
 export const IncludeSchema = z.object({
 	// The include's broadcast, relative to the broadcast serving this catalog.
 	broadcast: RelativeBroadcastSchema,
-	// The stream the reference names, with a rendition `instance`'s meaning. A composer leaves it
+	// The stream the reference names, with a rendition `identity`'s meaning. A composer leaves it
 	// out until the include resolves.
-	instance: z.optional(InstanceSchema),
+	identity: z.optional(IdentitySchema),
 });
 
 /** A whole broadcast listed for explicit, lazy selection. */

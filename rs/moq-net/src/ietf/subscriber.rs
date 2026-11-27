@@ -802,7 +802,7 @@ impl Target {
 /// TRACK_STATUS_OK).
 ///
 /// The copy keeps the units the publisher declared, so it matches a copy of the same
-/// instance that arrived over another route: resuming across routes refuses one whose
+/// identity that arrived over another route: resuming across routes refuses one whose
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
 fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
@@ -965,7 +965,7 @@ struct BroadcastState {
 	route: crate::origin::RouteInfo,
 
 	// Each live advertisement of the namespace with the route it describes, oldest first.
-	// A publisher replacing its instance withdraws one advertisement and makes another, on
+	// A publisher replacing its identity withdraws one advertisement and makes another, on
 	// separate streams that can arrive in either order: the newest stands until it goes,
 	// and an update to an older one changes nothing.
 	adverts: Vec<(u64, crate::origin::RouteInfo)>,
@@ -2964,13 +2964,13 @@ impl Subscriber {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
 				// Another advertisement of a namespace the peer holds is the same stream.
-				route.instance = entry.route.instance.clone();
+				route.identity = entry.route.identity.clone();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
 				}
 				// The newest advertisement stands, and an update to an older one changes
-				// nothing. A repeat of the same instance re-prices in place and in-flight
+				// nothing. A repeat of the same identity re-prices in place and in-flight
 				// tracks keep flowing.
 				let (newest, route) = entry.adverts.last().expect("just recorded");
 				if *newest == id {
@@ -2982,9 +2982,9 @@ impl Subscriber {
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
-				// moq-transport carries no instance, so each namespace the peer advertises anew
+				// moq-transport carries no identity, so each namespace the peer advertises anew
 				// is a stream of its own, even one it advertised before on this session.
-				route.instance = Some(crate::Instance::minted());
+				route.identity = Some(crate::Identity::minted());
 				// A peer past its limits loses the session, not just this namespace.
 				let slot = match slot {
 					Some(slot) => slot,
@@ -3298,7 +3298,7 @@ impl kio::Task for RunRoute {
 				Some(requested) => requested.clone(),
 				None => continue,
 			};
-			// The source takes new tracks only while the peer still selects that instance.
+			// The source takes new tracks only while the peer still selects that identity.
 			let validity = {
 				let state = this.state.lock();
 				let entry = state
@@ -3343,7 +3343,7 @@ impl kio::Task for RunRoute {
 
 /// Serves one minted source's track requests, taken through its `broadcast` handler,
 /// until it closes: its namespace is retracted (`route` closes), the peer stops
-/// selecting its instance, nothing holds it any more, or the session dies.
+/// selecting its identity, nothing holds it any more, or the session dies.
 struct RunBroadcast {
 	datagrams: broadcast::DatagramRequests,
 	this: Subscriber,
@@ -5574,7 +5574,7 @@ impl JoinFetch {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				// Served by the subscription it joins, which named the instance.
+				// Served by the subscription it joins, which named the identity.
 			},
 		)?;
 		Poll::Ready(Ok(stream))
@@ -9944,7 +9944,7 @@ mod tests {
 		}
 	}
 
-	/// An unanswered unnamed request cannot prove which instance the peer resolved.
+	/// An unanswered unnamed request cannot prove which identity the peer resolved.
 	/// Retiring its source cancels it even while the caller keeps its demand.
 	#[kio::test]
 	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
@@ -11156,7 +11156,7 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// Under another instance the fresh session is another source, so consumers restart
+	/// Under another identity the fresh session is another source, so consumers restart
 	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[kio::test]
 	async fn reconnecting_peer_restarts_the_route() {

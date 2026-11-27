@@ -512,7 +512,7 @@ release in flight between steps 3 and 5.
 ## Bootstrapping the video corpus
 
 The nightly video-quality job, which [the harness
-quest](../quest/m9/video-quality/harness.md) adds, reads its clips from two
+quest](../quest/m4/video-quality/harness.md) adds, reads its clips from two
 buckets.
 `corpus-moq-dev` holds open clips and is public at `corpus.moq.dev`.
 `corpus-private-moq-dev` holds clips that cannot be redistributed. It has no

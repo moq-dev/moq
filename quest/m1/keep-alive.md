@@ -80,4 +80,3 @@ sends about one per `soft / 2`.
 ## Related
 
 - [Route health](/quest/m3/route-health/README.md) - per-track failover, which never relies on QUIC keep-alives
-- [JS session cost](/quest/m1/js-session-cost.md) - Kixel's other link-quality primitive

@@ -179,7 +179,7 @@ impl<S: ObjectStore> Track<S> {
 				return Ok(error(&err));
 			}
 		};
-		// The listing's info may describe an instance the name no longer resolves to, so the
+		// The listing's info may describe an identity the name no longer resolves to, so the
 		// subscribed one's properties are what its frames are stored under.
 		self.properties(subscriber.info()).await?;
 

@@ -8,7 +8,7 @@ capacity drops instead of queueing media behind the pacer.
 
 ## Plan
 
-Decided 2026-10-17: its own quest beside the [realtime uplink](/quest/m4/quic-realtime.md), independent of the
+Decided 2026-10-17: its own quest beside the [realtime uplink](/quest/m5/quic-realtime.md), independent of the
 controller bake-off. It works with today's BBR3 estimate and gains the full
 latency win once `Realtime` lands.
 
@@ -29,4 +29,4 @@ Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 
 ## Related
 
-- [Realtime uplink congestion control](/quest/m4/quic-realtime.md) - the controller whose rate this follows
+- [Realtime uplink congestion control](/quest/m5/quic-realtime.md) - the controller whose rate this follows

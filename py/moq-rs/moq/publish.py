@@ -115,8 +115,9 @@ class TrackDemand:
     async def wanted_changed(self) -> bool:
         """Wait for ``wanted`` to change and return it. The first call returns at once.
 
-        End a track nobody wants with :meth:`TrackProducer.abort_unwanted`, which keeps it for
-        a reader that joined since.
+        End a track nobody wants by dropping every reference to its producer (``del producer``)
+        once this returns ``False``: a reader that joined since is served by the next request
+        for the track while a request handler is live.
         """
         return await self._inner.wanted_changed()
 
@@ -193,16 +194,6 @@ class TrackProducer:
         """Abort this track with an application error code."""
         self._inner.abort(error_code)
 
-    def abort_unwanted(self, error_code: int) -> bool:
-        """Abort this track with an application error code, but only while nobody wants it.
-
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
-        the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
-        returned ``None`` misses a reader that came and went, and waits on.
-        """
-        return self._inner.abort_unwanted(error_code)
-
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers.
 
@@ -234,7 +225,9 @@ class TrackRequest:
     def accept(self, info: TrackInfo | None = None) -> TrackProducer:
         """Accept the request as a raw track.
 
-        ``info`` fixes the track's timescale, priority, and cache; omit for defaults.
+        ``info`` fixes the track's timescale, priority, and cache; omit for defaults. A track asked
+        for again, because its producer was released while read, must be accepted with the info it
+        was published with: another ends the track, and the producer's writes raise.
         """
         return TrackProducer(self._inner.accept(_track_info(info)))
 

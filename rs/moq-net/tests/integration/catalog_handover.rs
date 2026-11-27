@@ -3,7 +3,7 @@
 //! A catalog's one open group (a snapshot at frame 0, deltas after) survives its
 //! route changing in the middle of that group, end to end over real sessions.
 //!
-//! A publisher `P` is pulled by two relays `A` and `B` carrying its instance, and `R`
+//! A publisher `P` is pulled by two relays `A` and `B` carrying its identity, and `R`
 //! reads through `A` until the route changes mid-group. The reader already on `R`
 //! continues with the next delta, and every reader after the change (a fresh one, a
 //! returning one, and a burst of short ones) still starts from the snapshot. The
@@ -470,7 +470,7 @@ macro_rules! handover_tests {
 	};
 }
 
-// Only an instance lets `R` resume onto another route; older wires end the subscription
+// Only an identity lets `R` resume onto another route; older wires end the subscription
 // with its route instead (see `route_change`).
 handover_tests! {
 	lite_07: "moq-lite-07-wip",
@@ -500,7 +500,7 @@ macro_rules! fetch_tests {
 	};
 }
 
-// A fetch needs no instance. moq-transport is left out: its copy goes idle on the leave
+// A fetch needs no identity. moq-transport is left out: its copy goes idle on the leave
 // and still answers from the open group it can no longer feed.
 fetch_tests! {
 	fetch_lite_06: "moq-lite-06",

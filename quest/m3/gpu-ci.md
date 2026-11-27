@@ -58,7 +58,7 @@ skipping inside the Nix shell.
 - Decided 2026-11-15 (maintainer, /quest-complete): ✅ (a) a sandboxed runner
   container on the CI host, like `nixos`'s existing runner containers, with
   the NVIDIA device nodes and the host driver's libraries bound in, as
-  [GPU runners](/quest/m9/video-quality/gpu-runners.md) plans for the quality
+  [GPU runners](/quest/m4/video-quality/gpu-runners.md) plans for the quality
   job (rejected: (b) a VFIO-passthrough VM from `github-runner-vm`, which
   conflicts with the [CI epic](/quest/m0/ci/README.md)'s choice of kernel
   sandboxing over a VM).
@@ -68,4 +68,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - hardware paths nothing runs yet
-- [Video quality hardware rows](/quest/m9/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU
+- [Video quality hardware rows](/quest/m4/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU

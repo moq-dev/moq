@@ -32,7 +32,7 @@ aggregation and measured link-cost policy outside the basic setup.
 
 Use generic public examples and validate CLI/config examples against the
 implemented help. Cross-link `doc/bin/relay/cluster.md` and identity guidance
-without duplicating reference material. Route health adds its section in m5.
+without duplicating reference material. Route health adds its section in m3.
 
 Public API/wire: documentation only, reflecting completed implementations.
 

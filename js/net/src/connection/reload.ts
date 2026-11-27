@@ -5,6 +5,7 @@ import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
 import { Allocator, reserved, Viewers } from "../bandwidth.ts";
 import { ConnectTimeout, error, reason } from "../error.ts";
+import type { Cost } from "../hop.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
@@ -24,7 +25,7 @@ import { type Answer, Dials } from "./dials.ts";
 import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
-import { DEFAULT_TIMEOUT } from "./handshake.ts";
+import { checkCost, DEFAULT_TIMEOUT } from "./handshake.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
@@ -275,7 +276,7 @@ export class Reload {
 	/**
 	 * Divides this connection's send-rate estimate among the tracks sharing it.
 	 *
-	 * The same instance across reconnects, so reservations survive a drop. The
+	 * The same identity across reconnects, so reservations survive a drop. The
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
 	 * its rate rather than encode at zero. It is sampled from the transport only
 	 * while a reservation reads it, so the first reservation after none waits one
@@ -288,7 +289,7 @@ export class Reload {
 	/**
 	 * Divides this connection's receive estimate among the broadcasts watched over it.
 	 *
-	 * The same instance across reconnects, so viewers survive a drop, and every session
+	 * The same identity across reconnects, so viewers survive a drop, and every session
 	 * the loop dials sends their ceilings summed as its PROBE target. A live viewer
 	 * requests PROBE; viewers report `undefined` while disconnected.
 	 */
@@ -322,6 +323,9 @@ export class Reload {
 
 	/** The bound on each connection attempt. See {@link ConnectProps.timeout}. */
 	readonly timeout?: Duration;
+
+	/** The price of each session's link. See {@link ConnectProps.cost}. */
+	readonly cost?: Cost;
 
 	/**
 	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
@@ -445,6 +449,8 @@ export class Reload {
 		this.websocket = props?.websocket;
 		// Validated here, like the versions, rather than by every attempt.
 		this.timeout = props?.timeout;
+		checkCost(props?.cost);
+		this.cost = props?.cost;
 		this.publish = props?.publish;
 		this.consume = props?.consume;
 
@@ -672,6 +678,7 @@ export class Reload {
 								timeout,
 								publish: this.publish,
 								consume: this.consume,
+								cost: this.cost,
 								auth: this.auth,
 								viewers: this.viewers,
 								signal,

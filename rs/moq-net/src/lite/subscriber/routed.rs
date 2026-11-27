@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::{
-	Error, Instance, Path, lite,
+	Error, Identity, Path, lite,
 	route::{
 		self, NodeId,
 		node::{self, Change, Claim, Msg},
@@ -51,7 +51,7 @@ struct WireClaim {
 	path: Option<Path>,
 	/// Relative to the session, as the wire names it.
 	relative: Option<Path>,
-	instance: Instance,
+	identity: Identity,
 	claim: Claim,
 	/// The node whose claim it is, once a floor closed the batch that started it.
 	origin: Option<NodeId>,
@@ -132,8 +132,8 @@ struct ServedClaim {
 	route: AnnouncedRoute<ServedKey>,
 }
 
-/// A served claim's claimant, its path, and the instance it serves.
-type ServedKey = (NodeId, Path, Instance);
+/// A served claim's claimant, its path, and the identity it serves.
+type ServedKey = (NodeId, Path, Identity);
 
 /// What a closed session leaves in the origin of a claim it served.
 struct Left(crate::origin::Claim);
@@ -486,12 +486,12 @@ impl Routed {
 	/// Leave what the session served in the origin, serving nothing, until another
 	/// session serves it or the node's reader lets it go.
 	fn orphan(&mut self) {
-		for ((origin, path, instance), mut served) in self.served.drain() {
+		for ((origin, path, identity), mut served) in self.served.drain() {
 			let unavailable = served.route.route.clone().with_available(false);
 			served.route.update(unavailable);
 			served.route.dynamic.disown();
 			let left = Left(served.route.dynamic.clone());
-			self.stream.orphan(origin, &(path, instance), Box::new(left));
+			self.stream.orphan(origin, &(path, identity), Box::new(left));
 		}
 	}
 
@@ -669,7 +669,7 @@ impl Routed {
 			Wire::Floor { id, revision } => self.floor(id, revision)?,
 			Wire::Start {
 				suffix,
-				instance,
+				identity,
 				claim,
 			} => {
 				let relative = self.decoder.start(Some(suffix))?;
@@ -689,7 +689,7 @@ impl Routed {
 				let wire = WireClaim {
 					path,
 					relative,
-					instance,
+					identity,
 					claim,
 					origin: None,
 					filed: Vec::new(),
@@ -711,7 +711,7 @@ impl Routed {
 					true => Change::Lost,
 					false => Change::Ended,
 				};
-				let broadcast = wire.path.map(|path| (path, wire.instance.clone()));
+				let broadcast = wire.path.map(|path| (path, wire.identity.clone()));
 				if self.routing {
 					if let Some((_, claims)) = wire
 						.origin
@@ -724,7 +724,7 @@ impl Routed {
 					self.pending.end(id, broadcast, change, wire.origin.is_some());
 				} else if !wire.filed.is_empty() {
 					let changes = (wire.filed.into_iter())
-						.map(|path| ((path, wire.instance.clone()), change.clone()))
+						.map(|path| ((path, wire.identity.clone()), change.clone()))
 						.collect();
 					self.stream
 						.recv(Msg::Announce { changes })
@@ -759,7 +759,7 @@ impl Routed {
 	/// neighbour's waits for its floor, and any other goes to the node at once.
 	fn changed(&mut self, id: u64, fresh: bool) -> Result<(), Error> {
 		let wire = self.claims.get_mut(&id).expect("a live claim");
-		let broadcast = wire.path.clone().map(|path| (path, wire.instance.clone()));
+		let broadcast = wire.path.clone().map(|path| (path, wire.identity.clone()));
 		let change = Change::Live(wire.claim.clone());
 		if self.routing {
 			// Every forwarding node holds every path another does.
@@ -768,7 +768,7 @@ impl Routed {
 			return Ok(());
 		}
 		// A claim at no path this node can hold reaches no reader here.
-		let Some((path, instance)) = broadcast else {
+		let Some((path, identity)) = broadcast else {
 			return Ok(());
 		};
 		let filing = filing(&self.origin, &self.root, &self.permit, &path);
@@ -776,7 +776,7 @@ impl Routed {
 		if filing.is_empty() && (fresh || !wire.filed.is_empty()) {
 			self.origin.stats().refuse_route(RouteRefusal::Scope);
 		}
-		let changes = refile(wire, &instance, filing, true);
+		let changes = refile(wire, &identity, filing, true);
 		match changes.is_empty() {
 			true => Ok(()),
 			false => self
@@ -889,8 +889,8 @@ impl Routed {
 				continue;
 			};
 			let filing = filing(&self.origin, &self.root, &self.permit, &path);
-			let instance = wire.instance.clone();
-			changes.extend(refile(wire, &instance, filing, false));
+			let identity = wire.identity.clone();
+			changes.extend(refile(wire, &identity, filing, false));
 		}
 		for change in changes {
 			let changes = vec![change];
@@ -908,18 +908,18 @@ impl Routed {
 			node::Output::Serve {
 				origin,
 				path,
-				instance,
+				identity,
 				served,
 			} => {
-				let key = (origin, path, instance);
+				let key = (origin, path, identity);
 				let served = self.serve(subscriber, &key, served);
 				// Dropped, a claim this session may no longer carry goes offline rather
 				// than ending: its publisher never withdrew it.
 				if served.is_err() {
 					self.served.remove(&key);
 				}
-				let (origin, path, instance) = key;
-				let refused = self.stream.serving(origin, &(path, instance), served.is_ok());
+				let (origin, path, identity) = key;
+				let refused = self.stream.serving(origin, &(path, identity), served.is_ok());
 				// Counted as the claim's slot turns refused, not on each update behind it.
 				if refused && let Err(Some(kind)) = served {
 					self.origin.stats().refuse_route(kind);
@@ -928,10 +928,10 @@ impl Routed {
 			node::Output::Unserve {
 				origin,
 				path,
-				instance,
+				identity,
 				gone,
 			} => {
-				if let Some(served) = self.served.remove(&(origin, path, instance)) {
+				if let Some(served) = self.served.remove(&(origin, path, identity)) {
 					release(served.route.dynamic, gone);
 				}
 			}
@@ -949,7 +949,7 @@ impl Routed {
 		key: &ServedKey,
 		served: node::Served,
 	) -> Result<(), Option<RouteRefusal>> {
-		let (origin, claim, instance) = key;
+		let (origin, claim, identity) = key;
 		let Some(path) = claim.strip_prefix(&self.root) else {
 			// Outside the session's root, so nothing a request could name here.
 			return Err(None);
@@ -988,7 +988,7 @@ impl Routed {
 		};
 		// A claim no route reaches is unavailable: it stays shown, and serves nothing.
 		let route = crate::origin::RouteInfo::new()
-			.with_instance(instance.clone(), served.attr.epoch)
+			.with_identity(identity.clone(), served.attr.epoch)
 			.with_hops(hops)
 			.with_cost(served.cost)
 			.with_via(subscriber.via(None))
@@ -1067,13 +1067,13 @@ fn filing(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::P
 		.collect()
 }
 
-/// File `wire`, a claim of `instance`, at `filing` instead of where it is: what the node
+/// File `wire`, a claim of `identity`, at `filing` instead of where it is: what the node
 /// should hear, each place it holds live, as many segments above it as it lies beneath the
 /// claim's path, then each it leaves lost. With `changed`, the claim itself changed, so
 /// every place it stays is told again.
 fn refile(
 	wire: &mut WireClaim,
-	instance: &Instance,
+	identity: &Identity,
 	filing: Vec<Path>,
 	changed: bool,
 ) -> Vec<(node::Broadcast, Change)> {
@@ -1085,11 +1085,11 @@ fn refile(
 		}
 		let mut claim = wire.claim.clone();
 		claim.item.above = claim.item.above.saturating_add((path.depth() - depth) as u64);
-		changes.push(((path.clone(), instance.clone()), Change::Live(claim)));
+		changes.push(((path.clone(), identity.clone()), Change::Live(claim)));
 	}
 	for path in &wire.filed {
 		if !filing.contains(path) {
-			changes.push(((path.clone(), instance.clone()), Change::Lost));
+			changes.push(((path.clone(), identity.clone()), Change::Lost));
 		}
 	}
 	wire.filed = filing;

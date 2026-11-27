@@ -409,7 +409,7 @@ roots = true                         # Also give each root its own stats under <
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
+Each run announces under a fresh [identity](/concept/moq-lite#publisher-identities),
 so a restart is a new broadcast at the same path. Each bucket is a
 [track](/concept/stats#bucket-tracks) of that broadcast, and one returning after
 its linger restarts its counters under a new run id without an announce. The

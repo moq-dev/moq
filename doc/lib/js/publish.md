@@ -134,13 +134,14 @@ follow through the catalog. For
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
-Audio groups carry at least 20 ms by default, packing shorter codec frames
-together. `el.audio.join` changes that minimum; a join shorter than a frame
-puts every frame in its own group, and zero is refused. A longer join lets a
+Audio groups carry at least 100 ms by default, so a relay keeps one stream per
+100 ms rather than one per codec frame; the frame that fills a group closes it.
+`el.audio.join` changes that minimum; a join shorter than a frame puts every
+frame in its own group, and zero is refused. A longer join lets a
 relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
 A reader that skips a superseded group at once (a zero `delay.max`, the default
-subscription) loses a 20 ms group whenever jitter delivers it to a relay together
+subscription) loses a group whenever jitter delivers it to a relay together
 with its successor; give that reader a `delay.max` of at least the path's jitter
 rather than lengthening the join. In a room, `Local` takes the same knob as
 `microphone.join` and `screen.audio.join`.

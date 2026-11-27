@@ -68,7 +68,7 @@ while let Some(event) = announced.next().await {
     // Skip retractions. A path stays present across publisher restarts: hold
     // `consumer.follow(path, None)` to be handed each new run.
     let moq_net::announce::Event::Present(update) = event else { continue };
-    let broadcast = consumer.request(&update.prefix, Some(update.route.instance().clone())).await?;
+    let broadcast = consumer.request(&update.prefix, Some(update.route.identity().clone())).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())

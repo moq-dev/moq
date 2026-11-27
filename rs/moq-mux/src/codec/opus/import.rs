@@ -12,8 +12,8 @@ use crate::container::Frame;
 /// frame of each group a keyframe (the rest extend it): frames accumulate into the current group
 /// until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The
 /// [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
-/// caller's either way: cut per packet for one group (one QUIC stream) forwarded immediately, or
-/// less often to batch frames into fewer groups. Opus' packet loss concealment handles drops.
+/// caller's either way: [`Join`](crate::container::Join) says when a group (one QUIC stream)
+/// holds its 100 ms. Opus' packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
@@ -66,17 +66,6 @@ impl Import {
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
-	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
-	/// unchanged when a reader does; see
-	/// [`Producer::abort_unwanted`](crate::container::Producer::abort_unwanted).
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the importer back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		self.track.abort_unwanted(err).map_err(|track| Self { track })
 	}
 
 	/// Cut the current group at `end` without finishing the track.

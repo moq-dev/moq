@@ -85,14 +85,14 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `target.name` (import),
-/// announced under `instance` once its catalog names a track.
-pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::Instance) -> anyhow::Result<()> {
+/// announced under `identity` once its catalog names a track.
+pub async fn connect_import(target: ImportTarget, url: Url, identity: moq_net::Identity) -> anyhow::Result<()> {
 	let name = &target.name;
 	// Hidden until the catalog exists: a viewer or export that resolved the broadcast earlier
 	// would find no catalog track. Held until the pull ends.
 	let route = target
 		.origin
-		.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
+		.route(name, moq_net::origin::RouteOptions::hidden().with_identity(identity, 0))
 		.context("failed to create broadcast")?;
 	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), target.ingest.catalog())?;
 	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
@@ -181,7 +181,7 @@ mod tests {
 			name: "pulled".to_string(),
 			ingest: moq_mux::Ingest::default(),
 		};
-		let pull = tokio::spawn(connect_import(target, url, moq_net::Instance::random()));
+		let pull = tokio::spawn(connect_import(target, url, moq_net::Identity::random()));
 
 		let (offer, _) = listener.accept().await.unwrap();
 		assert!(

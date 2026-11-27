@@ -91,7 +91,7 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		datagrams(name: string): Datagram.Consumer;
-		get instance(): Instance.Valid | undefined;
+		get identity(): Identity.Valid | undefined;
 		get path(): Path.Valid;
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
@@ -139,6 +139,7 @@ export * as Clock from "@moq/clock";
 export namespace Connection {
 	export interface AcceptProps {
 		consume?: Origin.Producer;
+		cost?: Origin.Cost;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
@@ -161,6 +162,7 @@ export namespace Connection {
 	export interface ConnectProps {
 		auth?: Auth.Handle;
 		consume?: Origin.Producer;
+		cost?: Origin.Cost;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
@@ -201,6 +203,7 @@ export namespace Connection {
 	export interface Props {
 		backoff?: Connection.Backoff;
 		consume?: Origin.Producer;
+		cost?: Origin.Cost;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
@@ -461,19 +464,19 @@ export namespace Group {
 	}
 }
 
-export namespace Instance {
+export namespace Identity {
 	export interface Minted {
 		get text(): string;
 		toString(): string;
 	}
 	export type Named = string & {
-		readonly _brand: "instance";
+		readonly _brand: "identity";
 	};
-	export type Valid = Instance.Named | Instance.Minted;
-	export function isMinted(instance: Instance.Valid): instance is Instance.Minted;
-	export function parse(text: string): Instance.Named;
-	export function random(): Instance.Named;
-	export function text(instance: Instance.Valid): string;
+	export type Valid = Identity.Named | Identity.Minted;
+	export function isMinted(identity: Identity.Valid): identity is Identity.Minted;
+	export function parse(text: string): Identity.Named;
+	export function random(): Identity.Named;
+	export function text(identity: Identity.Valid): string;
 }
 
 export namespace Origin {
@@ -482,7 +485,7 @@ export namespace Origin {
 		announce(): void;
 		get announced(): boolean;
 		close(): void;
-		get instance(): Instance.Valid;
+		get identity(): Identity.Valid;
 		requested(): AsyncIterableIterator<Origin.Request>;
 		setAuth(auth?: Auth.Credential): void;
 		setCost(cost: Origin.Cost): void;
@@ -497,7 +500,7 @@ export namespace Origin {
 	}
 	export type Cost = bigint;
 	export interface FollowOptions {
-		instance?: Instance.Valid;
+		identity?: Identity.Valid;
 	}
 	export class Following {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
@@ -517,6 +520,7 @@ export namespace Origin {
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		scope(root: Path.Valid, prefixes: Path.Prefixes): Origin.Producer;
+		withPriority(priority: number): Origin.Producer;
 	}
 	export interface Reader {
 		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -533,7 +537,7 @@ export namespace Origin {
 		unwanted(): Promise<void>;
 	}
 	export interface RequestOptions {
-		instance?: Instance.Valid;
+		identity?: Identity.Valid;
 	}
 	export class Requesting {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
@@ -548,7 +552,7 @@ export namespace Origin {
 		get announced(): boolean;
 		readonly broadcast: Broadcast.Producer;
 		close(): void;
-		get instance(): Instance.Valid;
+		get identity(): Identity.Valid;
 		setAuth(auth?: Auth.Credential): void;
 		setCost(cost: Origin.Cost): void;
 		withdraw(): void;
@@ -556,15 +560,15 @@ export namespace Origin {
 	export interface RouteInfo {
 		readonly available: boolean;
 		readonly cost: Origin.Cost;
-		readonly instance?: Instance.Valid;
+		readonly identity?: Identity.Valid;
 	}
 	export interface RouteOptions {
 		auth?: Auth.Credential;
 		cost?: Origin.Cost;
 		hidden?: boolean;
-		instance?: {
+		identity?: {
 			epoch: bigint;
-			id: Instance.Valid;
+			id: Identity.Valid;
 		};
 	}
 	export interface Table extends Origin.Reader {

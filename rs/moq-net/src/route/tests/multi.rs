@@ -24,11 +24,11 @@ use std::{
 
 use super::*;
 
-/// The Instance a claim serves: the publisher's identity in the fixtures.
-pub(super) type Instance = Id;
+/// The Identity a claim serves: the publisher's identity in the fixtures.
+pub(super) type Identity = Id;
 
-/// What a reader asks for: an Instance at a path.
-pub(super) type Broadcast = (Instance, Path);
+/// What a reader asks for: an Identity at a path.
+pub(super) type Broadcast = (Identity, Path);
 
 /// What a closed session says about the node at its far end: every route through
 /// it ranks as draining until that node's own word about the session arrives, or a

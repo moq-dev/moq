@@ -409,11 +409,14 @@ impl Stream<'_> {
 	/// Hand a lease back, keeping the connection credit of the bytes read from it
 	///
 	/// They wait for a later [`Self::release()`], as the start of a message read only in part
-	/// does.
+	/// does. Restoring assumes the reader will continue reading or releasing this stream; a
+	/// reader that parks elsewhere while holding leased bytes must release them or stop the
+	/// stream so a stuck receive window is not left holding them.
 	pub fn restore(&mut self, lease: Lease) {
 		let credit = self.put_back(lease);
 		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
-		// stuck itself, and one that is waits for more with its next lease.
+		// stuck itself (and may be about to consume it), and one that is waits for more with its
+		// next lease.
 		let transmit = self.state.stuck_waiting && self.unstick();
 		self.transmit(credit || transmit);
 	}
@@ -652,6 +655,19 @@ impl StreamsState {
 		);
 		self.held -= bytes;
 		self.add_read_credits(bytes)
+	}
+
+	/// Wake every reader waiting for more than the receive window holds, whose next lease fails
+	/// with [`Error::TooLarge`].
+	pub(super) fn wake_too_large(&mut self) {
+		for (&id, slot) in &self.recv {
+			if slot
+				.as_deref()
+				.is_some_and(|recv| recv.lease.wanted() > self.receive_window)
+			{
+				self.waits.wake(id, Wait::Read);
+			}
+		}
 	}
 
 	/// Take the lease of `id`, stopped or freed, out of the eviction order and return the credit
