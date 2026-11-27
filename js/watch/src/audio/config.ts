@@ -74,14 +74,15 @@ export function decoderDescription(codec: string, description: Uint8Array | unde
 
 /**
  * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it. AAC
- * with an AudioSpecificConfig is reckoned at its core's rate instead, which SBR may double.
+ * with an AudioSpecificConfig is reckoned by its core's frame length and rate instead, which SBR
+ * may double.
  *
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
 export function frameDuration(config: FrameConfig): Duration | undefined {
-	const core = aacCoreRate(config);
-	if (core !== undefined) return Duration.millis((AAC_LC_FRAME_SAMPLES * 1000) / core);
+	const aac = aacFrameDuration(config);
+	if (aac !== undefined) return aac;
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -122,8 +123,8 @@ function frameSamples(config: FrameConfig): number | undefined {
 	return undefined;
 }
 
-// The rate an AAC track's AudioSpecificConfig codes its frames at, or undefined without one.
-function aacCoreRate(config: FrameConfig): number | undefined {
+// How long an AAC track's AudioSpecificConfig codes each frame, or undefined without an AAC-LC core.
+function aacFrameDuration(config: FrameConfig): Duration | undefined {
 	const description = config.description;
 	if (!description || Util.Aac.objectType(config.codec) === undefined) return undefined;
 	const bytes =
@@ -132,5 +133,7 @@ function aacCoreRate(config: FrameConfig): number | undefined {
 			: ArrayBuffer.isView(description)
 				? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
 				: new Uint8Array(description);
-	return Util.Aac.parseConfig(bytes)?.coreSampleRate;
+	const asc = Util.Aac.parseConfig(bytes);
+	if (asc?.frameSamples === undefined) return undefined;
+	return Duration.millis((asc.frameSamples * 1000) / asc.coreSampleRate);
 }

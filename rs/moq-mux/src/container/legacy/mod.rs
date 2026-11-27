@@ -97,7 +97,8 @@ pub struct Audio(Packets);
 enum Packets {
 	/// Read from each packet's TOC byte, in 48 kHz samples.
 	Opus,
-	/// The same number of samples in every packet, at the track's rate.
+	/// The same number of samples in every packet, at the codec's rate: AAC's core may run below
+	/// the track's.
 	Fixed { samples: u32, rate: u32 },
 	/// Interleaved 32-bit samples, so the payload's length says.
 	Pcm { frame_bytes: u32, rate: u32 },
@@ -113,16 +114,16 @@ impl Audio {
 		}
 		let packets = match &config.codec {
 			hang::catalog::AudioCodec::Opus => Packets::Opus,
-			// AAC codes 1024 samples per packet at its core's rate, which SBR and PS may double on
-			// output. The AudioSpecificConfig names that rate; without one, only AAC-LC's is the
-			// catalog's.
-			hang::catalog::AudioCodec::AAC(aac) => Packets::Fixed {
-				samples: 1024,
-				rate: match &config.description {
-					Some(asc) => crate::codec::aac::core_sample_rate(asc),
-					None => (aac.profile == 2).then_some(rate),
-				}?,
-			},
+			// AAC codes 960 or 1024 samples per packet at its core's rate, which SBR and PS may
+			// double on output. The AudioSpecificConfig names both; without one, only AAC-LC's
+			// rate is the catalog's, at the usual 1024.
+			hang::catalog::AudioCodec::AAC(aac) => {
+				let (samples, rate) = match &config.description {
+					Some(asc) => crate::codec::aac::frame_clock(asc),
+					None => (aac.profile == 2).then_some((1024, rate)),
+				}?;
+				Packets::Fixed { samples, rate }
+			}
 			// Layer II codes 1152 samples per frame.
 			hang::catalog::AudioCodec::Mp2 => Packets::Fixed { samples: 1152, rate },
 			hang::catalog::AudioCodec::Pcm => Packets::Pcm {
@@ -209,21 +210,24 @@ mod tests {
 	}
 
 	#[test]
-	fn aac_states_1024_samples_at_its_configs_core_rate() {
+	fn aac_states_its_configs_frame_length_at_its_core_rate() {
 		let lc = hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
 		let he = hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 5 });
-		for (codec, sample_rate, asc) in [
+		for (codec, sample_rate, asc, duration) in [
 			// A 48 kHz core with SBR at 96 kHz behind a sync extension, then at the core's own rate.
-			(lc.clone(), 96_000, &[0x11, 0x90, 0x56, 0xe5, 0x80][..]),
-			(lc.clone(), 48_000, &[0x11, 0x90, 0x56, 0xe5, 0x98][..]),
+			(lc.clone(), 96_000, &[0x11, 0x90, 0x56, 0xe5, 0x80][..], 21_333),
+			(lc.clone(), 48_000, &[0x11, 0x90, 0x56, 0xe5, 0x98][..], 21_333),
 			// Plain AAC-LC, and explicit SBR over a 48 kHz core at 96 kHz.
-			(lc, 48_000, &[0x11, 0x90][..]),
-			(he, 96_000, &[0x29, 0x90, 0x10][..]),
+			(lc.clone(), 48_000, &[0x11, 0x90][..], 21_333),
+			(he.clone(), 96_000, &[0x29, 0x90, 0x08, 0x00][..], 21_333),
+			// frameLengthFlag set: 960 samples, plain and under explicit SBR over a 24 kHz core.
+			(lc, 48_000, &[0x11, 0x94][..], 20_000),
+			(he, 48_000, &[0x2b, 0x11, 0x8a, 0x00][..], 40_000),
 		] {
 			let mut aac = config(codec, sample_rate, 2);
 			aac.description = Some(bytes::Bytes::copy_from_slice(asc));
 			let audio = Audio::new(&aac).unwrap();
-			assert_eq!(micros(audio.duration(&[0xff])), Some(21_333), "{asc:02x?}");
+			assert_eq!(micros(audio.duration(&[0xff])), Some(duration), "{asc:02x?}");
 		}
 	}
 }

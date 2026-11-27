@@ -98,6 +98,8 @@ const CHANNEL_COUNTS: Readonly<Record<number, number>> = {
 export interface Config {
 	/** The core's rate, which codes each frame's samples: SBR plays them at up to twice it. */
 	coreSampleRate: number;
+	/** The samples an AAC-LC core codes per frame, 960 or 1024 by its frameLengthFlag. Undefined for another core. */
+	frameSamples?: 960 | 1024;
 	/** The decoded rate: under SBR, the extension rate rather than the core's. */
 	sampleRate: number;
 	/** The decoded channels: two under PS, which a mono core carries. */
@@ -169,12 +171,15 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 	if (truncated || rate === undefined || coreSampleRate === undefined || numberOfChannels === undefined) {
 		return undefined;
 	}
-	const config = { coreSampleRate, sampleRate: rate, numberOfChannels };
-	if (explicit || !GENERAL_AUDIO.has(core)) return config;
+	const config: Config = { coreSampleRate, sampleRate: rate, numberOfChannels };
+	if (!GENERAL_AUDIO.has(core)) return config;
 
-	// The rest of the GASpecificConfig: frameLengthFlag, dependsOnCoreCoder (then a 14-bit
-	// coreCoderDelay), and extensionFlag.
-	read(1);
+	// The GASpecificConfig: frameLengthFlag, ahead of any program config element, then
+	// dependsOnCoreCoder (then a 14-bit coreCoderDelay) and extensionFlag.
+	const frameLength = read(1);
+	if (truncated) return config;
+	if (core === AAC_LC) config.frameSamples = frameLength === 1 ? 960 : 1024;
+	if (explicit) return config;
 	if (read(1) === 1) read(14);
 	const extension = read(1) === 1;
 	// layerNr.

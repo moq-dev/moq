@@ -6,6 +6,7 @@ import { Signals } from "@moq/hang";
 export namespace Aac {
 	export interface Config {
 		coreSampleRate: number;
+		frameSamples?: 960 | 1024;
 		numberOfChannels: number;
 		sampleRate: number;
 	}

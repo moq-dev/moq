@@ -26,14 +26,18 @@ export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => D
 			return samples === undefined ? undefined : Duration.micros((samples * 1_000_000) / 48_000);
 		};
 	}
-	// AAC codes 1024 samples per packet at its core's rate, which SBR and PS may double on output.
-	// The AudioSpecificConfig names that rate; without one, only AAC-LC's is the catalog's.
+	// AAC codes 960 or 1024 samples per packet at its core's rate, which SBR and PS may double on
+	// output. The AudioSpecificConfig names both; without one, only AAC-LC's rate is the catalog's,
+	// at the usual 1024.
 	const aac = Aac.objectType(config.codec);
 	if (aac !== undefined) {
-		const asc = config.description ? Aac.parseConfig(Hex.toBytes(config.description)) : undefined;
-		const core = asc?.coreSampleRate ?? (aac === 2 ? rate : undefined);
-		if (core === undefined) return undefined;
-		const duration = Duration.micros((1024 * 1_000_000) / core);
+		const asc = config.description
+			? Aac.parseConfig(Hex.toBytes(config.description))
+			: aac === 2
+				? { frameSamples: 1024, coreSampleRate: rate }
+				: undefined;
+		if (asc?.frameSamples === undefined) return undefined;
+		const duration = Duration.micros((asc.frameSamples * 1_000_000) / asc.coreSampleRate);
 		return (payload) => (payload.byteLength > 0 ? duration : undefined);
 	}
 	// Layer II codes 1152 samples per frame.

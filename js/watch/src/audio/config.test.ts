@@ -81,6 +81,13 @@ test("an AAC frame with an AudioSpecificConfig runs 1024 samples at its core's r
 		const aac = config({ codec: "mp4a.40.2", sampleRate, description });
 		expect(frameDuration(aac)?.asMillis()).toBeCloseTo(21.333, 3);
 	}
+	// frameLengthFlag set: 960 samples, plain at 48 kHz and under explicit SBR over a 24 kHz core.
+	expect(frameDuration(config({ codec: "mp4a.40.2", sampleRate: 48000, description: "1194" }))).toEqual(
+		Duration.millis(20),
+	);
+	expect(frameDuration(config({ codec: "mp4a.40.5", sampleRate: 48000, description: "2b118a00" }))).toEqual(
+		Duration.millis(40),
+	);
 });
 
 test("Opus and unknown codecs have no constant frame duration", () => {

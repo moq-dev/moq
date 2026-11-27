@@ -320,21 +320,32 @@ const CONFIG_MAX_BITS: usize = 43 + 43 + 17 + 2440 + 23 + 2 + 63;
 /// The longest AudioSpecificConfig [`Config::parse_exact`] accepts, in bytes.
 pub(crate) const CONFIG_MAX_LEN: usize = CONFIG_MAX_BITS.div_ceil(8);
 
-/// Read an AudioSpecificConfig's leading fields: the audioObjectType, sample rate, and
-/// channelConfiguration.
-/// The rate an AAC-LC, SBR, or PS AudioSpecificConfig's core codes its 1024-sample frames at,
-/// which SBR may double on output, or `None` for another object type or a config that doesn't
-/// parse.
-pub(crate) fn core_sample_rate(asc: &[u8]) -> Option<u32> {
-	let config = Config::parse(&mut &asc[..]).ok()?;
-	if !matches!(config.profile, OBJECT_TYPE_LC | OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
+/// The samples each frame of an AAC-LC core codes, 960 or 1024 by its frameLengthFlag, and the
+/// rate it codes them at, which SBR may double on output. `None` for another core, or a config
+/// that doesn't parse.
+pub(crate) fn frame_clock(asc: &[u8]) -> Option<(u32, u32)> {
+	// Refuses what the exact walk below doesn't check, such as a reserved channelConfiguration.
+	Config::parse(&mut &asc[..]).ok()?;
+	let mut asc = asc;
+	let mut reader = BitReader::new(&mut asc);
+	// The leading rate is the core's: explicit SBR and PS name their output rate after it.
+	let (object_type, rate, _) = read_header(&mut reader).ok()?;
+	if !matches!(object_type, OBJECT_TYPE_LC | OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
 		return None;
 	}
-	// The leading rate is the core's: explicit SBR and PS name their output rate after it.
-	let mut asc = asc;
-	read_header(&mut BitReader::new(&mut asc)).ok().map(|(_, rate, _)| rate)
+	if read_core(&mut reader, object_type, rate).ok()?.0 != OBJECT_TYPE_LC {
+		return None;
+	}
+	// The GASpecificConfig's first field, ahead of any program config element.
+	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
+		0 => 1024,
+		_ => 960,
+	};
+	Some((samples, rate))
 }
 
+/// Read an AudioSpecificConfig's leading fields: the audioObjectType, sample rate, and
+/// channelConfiguration.
 fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
 	if reader.remaining().is_none_or(|remaining| remaining < 2) {
 		return Err(Error::ConfigTooShort);
@@ -679,6 +690,15 @@ mod tests {
 		assert_eq!(cfg.profile, 2);
 		assert_eq!(cfg.sample_rate, 44100);
 		assert_eq!(cfg.channel_count, 2);
+	}
+
+	#[test]
+	fn frame_clock_reads_an_aac_lc_cores_frame_length() {
+		// frameLengthFlag lands mid-byte after an explicit 44101 Hz rate.
+		assert_eq!(frame_clock(&[0x17, 0x80, 0x56, 0x22, 0x94]), Some((960, 44_101)));
+		// AAC Main, alone and as an explicit SBR core, codes other frames.
+		assert_eq!(frame_clock(&[0x09, 0x90]), None);
+		assert_eq!(frame_clock(&[0x2b, 0x11, 0x84, 0x00]), None);
 	}
 
 	/// An explicit rate of zero, escape index 15 then 24 zero bits, describes no audio.

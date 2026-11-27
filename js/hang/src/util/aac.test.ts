@@ -91,6 +91,7 @@ describe("parseConfig", () => {
 	it("reads AAC-LC", () => {
 		expect(parseConfig(new Uint8Array([0x12, 0x10]))).toEqual({
 			coreSampleRate: 44100,
+			frameSamples: 1024,
 			sampleRate: 44100,
 			numberOfChannels: 2,
 		});
@@ -99,6 +100,7 @@ describe("parseConfig", () => {
 	it("reads the escape form audioSpecificConfig writes", () => {
 		expect(parseConfig(audioSpecificConfig(44101, 8))).toEqual({
 			coreSampleRate: 44101,
+			frameSamples: 1024,
 			sampleRate: 44101,
 			numberOfChannels: 8,
 		});
@@ -108,11 +110,13 @@ describe("parseConfig", () => {
 	it("reports explicit SBR and PS output", () => {
 		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({
 			coreSampleRate: 24000,
+			frameSamples: 1024,
 			sampleRate: 48000,
 			numberOfChannels: 2,
 		});
 		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({
 			coreSampleRate: 24000,
+			frameSamples: 1024,
 			sampleRate: 48000,
 			numberOfChannels: 2,
 		});
@@ -120,6 +124,7 @@ describe("parseConfig", () => {
 		// element isn't parsed, so this channelConfiguration-0 config without one is still accepted.
 		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toEqual({
 			coreSampleRate: 24000,
+			frameSamples: 1024,
 			sampleRate: 48000,
 			numberOfChannels: 2,
 		});
@@ -131,18 +136,43 @@ describe("parseConfig", () => {
 	it("reports sync extension SBR and PS output", () => {
 		// A 24 kHz stereo core with SBR at 48 kHz.
 		const sbr = new Uint8Array([0x13, 0x10, 0x56, 0xe5, 0x98]);
-		expect(parseConfig(sbr)).toEqual({ coreSampleRate: 24000, sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(sbr)).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
 		// A 24 kHz mono core with SBR at 48 kHz and PS.
 		const ps = new Uint8Array([0x13, 0x08, 0x56, 0xe5, 0x9d, 0x48, 0x80]);
-		expect(parseConfig(ps)).toEqual({ coreSampleRate: 24000, sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(ps)).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
 		// sbrPresentFlag clear, or the extension cut short, leaves the core.
 		const absent = new Uint8Array([0x13, 0x10, 0x56, 0xe5, 0x00]);
-		expect(parseConfig(absent)).toEqual({ coreSampleRate: 24000, sampleRate: 24000, numberOfChannels: 2 });
-		expect(parseConfig(sbr.subarray(0, 4))).toEqual({
+		expect(parseConfig(absent)).toEqual({
 			coreSampleRate: 24000,
+			frameSamples: 1024,
 			sampleRate: 24000,
 			numberOfChannels: 2,
 		});
+		expect(parseConfig(sbr.subarray(0, 4))).toEqual({
+			coreSampleRate: 24000,
+			frameSamples: 1024,
+			sampleRate: 24000,
+			numberOfChannels: 2,
+		});
+	});
+
+	// frameLengthFlag set: an AAC-LC core codes 960 samples per frame, plain or under explicit SBR.
+	it("reads an AAC-LC core's frame length", () => {
+		expect(parseConfig(new Uint8Array([0x11, 0x94]))?.frameSamples).toBe(960);
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x8a, 0x00]))?.frameSamples).toBe(960);
+		// AAC Main, alone and as an explicit SBR core, codes other frames.
+		expect(parseConfig(new Uint8Array([0x09, 0x90]))?.frameSamples).toBeUndefined();
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x84, 0x00]))?.frameSamples).toBeUndefined();
 	});
 
 	it("refuses what it can't read", () => {
