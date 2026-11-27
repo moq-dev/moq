@@ -2868,12 +2868,13 @@ class Recover implements GroupRecover {
 		if (!copy) return false;
 		const route = this.#reader.route;
 		if (cause.kind === "failed" && this.#undelivered(cause.error, copy)) return true;
+		// A refusal is terminal: no route continues a short close, which stands.
+		if (cause.kind === "closed" && route.refusal) return false;
 		// A stall or a short close on a copy whose route failed, or a short close while the front
 		// stages the copy to replace it, looks to the route replacing it. Mirrors the Rust
 		// `Recover::wants`.
 		if (cause.kind === "stalled" && copyFailed(copy)) return true;
-		// A refusal of the replacement ends that wait: the close stands.
-		if (cause.kind === "closed" && (routeLost(copy) || route.staged) && !route.refusal) return true;
+		if (cause.kind === "closed" && (routeLost(copy) || route.staged)) return true;
 		if (route.concluded) return true;
 		if (route.generation !== this.#generation) {
 			// A route that returned serves the copy being read again, which a stalled group reuses.

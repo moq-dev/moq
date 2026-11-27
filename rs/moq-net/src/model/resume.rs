@@ -746,11 +746,11 @@ fn copy_failed(copy: &track::Consumer) -> bool {
 }
 
 /// Whether the copy's route failed, even after its declared end settled, which ends its readers
-/// cleanly: a group it closed short may hold more on the route replacing it. A received copy
-/// aborts after its end only with its session (`lite::subscriber`'s `SubscriptionCleanup`), so
-/// a route that serves on never leaves the group waiting. Mirrors the JS `routeLost`.
+/// cleanly: a group it closed short may hold more on the route replacing it. Only a session
+/// ending counts then: a subscription reset alone leaves the route serving, and nothing
+/// replaces it. Mirrors the JS `routeLost`.
 fn route_lost(copy: &track::Consumer) -> bool {
-	copy_failed(copy) || copy.aborted().is_some_and(|err| err.retryable())
+	copy_failed(copy) || copy.aborted().is_some_and(|err| err.closing())
 }
 
 /// A route's copy, as one reader reads it.
@@ -6263,11 +6263,30 @@ mod test {
 	}
 
 	/// A copy whose end settled aborts cleanly for its readers, but its session ending still
-	/// says its route failed: a group it closed short reads on from the route replacing it.
-	/// Mirrors the JS `a short group after its settled copy aborts`.
+	/// says its route failed: a group it closed short reads on from the route replacing it. A
+	/// subscription reset alone leaves the route serving, so the close stands. Mirrors the JS
+	/// `a short group after its settled copy aborts`.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_short_group_waits_for_a_replacement_after_its_settled_copy_fails() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, HOUR);
+		let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+		short.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		let finished = a.finish().unwrap();
+		short.finish().unwrap();
+		finished.abort(Error::Cancel).unwrap();
+		assert_eq!(
+			read(&mut reading),
+			None,
+			"a subscription reset leaves the close standing"
+		);
+
 		let routes = Producer::new();
 		let front = logical(&routes);
 		let a = copy();
