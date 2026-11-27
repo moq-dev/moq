@@ -1105,7 +1105,6 @@ fn congestion() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, _) = pair.connect();
-	pair.refill_pacing();
 
 	const TARGET: u64 = 2048;
 	assert!(pair.client_conn_mut(client_ch).congestion_window() > TARGET);
@@ -3172,7 +3171,6 @@ fn congested_tail_loss() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, _) = pair.connect();
-	pair.refill_pacing();
 
 	const TARGET: u64 = 2048;
 	assert!(pair.client_conn_mut(client_ch).congestion_window() > TARGET);
@@ -5830,7 +5828,6 @@ fn gso_truncation() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, server_ch) = pair.connect();
-	pair.refill_pacing();
 
 	let initial_ios = pair.client_conn_mut(client_ch).stats().udp_tx.ios;
 

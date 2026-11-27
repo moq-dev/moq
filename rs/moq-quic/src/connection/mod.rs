@@ -4523,11 +4523,12 @@ impl Connection {
 		self.prev_path.is_some()
 	}
 
-	/// When the pacer lets a full-size datagram go, or `None` if it does now
+	/// When the pacer's bucket is full again, or `None` if it is now
 	#[cfg(test)]
 	pub(crate) fn pacing_release(&mut self, now: Instant) -> Option<Instant> {
-		let mtu = u64::from(self.path.current_mtu());
-		self.path.congestion.pace(now, mtu)
+		// The pacer caps what it waits for at its bucket, so asking for the most it could send
+		// waits for a full one
+		self.path.congestion.pace(now, u64::MAX)
 	}
 
 	/// The number of bytes of packets containing retransmittable frames that have not been

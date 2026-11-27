@@ -585,7 +585,6 @@ fn rebinding_amid_old_path_losses_finds_no_black_hole() {
 	assert!(mtu > INITIAL_MTU, "{mtu}");
 
 	// Full-size packets the client receives only every other one of
-	pair.refill_pacing();
 	let s = pair
 		.server_streams(server_ch)
 		.open(Dir::Uni, Default::default())
