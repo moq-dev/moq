@@ -8969,6 +8969,66 @@ mod serve_group_test {
 		(header.key, sizes, times, end)
 	}
 
+	/// Metadata ingest waits on its group's fastest reader as payload ingest does, so a long
+	/// group of headers pauses its stream instead of shedding a header that reader has yet to
+	/// take.
+	#[test]
+	fn metadata_ingest_waits_for_its_reader() {
+		/// The rest of the stream in one read, and never its FIN.
+		struct Open(Option<bytes::Bytes>);
+		impl crate::transport::poll::Chunks for Open {
+			type Error = Error;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> std::task::Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+				match self.0.take() {
+					Some(chunk) => std::task::Poll::Ready(Ok(Some(chunk))),
+					None => std::task::Poll::Pending,
+				}
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let version = Version::Lite07;
+		let info = crate::track::Info::default();
+		// Empty untimed frames, each `Payload Length` 1: far more headers than the pace window
+		// holds, which the cache would shed from the front unpaced.
+		let headers = 400_000;
+		let stream = bytes::Bytes::from(vec![1u8; headers]);
+		let mut reader = crate::coding::Reader::new(crate::transport::poll::Buffered::new(Open(Some(stream))), version);
+		let track = track::Producer::new_meta(Arc::new(broadcast::Info::default()), "test", info.clone());
+		let producer = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut idle = producer.consume();
+		let mut group = crate::recv::Group::new(producer);
+		let mut ingest = lite::FrameIngest::new(
+			lite::Framing::new(&info, version),
+			false,
+			0,
+			lite::Clock::new(version, 0),
+		);
+		let waiter = kio::Waiter::noop();
+		// Polled until a poll writes nothing more: the ingest's own yields always progress.
+		let mut written = 0;
+		loop {
+			assert!(ingest.poll(&mut reader, &mut group, &waiter).is_pending());
+			let count = group.frame_count();
+			if count == written {
+				break;
+			}
+			written = count;
+		}
+		assert!(
+			written > 0 && written < headers,
+			"{written} of {headers} headers written"
+		);
+		let std::task::Poll::Ready(Ok(Some(first))) = idle.poll_read_object(&waiter) else {
+			panic!("the reader's next header was shed");
+		};
+		assert_eq!(first.inflated, Some(0));
+	}
+
 	/// Metadata subscriptions across the Rust/JS boundary: each reads the other's metadata Group
 	/// Stream through its own ingest, each frame's header alone, compressed or not: JS a Rust
 	/// publisher's, and Rust a JS publisher's answer to a Rust-encoded metadata SUBSCRIBE.

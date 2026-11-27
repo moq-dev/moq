@@ -86,7 +86,16 @@ impl Group {
 		self.writer
 			.as_ref()
 			.expect("group writer is available between frames")
-			.poll_paced(waiter, header.info.size.saturating_add(metadata), window)
+			.poll_paced(waiter, self.payload(header).saturating_add(metadata), window)
+	}
+
+	/// The payload bytes the frame `header` opens stores: none on a metadata copy, whatever
+	/// size it declares.
+	pub fn payload(&self, header: &frame::Header) -> u64 {
+		match self.is_meta() {
+			true => 0,
+			false => header.info.size,
+		}
 	}
 
 	/// How many more bytes the writer may take, a frame's included, before

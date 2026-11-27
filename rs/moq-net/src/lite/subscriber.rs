@@ -2092,14 +2092,7 @@ impl FrameIngest {
 						continue;
 					};
 					let header = self.header(group, timestamp, inflated, size)?;
-					if !group.is_meta() {
-						self.phase = IngestPhase::Admit { header };
-						continue;
-					}
-					// A metadata FRAME is its header alone: no payload follows it.
-					group.write_header(header)?;
-					self.phase = self.next_frame();
-					ready!(budget.poll_yield(waiter));
+					self.phase = IngestPhase::Admit { header };
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
@@ -2115,6 +2108,13 @@ impl FrameIngest {
 					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Length) else {
 						unreachable!()
 					};
+					if group.is_meta() {
+						// A metadata FRAME is its header alone: no payload follows it.
+						group.write_header(header)?;
+						self.phase = self.next_frame();
+						ready!(budget.poll_yield(waiter));
+						continue;
+					}
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed. No wire timestamp (pre-lite-05) means an untimed

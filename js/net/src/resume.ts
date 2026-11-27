@@ -3463,7 +3463,8 @@ export class Front {
 	// A copy a reader still reads says what the track is before `source` does: one logical track
 	// has one set of properties. Its route failing is no answer; a refusal is the track's.
 	async #askServed(name: string, source: Source, retired: AbortSignal): Promise<void> {
-		const served = this.#routes.get(name)?.served;
+		// Either mode's copy speaks for the track.
+		const served = this.#routes.get(name)?.served ?? this.#metaRoutes.get(name)?.served;
 		if (this.#info.has(name) || !served || served === source) return;
 		let info: track.Info;
 		try {
