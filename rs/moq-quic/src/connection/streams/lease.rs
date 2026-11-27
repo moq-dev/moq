@@ -112,6 +112,11 @@ impl Leased {
 		self.len + self.lent
 	}
 
+	/// Whether a reader waits for more than it leased, counted in [`StreamsState::waiting`].
+	pub(super) fn waits(&self) -> bool {
+		self.want.is_some()
+	}
+
 	/// The `len` a reader waits for, or zero.
 	pub(super) fn wanted(&self) -> u64 {
 		self.want.unwrap_or(0)
@@ -394,7 +399,8 @@ impl Stream<'_> {
 				(Some(Err(Error::Reset)), transmit)
 			}
 			None => {
-				lease.want = Some(want);
+				let waited = lease.want.replace(want).is_some();
+				self.state.waiting += usize::from(!waited);
 				// A unit larger than the stream window needs room for the rest of it.
 				let credit = self.queue_max_stream_data();
 				// It may be waiting behind a gap, which holds eviction off until filled.
@@ -412,9 +418,10 @@ impl Stream<'_> {
 	/// does.
 	pub fn restore(&mut self, lease: Lease) {
 		let credit = self.put_back(lease);
-		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
-		// stuck itself, and one that is waits for more with its next lease.
-		let transmit = self.state.stuck_waiting && self.unstick();
+		// While a reader waits, a pass this lease or the data it took held off reruns: this
+		// reader may now park on something else, leaving nobody to rerun it. With nobody waiting
+		// it stays, since this reader is not stuck itself, and one that is reruns it as it waits.
+		let transmit = self.state.waiting > 0 && self.unstick();
 		self.transmit(credit || transmit);
 	}
 
@@ -566,6 +573,7 @@ impl Stream<'_> {
 			Reader::Stopped => return Err(Error::Closed),
 		}
 		self.state.unlooked.remove(&self.id);
+		self.state.waiting -= usize::from(recv.lease.waits());
 		self.state.held += recv.lease.fill(&mut recv.assembler);
 		if recv.unread_credit() + recv.lease.held > 0 {
 			self.state.ranks.extend(recv.lease.rank_once(self.id));
@@ -654,12 +662,26 @@ impl StreamsState {
 		self.add_read_credits(bytes)
 	}
 
+	/// Wake every reader waiting for more than the receive window holds, whose next lease fails
+	/// with [`Error::TooLarge`].
+	pub(super) fn wake_too_large(&mut self) {
+		for (&id, slot) in &self.recv {
+			if slot
+				.as_deref()
+				.is_some_and(|recv| recv.lease.wanted() > self.receive_window)
+			{
+				self.waits.wake(id, Wait::Read);
+			}
+		}
+	}
+
 	/// Take the lease of `id`, stopped or freed, out of the eviction order and return the credit
 	/// of the bytes it holds, which `evicted` counts in [`Self::evicted_held`].
 	pub(super) fn discard_lease(&mut self, id: StreamId, lease: &mut Leased, evicted: bool) -> bool {
 		if std::mem::take(&mut lease.ranked) {
 			self.ranks.remove(&lease.rank(id));
 		}
+		self.waiting -= usize::from(lease.waits());
 		let held = lease.discard();
 		if evicted {
 			self.evicted_held -= held;
@@ -688,7 +710,6 @@ impl StreamsState {
 	/// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the evictions
 	/// freed; each evicted stream's reader wakes.
 	pub(super) fn evict_if_stuck(&mut self) -> Option<bool> {
-		self.stuck_waiting = false;
 		self.holds.by = None;
 		// The window, not the credit a rate cap paces, says whether memory is stuck: a capped
 		// peer out of credit is waiting on time, not on a reader.
@@ -748,14 +769,12 @@ impl StreamsState {
 			{
 				self.scans += 1;
 			}
-			let recv = self
+			let live = self
 				.recv
 				.get(&id)
 				.and_then(|slot| slot.as_deref())
-				.filter(|recv| recv.reader == Reader::Reading && unlooked(recv.unread_credit(), &recv.lease));
-			if let Some(recv) = recv {
-				// Nothing else reruns the pass once the lease comes back.
-				self.stuck_waiting = recv.lease.out;
+				.is_some_and(|recv| recv.reader == Reader::Reading && unlooked(recv.unread_credit(), &recv.lease));
+			if live {
 				found = true;
 				break;
 			}
@@ -778,6 +797,7 @@ impl StreamsState {
 			.get_mut(&id)
 			.and_then(|slot| slot.as_deref_mut())
 			.expect("a candidate is open");
+		self.waiting -= usize::from(recv.lease.waits());
 		let leased = recv.lease.evict();
 		self.evicted_held += recv.lease.held;
 		// The peer hears of it when the application stops the stream with its own code.
@@ -792,10 +812,11 @@ impl StreamsState {
 	}
 
 	/// Assert that the lease books balance: [`Self::held`] and [`Self::evicted_held`] sum the
-	/// leases, and every leased stream holding credit is ranked.
+	/// leases, [`Self::waiting`] counts the waiting readers, and every leased stream holding
+	/// credit is ranked.
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn check_leases(&self) {
-		let (mut held, mut evicted_held, mut ranked) = (0, 0, 0);
+		let (mut held, mut evicted_held, mut ranked, mut waiting) = (0, 0, 0, 0);
 		for (&id, slot) in &self.recv {
 			let Some(recv) = slot.as_deref() else {
 				continue;
@@ -807,6 +828,7 @@ impl StreamsState {
 			}
 			assert_eq!(lease.ranked, self.ranks.contains(&lease.rank(id)), "{id}");
 			ranked += usize::from(lease.ranked);
+			waiting += usize::from(lease.waits());
 			if lease.filled && recv.reader == Reader::Reading && recv.unread_credit() + lease.held > 0 {
 				assert!(lease.ranked, "{id} holds credit unranked");
 			}
@@ -814,5 +836,6 @@ impl StreamsState {
 		assert_eq!(held, self.held);
 		assert_eq!(evicted_held, self.evicted_held);
 		assert_eq!(ranked, self.ranks.len(), "ranks outlived their streams");
+		assert_eq!(waiting, self.waiting);
 	}
 }

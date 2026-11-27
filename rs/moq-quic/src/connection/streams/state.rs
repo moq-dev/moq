@@ -108,8 +108,9 @@ pub(crate) struct StreamsState {
 	/// Receive streams whose reader may progress without new credit, which holds eviction off:
 	/// every such stream, and possibly some that no longer are, trimmed by the stuck pass
 	pub(super) unlooked: FxHashSet<StreamId>,
-	/// A stuck pass waited on a lease out with its reader, so handing it back reruns the pass
-	pub(super) stuck_waiting: bool,
+	/// Receive streams whose reader waits for more than it leased, so a lease handed back reruns
+	/// the stuck pass that reader may be waiting on
+	pub(super) waiting: usize,
 	/// Credit still held by evicted readers that have not stopped their streams, which holds
 	/// further eviction off
 	pub(super) evicted_held: u64,
@@ -244,7 +245,7 @@ impl StreamsState {
 			evicted: 0,
 			peak_spent: 0,
 			unlooked: FxHashSet::default(),
-			stuck_waiting: false,
+			waiting: 0,
 			evicted_held: 0,
 			#[cfg(test)]
 			scans: 0,
@@ -333,6 +334,8 @@ impl StreamsState {
 			self.waits.wake_ended();
 		}
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
+		// An arrival wakes a waiting reader, which waits again only once it looked.
+		self.waiting -= usize::from(!stopped && rs.lease.waits());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 
@@ -429,6 +432,8 @@ impl StreamsState {
 		};
 		self.waits.wake_ended();
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader.is_evicted());
+		// An arrival wakes a waiting reader, which waits again only once it looked.
+		self.waiting -= usize::from(!stopped && rs.lease.waits());
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 		let credit = if stopped {
@@ -1291,24 +1296,27 @@ impl StreamsState {
 		self.peak_stream_receive_window = self.peak_stream_receive_window.max(window);
 	}
 
-	/// Set the receive_window and returns whether the receive_window has been
-	/// expanded or shrunk: true if expanded, false if shrunk.
+	/// Set the receive_window, returning whether a `MAX_DATA` is due.
+	///
+	/// A shrink leaves the stuck verdict alone, since it changes neither the advertised limit nor
+	/// what arrived, but it lowers the batch a `MAX_DATA` waits for, and fails the leases waiting
+	/// for more than the window now holds.
 	pub(crate) fn set_receive_window(&mut self, receive_window: VarInt) -> bool {
 		let receive_window = receive_window.into();
-		let mut expanded = false;
-		if receive_window > self.receive_window {
+		if receive_window >= self.receive_window {
 			// Growth first cancels what an earlier shrink still owes, so it is credited once.
 			let growth: u64 = receive_window - self.receive_window;
 			let cancelled = growth.min(self.receive_window_shrink_debt);
 			self.receive_window_shrink_debt -= cancelled;
 			self.window_max_data = self.window_max_data.saturating_add(growth - cancelled);
-			expanded = self.grant();
-		} else {
-			let diff = self.receive_window - receive_window;
-			self.receive_window_shrink_debt = self.receive_window_shrink_debt.saturating_add(diff);
+			self.receive_window = receive_window;
+			return self.grant();
 		}
+		let diff = self.receive_window - receive_window;
+		self.receive_window_shrink_debt = self.receive_window_shrink_debt.saturating_add(diff);
 		self.receive_window = receive_window;
-		expanded
+		self.wake_too_large();
+		self.max_data_due()
 	}
 
 	/// Allocate state for a locally-initiated stream
@@ -4541,6 +4549,107 @@ mod tests {
 		assert_eq!(client.credit_stats().evicted, 1);
 		assert_eq!(readers.woken(&mut client), [ids[2]]);
 		assert_eq!(client.local_max_data, max_data + WINDOW);
+	}
+
+	/// A pass held off by data that arrived for a waiting reader reruns when that reader leases
+	/// and hands the lease back: it may then park on something else, leaving every reader parked
+	/// on a stuck window.
+	#[test]
+	fn restore_after_ready_wait_evicts() {
+		const WINDOW: u64 = 1000;
+		let (mut client, [ready, waiting]) = stuck(WINDOW);
+		data(&mut client, ready, 0, WINDOW as usize / 2, false);
+		assert_eq!(lease(&mut client, ready), WINDOW as usize / 2);
+		assert!(matches!(wait(&mut client, ready, WINDOW as usize), Poll::Pending));
+		data(&mut client, waiting, 0, WINDOW as usize, false);
+		assert_eq!(lease(&mut client, waiting), WINDOW as usize);
+		assert!(matches!(wait(&mut client, waiting, 2000), Poll::Pending));
+
+		// The last of the window arrives for the waiting reader, which holds eviction off.
+		data(&mut client, ready, WINDOW / 2, WINDOW as usize / 2, false);
+		assert_eq!(client.credit_stats().evicted, 0);
+
+		// Its reader looks at everything and parks without waiting on the stream.
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut client, &mut pending, ready);
+		let held = stream.lease(0).unwrap();
+		assert_eq!(held.remaining(), WINDOW as usize);
+		stream.restore(held);
+		client.check_leases();
+		assert_eq!(client.credit_stats().evicted, 1);
+		assert_eq!(wait(&mut client, waiting, 1), Poll::Ready(Err(recv::Error::Evicted)));
+	}
+
+	/// A plain read whose credit only pays a shrunk window's debt reruns the stuck pass, which
+	/// its unread data held off: the leasing readers are already waiting, and the peer is still
+	/// blocked.
+	#[test]
+	fn read_into_shrink_debt_evicts() {
+		const WINDOW: u64 = 1000;
+		let mut client = StreamsState::new(
+			Side::Client,
+			128u32.into(),
+			128u32.into(),
+			1024 * 1024,
+			VarInt::from_u64(3 * WINDOW).unwrap(),
+			VarInt::from_u64(3 * WINDOW).unwrap(),
+		);
+		let [plain, old, new] = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+		let mut readers = Readers::park(&mut client, &[old, new]);
+		for id in [plain, old, new] {
+			data(&mut client, id, 0, WINDOW as usize, false);
+		}
+		for id in [old, new] {
+			assert_eq!(lease(&mut client, id), WINDOW as usize);
+			assert!(matches!(wait(&mut client, id, WINDOW as usize + 1), Poll::Pending));
+		}
+		assert_eq!(client.credit_stats().evicted, 0);
+		readers.woken(&mut client);
+		let max_data = client.local_max_data;
+		client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut client, &mut pending, plain);
+		let mut chunks = stream.read().unwrap();
+		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), WINDOW as usize);
+		chunks.finalize();
+		assert!(pending.max_data);
+		assert_eq!(client.credit_stats().evicted, 1);
+		assert_eq!(readers.woken(&mut client), [new]);
+		assert_eq!(client.local_max_data, max_data + WINDOW);
+	}
+
+	/// Shrinking the window under a reader waiting for more than it can now hold wakes it to
+	/// fail, rather than leave it parked for bytes the peer can never send.
+	#[test]
+	fn shrink_below_a_want_wakes_it() {
+		const WINDOW: u64 = 1000;
+		let (mut client, [id, _]) = stuck(WINDOW);
+		let mut readers = Readers::park(&mut client, &[id]);
+		data(&mut client, id, 0, 10, false);
+		readers.woken(&mut client);
+		assert!(matches!(wait(&mut client, id, 1500), Poll::Pending));
+		assert_eq!(readers.woken(&mut client), []);
+
+		client.set_receive_window(VarInt::from_u64(WINDOW).unwrap());
+		assert_eq!(readers.woken(&mut client), [id]);
+		assert_eq!(wait(&mut client, id, 1500), Poll::Ready(Err(recv::Error::TooLarge)));
+	}
+
+	/// Shrinking the window lowers the batch a `MAX_DATA` waits for, so credit the old window
+	/// batched may be due at once.
+	#[test]
+	fn shrink_sends_batched_credit() {
+		const WINDOW: u64 = 8000;
+		let (mut client, [id, _]) = stuck(WINDOW / 2);
+		data(&mut client, id, 0, 500, false);
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut client, &mut pending, id);
+		let mut chunks = stream.read().unwrap();
+		let _ = chunks.next(usize::MAX).unwrap();
+		chunks.finalize();
+		assert!(!pending.max_data, "under an eighth of the window");
+		assert!(client.set_receive_window(VarInt::from_u64(WINDOW / 2).unwrap()));
 	}
 
 	/// A reader waiting behind a gap is not stuck: retransmitting the missing bytes spends no
