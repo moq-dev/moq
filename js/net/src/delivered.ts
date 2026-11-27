@@ -54,18 +54,6 @@ export class Delivered {
 		return index >= 0 && end - 1n <= this.#runs[index][1];
 	}
 
-	/**
-	 * Whether no range, even one added now, is owed a key of `[start, end)`: each was handed out, or
-	 * folded while a range held it. Mirrors the Rust `Delivered::owes_none`.
-	 */
-	owesNone(start: bigint, end: bigint): boolean {
-		if (!this.covers(start, end)) return false;
-		const unjudged = this.#unjudged;
-		if (!unjudged || start >= end) return true;
-		const gap = unjudged.gaps(start, end).next();
-		return !gap.done && gap.value.start === start && gap.value.end === end;
-	}
-
 	/** Record `key` as handed out; `false` when it already was. */
 	add(key: bigint): boolean {
 		if (this.has(key)) return false;

@@ -95,9 +95,6 @@ test("a fold reopens only the gaps no range judged", () => {
 	delivered.foldBelow(9n, judged([2n, 5n], [6n, 8n]));
 	expect([...delivered.gaps(0n, 10n)]).toEqual([]);
 	expect(delivered.runs).toBe(4);
-	// A range added now owes the gaps no range held.
-	expect(delivered.owesNone(0n, 9n)).toBe(false);
-	expect(delivered.owesNone(2n, 5n) && delivered.owesNone(6n, 8n)).toBe(true);
 	// A range added over 0..9 owes the gaps folded unjudged, never a hand-out nor what the budget judged.
 	delivered.reopen(judged([0n, 9n]));
 	expect([...delivered.gaps(0n, 10n)]).toEqual([

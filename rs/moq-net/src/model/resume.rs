@@ -3596,7 +3596,7 @@ impl Reader {
 		};
 		let lowered = lowered.start..lowered.end.min(end);
 		// An ordered reader never goes back, nor does any reader past its budget.
-		if delivered.owes_none(lowered.clone()) {
+		if delivered.covers(lowered.clone()) {
 			return;
 		}
 		let newest = self.copies.last().expect("checked above");
@@ -3700,7 +3700,7 @@ impl Reader {
 		// holding it would, as none under it goes out.
 		let owed: BTreeMap<u64, u64> = raised
 			.iter()
-			.filter(|(_, time)| resumed.is_some_and(|resumed| !delivered.owes_none(**time..resumed)))
+			.filter(|(_, time)| resumed.is_some_and(|resumed| !delivered.covers(**time..resumed)))
 			.map(|(key, time)| (*key, *time))
 			.collect();
 		// Kept until a copy places the ranges, but those whose start the resume point raised,

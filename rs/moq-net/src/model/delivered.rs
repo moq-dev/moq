@@ -46,12 +46,6 @@ impl Delivered {
 				.is_some_and(|(_, last)| groups.end - 1 <= *last)
 	}
 
-	/// Whether no range, even one added now, is owed a key of `groups`: each was handed out, or
-	/// folded while a range held it.
-	pub fn owes_none(&self, groups: std::ops::Range<u64>) -> bool {
-		self.covers(groups.clone()) && (groups.is_empty() || !self.unjudged.overlaps(&groups))
-	}
-
 	/// Record `key` as handed out; `false` when it already was.
 	pub fn insert(&mut self, key: u64) -> bool {
 		if self.contains(key) {
@@ -407,11 +401,6 @@ mod test {
 		delivered.fold_below(9, Some(&Cover::new([2..=4, 6..=7])));
 		assert_eq!(runs(&delivered), [(0, 9)]);
 		assert_eq!(delivered.runs(), 4, "the floor plus three gaps no range held");
-		assert!(
-			!delivered.owes_none(0..9),
-			"a range added now owes the gaps no range held"
-		);
-		assert!(delivered.owes_none(2..5) && delivered.owes_none(6..8));
 
 		// A range added over 0..=8 owes the gaps folded unjudged, never a hand-out nor what the
 		// budget judged.
