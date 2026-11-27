@@ -97,16 +97,16 @@ pub struct TextConfig {
 	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
-	/// The instance of the stream the reference names, when the catalog knows it. Absent names
+	/// The identity of the stream the reference names, when the catalog knows it. Absent names
 	/// whichever stream the reader resolves first, as in every catalog before this field.
 	///
-	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
-	/// over a wire that carries no instance has one its session minted, which proves nothing,
+	/// A reader refuses a broadcast of another identity rather than fall back to it. A route
+	/// over a wire that carries no identity has one its session minted, which proves nothing,
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
 	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
-	pub instance: Option<moq_net::Instance>,
+	pub identity: Option<moq_net::Identity>,
 
 	/// The serialization format of each cue payload.
 	#[serde_as(as = "DisplayFromStr")]
@@ -174,7 +174,7 @@ impl TextConfig {
 		Self {
 			broadcast: None,
 			track: None,
-			instance: None,
+			identity: None,
 			format,
 			role: TextRole::default(),
 			lang: None,

@@ -2,7 +2,7 @@ import { expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Instance, Origin, Path, Time, type Track } from "@moq/net";
+import { Identity, Origin, Path, Time, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
@@ -12,8 +12,8 @@ import { defined } from "./defined.test-util.ts";
 import { Source } from "./video/source";
 import { stubSupport } from "./webcodecs.test-util";
 
-function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
-	const publication = origin.route(Path.from(path), { instance: instance && { id: instance, epoch: 0n } });
+function publish(origin: Origin.Producer, path: string, identity?: Identity.Valid) {
+	const publication = origin.route(Path.from(path), { identity: identity && { id: identity, epoch: 0n } });
 	return publication.broadcast;
 }
 
@@ -238,13 +238,13 @@ it("tracks the include entry without reopening it on unrelated catalog updates",
 	}
 });
 
-it("follows a restarted contributor only for an entry that names no instance", async () => {
+it("follows a restarted contributor only for an entry that names no identity", async () => {
 	const origin = new Origin.Producer();
 	// A session that could announce the include, so its absence reads offline.
 	wireOf(origin).attach(true);
 	publish(origin, "room/main.hang");
-	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
-	const old = publish(origin, "room/extra.hang", oldInstance);
+	const [oldIdentity, newIdentity] = [Identity.random(), Identity.random()];
+	const old = publish(origin, "room/extra.hang", oldIdentity);
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -252,7 +252,7 @@ it("follows a restarted contributor only for an entry that names no instance", a
 		catalog: Catalog.RootSchema.parse({
 			include: {
 				following: { broadcast: "./extra.hang" },
-				pinned: { broadcast: "./extra.hang", instance: oldInstance },
+				pinned: { broadcast: "./extra.hang", identity: oldIdentity },
 			},
 		}),
 	});
@@ -261,14 +261,14 @@ it("follows a restarted contributor only for an entry that names no instance", a
 		const following = parent.include(owner, "following");
 		const pinned = parent.include(owner, "pinned");
 		await settle();
-		expect(following.out.active.peek()?.instance).toBe(oldInstance);
-		expect(pinned.out.active.peek()?.instance).toBe(oldInstance);
+		expect(following.out.active.peek()?.identity).toBe(oldIdentity);
+		expect(pinned.out.active.peek()?.identity).toBe(oldIdentity);
 
 		// The announcement is the online signal: the plain entry follows the restart, while the
-		// one naming the old instance goes offline rather than reading the new one.
-		const replacement = publish(origin, "room/extra.hang", newInstance);
+		// one naming the old identity goes offline rather than reading the new one.
+		const replacement = publish(origin, "room/extra.hang", newIdentity);
 		await quietly(settle);
-		expect(following.out.active.peek()?.instance).toBe(newInstance);
+		expect(following.out.active.peek()?.identity).toBe(newIdentity);
 		expect(pinned.out.active.peek()).toBeUndefined();
 		expect(pinned.out.status.peek()).toBe("offline");
 		replacement.close();
@@ -280,10 +280,10 @@ it("follows a restarted contributor only for an entry that names no instance", a
 	}
 });
 
-it("pins the first instance of an include when not following announcements", async () => {
+it("pins the first identity of an include when not following announcements", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const first = publish(origin, "room/extra.hang", Instance.random());
+	const first = publish(origin, "room/extra.hang", Identity.random());
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -298,8 +298,8 @@ it("pins the first instance of an include when not following announcements", asy
 		const pinned = child.out.active.peek();
 		expect(pinned?.path).toBe(Path.from("room/extra.hang"));
 
-		// A restart ends the pinned instance without moving the child to the new one.
-		const second = publish(origin, "room/extra.hang", Instance.random());
+		// A restart ends the pinned identity without moving the child to the new one.
+		const second = publish(origin, "room/extra.hang", Identity.random());
 		await settle();
 		expect(child.out.active.peek()).toBeUndefined();
 		expect(child.out.error.peek()).toBeUndefined();
@@ -312,20 +312,20 @@ it("pins the first instance of an include when not following announcements", asy
 	}
 });
 
-it("never reads an include of another instance, but reads a minted one", async () => {
+it("never reads an include of another identity, but reads a minted one", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const served = Instance.random();
+	const served = Identity.random();
 	const proven = publish(origin, "room/proven.hang", served);
 	const track = defined(proven.createTrack(Catalog.TRACK));
-	// A route over a wire that carries no instance has one its session minted.
+	// A route over a wire that carries no identity has one its session minted.
 	publish(origin, "room/plain.hang", Mint.fresh());
-	const named = Instance.random();
-	const include = (instance: Instance.Valid) =>
+	const named = Identity.random();
+	const include = (identity: Identity.Valid) =>
 		Catalog.RootSchema.parse({
 			include: {
-				proven: { broadcast: "./proven.hang", instance },
-				plain: { broadcast: "./plain.hang", instance: named },
+				proven: { broadcast: "./proven.hang", identity },
+				plain: { broadcast: "./plain.hang", identity: named },
 			},
 		});
 	const catalog = new Signal(include(named));
@@ -345,13 +345,13 @@ it("never reads an include of another instance, but reads a minted one", async (
 		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
 		expect(track.demand().wanted.peek()).toBe(false);
-		// A minted instance cannot prove the stream, so the named instance cannot refuse it.
+		// A minted identity cannot prove the stream, so the named identity cannot refuse it.
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
-		// A catalog update naming the served instance admits the stream the request already holds.
+		// A catalog update naming the served identity admits the stream the request already holds.
 		catalog.set(include(served));
 		await settle();
-		expect(refused.out.active.peek()?.instance).toBe(served);
+		expect(refused.out.active.peek()?.identity).toBe(served);
 	} finally {
 		owner.close();
 		parent.close();
@@ -359,17 +359,17 @@ it("never reads an include of another instance, but reads a minted one", async (
 	}
 });
 
-it("shares the parent's resolution, so a new instance checks the held handle", async () => {
+it("shares the parent's resolution, so a new identity checks the held handle", async () => {
 	const origin = new Origin.Producer();
-	const [served, other] = [Instance.random(), Instance.random()];
+	const [served, other] = [Identity.random(), Identity.random()];
 	publish(origin, "room/main.hang", served);
 	const extraCatalog = defined(publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK));
-	const entries = (instance?: Instance.Valid) =>
+	const entries = (identity?: Identity.Valid) =>
 		Catalog.RootSchema.parse({
 			include: {
-				sibling: { broadcast: "./extra.hang", instance },
-				self: { broadcast: "./main.hang", instance },
-				empty: { broadcast: "", instance },
+				sibling: { broadcast: "./extra.hang", identity },
+				self: { broadcast: "./main.hang", identity },
+				empty: { broadcast: "", identity },
 			},
 		});
 	const catalog = new Signal(entries());
@@ -386,7 +386,7 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 		const self = parent.include(owner, "self");
 		await settle();
 		const held = sibling.out.active.peek();
-		expect(held?.instance).toBe(served);
+		expect(held?.identity).toBe(served);
 		// A self-reference is the parent's own handle, not a request of its own. An empty one is
 		// too, and is named like the parent, so its own references resolve against the same base.
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
@@ -403,14 +403,14 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 			}),
 		);
 
-		// Naming the held instance keeps the same handle rather than resolving the path again.
+		// Naming the held identity keeps the same handle rather than resolving the path again.
 		catalog.set(entries(served));
 		await settle();
 		expect(sibling.out.active.peek()).toBe(held);
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
 		expect(withdrawals).toBe(0);
 
-		// Naming another instance fails the held one.
+		// Naming another identity fails the held one.
 		catalog.set(entries(other));
 		await quietly(settle);
 		expect(sibling.out.active.peek()).toBeUndefined();
@@ -427,7 +427,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const parentHd = defined(parent.createTrack("hd"));
-	const served = Instance.random();
+	const served = Identity.random();
 	const ladder = publish(origin, "room/ladder.hang", served);
 	const ladderTrack = defined(ladder.createTrack(Catalog.TRACK));
 	const ladderCatalog = new Json.Snapshot.Producer<Catalog.Root>({ track: ladderTrack, deltas: false });
@@ -472,7 +472,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const root = (own: Record<string, Catalog.VideoConfig>) =>
 		Catalog.RootSchema.parse({
 			video: { renditions: own },
-			include: { ladder: { broadcast: "./ladder.hang", instance: served } },
+			include: { ladder: { broadcast: "./ladder.hang", identity: served } },
 		});
 	const catalog = new Signal(root({ hd: sized(1920, 1080, 5_000_000) }));
 	const broadcast = new Broadcast({ origin, name: Path.from("room/main.hang"), catalogFormat: "manual", catalog });
@@ -481,7 +481,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	const selection = new Effect();
 	try {
 		await settle();
-		const ref = { broadcast: "ladder.hang" as Path.Relative, instance: served };
+		const ref = { broadcast: "ladder.hang" as Path.Relative, identity: served };
 		expect(broadcast.out.catalog.peek()?.video?.renditions).toEqual({
 			hd: sized(1920, 1080, 5_000_000),
 			"ladder/720p": { ...sized(1280, 720, 2_000_000), ...ref, track: "720p" },
@@ -512,7 +512,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 
 		// Reading the selected rendition, as the decoder does, subscribes that track alone.
 		const frames = broadcast
-			.relativeBroadcast(selection, selected?.broadcast, selected?.instance)
+			.relativeBroadcast(selection, selected?.broadcast, selected?.identity)
 			?.track(Catalog.track("ladder/720p", selected ?? {}))
 			.subscribe()
 			.ordered();
@@ -545,9 +545,9 @@ it("offers every include's renditions to selection, subscribing only the selecte
 it("dedupes an include's rendition only against a usable one", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
-	const serve = (instance: Instance.Valid) => {
-		const broadcast = publish(origin, "room/extra.hang", instance);
+	const [oldIdentity, newIdentity] = [Identity.random(), Identity.random()];
+	const serve = (identity: Identity.Valid) => {
+		const broadcast = publish(origin, "room/extra.hang", identity);
 		const catalog = new Json.Snapshot.Producer<Catalog.Root>({
 			track: defined(broadcast.createTrack(Catalog.TRACK)),
 			deltas: false,
@@ -555,13 +555,13 @@ it("dedupes an include's rendition only against a usable one", async () => {
 		catalog.update(Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), key());
 		return broadcast;
 	};
-	const old = serve(oldInstance);
+	const old = serve(oldIdentity);
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
 		catalogFormat: "manual",
 		catalog: Catalog.RootSchema.parse({
-			video: { renditions: { v: { ...video("vp8"), broadcast: "./extra.hang", instance: oldInstance } } },
+			video: { renditions: { v: { ...video("vp8"), broadcast: "./extra.hang", identity: oldIdentity } } },
 			include: { extra: { broadcast: "./extra.hang" } },
 		}),
 	});
@@ -571,7 +571,7 @@ it("dedupes an include's rendition only against a usable one", async () => {
 		expect(Object.keys(parent.out.catalog.peek()?.video?.renditions ?? {})).toEqual(["v"]);
 
 		// A restart proves the root's entry stale, while the include follows it.
-		const replacement = serve(newInstance);
+		const replacement = serve(newIdentity);
 		await quietly(settle);
 		expect(parent.out.catalog.peek()?.video?.renditions).toEqual({
 			"extra/v": { ...video("vp8"), broadcast: "extra.hang" as Path.Relative, track: "v" },

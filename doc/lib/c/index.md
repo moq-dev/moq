@@ -71,7 +71,7 @@ if (session < 0)
 ```c
 const char *path = "my-stream.hang";
 moq_route_options options;
-memset(&options, 0, sizeof(options)); // zeroed means visible, cost 0, a fresh instance
+memset(&options, 0, sizeof(options)); // zeroed means visible, cost 0, a fresh identity
 options.hidden = true;                // fill the catalog before anyone finds it
 int route = moq_origin_route(origin, path, strlen(path), &options);
 if (route < 0)
@@ -83,27 +83,27 @@ if (moq_route_announce((uint32_t)route) < 0)
 ```
 
 The route keeps the broadcast announced: `moq_route_free()` retracts it, and
-`moq_publish_close()` ends both. A route carries a cost, the stream's instance, and optionally a credential (`moq_route_set_auth()`);
-relays add the hops. `moq_origin_route()` mints a fresh instance (`moq_route_instance()`) and
+`moq_publish_close()` ends both. A route carries a cost, the stream's identity, and optionally a credential (`moq_route_set_auth()`);
+relays add the hops. `moq_origin_route()` mints a fresh identity (`moq_route_identity()`) and
 keeps it across `moq_route_withdraw()` and `moq_route_announce()`, so a restarted publisher,
 being a new route, is a new stream that `moq_origin_follow` hands viewers instead of a stalled
 broadcast; the path stays `MOQ_ANNOUNCE_KIND_PRESENT` throughout. The follow callback
-reports each instance as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
-`MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `instance` only for a publisher that continues its group starts
-across restarts, and raise `epoch` on each: readers stitch every route of one instance
-together, so restarting the starts under an old instance splices unrelated groups into
+reports each identity as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
+`MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `identity` only for a publisher that continues its group starts
+across restarts, and raise `epoch` on each: readers stitch every route of one identity
+together, so restarting the starts under an old identity splices unrelated groups into
 their tracks. To serve paths on demand, `moq_origin_claim()` returns a claim handle and delivers each request to
 answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
 `moq_broadcast_request_reject()`; `moq_claim_announce()`, `moq_claim_withdraw()`,
 `moq_claim_set_cost()`, `moq_claim_set_auth()`, and `moq_claim_free()` control the claim. Unless one is named, a claim moves to a fresh
-instance (`moq_claim_instance()`) each time a job holding its current one ends, and a job from
+identity (`moq_claim_identity()`) each time a job holding its current one ends, and a job from
 `moq_broadcast_request_route()` takes the claim's, so on moq-lite 07 a reader resolved through the
-claim does not restart; older wires mint another instance for the job's route, restarting it.
+claim does not restart; older wires mint another identity for the job's route, restarting it.
 
-An instance is a handle: `moq_route_instance()` and `moq_claim_instance()` return one you free
-with `moq_instance_free()`, and an announcement's `route.instance` lives as long as the
-announcement. `moq_instance_parse()` names one from text; `moq_instance_text()`,
-`moq_instance_minted()`, and `moq_instance_equal()` read it. A session mints an instance for a
+An identity is a handle: `moq_route_identity()` and `moq_claim_identity()` return one you free
+with `moq_identity_free()`, and an announcement's `route.identity` lives as long as the
+announcement. `moq_identity_parse()` names one from text; `moq_identity_text()`,
+`moq_identity_minted()`, and `moq_identity_equal()` read it. A session mints an identity for a
 route whose wire (moq-lite 06 or older, or moq-transport) carries none, and only a session can,
 so pass the handle a route or announcement reported, not its text, to pin
 `moq_origin_request()` or `moq_origin_follow()` to that stream.
@@ -137,7 +137,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Decoded reads.** `moq_decode_audio` and `moq_decode_video` deliver read ids in order: a frame, a gap where media was lost, or an end where the publisher stopped its encoder. Check `kind` on what `moq_decode_audio_read` or `moq_decode_video_read` writes. Free each id with `moq_decode_audio_read_free` or `moq_decode_video_read_free` promptly: a held video frame holds a decoder buffer, and the decoder stalls. A decoder reads everything the track still holds unless a live player sets `start` to `MOQ_DECODE_START_LATEST`, which joins at the newest group and skips the cached backlog. A decoder setup refusal reports `MOQ_ERROR_UNSUPPORTED_CONFIG` on its terminal callback, so the caller can try another rendition; later peer or decode failures retain their own error codes.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`), and `datagrams_unrouted`, the datagrams received for a subscription with no datagram track, reported only on moq-lite 05 and later, which carry datagrams. Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero. `moq_session_snapshot()` adds the negotiated `version`. A failed dial or dropped connection reaches the session's `on_state` with its `failure` code, and `moq_error()` gives the reason during that callback. Hold the handle returned by `moq_session_recv_bandwidth()` to request receive estimates. `moq_bandwidth_consumer_peek()` reads the estimate and `moq_bandwidth_consumer_changed()` waits for a change. `moq_bandwidth_consumer_close()` releases demand; the last consumer stops PROBE. Stats snapshots do not request it.
 - **Viewers.** `moq_session_viewers()` returns a handle that divides the receive estimate among the broadcasts you watch, max-min fair by each one's ceiling. `moq_viewers_watch()` returns a viewer claiming up to `max_bps`, the bitrate of the largest rendition you would switch to; `moq_viewer_rate()` reads its share in bits per second, with `present` false while there is no estimate (keep the current rendition), and `moq_viewer_update()` changes the ceiling. Holding a viewer requests the estimate like a `moq_session_recv_bandwidth()` consumer, and `moq_viewer_close()` releases the claim. The session sends the summed ceilings as its PROBE target; `moq_viewers_set_target()` with `present` true overrides that, a `0` target sends none, and `present` false follows the viewers again. `moq_viewers_watch()`, `moq_viewer_update()`, and `moq_viewers_set_target()` return `MOQ_ERROR_OUT_OF_RANGE`, changing nothing, when the ceilings or the target would pass 2^53 - 1 bps, the most a PROBE target carries. `moq_viewers_close()` releases the registry handle; viewers watched through it stay until each is closed.
-- **Demand.** A watcher from `moq_publish_track_demand()` (or the media, video, and audio variants) calls back `MOQ_DEMAND_WANTED` or `MOQ_DEMAND_UNWANTED` on each change, and `moq_publish_demand_wanted()` reads the current state. `moq_publish_demand_refresh()` calls back `MOQ_DEMAND_REFRESH` once a subscriber asks for a new group: the first group of a track with none, or a join judged by the track's refresh settings. Write a group starting with a keyframe or snapshot, which answers it, then wait again. Set `refresh` in `moq_track_info` to have a joining subscriber ask once the newest group has grown past `refresh` times its first frame, and `refresh_interval_us` to have a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A raw track subscriber asks with `moq_consume_track_refresh()`, which calls back `MOQ_REFRESH_SENT` once the request is sent (forwarded upstream, or read by a local publisher); `moq_consume_track_refresh_cancel()` first withdraws it. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while the watcher reports `MOQ_DEMAND_WANTED` is an opt-in that saves the encode but leaves nothing from before the first subscriber. To end a track nobody wants, call `moq_publish_track_abort_unwanted()` (or `moq_publish_media_abort_unwanted()`, `moq_encode_video_abort_unwanted()`, `moq_encode_audio_abort_unwanted()`) once the watcher reports `MOQ_DEMAND_UNWANTED`, rather than finishing or releasing the handle: it returns 1 and releases the handle once the track is closed, or 0 and keeps the track for a subscriber that joined since. Then wait for `MOQ_DEMAND_UNWANTED` from a new watcher, since one that already reported it misses a subscriber that came and went.
+- **Demand.** A watcher from `moq_publish_track_demand()` (or the media, video, and audio variants) calls back `MOQ_DEMAND_WANTED` or `MOQ_DEMAND_UNWANTED` on each change, and `moq_publish_demand_wanted()` reads the current state. `moq_publish_demand_refresh()` calls back `MOQ_DEMAND_REFRESH` once a subscriber asks for a new group: the first group of a track with none, or a join judged by the track's refresh settings. Write a group starting with a keyframe or snapshot, which answers it, then wait again. Set `refresh` in `moq_track_info` to have a joining subscriber ask once the newest group has grown past `refresh` times its first frame, and `refresh_interval_us` to have a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A raw track subscriber asks with `moq_consume_track_refresh()`, which calls back `MOQ_REFRESH_SENT` once the request is sent (forwarded upstream, or read by a local publisher); `moq_consume_track_refresh_cancel()` first withdraws it. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while the watcher reports `MOQ_DEMAND_WANTED` is an opt-in that saves the encode but leaves nothing from before the first subscriber. To end a track nobody wants, free its handle with `moq_publish_track_free()` (or `moq_publish_media_free()`, `moq_encode_video_free()`, `moq_encode_audio_free()`) once the watcher reports `MOQ_DEMAND_UNWANTED`; a subscriber that joined since is served by the next request for the track while a `moq_publish_requests()` handler is live, which must accept it with the `moq_track_info` the track was published with (an encoder's track with `moq_track_request_encode_video()` or `moq_track_request_encode_audio()` and the configuration it was published with, codec settings included, since only a changed track info ends the track), and ends with an error without one, or once that request's handle is freed too before another subscriber joins.
 - **Disabled renditions.** Audio and video consumers and decoders reject a rendition with `enabled: false`. Query the latest catalog with `moq_consume_audio_enabled` or `moq_consume_video_enabled` before selecting a rendition and opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Reference

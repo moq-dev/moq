@@ -116,7 +116,7 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 - **One driver at a time.** The first driver to send a command holds the
   lease until its broadcast ends or its 1 s watchdog expires; the player
   heartbeats every 250 ms, and lets go once `status` stops naming it. The
-  lease is bound to the driver's path and the publisher instance serving it,
+  lease is bound to the driver's path and the publisher identity serving it,
   so a driver that republishes at the same path is a new claimant rather than
   a continuation.
 - **E-stop latches** until an explicit reset, from any viewer. The lease
@@ -145,7 +145,7 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
 
 The lease is cooperative. Anonymous drivers share one grant to publish under
 `viewer/**`, and `status` names the holder, so anyone can announce at the
-holder's path under another instance, which ends the holder's run and frees
+holder's path under another identity, which ends the holder's run and frees
 the lease. It stops two honest drivers fighting over a truck, not a deliberate
 takeover. Anything beyond a simulator needs per-driver tokens scoped to the
 driver's own path.

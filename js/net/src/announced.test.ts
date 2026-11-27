@@ -4,7 +4,7 @@ import * as Announce from "./announced.ts";
 import type { Credential } from "./auth.ts";
 import type { Producer as BroadcastProducer } from "./broadcast.ts";
 import { toHop, UNKNOWN_HOP, WireRoute } from "./hop.ts";
-import * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
@@ -47,9 +47,9 @@ test("a listing shows a route's facts, never its epoch, hops, credential, or dra
 	const producer = new Announce.Producer();
 	const listing = Announce.list(producer.consume());
 
-	const instance = Instance.random();
+	const identity = Identity.random();
 	const route = WireRoute.normalize({
-		instance,
+		identity,
 		epoch: 3n,
 		hops: [toHop(7n), UNKNOWN_HOP],
 		cost: 5n,
@@ -63,15 +63,15 @@ test("a listing shows a route's facts, never its epoch, hops, credential, or dra
 		kind: "present",
 		prefix: p("a"),
 		captures: undefined,
-		route: { instance, cost: 5n, available: true },
+		route: { identity, cost: 5n, available: true },
 	});
-	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "instance"]);
+	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "identity"]);
 });
 
 test("a listing stays quiet as availability flips and reports a let-go path absent", async () => {
 	const producer = new Announce.Producer();
 	const listing = Announce.list(producer.consume());
-	const route = WireRoute.normalize({ instance: Instance.random() });
+	const route = WireRoute.normalize({ identity: Identity.random() });
 	const held = { ...route, available: false };
 
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route: held });
@@ -186,7 +186,7 @@ test("an origin handle resolves a local publish with no session attached", async
 	const held = watch.active.peek();
 	expect(held).toBeDefined();
 
-	// The same request moves to the new publisher instance.
+	// The same request moves to the new publisher identity.
 	const second = publish(origin, path);
 	await settle();
 	expect(watch.active.peek()).toBeDefined();

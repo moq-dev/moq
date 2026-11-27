@@ -29,7 +29,10 @@ typealias SnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
 /** Consumes reconstructed latest-value JSON snapshots from a track it subscribes to itself. */
 typealias SnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
 
-/** Publishes a lossless stream of JSON records on a track it takes over. */
+/**
+ * Publishes a lossless stream of JSON records on a track it takes over. Once it appended a record,
+ * finish it: closing it unfinished is not supported, and aborts its track with `Dropped`.
+ */
 typealias StreamProducer = uniffi.moq.MoqJsonStreamProducer
 
 /** Consumes a lossless stream of JSON records from a track it takes over. */
@@ -44,7 +47,11 @@ typealias SnapshotConsumerConfig = uniffi.moq.MoqJsonSnapshotConsumerConfig
 /** A JSON string and the timestamp of the frame that carried it. */
 typealias Value = uniffi.moq.MoqJsonValue
 
-/** Publishes a sliding window of JSON records, pushed at the back and popped from the front. */
+/**
+ * Publishes a sliding window of JSON records, pushed at the back and popped from the front. Once it
+ * pushed a record, finish it: closing it unfinished is not supported, and aborts its track with
+ * `Dropped`.
+ */
 typealias WindowProducer = uniffi.moq.MoqJsonWindowProducer
 
 /** Consumes each push, pop, and skip of a JSON window from a track it takes over. */

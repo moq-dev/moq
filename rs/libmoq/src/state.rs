@@ -39,7 +39,7 @@ impl State {
 	}
 }
 
-/// Global shared state instance.
+/// Global shared state identity.
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::new()));
 
 /// A resource a C call works on with the global [`State`] lock released.

@@ -99,7 +99,7 @@ paragraphs, and the cut gate template with its decision:
   ready once the cycle's API breaks, wire changes, and the cut gate in m3
   have merged, and it has no `## Waiting`, since the maintainer opens the
   wire phase before that. [m5](/quest/m5/README.md) and m6 require it: the
-  gate that holds later work while m9's lab stays open. The hygiene audits
+  gate that holds later work. The hygiene audits
   and the vendor sync's children recur behind it in m4. Its PR re-creates it
   at the same path and keeps the m5 and m6 links, so the gate holds the next
   cycle too; m5's quests reach m4 in the shift, which is when they can start.
@@ -171,7 +171,7 @@ shift anyway).
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
 decision below). The gate is an epic in m3, `/quest/m3/cut-gate/`, for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the
-upstream fixes it needs, and the hand-written `moq-c` is at parity with
+upstream fixes it needs, and the hand-written `libmoq` (retired after `0.22`) is at parity with
 moq-ffi. It has no work of its own and completes when every child merges. It
 recurs once per release cycle, always in m3, and never re-creates itself: m3
 holds it and the cycle's wire cut requires m3, so a copy made before that cut
@@ -226,8 +226,7 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
   method to an existing binding object, which the API diff counts as a
   break once 0.22 is published. Superseded 2026-11-23 (maintainer): it
-  landed, and [abort-unwanted-delete](/quest/m2/abort-unwanted-delete.md)
-  in m2 deletes it before 0.22 publishes it.
+  landed, and m2 deleted it before 0.22 published it.
 - ✅ End-to-end encryption does not publish at this cut
   ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
   so `moq-e2ee` is no longer a retired name, and the paragraph above about
@@ -305,6 +304,7 @@ candidate:
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
+- [kio published on crates.io](/quest/m0/kio-crates-io.md) - crates.io publish refuses git dependencies (`kio` / `kio-macros`)
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed

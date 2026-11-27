@@ -495,7 +495,7 @@ async fn goaway_keeps_new_subscribes_moq_transport_22() {
 /// draining peer has no reason to send.
 async fn goaway_drains_routes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
-		// A publisher of its own instance at `test`, behind its own session.
+		// A publisher of its own identity at `test`, behind its own session.
 		let publish = || {
 			let origin = produce_origin();
 			let route = origin
@@ -514,7 +514,7 @@ async fn goaway_drains_routes(version: Version) {
 		opts.server_publish = Some(standby_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone().with_priority(moq_net::origin::Priority::new(-1)));
 		let _standby_pair = connect_mock(opts).await;
-		let standby = route_at(&mut announced, |_| true).await.instance().clone();
+		let standby = route_at(&mut announced, |_| true).await.identity().clone();
 
 		// The primary outranks it by preference.
 		let (primary_origin, _primary) = publish();
@@ -522,7 +522,7 @@ async fn goaway_drains_routes(version: Version) {
 		opts.server_publish = Some(primary_origin.consume());
 		opts.client_subscribe = Some(sub_origin.clone());
 		let MockPair { client, server, .. } = connect_mock(opts).await;
-		route_at(&mut announced, |route| *route.instance() != standby).await;
+		route_at(&mut announced, |route| *route.identity() != standby).await;
 
 		server.goaway(Goaway::new()).expect("send goaway");
 		client.draining().recv().await.expect("goaway");
@@ -530,7 +530,7 @@ async fn goaway_drains_routes(version: Version) {
 		// Nothing else is sent on the announce stream, so this only resolves if the
 		// subscriber acted on the GOAWAY rather than on another message: the draining
 		// primary ranks below even the demoted standby.
-		route_at(&mut announced, |route| *route.instance() == standby).await;
+		route_at(&mut announced, |route| *route.identity() == standby).await;
 	})
 	.await
 	.expect("test timed out (likely a route that never drained)");

@@ -76,4 +76,4 @@ Public API: none, unless an export grows an order option. Wire: none.
 
 ## Related
 
-- [A path that's back is used within an RTT](/quest/m3/quic-path-return.md) - the transport half of the same outage
+- [A path that's back is used within an RTT](/quest/m1/quic-path-return.md) - the transport half of the same outage

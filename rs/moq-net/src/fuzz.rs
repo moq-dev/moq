@@ -515,10 +515,10 @@ impl AnnounceWriter {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix) = self.encoder.start(suffix.clone());
 				match routes {
-					// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
+					// A fixed identity, so the bytes stay pinned and match what `js/net` writes.
 					true => lite::AnnounceBroadcast::Start {
 						suffix,
-						instance: "a".parse().unwrap(),
+						identity: "a".parse().unwrap(),
 						claim: announce_claim(hops),
 					},
 					false => lite::AnnounceBroadcast::Active {
@@ -562,13 +562,13 @@ pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::C
 	origin.excluding(crate::Hop::from_wire(peer))
 }
 
-/// A fresh instance as a session mints one for a route an older wire delivered, for tests
+/// A fresh identity as a session mints one for a route an older wire delivered, for tests
 /// outside the crate that route one without an older session.
-pub fn minted_instance() -> crate::Instance {
-	crate::Instance::minted()
+pub fn minted_identity() -> crate::Identity {
+	crate::Identity::minted()
 }
 
-/// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
+/// A peer's wire route: its hop ids, cost, and identity at an epoch, as a session
 /// decodes one, for benches and tests that land or update forwarded routes.
 ///
 /// Panics on a chain no session would decode: longer than 32, or naming a non-zero id
@@ -576,13 +576,13 @@ pub fn minted_instance() -> crate::Instance {
 pub fn route_info(
 	hops: impl IntoIterator<Item = u64>,
 	cost: u64,
-	instance: Option<(crate::Instance, u64)>,
+	identity: Option<(crate::Identity, u64)>,
 ) -> crate::origin::RouteInfo {
 	let info = crate::origin::RouteInfo::new()
 		.with_hops(hop_chain(hops))
 		.with_cost(cost);
-	match instance {
-		Some((instance, epoch)) => info.with_instance(instance, epoch),
+	match identity {
+		Some((identity, epoch)) => info.with_identity(identity, epoch),
 		None => info,
 	}
 }
@@ -701,7 +701,7 @@ fn route_drain<'a>(streams: impl IntoIterator<Item = &'a crate::route::node::Str
 pub struct RouteNode {
 	node: crate::route::Node,
 	streams: Vec<crate::route::node::Stream>,
-	instance: crate::Instance,
+	identity: crate::Identity,
 }
 
 impl RouteNode {
@@ -709,11 +709,11 @@ impl RouteNode {
 	/// per prefix in `streams`, each already sent its initial set.
 	pub fn new(claims: usize, streams: &[&str]) -> Self {
 		let node = crate::route::Node::new(route_id(1), true, route_clock());
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		for i in 0..claims {
 			let path = Path::new(&format!("live/{i}")).unwrap();
 			let live = crate::route::relay::Change::Live(route_claim(0, 0));
-			node.own(false, (path, instance.clone()), live);
+			node.own(false, (path, identity.clone()), live);
 		}
 		let streams = (streams.iter().enumerate())
 			.map(|(i, prefix)| {
@@ -726,7 +726,7 @@ impl RouteNode {
 		let node = Self {
 			node,
 			streams,
-			instance,
+			identity,
 		};
 		node.drain();
 		node
@@ -738,7 +738,7 @@ impl RouteNode {
 			true => crate::route::relay::Change::Live(route_claim(0, 0)),
 			false => crate::route::relay::Change::Ended,
 		};
-		let broadcast = (Path::new(path).unwrap(), self.instance.clone());
+		let broadcast = (Path::new(path).unwrap(), self.identity.clone());
 		self.node.own(false, broadcast, change);
 	}
 
@@ -756,7 +756,7 @@ pub struct RouteRelay {
 	answer: Vec<crate::route::node::Stream>,
 	#[allow(dead_code, reason = "held so the streams keep a node to talk to")]
 	node: crate::route::Node,
-	instance: crate::Instance,
+	identity: crate::Identity,
 	claims: usize,
 	/// The origin's revision as the first session last heard it.
 	rev: u64,
@@ -781,7 +781,7 @@ impl RouteRelay {
 				stream
 			})
 			.collect();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let rev = claims as u64;
 		let origin = route_id(Self::ORIGIN);
 		let receive = (0..streams as u64)
@@ -807,7 +807,7 @@ impl RouteRelay {
 				};
 				receive.recv(route).unwrap();
 				let changes = (0..claims).map(|i| (i, route_claim(0, 0))).collect();
-				Self::hear(&receive, &instance, changes, rev);
+				Self::hear(&receive, &identity, changes, rev);
 				receive
 			})
 			.collect();
@@ -815,7 +815,7 @@ impl RouteRelay {
 			receive,
 			answer,
 			node,
-			instance,
+			identity,
 			claims,
 			rev,
 			behind: Default::default(),
@@ -849,14 +849,14 @@ impl RouteRelay {
 	/// `stream` hears the origin change the claims `changes` names, up to `rev`.
 	fn hear(
 		stream: &crate::route::node::Stream,
-		instance: &crate::Instance,
+		identity: &crate::Identity,
 		changes: Vec<(usize, crate::route::node::Claim)>,
 		rev: u64,
 	) {
 		let changes = (changes.into_iter())
 			.map(|(i, claim)| {
 				let path = Path::new(&format!("live/{i}")).unwrap();
-				((path, instance.clone()), crate::route::relay::Change::Live(claim))
+				((path, identity.clone()), crate::route::relay::Change::Live(claim))
 			})
 			.collect();
 		let claims = crate::route::node::Msg::Claims {
@@ -873,7 +873,7 @@ impl RouteRelay {
 	pub fn change(&mut self, changes: usize) -> usize {
 		self.rev += 1;
 		let changes = (0..changes).map(|i| (i, route_claim(0, self.rev))).collect();
-		Self::hear(&self.receive[0], &self.instance, changes, self.rev);
+		Self::hear(&self.receive[0], &self.identity, changes, self.rev);
 		self.drain()
 	}
 
@@ -888,17 +888,17 @@ impl RouteRelay {
 		self.rev += 1;
 		Self::hear(
 			&self.receive[0],
-			&self.instance,
+			&self.identity,
 			vec![(0, route_claim(epoch, 0))],
 			self.rev,
 		);
 		let serves: Vec<_> = std::iter::from_fn(|| self.receive[0].try_serve()).collect();
 		for serve in &serves {
 			if let crate::route::node::Output::Serve {
-				origin, path, instance, ..
+				origin, path, identity, ..
 			} = serve
 			{
-				self.receive[0].serving(*origin, &(path.clone(), instance.clone()), true);
+				self.receive[0].serving(*origin, &(path.clone(), identity.clone()), true);
 			}
 		}
 		serves.len() + self.drain()
@@ -909,7 +909,7 @@ impl RouteRelay {
 		self.rev += 1;
 		let i = self.rev as usize % self.claims;
 		let changes = vec![(i, route_claim(0, self.rev))];
-		Self::hear(&self.receive[0], &self.instance, changes, self.rev);
+		Self::hear(&self.receive[0], &self.identity, changes, self.rev);
 		self.behind.push_back((self.rev, i));
 	}
 
@@ -918,7 +918,7 @@ impl RouteRelay {
 	pub fn step(&mut self) -> usize {
 		self.advance();
 		let (rev, i) = self.behind.pop_front().expect("the second session lags");
-		Self::hear(&self.receive[1], &self.instance, vec![(i, route_claim(0, rev))], rev);
+		Self::hear(&self.receive[1], &self.identity, vec![(i, route_claim(0, rev))], rev);
 		self.drain()
 	}
 
@@ -933,7 +933,7 @@ pub struct RouteFollower {
 	#[allow(dead_code, reason = "held so the stream keeps a node to talk to")]
 	node: crate::route::Node,
 	stream: crate::route::node::Stream,
-	instance: crate::Instance,
+	identity: crate::Identity,
 	prefixes: usize,
 	claims: usize,
 	/// The next prefix [`Self::refollow`] replaces.
@@ -948,7 +948,7 @@ impl RouteFollower {
 		let follower = Self {
 			node,
 			stream,
-			instance: crate::Instance::random(),
+			identity: crate::Identity::random(),
 			prefixes,
 			claims,
 			next: 0,
@@ -977,7 +977,7 @@ impl RouteFollower {
 			.map(|j| {
 				let path = Path::new(&format!("live/{k}/{j}")).unwrap();
 				let live = crate::route::relay::Change::Live(route_claim(0, 0));
-				((path, self.instance.clone()), live)
+				((path, self.identity.clone()), live)
 			})
 			.collect();
 		let announce = crate::route::node::Msg::Announce { changes };
@@ -1228,7 +1228,7 @@ impl LiteSample {
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
-				instance: None,
+				identity: None,
 				node: None,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
@@ -1426,7 +1426,7 @@ impl Default for Messages {
 		Self {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
-				instance: None,
+				identity: None,
 				node: None,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
@@ -1609,7 +1609,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 		false => lite::Subscribe {
 			id: 0,
 			broadcast: broadcast.clone(),
-			instance: None,
+			identity: None,
 			node: None,
 			track: track.into(),
 			priority: 0,
@@ -2468,7 +2468,7 @@ pub struct RequestValidity {
 }
 
 impl RequestValidity {
-	/// Watch which instance this route's peer selects for a path.
+	/// Watch which identity this route's peer selects for a path.
 	pub fn new(route: &crate::origin::Claim, path: &crate::Path) -> Self {
 		Self {
 			watch: crate::model::broadcast::RequestValidity::for_source(route, path),

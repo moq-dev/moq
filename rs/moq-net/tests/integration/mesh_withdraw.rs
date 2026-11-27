@@ -272,7 +272,7 @@ async fn retracted_relay_ignores_a_stale_path() {
 ///
 /// The watching client holds nothing, so it reports every toggle its relay
 /// sends, as a browser's announce stream does. The relays speak lite-07, which
-/// carries the broadcast's instance, so a relay moving to another path updates it.
+/// carries the broadcast's identity, so a relay moving to another path updates it.
 /// Older versions carry none, so every relay mints its own and a move between
 /// neighbors is a restart, which the update hold waits out only onto a worse path.
 struct Cluster {
@@ -376,7 +376,7 @@ async fn cross_node_close_retracts_once_lite07() {
 }
 
 /// The update hold waits out a lite-06 relay's fall back onto a stale path, though each
-/// relay mints its own instance for what a neighbor announces, so the fall back reads
+/// relay mints its own identity for what a neighbor announces, so the fall back reads
 /// as a restart.
 #[kio::test]
 async fn cross_node_close_retracts_once_lite06() {
@@ -462,7 +462,7 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 }
 
 /// A relay that first hears a broadcast over a longer path moves to the shorter
-/// one when it arrives, under the same claim and instance: lite-07 relays route by
+/// one when it arrives, under the same claim and identity: lite-07 relays route by
 /// the publisher's origin node, so the move is a next hop the relay picks. The route
 /// travels with the claim, so the shorter one arrives late too, and a client of
 /// either version sees the cheaper path as an update in place.
@@ -517,12 +517,12 @@ async fn mesh_retracts_once() {
 	assert_capped_withdrawal(EDGES, 4, 8).await;
 }
 
-/// On a lite-06 mesh each relay mints its own instance for what a neighbor
-/// announces, so the move to the late, shorter path is another instance: the
+/// On a lite-06 mesh each relay mints its own identity for what a neighbor
+/// announces, so the move to the late, shorter path is another identity: the
 /// watching client sees the live broadcast retracted and announced again.
 ///
-/// Lite-06 keeps it. Its wire carries no instance, so a relay cannot tell a move
-/// between neighbors from its publisher restarting, and keeping the instance
+/// Lite-06 keeps it. Its wire carries no identity, so a relay cannot tell a move
+/// between neighbors from its publisher restarting, and keeping the identity
 /// across the move would give a restarted broadcast its old identity. A mesh on
 /// lite-07 updates in place: [`late_better_path_updates_in_place`].
 #[kio::test]

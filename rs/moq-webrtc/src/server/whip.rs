@@ -130,7 +130,7 @@ impl<'a> Request<'a> {
 /// scope is enforced by moq-net exactly as for a native session; the bundled
 /// [`Server::publish_router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers a media session on the shared mux, announces the
-/// broadcast under a fresh instance once negotiation succeeds (so a fast subscriber
+/// broadcast under a fresh identity once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
 /// encoder replaces a stale session's broadcast at once), and returns the SDP answer plus an opaque `resource_id` for the WHIP
 /// `Location` header. The caller must run the returned [`Response`] to drive the
@@ -187,10 +187,10 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Announce only once negotiation succeeded, so a failed offer leaves a live
 	// session's broadcast alone, but before returning the answer, so a fast
 	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
-	// offer is its own route under a fresh instance, so a reconnect replaces a
+	// offer is its own route under a fresh identity, so a reconnect replaces a
 	// stale session's broadcast instead of resuming into it.
 	route.announce()?;
-	let instance = route.instance();
+	let identity = route.identity();
 
 	let resource_id = sdp::new_resource_id();
 	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
@@ -204,7 +204,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	tracing::info!(%broadcast, %instance, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
+	tracing::info!(%broadcast, %identity, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
 	let mut answer = sdp::render_answer(&answer, &refused);
 	if let Some(cap) = cap {
@@ -334,7 +334,7 @@ mod tests {
 	}
 
 	/// An encoder reconnecting to the same broadcast while its stale session is still
-	/// open restarts the broadcast at once: each offer is its own instance, so a fresh
+	/// open restarts the broadcast at once: each offer is its own identity, so a fresh
 	/// request reaches the reconnect, while the stale viewer stays on the old one until
 	/// it leaves.
 	#[tokio::test]

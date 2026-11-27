@@ -4,10 +4,27 @@
 
 Every change that would need a semver-breaking release if it landed right
 after the next cut of `main` into `release`. The
-[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
-complete it before cutting main into release.
+[release cut](/quest/m3/release/cut.md) and its pre-cut reviews wait on this
+milestone (plus `cut.md`'s m0 blockers, not m1); complete it before cutting
+main into release.
 
 ## Plan
+
+Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
+
+- ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
+  on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
+  `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
+  `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its
+  c2rust surface; rejected: also fencing `App::source`, `Applied::cut`, and
+  `error-matches` `Ok(None)` before `0.22.0`; leaving all fences for the next
+  API cut).
+- ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
+  five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
+  and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
+  and [kio crates.io publish](/quest/m0/kio-crates-io.md) to m0 as a direct
+  `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
+  in m2).
 
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
@@ -28,8 +45,7 @@ Non-breaking findings from the same audit live in
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
 Decided 2026-11-23 (maintainer): ✅ the cut waits for a
-[safe on-demand drop](/quest/m2/on-demand-drop.md) and
-[deleting `abort_unwanted`](/quest/m2/abort-unwanted-delete.md), so 0.22 never
+safe on-demand drop and deleting `abort_unwanted`, so 0.22 never
 publishes an API the next release removes (rejected: leaving them in m3,
 cutting first and deleting in the next breaking release).
 
@@ -48,7 +64,7 @@ Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` pro
 
 Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
 ✅ the cut also waits on
-[Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md)
+the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720))
 (renaming `Instance` to `Identity` across every wire message, capping it at
 256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
 keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both

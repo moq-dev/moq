@@ -309,8 +309,9 @@ impl Connection {
 
 	/// Close the connection with an APPLICATION_CLOSE, unless it already ended
 	///
-	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
-	/// the transport.
+	/// The frame comes from [`Self::poll_transmit`], in a record of its own if the transport
+	/// parameters still go first; keep transmitting until [`Self::is_drained`], then flush
+	/// before shutting down the transport.
 	pub fn close(&mut self, error_code: VarInt, reason: String) {
 		if self.is_closed() {
 			return;
@@ -589,9 +590,14 @@ impl Connection {
 		}
 
 		if let End::Closing { error, frame } = &mut self.end {
+			let room = budget.saturating_sub(buf.len());
+			if frame.is_some() && !buf.is_empty() && room < Close::SIZE_BOUND {
+				// The transport parameters left no room, so the close goes in the next record
+				self.timer.on_send(now);
+				return Some(Default::default());
+			}
 			// Write the close frame, if any, and go quiet
 			if let Some(close) = frame.take() {
-				let room = budget - buf.len();
 				close.encode(buf, room);
 			}
 			self.end = End::Closed(error.clone());

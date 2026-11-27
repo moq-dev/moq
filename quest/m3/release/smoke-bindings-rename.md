@@ -31,7 +31,7 @@ the same release. Today's call sites: `test/smoke/clients/swift/Sources/smoke/ma
 `test/smoke/clients/kotlin/src/main/kotlin/Main.kt`, and
 `test/smoke/clients/python/smoke.py`.
 
-The C smoke client is out of scope: it uses the hand-written `moq-c`, which
+The C smoke client is out of scope: it uses the hand-written `libmoq`, which
 keeps `moq_origin_announced_broadcast`, and
 [Published generated C](/quest/m3/release/c-publish.md) moves it onto the
 generated API, which already names them `request` and `follow`.

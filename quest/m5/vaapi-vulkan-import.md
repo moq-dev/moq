@@ -46,7 +46,7 @@ sync_file import, so an explicit-sync producer races it.
   encode on one node per DMA-BUF. Decided 2026-10-05: the producer puts the
   render node's `dev_t` in the surface, read from
   its own `VK_EXT_physical_device_drm`, and VA-API opens that node. It is
-  the one device identity [GPU health](/quest/m3/gpu-health.md) keys by too.
+  the one device identity [GPU health](/quest/m4/gpu-health.md) keys by too.
   It landed in #4975 as `frame::vulkan::Device { device_uuid, driver_uuid,
   render_node: Option<u64> }`. VA-API refuses a surface with no
   `render_node`, since it has no other way to pick a node.
@@ -70,5 +70,5 @@ Public API: none; the surface landed in #4975. Wire: none.
 ## Related
 
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - the AMD half of the same proof
-- [GPU capacity and health](/quest/m3/gpu-health.md) - reports per device keyed by the same render node `dev_t`
+- [GPU capacity and health](/quest/m4/gpu-health.md) - reports per device keyed by the same render node `dev_t`
 - [Video hardware validation](/quest/m5/video-hardware.md) - VA-API so far ran only on Meteor Lake

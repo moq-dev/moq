@@ -61,7 +61,7 @@ struct Held {
 	route: crate::origin::RouteInfo,
 }
 
-type ServedKey = (NodeId, Path, crate::Instance);
+type ServedKey = (NodeId, Path, crate::Identity);
 
 /// One upstream session and what it serves into the origin.
 struct Upstream {
@@ -102,7 +102,7 @@ pub struct RouteMesh {
 	/// Orphans the node released since the last [`Self::collect`].
 	released: Arc<AtomicUsize>,
 	shape: RouteShape,
-	instance: crate::Instance,
+	identity: crate::Identity,
 	next_tag: u64,
 	/// The middle hop every route takes, which [`Self::repath`] moves.
 	via: u64,
@@ -126,7 +126,7 @@ impl RouteMesh {
 			_driver: driver,
 			released: Arc::default(),
 			shape,
-			instance: crate::Instance::random(),
+			identity: crate::Identity::random(),
 			next_tag: 1,
 			via: Self::VIA,
 			marked: false,
@@ -217,7 +217,7 @@ impl RouteMesh {
 			let changes = (0..self.shape.broadcasts)
 				.map(|b| {
 					let path = Path::new(&format!("live/{r}/{b}")).unwrap();
-					((path, self.instance.clone()), Change::Live(route_claim(0, 0)))
+					((path, self.identity.clone()), Change::Live(route_claim(0, 0)))
 				})
 				.collect();
 			stream
@@ -244,13 +244,13 @@ impl RouteMesh {
 	pub fn close(&mut self, i: usize) -> RouteTally {
 		let mut tally = RouteTally::default();
 		let up = self.up[i].take().expect("an open upstream");
-		for ((origin, path, instance), held) in up.served {
+		for ((origin, path, identity), held) in up.served {
 			let route = held.route.with_available(false);
 			held.claim.update(route).unwrap();
 			tally.writes += 1;
 			up.stream.orphan(
 				origin,
-				&(path, instance),
+				&(path, identity),
 				Box::new(Left(held.claim, self.released.clone())),
 			);
 		}
@@ -318,7 +318,7 @@ impl RouteMesh {
 	/// [`Self::remark`] moves.
 	pub fn own(&mut self, claims: usize) -> RouteTally {
 		for c in 1..=claims {
-			let broadcast = (Path::new(&format!("own/{c}")).unwrap(), self.instance.clone());
+			let broadcast = (Path::new(&format!("own/{c}")).unwrap(), self.identity.clone());
 			self.node.own(false, broadcast, Change::Live(route_claim(0, 0)));
 		}
 		self.collect()
@@ -328,7 +328,7 @@ impl RouteMesh {
 	/// marked link, or not.
 	pub fn remark(&mut self) -> RouteTally {
 		self.marked = !self.marked;
-		let broadcast = (Path::new("own/0").unwrap(), self.instance.clone());
+		let broadcast = (Path::new("own/0").unwrap(), self.identity.clone());
 		self.node.own(self.marked, broadcast, Change::Live(route_claim(0, 0)));
 		self.collect()
 	}
@@ -377,7 +377,7 @@ impl RouteMesh {
 			Output::Serve {
 				origin: node,
 				path,
-				instance,
+				identity,
 				served,
 			} => {
 				let lane = crate::origin::Lane {
@@ -387,14 +387,14 @@ impl RouteMesh {
 					lifecycle: served.lifecycle,
 				};
 				let route = crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), served.attr.epoch)
+					.with_identity(identity.clone(), served.attr.epoch)
 					.with_cost(served.cost)
 					.with_node(Some(node))
 					.with_lane(lane)
 					.with_draining(served.draining)
 					.with_available(served.available)
 					.with_marked(served.marked);
-				let key = (node, path, instance);
+				let key = (node, path, identity);
 				match up.served.get_mut(&key) {
 					Some(held) => {
 						held.claim.update(route.clone()).unwrap();
@@ -405,16 +405,16 @@ impl RouteMesh {
 						up.served.insert(key.clone(), Held { claim, route });
 					}
 				}
-				let (node, path, instance) = key;
-				up.stream.serving(node, &(path, instance), true);
+				let (node, path, identity) = key;
+				up.stream.serving(node, &(path, identity), true);
 			}
 			Output::Unserve {
 				origin: node,
 				path,
-				instance,
+				identity,
 				gone,
 			} => {
-				if let Some(held) = up.served.remove(&(node, path, instance)) {
+				if let Some(held) = up.served.remove(&(node, path, identity)) {
 					release(held.claim, gone);
 				}
 			}

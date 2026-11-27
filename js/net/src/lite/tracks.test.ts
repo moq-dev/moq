@@ -7,7 +7,7 @@ import { accept, connect } from "../connection/index.ts";
 import { defined } from "../defined.test-util.ts";
 import { fromTransport, NotFound, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { randomHop } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -93,11 +93,11 @@ test("events and the request round-trip", async () => {
 	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "synced" });
 	expect(await decodeTracksEventMaybe(reader, version)).toBeUndefined();
 
-	const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
-	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), instance).encode(w, version));
+	const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
+	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), identity).encode(w, version));
 	const got = await TracksMessage.decode(new Reader(undefined, request, version), version);
 	expect(got.broadcast).toBe(Path.from("room/alice"));
-	expect(got.instance).toBe(instance);
+	expect(got.identity).toBe(identity);
 });
 
 test("a datagram track's events carry its kind ahead of its name", async () => {
@@ -565,7 +565,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	server.abort();
 });
 
-test("an instance-pinned front lists its serving route's tracks", async () => {
+test("an identity-pinned front lists its serving route's tracks", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -575,7 +575,7 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 	]);
 	const broadcastRoute = serverOrigin.route(Path.from("room"), {
 		hidden: true,
-		instance: { id: Instance.parse("01900000-0000-7000-8000-000000000001"), epoch: 0n },
+		identity: { id: Identity.parse("01900000-0000-7000-8000-000000000001"), epoch: 0n },
 	});
 	const broadcast = broadcastRoute.broadcast;
 	defined(broadcast.createTrack("a"));
@@ -602,9 +602,9 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 	server.abort();
 });
 
-test("a front pinned to a named instance served through a covering prefix route is NOT_FOUND", async () => {
+test("a front pinned to a named identity served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.claim(Path.from("room"), { instance: { id: Instance.parse("named"), epoch: 0n } });
+	const dynamic = origin.claim(Path.from("room"), { identity: { id: Identity.parse("named"), epoch: 0n } });
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();

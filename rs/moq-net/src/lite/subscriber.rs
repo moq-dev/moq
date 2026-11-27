@@ -116,38 +116,38 @@ pub(super) struct Subscriber {
 	pub(super) announces: crate::session::Slots,
 	/// The viewers whose sum the PROBE stream sends as its target.
 	pub(super) viewers: bandwidth::Viewers,
-	/// The instances minted for the paths the peer advertises without one, shared by the
+	/// The identities minted for the paths the peer advertises without one, shared by the
 	/// announce streams.
 	minted: Minted,
 }
 
-/// The instance a session minted for each path a peer advertises without one (every
+/// The identity a session minted for each path a peer advertises without one (every
 /// version before lite-07), shared by its announce streams: a peer serves one broadcast at
 /// a path at a time, so the path advertised on two streams at once is one stream. The peer
-/// ending it on any stream retires its instance, so the next advertisement is a new stream
+/// ending it on any stream retires its identity, so the next advertisement is a new stream
 /// with a fresh one, even while a lagging stream still holds the old: holders alone cannot
 /// tell a replacement from continuity. A stream closing only lets go of it.
 #[derive(Clone, Default)]
-struct Minted(Lock<HashMap<Path, (crate::Instance, usize)>>);
+struct Minted(Lock<HashMap<Path, (crate::Identity, usize)>>);
 
 impl Minted {
-	fn acquire(&self, path: &Path) -> crate::Instance {
+	fn acquire(&self, path: &Path) -> crate::Identity {
 		let mut minted = self.0.lock();
-		let (instance, holders) = minted
+		let (identity, holders) = minted
 			.entry(path.clone())
-			.or_insert_with(|| (crate::Instance::minted(), 0));
+			.or_insert_with(|| (crate::Identity::minted(), 0));
 		*holders += 1;
-		instance.clone()
+		identity.clone()
 	}
 
-	/// Let go of `instance`, retiring it if the peer `ended` its advertisement. A no-op once
+	/// Let go of `identity`, retiring it if the peer `ended` its advertisement. A no-op once
 	/// another stream's end retired it.
-	fn release(&self, path: &Path, instance: &crate::Instance, ended: bool) {
+	fn release(&self, path: &Path, identity: &crate::Identity, ended: bool) {
 		let mut minted = self.0.lock();
 		let Some((current, holders)) = minted.get_mut(path) else {
 			return;
 		};
-		if current != instance {
+		if current != identity {
 			return;
 		}
 		*holders -= 1;
@@ -700,9 +700,9 @@ impl Subscriber {
 	/// of every announcement received over it.
 	///
 	/// A locally configured price wins, since what we charge our own routing is local
-	/// policy. Otherwise we charge what the peer declared, which is how a server prices
-	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
-	/// the peer declares the price for both of them. Falls back to
+	/// policy. Otherwise we charge what the peer declared, which is how a server that
+	/// cannot tell a sibling from a stranger prices a link: the dialer that chose the
+	/// peer declares the price for both of them. Falls back to
 	/// [`super::DEFAULT_COST`] when neither priced it, and to `0` on a version that
 	/// carries no cost at all, whose routes rank on hop count alone.
 	///
@@ -759,7 +759,7 @@ impl Subscriber {
 						&mut run.announced,
 					)?;
 				} else {
-					// An announcement here names no instance, so the session mints one.
+					// An announcement here names no identity, so the session mints one.
 					self.start_announce(
 						path,
 						None,
@@ -823,8 +823,8 @@ impl Subscriber {
 	fn start_announce(
 		&mut self,
 		path: Path,
-		// The instance and epoch the peer announced, fixed until it restarts or retracts.
-		instance: Option<(crate::Instance, u64)>,
+		// The identity and epoch the peer announced, fixed until it restarts or retracts.
+		identity: Option<(crate::Identity, u64)>,
 		hops: crate::Hops,
 		// The route cost off the wire, i.e. as the peer advertised it.
 		// [`Cost::UNKNOWN`] before lite-06, leaving the hop chain as the only
@@ -848,7 +848,7 @@ impl Subscriber {
 		// The peer holds this prefix now. Everything below either accepts the announcement,
 		// replacing this, or declines it and leaves it exactly as reserved. Past the
 		// session's cap this refuses the announce stream instead.
-		announced.reserve(path.clone(), instance)?;
+		announced.reserve(path.clone(), identity)?;
 
 		let Some(hops) = self.chain(&path, hops, responder_origin) else {
 			return Ok(false);
@@ -871,7 +871,7 @@ impl Subscriber {
 	/// including a restart of one already attached: a connection on its way out must
 	/// not win selection, however good the path it advertises looks.
 	///
-	/// The instance and epoch are the ones the peer announced at `path`: an update
+	/// The identity and epoch are the ones the peer announced at `path`: an update
 	/// carries neither, since it never changes the stream.
 	fn announced_route(
 		&self,
@@ -882,8 +882,8 @@ impl Subscriber {
 		responder: Option<crate::Hop>,
 		announced: &Announced,
 	) -> crate::origin::RouteInfo {
-		let mut route = match announced.instance(path) {
-			Some((instance, epoch)) => crate::origin::RouteInfo::new().with_instance(instance, epoch),
+		let mut route = match announced.identity(path) {
+			Some((identity, epoch)) => crate::origin::RouteInfo::new().with_identity(identity, epoch),
 			None => crate::origin::RouteInfo::new(),
 		}
 		.with_hops(hops)
@@ -2724,8 +2724,8 @@ impl AnnouncePrefix {
 /// A source the announce half minted for one requested path, for the driver to serve.
 struct MintedSource {
 	path: Path,
-	/// The instance the route announced, asked for on every request.
-	instance: Option<crate::Instance>,
+	/// The identity the route announced, asked for on every request.
+	identity: Option<crate::Identity>,
 	/// The node every request names (lite-07), or none to let the peer select.
 	node: Option<crate::route::NodeId>,
 	source: crate::model::broadcast::SourceGuard,
@@ -2736,7 +2736,7 @@ struct MintedSource {
 }
 
 /// Serves the origin's track requests for one minted source until it closes: its
-/// route goes, the peer stops selecting its instance, nothing holds it any more, or
+/// route goes, the peer stops selecting its identity, nothing holds it any more, or
 /// the session dies. A closed source
 /// takes no new tracks but lets those in flight run to their own end (moq-lite:
 /// retraction does not disturb subscriptions already in flight); the session
@@ -2744,7 +2744,7 @@ struct MintedSource {
 struct SourceServe {
 	subscriber: Subscriber,
 	path: Path,
-	instance: Option<crate::Instance>,
+	identity: Option<crate::Identity>,
 	node: Option<crate::route::NodeId>,
 	source: crate::model::broadcast::SourceGuard,
 	dynamic: crate::broadcast::Requests,
@@ -2779,9 +2779,9 @@ struct TracksRecv {
 	/// A listing is a subscribe: it waits for a token that may cover the broadcast, and
 	/// ends once the session stops allowing it.
 	gate: crate::auth::Gate,
-	/// Until the peer answers, what the source must still hold: the selected instance
+	/// Until the peer answers, what the source must still hold: the selected identity
 	/// until the request is out, then no replacement, since a TRACKS request without an
-	/// instance lists whichever one won the path when it arrived.
+	/// identity lists whichever one won the path when it arrived.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
@@ -2842,7 +2842,7 @@ impl TracksRecv {
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
 					broadcast: source.path.clone(),
-					instance: source.instance.clone(),
+					identity: source.identity.clone(),
 					node: source.node,
 				})?;
 				self.stream.insert(stream)
@@ -2912,7 +2912,7 @@ impl SourceServe {
 			listing: None,
 			subscriber,
 			path: minted.path,
-			instance: minted.instance,
+			identity: minted.identity,
 			node: minted.node,
 			source: minted.source,
 			datagram_requests: minted.dynamic.datagrams(),
@@ -3008,7 +3008,7 @@ impl kio::Task for SourceServe {
 				let serve = DatagramServe::new(
 					self.subscriber.clone(),
 					self.path.clone(),
-					(self.instance.clone(), self.node),
+					(self.identity.clone(), self.node),
 					self.dynamic.validity().clone(),
 					self.source.consume(),
 					request,
@@ -3025,7 +3025,7 @@ impl kio::Task for SourceServe {
 						source: Some((*self.source).clone()),
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
-						instance: self.instance.clone(),
+						identity: self.identity.clone(),
 						node: self.node,
 						name: request.name().to_string(),
 					};
@@ -3077,7 +3077,7 @@ struct DatagramServe {
 	open: crate::transport::open::Open,
 	subscriber: Subscriber,
 	path: Path,
-	instance: Option<crate::Instance>,
+	identity: Option<crate::Identity>,
 	node: Option<crate::route::NodeId>,
 	validity: crate::model::broadcast::RequestValidity,
 	// A dedicated close-watch handle.
@@ -3141,7 +3141,7 @@ impl DatagramServe {
 	fn new(
 		subscriber: Subscriber,
 		path: Path,
-		(instance, node): (Option<crate::Instance>, Option<crate::route::NodeId>),
+		(identity, node): (Option<crate::Identity>, Option<crate::route::NodeId>),
 		validity: crate::model::broadcast::RequestValidity,
 		source: crate::broadcast::Consumer,
 		request: datagram::Request,
@@ -3154,7 +3154,7 @@ impl DatagramServe {
 			closed: subscriber.session.clone(),
 			subscriber,
 			path,
-			instance,
+			identity,
 			node,
 			validity,
 			id,
@@ -3254,7 +3254,7 @@ impl DatagramServe {
 					stream.writer.buffer(&lite::Datagrams {
 						id: self.id,
 						broadcast: self.path.clone(),
-						instance: self.instance.clone(),
+						identity: self.identity.clone(),
 						node: self.node,
 						track: request.name().to_string().into(),
 						priority,
@@ -6234,7 +6234,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".to_string(),
 			};
@@ -6283,7 +6283,7 @@ mod tests {
 		}
 	}
 
-	/// Answer a SUBSCRIBE under another instance with a finished, empty track, but only read the
+	/// Answer a SUBSCRIBE under another identity with a finished, empty track, but only read the
 	/// answer after `retire` changed its source's selection, then return what the reader got.
 	async fn answer_after(
 		version: Version,
@@ -6309,7 +6309,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -6351,7 +6351,7 @@ mod tests {
 			.map(|res| res.map(|group| group.map(|group| group.start)))
 	}
 
-	/// An answer read only after another instance took the path may be that instance's,
+	/// An answer read only after another identity took the path may be that identity's,
 	/// so the replacement refuses the subscription instead, as does a withdrawal followed
 	/// by a new announcement.
 	#[kio::test]
@@ -6418,7 +6418,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -6506,7 +6506,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -6919,7 +6919,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -7392,7 +7392,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".to_string(),
 			};
@@ -7473,7 +7473,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -7548,7 +7548,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -7621,7 +7621,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -7737,7 +7737,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -7808,7 +7808,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".to_string(),
 			};
@@ -7979,7 +7979,7 @@ mod tests {
 				source: None,
 				subscriber: subscriber.clone(),
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".to_string(),
 			},
@@ -8052,7 +8052,7 @@ mod tests {
 					source: None,
 					subscriber,
 					path: Path::from_static("room"),
-					instance: None,
+					identity: None,
 					node: None,
 					name: "video".into(),
 				};
@@ -8136,7 +8136,7 @@ mod tests {
 					source: None,
 					subscriber,
 					path: Path::from_static("room"),
-					instance: None,
+					identity: None,
 					node: None,
 					name: "video".to_string(),
 				},
@@ -8190,7 +8190,7 @@ mod tests {
 			source: None,
 			subscriber: subscriber.clone(),
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".to_string(),
 		};
@@ -8254,9 +8254,9 @@ mod tests {
 	}
 
 	/// An in-flight TRACK survives withdrawal, like its pipelined SUBSCRIBE, but
-	/// never accepts a replacement instance's info.
+	/// never accepts a replacement identity's info.
 	#[kio::test]
-	async fn an_in_flight_track_info_keeps_its_instance() {
+	async fn an_in_flight_track_info_keeps_its_identity() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for replace in [false, true] {
 				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
@@ -8642,7 +8642,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".to_string(),
 			},
@@ -8688,7 +8688,7 @@ mod tests {
 					source: Some(source.clone()),
 					subscriber,
 					path: Path::from_static("room"),
-					instance: None,
+					identity: None,
 					node: None,
 					name: "video".to_string(),
 				},
@@ -8724,7 +8724,7 @@ mod tests {
 		let route = kio::Producer::new(());
 		let _ = subscriber.sources.try_push(MintedSource {
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			dynamic: source.requests(),
 			source: crate::model::broadcast::SourceGuard::new(source),
@@ -8769,7 +8769,7 @@ mod tests {
 			subscriber,
 			MintedSource {
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
 				dynamic,
@@ -8804,10 +8804,10 @@ mod tests {
 		assert!(tracks.next().now_or_never().is_none(), "synced before the peer");
 	}
 
-	/// An instance retired while its listing waits for a token lists nothing: a TRACKS
-	/// request under another instance would list its replacement. The source ends with it.
+	/// An identity retired while its listing waits for a token lists nothing: a TRACKS
+	/// request under another identity would list its replacement. The source ends with it.
 	#[kio::test]
-	async fn a_listing_of_a_retired_instance_never_reaches_the_wire() {
+	async fn a_listing_of_a_retired_identity_never_reaches_the_wire() {
 		let auth = crate::auth::Link::new(true);
 		let token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let open = kio::Producer::new(true);
@@ -8825,10 +8825,10 @@ mod tests {
 		assert_eq!(session.log.bi_opens(), 0);
 	}
 
-	/// A listing on the wire but unanswered when another instance takes the path lists
-	/// nothing: the peer may list that instance.
+	/// A listing on the wire but unanswered when another identity takes the path lists
+	/// nothing: the peer may list that identity.
 	#[kio::test]
-	async fn an_unanswered_listing_of_a_replaced_instance_is_refused() {
+	async fn an_unanswered_listing_of_a_replaced_identity_is_refused() {
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
 		let mut selection = crate::model::TestSelection::new();
@@ -8915,7 +8915,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".to_string(),
 			},
@@ -8968,7 +8968,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room/host"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "catalog.json".to_string(),
 		};
@@ -9037,7 +9037,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room/host"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "audio".to_string(),
 		};
@@ -9106,7 +9106,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room/host"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "audio".to_string(),
 			};
@@ -9205,7 +9205,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room/host"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "audio".to_string(),
 		};
@@ -9271,7 +9271,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room/host"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "audio".to_string(),
 			};
@@ -9394,7 +9394,7 @@ mod tests {
 					source: None,
 					subscriber,
 					path: Path::from_static("room/host"),
-					instance: None,
+					identity: None,
 					node: None,
 					name: "catalog.json".to_string(),
 				},
@@ -9470,7 +9470,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".into(),
 			};
@@ -9544,7 +9544,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".into(),
 			};
@@ -9620,7 +9620,7 @@ mod tests {
 				source: None,
 				subscriber,
 				path: Path::from_static("room"),
-				instance: None,
+				identity: None,
 				node: None,
 				name: "video".into(),
 			};
@@ -9714,7 +9714,7 @@ mod tests {
 					source: None,
 					subscriber,
 					path: Path::from_static("room"),
-					instance: None,
+					identity: None,
 					node: None,
 					name: "video".into(),
 				};
@@ -9834,7 +9834,7 @@ mod tests {
 			source: None,
 			subscriber,
 			path: Path::from_static("room"),
-			instance: None,
+			identity: None,
 			node: None,
 			name: "video".into(),
 		};
@@ -10460,42 +10460,42 @@ mod tests {
 		);
 	}
 
-	/// Announce streams overlapping at a path share the instance minted for it, but a
+	/// Announce streams overlapping at a path share the identity minted for it, but a
 	/// replacement delivered on both, interleaved, is a new stream on each: holder counts
-	/// alone would hand it the old instance, splicing the two.
+	/// alone would hand it the old identity, splicing the two.
 	#[test]
-	fn an_interleaved_replacement_mints_a_fresh_instance() {
+	fn an_interleaved_replacement_mints_a_fresh_identity() {
 		let slots = crate::session::Slots::default();
 		let minted = Minted::default();
 		let mut first = Announced::new(slots.clone(), minted.clone());
 		let mut second = Announced::new(slots, minted.clone());
 		let path = Path::from_static("room/host");
-		let instance = |announced: &Announced| announced.instance(&path).unwrap().0;
+		let identity = |announced: &Announced| announced.identity(&path).unwrap().0;
 
 		first.reserve(path.clone(), None).unwrap();
 		second.reserve(path.clone(), None).unwrap();
-		let old = instance(&first);
+		let old = identity(&first);
 		assert!(old.is_minted());
-		assert_eq!(instance(&second), old, "one advertisement on two streams is one stream");
+		assert_eq!(identity(&second), old, "one advertisement on two streams is one stream");
 
 		// END1, START1, END2, START2.
 		first.withdraw(&path);
 		first.reserve(path.clone(), None).unwrap();
-		let new = instance(&first);
-		assert_ne!(new, old, "the replacement inherited the old instance");
+		let new = identity(&first);
+		assert_ne!(new, old, "the replacement inherited the old identity");
 		second.withdraw(&path);
 		second.reserve(path.clone(), None).unwrap();
 		assert_eq!(
-			instance(&second),
+			identity(&second),
 			new,
 			"both streams carry the replacement as one stream"
 		);
 
-		// A stream closing ends nothing: the other's advertisement keeps its instance.
+		// A stream closing ends nothing: the other's advertisement keeps its identity.
 		drop(first);
 		let mut third = Announced::new(Default::default(), minted);
 		third.reserve(path.clone(), None).unwrap();
-		assert_eq!(instance(&third), new);
+		assert_eq!(identity(&third), new);
 	}
 
 	/// A serve pass polls only the routes whose request queue woke. The driver runs a
@@ -11017,7 +11017,7 @@ mod tests {
 	}
 
 	/// A publisher that names nobody keeps the anonymous mark, and nothing in front of it:
-	/// naming the stream is the route instance's job, so the relay never names the publisher. A
+	/// naming the stream is the route identity's job, so the relay never names the publisher. A
 	/// reprice on the same connection keeps it and updates in place.
 	#[kio::test]
 	async fn an_unnamed_publisher_stays_anonymous() {
@@ -11265,7 +11265,7 @@ mod tests {
 			let start = match version.has_routes() {
 				true => lite::AnnounceBroadcast::Start {
 					suffix,
-					instance: crate::Instance::random(),
+					identity: crate::Identity::random(),
 					claim: claim(0),
 				},
 				false => lite::AnnounceBroadcast::Active {
@@ -11689,7 +11689,7 @@ mod tests {
 	fn start_at(suffix: lite::PathRef, above: u64) -> impl Fn(&mut crate::coding::Encoder<'_>) {
 		wire(lite::AnnounceBroadcast::Start {
 			suffix,
-			instance: crate::Instance::random(),
+			identity: crate::Identity::random(),
 			claim: claim(above),
 		})
 	}
@@ -12270,8 +12270,8 @@ struct SubStream {
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
 	wanted: Option<u64>,
 	/// Until the publisher's first response, what the source must still hold: a SUBSCRIBE
-	/// without an instance resolves whichever one wins the path when it arrives, so one
-	/// still unanswered once another instance takes the path may be answered by it.
+	/// without an identity resolves whichever one wins the path when it arrives, so one
+	/// still unanswered once another identity takes the path may be answered by it.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
@@ -12828,10 +12828,10 @@ struct Announced {
 	/// The session's announce cap, and one slot taken from it per entry in `routes`.
 	slots: crate::session::Slots,
 	held: Vec<crate::session::Slot>,
-	/// The instance and epoch each advertisement serves, kept while it stands even when
+	/// The identity and epoch each advertisement serves, kept while it stands even when
 	/// declined, so a restart that attaches it later serves the same stream, and whether
 	/// the session minted it.
-	instances: HashMap<Path, ((crate::Instance, u64), bool)>,
+	identities: HashMap<Path, ((crate::Identity, u64), bool)>,
 	minted: Minted,
 	/// Attached routes whose request queue woke since the last serve pass. The
 	/// driver wakes for every group the session carries, so a pass must cost what
@@ -12860,9 +12860,9 @@ impl Default for Announced {
 impl Drop for Announced {
 	fn drop(&mut self) {
 		// The stream closing ends none of its advertisements, which another may still carry.
-		for (path, ((instance, _), minted)) in std::mem::take(&mut self.instances) {
+		for (path, ((identity, _), minted)) in std::mem::take(&mut self.identities) {
 			if minted {
-				self.minted.release(&path, &instance, false);
+				self.minted.release(&path, &identity, false);
 			}
 		}
 	}
@@ -12874,7 +12874,7 @@ impl Announced {
 			routes: HashMap::new(),
 			slots,
 			held: Vec::new(),
-			instances: HashMap::new(),
+			identities: HashMap::new(),
 			minted,
 			ready: Default::default(),
 		}
@@ -12933,29 +12933,29 @@ impl Announced {
 	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
 	///
 	/// Fails with [`Error::TooManyRequests`] once the session holds as many as it allows.
-	fn reserve(&mut self, path: Path, instance: Option<(crate::Instance, u64)>) -> Result<(), Error> {
+	fn reserve(&mut self, path: Path, identity: Option<(crate::Identity, u64)>) -> Result<(), Error> {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
 		self.held.push(self.slots.acquire()?);
-		let instance = match instance {
-			Some(instance) => (instance, false),
+		let identity = match identity {
+			Some(identity) => (identity, false),
 			None => ((self.minted.acquire(&path), 0), true),
 		};
 		self.forget(&path, false);
-		self.instances.insert(path.clone(), instance);
+		self.identities.insert(path.clone(), identity);
 		self.routes.insert(path, Held::Declined);
 		Ok(())
 	}
 
-	/// The instance and epoch the advertisement at `path` serves.
-	fn instance(&self, path: &Path) -> Option<(crate::Instance, u64)> {
-		self.instances.get(path).map(|(instance, _)| instance.clone())
+	/// The identity and epoch the advertisement at `path` serves.
+	fn identity(&self, path: &Path) -> Option<(crate::Identity, u64)> {
+		self.identities.get(path).map(|(identity, _)| identity.clone())
 	}
 
-	/// Drop the instance recorded for `path`, releasing it if the session minted it, and
+	/// Drop the identity recorded for `path`, releasing it if the session minted it, and
 	/// retiring it if the peer `ended` the advertisement.
 	fn forget(&mut self, path: &Path, ended: bool) {
-		if let Some(((instance, _), true)) = self.instances.remove(path) {
-			self.minted.release(path, &instance, ended);
+		if let Some(((identity, _), true)) = self.identities.remove(path) {
+			self.minted.release(path, &identity, ended);
 		}
 	}
 
@@ -13055,10 +13055,10 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
 			continue;
 		};
 		let path = path.clone();
-		// A request naming the instance reaches only that stream, so only a source on
+		// A request naming the identity reaches only that stream, so only a source on
 		// a wire that cannot name one must stop once the peer no longer selects what
 		// minted it.
-		let validity = if subscriber.version.has_instance() {
+		let validity = if subscriber.version.has_identity() {
 			Default::default()
 		} else {
 			crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
@@ -13072,7 +13072,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
 		request.serve(&source);
 		let _ = subscriber.sources.try_push(MintedSource {
 			path,
-			instance: entry.route.instance.clone(),
+			identity: entry.route.identity.clone(),
 			node,
 			source: crate::model::broadcast::SourceGuard::new(source),
 			dynamic,
@@ -13158,8 +13158,8 @@ struct TrackServe {
 	source: Option<crate::broadcast::Producer>,
 	subscriber: Subscriber,
 	path: Path,
-	/// The instance to ask for; the peer refuses a request for another.
-	instance: Option<crate::Instance>,
+	/// The identity to ask for; the peer refuses a request for another.
+	identity: Option<crate::Identity>,
 	/// The node to ask for (lite-07), or none to let the peer select.
 	node: Option<crate::route::NodeId>,
 	name: String,
@@ -13417,7 +13417,7 @@ impl TrackServe {
 	/// measured with the smallest range, since it carries at least one.
 	fn subscribe_fields(&self, subscription: &Subscription) -> usize {
 		let msg = lite::Subscribe {
-			instance: self.instance.clone(),
+			identity: self.identity.clone(),
 			node: self.node,
 			id: u64::MAX,
 			broadcast: self.path.clone(),
@@ -13806,7 +13806,7 @@ impl Establish {
 			waiter
 		))?;
 		let msg = lite::Subscribe {
-			instance: self.serve.instance.clone(),
+			identity: self.serve.identity.clone(),
 			node: self.serve.node,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
@@ -14774,7 +14774,7 @@ impl TrackInfoFetch {
 				.with_stats(serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Track)?;
 		stream.writer.buffer(&lite::Track {
-			instance: serve.instance.clone(),
+			identity: serve.identity.clone(),
 			node: serve.node,
 			broadcast: serve.path.clone(),
 			track: serve.name.as_str().into(),
@@ -15793,7 +15793,7 @@ impl ServeLoop {
 					return Poll::Pending;
 				}
 				ServeMode::Select => {
-					// A SUBSCRIBE still unanswered once another instance takes the path may have
+					// A SUBSCRIBE still unanswered once another identity takes the path may have
 					// resolved it: refuse it. A withdrawal alone leaves it to its answer. Checked
 					// before reading the stream, so an answer that only arrived alongside the
 					// replacement cannot claim it, and before the flush, so an update parked on
@@ -15802,7 +15802,7 @@ impl ServeLoop {
 						&& let Some(validity) = &active.unanswered
 						&& let Err(err) = validity.check_unanswered(waiter)
 					{
-						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "unanswered subscribe refused: instance replaced");
+						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "unanswered subscribe refused: identity replaced");
 						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 
@@ -16404,7 +16404,7 @@ impl kio::Task for FetchServeRun {
 					};
 
 					let msg = lite::Fetch {
-						instance: self.serve.instance.clone(),
+						identity: self.serve.identity.clone(),
 						node: self.serve.node,
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
@@ -16853,7 +16853,7 @@ impl kio::Task for SubFillRun {
 						},
 					};
 					let msg = lite::Subscribe {
-						instance: self.serve.instance.clone(),
+						identity: self.serve.identity.clone(),
 						node: self.serve.node,
 						id: self.id,
 						broadcast: self.serve.path.clone(),

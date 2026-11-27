@@ -3,7 +3,7 @@
  * `rs/moq-net`.
  *
  * A {@link Front} is one broadcast served through one route at a time: the origin re-sources it
- * when another route of the same instance takes over, since routes with one instance serve one
+ * when another route of the same identity takes over, since routes with one identity serve one
  * stream and so hold the same groups and frames. A reader of a logical track reads the
  * serving route's copy directly, through its own subscription: nothing is copied, and with one
  * route it is a passthrough.
@@ -441,7 +441,7 @@ interface Copy {
 	 * being read on its source until that copy ends, so a copy it replaced has stopped placing the
 	 * window by the time the next one subscribes. That copy subscribes with the window's resolution,
 	 * so its own ranges hold back what the window leaves out, still cached for a widening to offer.
-	 * This front moves a track being read as soon as a better route of its instance answers. A copy
+	 * This front moves a track being read as soon as a better route of its identity answers. A copy
 	 * it replaced, still delivering, can then place the window after the serving copy subscribed with
 	 * nothing resolved, and that copy offers a group the window leaves out: the reader takes it.
 	 */
@@ -3100,7 +3100,7 @@ class FetchExpiry implements Expiry {
  * One broadcast served through one route at a time; see the module docs.
  *
  * Its {@link consumer} is the broadcast handed out: every track read through it follows the
- * front's route. The origin calls {@link serve} as routes of the same instance take over, and
+ * front's route. The origin calls {@link serve} as routes of the same identity take over, and
  * {@link conclude} once none will: readers then follow the last copy to its end.
  */
 export class Front {
@@ -3131,7 +3131,7 @@ export class Front {
 
 	/**
 	 * Answer listings of the front's broadcast with its serving source's listing, while anyone
-	 * lists it. A source of the same instance lists the same tracks, so a takeover shows readers
+	 * lists it. A source of the same identity lists the same tracks, so a takeover shows readers
 	 * only what differs, once the new source's listing synced.
 	 */
 	async #list(lister: Lister): Promise<void> {

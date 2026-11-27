@@ -13,9 +13,9 @@ use super::{Message, Version};
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
+	/// The identity the subscriber expects; see [`crate::origin::RouteInfo::identity`].
 	/// Lite07+ only.
-	pub instance: Option<crate::Instance>,
+	pub identity: Option<crate::Identity>,
 	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
 	pub node: Option<crate::route::NodeId>,
@@ -34,7 +34,7 @@ impl Fetch<'_> {
 	pub fn into_owned(self) -> Fetch<'static> {
 		Fetch {
 			broadcast: self.broadcast,
-			instance: self.instance,
+			identity: self.identity,
 			node: self.node,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
@@ -56,8 +56,8 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let instance = super::instance::decode_pin(r, version)?;
-		let node = super::instance::decode_node(r, version)?;
+		let identity = super::identity::decode_pin(r, version)?;
+		let node = super::identity::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 		let group = r.varint()?;
@@ -73,7 +73,7 @@ impl<'a> Message<'a> for Fetch<'a> {
 
 		Ok(Self {
 			broadcast,
-			instance,
+			identity,
 			node,
 			track,
 			priority,
@@ -92,8 +92,8 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node)?;
+		super::identity::encode_pin(w, version, self.identity.as_ref())?;
+		super::identity::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 		w.varint(self.group)?;
@@ -116,7 +116,7 @@ mod test {
 
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
