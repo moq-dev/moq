@@ -16168,8 +16168,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/kixel-ai/kio";
-          rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671";
-          sha256 = "0sj9n9n4dllb5nybc3n9kf4g60iyayhiyyz34sr0hzzl0sz21jf1";
+          rev = "8013885f8c9f53cfe010c0f50d618f530464776c";
+          sha256 = "1kj2gf5injxbsabql2sz0y9g38nwv7gn3cwhgnc2a5za2v1c088p";
         };
         authors = [
           "Luke Curley"
@@ -16183,6 +16183,8 @@ rec {
             name = "futures";
             packageId = "futures";
             optional = true;
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "kio-macros";
@@ -16234,6 +16236,8 @@ rec {
           {
             name = "futures";
             packageId = "futures";
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "tokio";
@@ -16278,8 +16282,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/kixel-ai/kio";
-          rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671";
-          sha256 = "0sj9n9n4dllb5nybc3n9kf4g60iyayhiyyz34sr0hzzl0sz21jf1";
+          rev = "8013885f8c9f53cfe010c0f50d618f530464776c";
+          sha256 = "1kj2gf5injxbsabql2sz0y9g38nwv7gn3cwhgnc2a5za2v1c088p";
         };
         procMacro = true;
         libName = "kio_macros";
@@ -16297,7 +16301,7 @@ rec {
           }
           {
             name = "syn";
-            packageId = "syn 2.0.119";
+            packageId = "syn 3.0.6";
             features = [
               "full"
               "visit-mut"
@@ -59577,6 +59581,10 @@ rec {
             packageId = "fs-err";
             usesDefaultFeatures = false;
             features = [ "tokio" ];
+          }
+          {
+            name = "futures";
+            packageId = "futures";
           }
           {
             name = "futures-channel";

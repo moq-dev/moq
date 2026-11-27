@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `time::EPOCH` replaces kio's `Wall::MOQ_EPOCH`
+
+kio no longer carries MoQ's wall-clock origin. Code that read `kio::clock::Wall::MOQ_EPOCH`
+(only ever on a kio Git revision) reads `moq_net::time::EPOCH`, the same 2020-01-01T00:00:00Z.
+
 ### `track::Fill::wanted_changed` waits for a reader to pick up the group served before
 
 `Fill::wanted_changed` (and `poll_wanted_changed`) now yields the next group only once every group the fill accepted reached a reader, which picks it up as it asks for its next group, so a handler writes a batch one group at a time at its fastest reader's pace.

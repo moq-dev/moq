@@ -45,6 +45,7 @@ flume = { version = "0.12" }
 foldhash = { version = "0.2" }
 form_urlencoded = { version = "1" }
 fs-err = { version = "3", default-features = false, features = ["tokio"] }
+futures = { version = "0.3" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }

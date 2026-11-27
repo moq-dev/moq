@@ -46,5 +46,5 @@ third-party = [
     { name = "clang-sys" },
     { name = "gstreamer" },
     { name = "gstreamer-sys" },
-    { name = "kio", git = "https://github.com/kixel-ai/kio", rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671" },
+    { name = "kio", git = "https://github.com/kixel-ai/kio", rev = "8013885f8c9f53cfe010c0f50d618f530464776c" },
 ]

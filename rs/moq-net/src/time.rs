@@ -7,6 +7,12 @@ pub(crate) use kio::clock::{Deadline, Deadlines};
 
 use crate::Error;
 
+/// The origin MoQ counts wall time from, 2020-01-01T00:00:00Z.
+///
+/// Counting from 50 years after the Unix epoch keeps wall timestamps ~1.5e12 ms
+/// smaller, trimming a byte or two off their varints.
+pub const EPOCH: kio::clock::Wall = kio::clock::Wall::from_unix_secs(1_577_836_800);
+
 /// A state machine polled with caller-supplied time.
 ///
 /// Each poll advances the driver to `now`, processes ready work, and registers

@@ -1,6 +1,6 @@
 {
-  "git+https://github.com/kixel-ai/kio?rev=866ef062d86cf4bd81e1f6766baaf95e3f687671#0.6.2": "0sj9n9n4dllb5nybc3n9kf4g60iyayhiyyz34sr0hzzl0sz21jf1",
-  "git+https://github.com/kixel-ai/kio?rev=866ef062d86cf4bd81e1f6766baaf95e3f687671#kio-macros@0.1.0": "0sj9n9n4dllb5nybc3n9kf4g60iyayhiyyz34sr0hzzl0sz21jf1",
+  "git+https://github.com/kixel-ai/kio?rev=8013885f8c9f53cfe010c0f50d618f530464776c#0.6.2": "1kj2gf5injxbsabql2sz0y9g38nwv7gn3cwhgnc2a5za2v1c088p",
+  "git+https://github.com/kixel-ai/kio?rev=8013885f8c9f53cfe010c0f50d618f530464776c#kio-macros@0.1.0": "1kj2gf5injxbsabql2sz0y9g38nwv7gn3cwhgnc2a5za2v1c088p",
   "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
   "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_bindgen@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",
   "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#uniffi_core@0.32.2": "0xl7aqjgs27pmd246pgj5sc103czr9qmfbaq9zdjn2hijn1p16y7",

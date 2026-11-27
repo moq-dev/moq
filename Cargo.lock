@@ -3751,7 +3751,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kio"
 version = "0.6.2"
-source = "git+https://github.com/kixel-ai/kio?rev=866ef062d86cf4bd81e1f6766baaf95e3f687671#866ef062d86cf4bd81e1f6766baaf95e3f687671"
+source = "git+https://github.com/kixel-ai/kio?rev=8013885f8c9f53cfe010c0f50d618f530464776c#8013885f8c9f53cfe010c0f50d618f530464776c"
 dependencies = [
  "crossbeam-epoch",
  "futures",
@@ -3767,11 +3767,11 @@ dependencies = [
 [[package]]
 name = "kio-macros"
 version = "0.1.0"
-source = "git+https://github.com/kixel-ai/kio?rev=866ef062d86cf4bd81e1f6766baaf95e3f687671#866ef062d86cf4bd81e1f6766baaf95e3f687671"
+source = "git+https://github.com/kixel-ai/kio?rev=8013885f8c9f53cfe010c0f50d618f530464776c#8013885f8c9f53cfe010c0f50d618f530464776c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -10626,6 +10626,7 @@ dependencies = [
  "foldhash",
  "form_urlencoded",
  "fs-err",
+ "futures",
  "futures-channel",
  "futures-core",
  "futures-executor",

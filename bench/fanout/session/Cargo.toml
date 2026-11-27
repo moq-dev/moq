@@ -12,7 +12,7 @@ publish = false
 bytes = "1"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "time"] }
-kio = { git = "https://github.com/kixel-ai/kio", rev = "866ef062d86cf4bd81e1f6766baaf95e3f687671" }
+kio = { git = "https://github.com/kixel-ai/kio", rev = "8013885f8c9f53cfe010c0f50d618f530464776c" }
 moq-net = { path = "../../../rs/moq-net", features = ["async"] }
 
 [profile.release]
