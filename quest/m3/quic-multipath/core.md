@@ -73,4 +73,4 @@ moq-lite change.
 ## Related
 
 - Fix dual-stack NAT rebinding, prev_path rollback, and probe gating ([moq-dev/moq#9712](https://github.com/moq-dev/moq/pull/9712)) - edits the same path code; land it first or rebase over it
-- [Session keep-alive with a stale signal](/quest/m1/keep-alive.md) - its Stale signal becomes per path
+- [Session keep-alive with a stale signal](https://github.com/moq-dev/moq/pull/9698) - its Stale signal becomes per path

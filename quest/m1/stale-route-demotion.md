@@ -81,17 +81,13 @@ Guidance:
   for the single-duration NAT-binding ping interval (`--quic-keep-alive`).
   Keep the new `soft`/`hard` probing config additive so it coexists cleanly
   with `quic.keep_alive`, align its option shape with
-  [Session keep-alive](/quest/m1/keep-alive.md), and mirror it on `moq-relay`'s
+  [Session keep-alive](https://github.com/moq-dev/moq/pull/9698), and mirror it on `moq-relay`'s
   `[limits.peer.quic]` (`rs/moq-relay/src/limits.rs` and `settings.rs`) so
   peer and dialed links can enable probing without touching local clients.
 - Test multi-hop `lite-07` demotion, recovery to `Live`, and coexistence with
   GOAWAY; `lite-05/06` and `moq-transport` route re-ranking and recovery;
   `origin.routes()` observing `RouteInfo::draining()` transitions in Rust and
   JS; and `moq-relay` config merging and drill coverage for peer-link probing.
-
-## Required
-
-- [Session keep-alive with a stale signal](/quest/m1/keep-alive.md) - provides the per-session `keep_alive` (`soft`, `hard`) option and `Stale`/`Live` liveness watch
 
 ## Related
 

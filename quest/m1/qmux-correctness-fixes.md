@@ -56,6 +56,6 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Session keep-alive with a stale signal](/quest/m1/keep-alive.md) - touches the same QMux timer state machine
+- [Session keep-alive with a stale signal](https://github.com/moq-dev/moq/pull/9698) - touches the same QMux timer state machine
 - [Fix moq-quic stream, Assembler, QMux, BloomTokenLog, CidState, rate-cap, and 32-bit wire bugs](https://github.com/moq-dev/moq/pull/9716) - owns mux close underflow and 32-bit `frame.rs`/`packet.rs` varint fixes
 - [Polish wire, transport, qmux config, draft, and HLS escaping edge cases](/quest/m3/wire-and-transport-polish.md) - owns `rs/qmux/src/config.rs` rate-cap validation and `ws.rs` stale docs
