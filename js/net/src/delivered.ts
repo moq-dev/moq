@@ -12,8 +12,6 @@ import type { Run } from "./window.ts";
 export interface Judged {
 	/** The runs the placed ranges name from `from` up to the exclusive `end`, lowest first. */
 	placed(from: bigint, end: bigint): Run[];
-	/** Whether a live join still waits on a first group, which may then hold any group. */
-	readonly pending: boolean;
 }
 
 /**
@@ -165,8 +163,9 @@ export class Delivered {
 	 * owed again.
 	 *
 	 * The keys it gave back before that `judged` no longer holds, and any other gap it doesn't, it
-	 * counts as handed out unjudged again first, unless a live join still waits, so the gaps never
-	 * outlive the ranges that owed them, as the Rust `Record::retire` bounds them.
+	 * counts as handed out unjudged again first, so the gaps never outlive the ranges that owed
+	 * them, as the Rust `Record::retire` bounds them. A live join still waiting gets back what it
+	 * holds once it places, as any range added later does.
 	 */
 	reopen(judged: Judged): void {
 		const unjudged = this.#unjudged;
@@ -174,7 +173,7 @@ export class Delivered {
 		const held = unjudged.#runs.flatMap(([first, last]) => judged.placed(first, last + 1n));
 		if (held.length === 0) return;
 		const last = this.#runs.at(-1);
-		if (!judged.pending && last) {
+		if (last) {
 			for (const gap of [...this.gaps(0n, last[1])]) {
 				let from = gap.start;
 				for (const run of [...judged.placed(gap.start, gap.end), { start: gap.end, end: gap.end }]) {

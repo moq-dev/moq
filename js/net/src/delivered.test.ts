@@ -85,7 +85,6 @@ function judged(...runs: [bigint, bigint][]): Judged {
 			runs
 				.filter(([start, stop]) => start < end && stop > from)
 				.map(([start, stop]) => ({ start: max(start, from), end: min(stop, end) })),
-		pending: false,
 	};
 }
 
@@ -149,8 +148,10 @@ test("a reopen closes the gaps no range holds any longer", () => {
 		expect([...delivered.gaps(0n, 100n)]).toEqual([{ start: key, end: key + 1n }]);
 	}
 	expect(delivered.runs).toBe(4);
-	// Nor while a live join waits, which may hold any group.
-	delivered.reopen({ ...judged([20n, 21n]), pending: true });
+	// While a live join waits as well, which gets back what it holds once it places.
+	delivered.reopen(judged([20n, 21n]));
+	expect([...delivered.gaps(0n, 100n)]).toEqual([{ start: 20n, end: 21n }]);
+	delivered.reopen(judged([20n, 21n], [80n, 81n]));
 	expect([...delivered.gaps(0n, 100n)]).toEqual([
 		{ start: 20n, end: 21n },
 		{ start: 80n, end: 81n },
