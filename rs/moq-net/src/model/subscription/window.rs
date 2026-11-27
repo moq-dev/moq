@@ -1037,56 +1037,6 @@ impl Window {
 		Some((*run.start()).max(range.start)..end)
 	}
 
-	/// The parts of `range` that any current range (placed or still resolving) can still name.
-	/// Unlike [`Self::groups`], an unresolved range contributes only up to its own end (and from
-	/// its lookup floor when known), so an unrelated unresolved range never keeps retired skips
-	/// outside it alive.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn possible_runs(&self, range: ops::Range<u64>) -> Vec<ops::Range<u64>> {
-		if range.is_empty() {
-			return Vec::new();
-		}
-		let mut out = rangemap::RangeSet::new();
-		for run in self.groups.runs(range.start) {
-			let start = (*run.start()).max(range.start);
-			if start >= range.end {
-				break;
-			}
-			let end = run.end().checked_add(1).map_or(range.end, |e| e.min(range.end));
-			if start < end {
-				out.insert(start..end);
-			}
-		}
-		for key in self.pending.iter().chain(self.reaching.iter()) {
-			if let Some(r) = self.ranges.get(key).filter(|r| !r.is_empty()) {
-				let end = r.end.and_then(|e| e.checked_add(1)).unwrap_or(u64::MAX).min(range.end);
-				if range.start < end {
-					out.insert(range.start..end);
-				}
-			}
-		}
-		for &(_, key) in &self.waiting {
-			if let Some(span) = self.spans.get(&key) {
-				let end = span.end.unwrap_or(u64::MAX).min(range.end);
-				if range.start < end {
-					out.insert(range.start..end);
-				}
-			}
-		}
-		for &(_, key) in &self.looking {
-			if let Some(span) = self.spans.get(&key)
-				&& let Some(looking) = span.looking
-			{
-				let start = looking.floor.max(range.start);
-				let end = span.end.unwrap_or(u64::MAX).min(range.end);
-				if start < end {
-					out.insert(start..end);
-				}
-			}
-		}
-		out.into_iter().collect()
-	}
-
 	/// The time starts still looked up, each with the oldest key the group containing it may
 	/// start at: past every group held below the time, which holds it if the track's history
 	/// has one.

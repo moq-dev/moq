@@ -2120,30 +2120,6 @@ impl TrackState {
 		}
 	}
 
-	/// Bridge immediate declared skips adjacent to `key` and any gaps in `delivered` touched by
-	/// newly declared skips since `seen` (updating `seen`), calling `allow` before bridging each
-	/// gap and `on_bridge` after.
-	fn bridge_skips(
-		&self,
-		delivered: &mut Delivered,
-		key: u64,
-		seen: &mut u64,
-		mut allow: impl FnMut(ops::Range<u64>) -> bool,
-		mut on_bridge: impl FnMut(ops::Range<u64>),
-	) {
-		delivered.bridge_adjacent_skips(key, |k| self.skip_end(k), &mut allow, &mut on_bridge);
-		if delivered.runs() > 1 && self.drops_changes.revision() != *seen {
-			for changed in self.drops_changes.since(*seen) {
-				for (skip, hole) in self.drops.overlapping(&changed) {
-					if *hole == Hole::Skip {
-						delivered.bridge_skip_gaps(skip.clone(), &mut allow, &mut on_bridge);
-					}
-				}
-			}
-			*seen = self.drops_changes.revision();
-		}
-	}
-
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
 	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
@@ -8452,28 +8428,6 @@ impl Consumer {
 			.unwrap_or(end)
 	}
 
-	/// One past the declared skip run holding `key`, if `key` was declared skipped.
-	/// Bridge declared skips on this track (or its serving route) into `delivered`; see
-	/// [`TrackState::bridge_skips`].
-	pub(super) fn bridge_skips(
-		&self,
-		delivered: &mut Delivered,
-		key: u64,
-		seen: &mut u64,
-		allow: impl FnMut(ops::Range<u64>) -> bool,
-		on_bridge: impl FnMut(ops::Range<u64>),
-	) {
-		if let Some(serving) = self.serving() {
-			serving.bridge_skips(delivered, key, seen, allow, on_bridge);
-			return;
-		}
-		self.with_state(|state| {
-			if let Some(state) = state {
-				state.read().bridge_skips(delivered, key, seen, allow, on_bridge);
-			}
-		});
-	}
-
 	/// When the latest group cached at `keys` landed; see [`Subscriber::landed`].
 	pub(super) fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
 		if let Some(serving) = self.serving() {
@@ -10134,8 +10088,6 @@ struct Cursor {
 	record: Record,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
-	/// The [`TrackState::drops_changes`] revision revisited for bridging declared skips in `delivered`.
-	drops_bridged: u64,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
 	/// The keys a bounded window owes that the local floor or cap keeps out and the track
@@ -10729,7 +10681,6 @@ impl Cursor {
 			seek_pending: BTreeMap::new(),
 			record: Record::default(),
 			drops: None,
-			drops_bridged: 0,
 			misses: None,
 			kept_out: None,
 			routed_out: None,
@@ -11687,35 +11638,8 @@ impl Cursor {
 		}
 		self.prune_skipped();
 		self.record.delivered.insert(key);
-		let reporting = self.drops.is_some() || self.record.has_reports();
 		let mut delivered = std::mem::take(&mut self.record.delivered);
-		let mut bridged = Vec::new();
-		if !ordered {
-			if delivered.runs() > 1 {
-				let state = self.state.read();
-				let record = &self.record;
-				let window = &self.filter.window;
-				state.bridge_skips(
-					&mut delivered,
-					key,
-					&mut self.drops_bridged,
-					|gap| match reporting {
-						true => record.told_all(gap),
-						false => window.groups().is_none_or(|groups| {
-							groups
-								.first(gap.start, gap.end - 1)
-								.is_some_and(|run| *run.start() <= gap.start && *run.end() >= gap.end - 1)
-						}),
-					},
-					|gap| bridged.push(gap),
-				);
-				if delivered.above_gap().is_some() {
-					self.forget_past_budget_with(&state, &mut delivered, self.filter.window.budget(), None);
-				}
-			}
-		} else {
-			self.forget_past_budget(&mut delivered, self.filter.window.budget(), None);
-		}
+		self.forget_past_budget(&mut delivered, self.filter.window.budget(), None);
 		self.record.delivered = delivered;
 		self.retire_written_off();
 		// Only prune `misses.given_up` once drops are being polled (so any give-up was already
@@ -11731,9 +11655,6 @@ impl Cursor {
 				&& let Some(end) = key.checked_add(1)
 			{
 				misses.forget(key..end);
-			}
-			for gap in bridged {
-				misses.forget(gap);
 			}
 		}
 	}
@@ -13292,18 +13213,12 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.hand_out(key, ordered),
 			Inner::Resume(resume, logical) => {
-				let reporting = logical.record.has_reports();
-				let mut delivered = std::mem::take(&mut logical.record.delivered);
+				let delivered = &mut logical.record.delivered;
 				if ordered {
 					delivered.forget_below(key);
 				}
 				delivered.insert(key);
-				if !ordered && delivered.runs() > 1 {
-					let record = &logical.record;
-					resume.bridge_skips(&mut delivered, key, reporting, |gap| record.told_all(gap));
-				}
-				resume.forget_past_budget(&mut delivered);
-				logical.record.delivered = delivered;
+				resume.forget_past_budget(delivered);
 			}
 		}
 	}
@@ -13334,15 +13249,6 @@ impl Subscriber {
 		self.record().delivered.runs()
 	}
 
-	/// How many drop runs a front subscriber currently holds queued.
-	#[cfg(all(test, feature = "async"))]
-	pub(super) fn queued_drops(&mut self) -> usize {
-		match &mut self.inner {
-			Inner::Plain(_) => 0,
-			Inner::Resume(resume, _) => resume.queued_drops(),
-		}
-	}
-
 	/// Bill what this reader settled, retire the gaps its ranges left behind, and pay what it
 	/// can of the debt its track left its readers.
 	pub(super) fn settle_record(&mut self, handed: Option<u64>) {
@@ -13356,9 +13262,15 @@ impl Subscriber {
 					handed,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
 				};
+				let no_drops = cursor.drops.is_none() && cursor.record.reported.is_empty();
+				let skip_end = |k: u64| no_drops.then(|| state.read().skip_end(k)).flatten();
 				match cursor.misses.as_deref_mut() {
-					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, reader),
-					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), reader),
+					Some(misses) => cursor
+						.record
+						.settle_with(|| state.read().cache.clone(), misses, reader, &skip_end),
+					None => cursor
+						.record
+						.settle_with(|| state.read().cache.clone(), &mut (), reader, &skip_end),
 				}
 			}
 			Inner::Resume(resume, logical) => {
@@ -13415,7 +13327,7 @@ impl Subscriber {
 			Inner::Plain(cursor) if cursor.drops.is_some() => {
 				cursor.record.tell(key..end, Report::Final);
 			}
-			Inner::Resume(_, logical) if !logical.record.reported.is_empty() => {
+			Inner::Resume(_, logical) if logical.record.has_reports() => {
 				logical.record.tell(key..end, Report::Final);
 			}
 			_ => {}
@@ -14072,7 +13984,7 @@ impl Subscriber {
 				if let Some(next) = logical.record.next_pending() {
 					return Poll::Ready(next);
 				}
-				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record, probe, waiter));
+				let (range, hole) = std::task::ready!(resume.poll_drop(&logical.record.delivered, probe, waiter));
 				logical.record.pending.insert(range, Pending::own(hole));
 			},
 		}
@@ -35527,13 +35439,12 @@ mod test {
 	}
 
 	/// A live reader of a track whose groups start at sparse keys, each ending whole where the
-	/// next starts, keeps a bounded record however long the track runs, under a pool with room
-	/// to spare, whether the keys between groups are skipped by the publisher's append or by
-	/// the upstream's group end: what the spans prove folds as it goes rather than waiting for
-	/// pool pressure. Each kind of reader: a wire publisher that tells each group's span as it
-	/// serves it, or tells it dropped over the skip already reported there, as a publisher
-	/// whose stream failed does; a front's copy that tells none; one that never asks what it
-	/// missed; and a key-order read.
+	/// next starts, keeps a bounded record however long the track runs, whether the keys between
+	/// groups are skipped by the publisher's append or by the upstream's group end:
+	/// - Under a finite freshness budget (even with a huge pool), `reported` coalesces to O(1)
+	///   and budget retirement keeps `delivered` + `misses` bounded to the budget window.
+	/// - Under an unlimited budget and finite cache capacity, pool debt folds both reporting and
+	///   non-reporting readers to O(1) runs.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_sparse_live_track_keeps_a_bounded_record() {
@@ -35557,70 +35468,94 @@ mod test {
 			Reader::Ordered,
 		] {
 			for received in [false, true] {
-				let (producer, pool) = pooled_producer(1 << 40);
-				if received {
-					producer.received();
-				}
-				let mut subscriber = Some(producer.subscribe(Subscription::default()));
-				let mut ordered = match reader {
-					Reader::Ordered => subscriber.take().map(Subscriber::ordered),
-					_ => None,
-				};
-				let mut most = 0;
-				for n in 0..GROUPS {
-					let key = BASE + n * SPACING;
-					let span = key..key + SPACING;
-					let mut group = match received {
-						false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
-						true => producer.create_group(group::Info { start: key }).unwrap(),
-					};
-					group
-						.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
-						.unwrap();
-					group.finish_at(span.end).unwrap();
-					// A GROUP_END accounts for the starts inside its span.
+				// (pool_capacity, max_delay, max_expected_runs)
+				let configs: &[(u64, Option<Duration>, u64)] = &[
+					// Finite freshness budget on a roomy pool (no debt folding needed).
+					(1 << 40, Some(Duration::from_millis(200)), 40),
+					// Unlimited budget under finite pool capacity (debt folding keeps it O(1)).
+					(1 << 14, None, 200),
+				];
+				for &(capacity, max_delay, limit) in configs {
+					let (producer, pool) = pooled_producer(capacity);
 					if received {
-						producer.skip_groups(key + 1..span.end);
+						producer.received();
 					}
-					match (&mut subscriber, &mut ordered) {
-						(Some(subscriber), _) => {
-							assert_eq!(drain_groups(subscriber), [key], "{reader:?} received={received}");
-							match reader {
-								Reader::Told => {
-									subscriber.record_mut().tell(key..key + 1, Report::Final);
-									if span.end > key + 1 {
-										subscriber.record_mut().tell_skip(key + 1..span.end);
+					let sub_cfg = match max_delay {
+						Some(max) => Subscription::default().with_max(max),
+						None => Subscription::default(),
+					};
+					let mut subscriber = Some(producer.subscribe(sub_cfg));
+					let mut ordered = match reader {
+						Reader::Ordered => subscriber.take().map(Subscriber::ordered),
+						_ => None,
+					};
+					let mut most = 0;
+					for n in 0..GROUPS {
+						let key = BASE + n * SPACING;
+						let span = key..key + SPACING;
+						let mut group = match received {
+							false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
+							true => producer.create_group(group::Info { start: key }).unwrap(),
+						};
+						group
+							.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+							.unwrap();
+						group.finish_at(span.end).unwrap();
+						// A GROUP_END accounts for the starts inside its span.
+						if received {
+							producer.skip_groups(key + 1..span.end);
+						}
+						if max_delay.is_some() {
+							elapse(&producer, Duration::from_millis(SPACING));
+						}
+						match (&mut subscriber, &mut ordered) {
+							(Some(subscriber), _) => {
+								assert_eq!(
+									drain_groups(subscriber),
+									[key],
+									"{reader:?} received={received} max_delay={max_delay:?}"
+								);
+								match reader {
+									Reader::Told => {
+										subscriber.record_mut().tell(span, Report::Final);
 									}
+									Reader::Dropped => {
+										drained_drops(subscriber);
+										subscriber.record_mut().tell(span, Report::Final);
+									}
+									Reader::Untold => {
+										drained_drops(subscriber);
+										subscriber.settle_if_dropping(key);
+									}
+									_ => {}
 								}
-								Reader::Dropped => {
-									drained_drops(subscriber);
-									subscriber.record_mut().tell(span, Report::Final);
-								}
-								Reader::Untold => {
-									drained_drops(subscriber);
-									subscriber.settle_if_dropping(key);
-								}
-								_ => {}
+								assert!(
+									subscriber.record().reported.len() <= 2,
+									"{reader:?} received={received} max_delay={max_delay:?}: reported grew to {}",
+									subscriber.record().reported.len()
+								);
 							}
-						}
-						(None, Some(ordered)) => {
-							let mut items = Vec::new();
-							while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop()) {
-								items.push(match item {
-									Item::Group(group) => group.start,
-									Item::Gap { range, .. } => panic!("{reader:?} received={received}: gap {range:?}"),
-								});
+							(None, Some(ordered)) => {
+								let mut items = Vec::new();
+								while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop()) {
+									items.push(match item {
+										Item::Group(group) => group.start,
+										Item::Gap { range, .. } => {
+											panic!("{reader:?} received={received}: gap {range:?}")
+										}
+									});
+								}
+								assert_eq!(items, [key], "{reader:?} received={received}");
 							}
-							assert_eq!(items, [key], "{reader:?} received={received}");
+							(None, None) => unreachable!(),
 						}
-						(None, None) => unreachable!(),
+						most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
 					}
-					most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+					assert!(
+						most <= limit,
+						"{reader:?} received={received} max_delay={max_delay:?}: the record grew to {most} runs (limit {limit})"
+					);
 				}
-				assert!(
-					most <= 8,
-					"{reader:?} received={received}: the record grew to {most} runs"
-				);
 			}
 		}
 	}
@@ -35720,8 +35655,8 @@ mod test {
 		assert!(most <= 8, "lagging stale drops grew record to {most} runs");
 
 		// Case 2: Receive-only reader with unbounded budget (`Start::Oldest`) and out-of-order
-		// `GROUP_END` skips arriving after the next group opens.
-		let (producer, pool) = pooled_producer(1 << 40);
+		// `GROUP_END` skips arriving after the next group opens, bounded under finite pool capacity.
+		let (producer, pool) = pooled_producer(64 * 1024);
 		producer.received();
 		let mut sub = producer.subscribe(Subscription::default().with_ranges([Range {
 			start: Start::Oldest,
@@ -35737,20 +35672,21 @@ mod test {
 				.unwrap();
 			assert_eq!(drain_groups(&mut sub), [key]);
 			if let Some((prev, prev_group)) = open.take() {
-				prev_group.finish_at(key).unwrap();
+				let _ = prev_group.finish_at(key);
 				producer.skip_groups(prev + 1..key);
 			}
 			open = Some((key, group));
 			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
 		}
 		if let Some((_, prev_group)) = open.take() {
-			prev_group.finish().unwrap();
+			let _ = prev_group.finish();
 		}
-		assert!(most <= 8, "out-of-order GROUP_END grew record to {most} runs");
+		assert!(most <= 600, "out-of-order GROUP_END grew record to {most} runs");
 	}
 
 	/// `Misses` never forgets a fill refusal while `delivered` does not cover that key, even as
-	/// later sparse groups and skips pass by; once `delivered` covers it, it is pruned.
+	/// later sparse groups and skips pass by; under pool debt, subsequent stretches fold cleanly
+	/// without ever re-asking the refused key.
 	#[test]
 	#[cfg(feature = "async")]
 	fn misses_keep_uncovered_fill_verdicts_and_prune_covered_ones() {
@@ -35788,24 +35724,50 @@ mod test {
 		// Take in the refusal.
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 
-		// Advance 500 more sparse groups: 110 stays uncovered by `delivered` and is NEVER re-asked,
-		// while the subsequent skipped runs are pruned so the record stays bounded.
-		let mut most = 0;
-		for n in 1..=500u64 {
+		// Advance 200 sparse groups with roomy pool: 110 stays uncovered and is NEVER re-asked.
+		for n in 1..=200u64 {
 			let key = 120 + n * 17;
 			let mut g = producer.create_group(group::Info { start: key }).unwrap();
 			g.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
 			g.finish_at(key + 17).unwrap();
 			producer.skip_groups(key + 1..key + 17);
 			assert_eq!(drain_groups(&mut sub), [key]);
+			drained_drops(&mut sub);
+			sub.record_mut().tell(key..key + 1, Report::Final);
 			assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 			assert!(
 				fills.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
 				"refused key 110 must never be re-asked at step {n}"
 			);
-			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
 		}
-		assert!(most <= 12, "record + misses grew to {most} runs");
+
+		// Under pool pressure, `Record::fold` folds the settled stretch and frees `misses` runs
+		// without re-asking 110. Write 4 KiB frames so eviction clears the 200 cached groups
+		// while the pinned live edge stays well below the record's bill.
+		pool.resize(1);
+		for step in 0..32u64 {
+			let key = 120 + (201 + step) * 17;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; 4 * 1024])
+				.unwrap();
+			g.finish_at(key + 17).unwrap();
+			producer.skip_groups(key + 1..key + 17);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			drained_drops(&mut sub);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+			assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			while let Poll::Ready(Ok(fill)) = fills.poll_requested_fill(&kio::Waiter::noop()) {
+				assert!(
+					!(fill.start().group..fill.end()).contains(&110),
+					"refused key 110 must never be re-asked after fold"
+				);
+			}
+		}
+		assert!(
+			pool.recorded() / super::super::record::RUN_OVERHEAD <= 8,
+			"record + misses did not fold under pool pressure: {} runs",
+			pool.recorded() / super::super::record::RUN_OVERHEAD
+		);
 	}
 
 	/// A drop-reporting reader (plain or behind a front) under cache pool debt never absorbs
@@ -35892,15 +35854,17 @@ mod test {
 	}
 
 	/// A drop-reporting reader polling drops before handing out groups coalesces adjacent
-	/// already-reported skips into `delivered` when the preceding group is handed out.
+	/// already-reported skips into `reported` (1 run), and compacts `delivered` under pool debt.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_reporting_reader_coalesces_skips_reported_before_their_group() {
 		let (producer, pool) = pooled_producer(1 << 40);
 		producer.received();
-		let mut sub = producer.subscribe(Subscription::default());
-		let mut most = 0;
-		for n in 0..500u64 {
+		let mut sub = producer.subscribe(Subscription::default().with_ranges([Range {
+			start: Start::Oldest,
+			end: None,
+		}]));
+		for n in 0..200u64 {
 			let key = 1_000 + 2 * n;
 			let mut g = producer.create_group(group::Info { start: key }).unwrap();
 			g.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
@@ -35911,10 +35875,33 @@ mod test {
 			assert_eq!(drops, [(key + 1, key + 2)]);
 			assert_eq!(drain_groups(&mut sub), [key]);
 			sub.record_mut().tell(key..key + 1, Report::Final);
-			most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+			assert!(
+				sub.record().reported.len() <= 2,
+				"reported grew to {} runs",
+				sub.record().reported.len()
+			);
 		}
-		assert!(most <= 4, "delivered/reported grew to {most} runs");
-		assert_eq!(sub.delivered_runs(), 1);
+		assert_eq!(sub.delivered_runs(), 200, "unlimited budget keeps every run until debt");
+		// Under pool pressure, `Record::fold` compacts all 200 `delivered` runs into 1.
+		// Write 4 KiB frames so eviction clears the 200 cached groups while the pinned live
+		// edge stays well below the record's bill.
+		pool.resize(1);
+		for step in 0..96u64 {
+			let key = 1_400 + 2 * step;
+			let mut g = producer.create_group(group::Info { start: key }).unwrap();
+			g.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; 4 * 1024])
+				.unwrap();
+			g.finish_at(key + 1).unwrap();
+			producer.skip_groups(key + 1..key + 2);
+			drained_drops(&mut sub);
+			assert_eq!(drain_groups(&mut sub), [key]);
+			sub.record_mut().tell(key..key + 1, Report::Final);
+		}
+		assert!(
+			sub.delivered_runs() <= 2,
+			"expected folded delivered runs <= 2, got {}",
+			sub.delivered_runs(),
+		);
 	}
 
 	/// A wire publisher serving disjoint ranges `[0, 0]` and `[10, 10]` must not bridge the

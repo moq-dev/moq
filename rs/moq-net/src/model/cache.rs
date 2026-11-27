@@ -327,7 +327,7 @@ impl Pool {
 	}
 
 	/// What readers' records and tails bill in all.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(super) fn recorded(&self) -> u64 {
 		self.inner.recorded.load(Ordering::Relaxed)
 	}

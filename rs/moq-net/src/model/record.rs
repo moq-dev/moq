@@ -79,9 +79,6 @@ impl Record {
 	/// Report the first part of `range` nothing reported already, as `hole` says. `None`
 	/// when every part was. `withdrawable` is true only for a key-order reader that may take
 	/// back an unreturned stale gap on a budget widening.
-	///
-	/// A declared skip (`Hole::Skip`) was never produced, so when it strictly bridges two
-	/// already-handed-out runs in `delivered` it merges them into one run.
 	pub fn report(&mut self, range: Range<u64>, hole: &Hole, withdrawable: bool) -> Option<Range<u64>> {
 		let range = range.start.max(self.floor)..range.end;
 		if range.is_empty() {
@@ -93,9 +90,6 @@ impl Record {
 			false => Report::Final,
 		};
 		self.reported.insert(gap.clone(), report);
-		if *hole == Hole::Skip {
-			self.delivered.bridge_skip(gap.clone());
-		}
 		Some(gap)
 	}
 
@@ -129,22 +123,6 @@ impl Record {
 		key < self.floor || self.reported.contains_key(&key)
 	}
 
-	/// Whether the wire was told of every key in `range`.
-	pub fn told_all(&self, range: Range<u64>) -> bool {
-		let range = range.start.max(self.floor)..range.end;
-		range.is_empty() || self.reported.gaps(&range).next().is_none()
-	}
-
-	/// The first untold gap in `range` that `find` accepts, evaluated lazily without
-	/// materializing the remaining gaps.
-	pub fn find_untold_gap<T>(&self, range: Range<u64>, mut find: impl FnMut(Range<u64>) -> Option<T>) -> Option<T> {
-		let range = range.start.max(self.floor)..range.end;
-		if range.is_empty() {
-			return None;
-		}
-		self.reported.gaps(&range).find_map(&mut find)
-	}
-
 	/// The parts of `range` the wire was told nothing of.
 	pub fn untold(&self, range: Range<u64>) -> RangeSet<u64> {
 		let range = range.start.max(self.floor)..range.end;
@@ -156,23 +134,10 @@ impl Record {
 
 	/// Record that the wire was told `report` of `range`.
 	pub fn tell(&mut self, range: Range<u64>, report: Report) {
+		let range = range.start.max(self.floor)..range.end;
 		if !range.is_empty() {
 			self.reported.insert(range, report);
 		}
-	}
-
-	/// Record that the wire was told of declared skip `range` (for example a `GROUP_END` inner
-	/// span or `SUBSCRIBE_DROP(SKIP)`), bridging it in `delivered` if it connects handed-out runs.
-	pub fn tell_skip(&mut self, range: Range<u64>) {
-		if !range.is_empty() {
-			self.reported.insert(range.clone(), Report::Final);
-			self.delivered.bridge_skip(range);
-		}
-	}
-
-	/// Bridge a declared skip `range` in `delivered` after it was told to the wire.
-	pub fn bridge_skip(&mut self, range: Range<u64>) {
-		self.delivered.bridge_skip(range);
 	}
 
 	/// Whether this record has already recorded reports or folded a report floor.
@@ -303,6 +268,19 @@ impl Record {
 		beside: &mut dyn Beside,
 		reader: Standing,
 	) {
+		self.settle_with(account, beside, reader, &|_| None);
+	}
+
+	/// Like [`Self::settle`], passing a declared-skip lookup so a non-reporting reader under
+	/// pool debt compacts fragmented `delivered` runs across declared skips without touching the
+	/// report floor or `reported`.
+	pub(super) fn settle_with(
+		&mut self,
+		account: impl FnOnce() -> Arc<cache::Track>,
+		beside: &mut dyn Beside,
+		reader: Standing,
+		skip_end: &dyn Fn(u64) -> Option<u64>,
+	) {
 		let moved = reader.ranges.is_some() && reader.ranges != self.retired;
 		if moved {
 			self.retired = reader.ranges.clone();
@@ -323,7 +301,7 @@ impl Record {
 			folded.extend(self.retire(&reader, &*beside));
 		}
 		if owed {
-			folded.extend(self.fold(&reader, &*beside));
+			folded.extend(self.fold(&reader, &*beside, skip_end));
 		}
 		for folded in folded {
 			beside.forget(folded);
@@ -418,7 +396,12 @@ impl Record {
 	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
 	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
 	/// ask allowance bounds in turn. Returns the runs it folded, below the floor and above.
-	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
+	fn fold(
+		&mut self,
+		reader: &Standing,
+		beside: &dyn Beside,
+		skip_end: &dyn Fn(u64) -> Option<u64>,
+	) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -466,7 +449,43 @@ impl Record {
 			.flatten()
 			.min();
 		}
+		if self.reported.is_empty() && self.pending.is_empty() {
+			self.compact_delivered_skips(skip_end, &mut folded);
+		}
 		folded
+	}
+
+	/// Compact fragmented `delivered` runs across declared skips for a non-reporting reader
+	/// under pool debt, starting strictly above the `0` prefix so `self.floor` and `reported`
+	/// stay untouched.
+	fn compact_delivered_skips(&mut self, skip_end: &dyn Fn(u64) -> Option<u64>, folded: &mut Vec<Range<u64>>) {
+		let mut from = self
+			.delivered
+			.above_gap()
+			.and_then(|start| self.delivered.next_from(start.max(self.delivered.budget_floor())));
+		while let Some(start) = from {
+			let mut end = start;
+			let mut last_delivered = start;
+			let mut runs = 0usize;
+			loop {
+				if let Some(run_end) = self.delivered.run_end(end) {
+					end = run_end;
+					last_delivered = run_end;
+					runs += 1;
+				} else if let Some(next) = skip_end(end).filter(|next| *next > end) {
+					end = next;
+				} else {
+					break;
+				}
+			}
+			if runs > 1 {
+				self.delivered.insert_run(start..last_delivered);
+				self.skipped.forget(start..last_delivered);
+				self.written_off.remove(start..last_delivered);
+				folded.push(start..last_delivered);
+			}
+			from = self.delivered.next_from(end.max(start + 1));
+		}
 	}
 
 	/// Settle everything below `floor` for good.
@@ -1061,10 +1080,9 @@ mod test {
 	}
 
 	/// Served groups, declared skips, and wire-final stale drops all coalesce into one final run
-	/// in `reported`, while `delivered` absorbs skips only rightward from delivered groups so a
-	/// lagging viewer skipping groups as stale never piles up disjoint runs in `delivered`.
+	/// in `reported` without touching `delivered`.
 	#[test]
-	fn final_reports_coalesce_and_skips_never_fragment_delivered() {
+	fn final_reports_coalesce_without_fragmenting_reported() {
 		let mut record = Record::default();
 		// Lagging viewer: stale OLD drops alternating with skips, nothing handed out.
 		for i in 0..500u64 {
@@ -1081,7 +1099,7 @@ mod test {
 		assert_eq!(record.reported.len(), 1, "stale wire drops and skips coalesce");
 		assert_eq!(record.delivered.runs(), 0, "skips alone never create runs in delivered");
 
-		// Healthy sparse live reader: handed-out keys bridge across declared skips.
+		// Healthy sparse live reader: served keys and declared skips coalesce in `reported`.
 		let mut healthy = Record::default();
 		for i in 0..500u64 {
 			let key = 1_000 + i * 17;
@@ -1092,7 +1110,6 @@ mod test {
 			}
 		}
 		assert_eq!(healthy.reported.len(), 1);
-		assert_eq!(healthy.delivered.runs(), 1);
 	}
 
 	/// A key-order reader's unreturned stale gap stays withdrawable until finalized or untold,
@@ -1159,7 +1176,7 @@ mod test {
 
 			const MAX_KEY: u64 = 128;
 			for _ in 0..250 {
-				match rng.below(6) {
+				match rng.below(5) {
 					// Hand out a non-skipped key.
 					0 => {
 						let key = rng.below(MAX_KEY);
@@ -1215,29 +1232,12 @@ mod test {
 						}
 					}
 					// Untell a range.
-					4 => {
+					_ => {
 						let start = rng.below(MAX_KEY);
 						let end = (start + 1 + rng.below(6)).min(MAX_KEY);
 						record.untell(start..end);
 						for k in start..end {
 							reported.remove(&k);
-						}
-					}
-					// Bridge a skip strictly between handed-out runs.
-					_ => {
-						let start = rng.below(MAX_KEY);
-						let end = (start + 1 + rng.below(12)).min(MAX_KEY);
-						if (start..end).all(|k| !handed.contains(&k)) {
-							let before_runs = record.delivered.runs();
-							record.delivered.bridge_skip(start..end);
-							assert!(
-								record.delivered.runs() <= before_runs,
-								"seed {seed}: bridge_skip grew delivered from {before_runs} to {}",
-								record.delivered.runs()
-							);
-							for k in start..end {
-								skipped.insert(k);
-							}
 						}
 					}
 				}
@@ -1352,35 +1352,40 @@ mod test {
 			},
 		);
 		assert!(!record.told(1), "budget-retired prefix must not raise the report floor");
-		assert!(!record.told_all(1..2));
+		assert!(!record.untold(1..2).is_empty());
 
 		// Once 0..5 is actually reported, debt folding raises the floor over it normally.
 		record.tell(0..5, Report::Final);
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert!(record.told(1) && record.told_all(0..5));
+		assert!(record.told(1) && record.untold(0..5).is_empty());
 	}
 
-	/// `told_all` and `find_untold_gap` match `untold` while stopping at the first accepted gap.
+	/// A non-reporting reader under pool debt compacts sparse `delivered` runs across declared
+	/// skips without touching `reported` or raising the report floor over unreported keys.
 	#[test]
-	fn told_all_and_find_untold_gap_match_untold_lazily() {
+	fn a_debt_compacts_non_reporting_delivered_across_declared_skips() {
+		let (pool, track) = account();
 		let mut record = Record::default();
-		for k in (0..200).step_by(2) {
-			record.tell(k..k + 1, Report::Final);
+		const SPACING: u64 = 17;
+		// Include key 0 so the `0..1` prefix stays separate from the compacted stretch above it.
+		record.delivered.insert(0);
+		for n in 1..=200u64 {
+			record.delivered.insert(n * SPACING);
 		}
-		assert!(!record.told_all(0..200));
-		assert!(record.told_all(2..3));
-
-		let mut visited = 0usize;
-		let found = record.find_untold_gap(0..200, |gap| {
-			visited += 1;
-			(gap.start >= 5).then_some(gap)
-		});
-		assert_eq!(found, Some(5..6));
-		assert_eq!(
-			visited, 3,
-			"stopped at 5..6 without materializing the remaining 97 gaps"
-		);
+		let skip_end = |key: u64| {
+			let rem = key % SPACING;
+			(rem != 0).then(|| key + (SPACING - rem))
+		};
+		record.settle_with(|| track.clone(), &mut (), Standing::default(), &skip_end);
+		assert_eq!(record.delivered.runs(), 201);
+		owe(&track, pool.used());
+		record.settle_with(|| track.clone(), &mut (), Standing::default(), &skip_end);
+		assert!(record.delivered.runs() <= 2, "compacted runs above 0 into one run");
+		assert!(record.reported.is_empty(), "reported stays empty");
+		assert!(!record.told(1), "skip 1..17 stays unreported");
+		assert!(!record.told(SPACING + 1), "compacted skips stay unreported");
+		assert!(record.delivered.contains(SPACING * 100));
 	}
 }

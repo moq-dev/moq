@@ -3528,33 +3528,6 @@ type Superseded = { successor?: Successor };
 // the oldest held.
 type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined };
 
-// Bridge immediate declared skips adjacent to `key` and any gaps in `delivered` touched by
-// newly declared skips since `seen`, returning the new drops revision. Mirrors the Rust
-// `TrackState::bridge_skips`.
-function bridgeTrackSkips(
-	drops: DropSet,
-	delivered: Delivered,
-	key: bigint,
-	seen: number,
-	allow: (start: bigint, end: bigint) => boolean,
-	onBridge?: (start: bigint, end: bigint) => void,
-): number {
-	const skipEnd = (from: bigint) => {
-		const run = drops.at(from);
-		return run?.skip ? run.end : undefined;
-	};
-	delivered.bridgeAdjacentSkips(key, skipEnd, allow, onBridge);
-	if (delivered.runs > 1 && drops.revision !== seen) {
-		for (const changed of drops.since(seen)) {
-			for (const run of drops.overlapping(changed.start, changed.end)) {
-				if (run.skip) delivered.bridgeSkipGaps(run.start, run.end, allow, onBridge);
-			}
-		}
-		return drops.revision;
-	}
-	return seen;
-}
-
 /**
  * What a lite publisher told its wire about a reader's keys, kept in the reader's own
  * record so the cursor's drops and the publisher's groups consult one map. Mirrors the
@@ -3567,8 +3540,8 @@ export interface WireRecord {
 	told(key: bigint): boolean;
 	/** The parts of `[start, end)` the wire was told nothing of. */
 	untold(start: bigint, end: bigint): Run[];
-	/** Record that the wire was told of `[start, end)`; when `skip`, also bridge in `delivered`. */
-	tell(start: bigint, end: bigint, skip?: boolean): void;
+	/** Record that the wire was told of `[start, end)`. */
+	tell(start: bigint, end: bigint): void;
 	/** Forget what was recorded of `[start, end)` without going out on the wire. */
 	untell(start: bigint, end: bigint): void;
 }
@@ -3675,8 +3648,6 @@ export class Subscriber {
 		coverage?: Coverage;
 	};
 	#reported = new Runs<Run>();
-	// The track's drops revision revisited for bridging declared skips in `#delivered`.
-	#dropsBridged = 0;
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
 	// under pool pressure; a key-order read folds at where it is instead (see #fold).
@@ -4066,28 +4037,6 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
-		if (!ordered && this.#delivered.runs > 1) {
-			const reporting =
-				this.#dropsSeen !== undefined || this.#reported.size > 0 || this.#floor > 0n || this.#wired;
-			const allow = (start: bigint, end: bigint): boolean => {
-				if (reporting) return this.#untold(start, end).length === 0;
-				const window = this.#resume ? this.#resume.window() : this.#window;
-				const runs = window.runs(start, end);
-				return runs.length === 1 && runs[0].start === start && runs[0].end === end;
-			};
-			if (this.#resume) {
-				this.#resume.bridgeSkips(this.#delivered, key, allow, (start, end) => this.#pruneSkip(start, end));
-			} else {
-				this.#dropsBridged = bridgeTrackSkips(
-					this.#state.drops,
-					this.#delivered,
-					key,
-					this.#dropsBridged,
-					allow,
-					(start, end) => this.#pruneSkip(start, end),
-				);
-			}
-		}
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -4100,23 +4049,9 @@ export class Subscriber {
 		if (ordered) this.#fold(forgot);
 	}
 
-	// Prune fill state overlapping a bridged skip `[start, end)`, waking fills only when this
-	// reader actually tracked something there.
-	#pruneSkip(start: bigint, end: bigint): void {
-		if (this.#adopted.length > 0) this.#adopted = removeRun(this.#adopted, start, end);
-		const overlaps = (runs: readonly Run[]) => {
-			const at = runsFrom(runs, start);
-			return at < runs.length && runs[at].start < end;
-		};
-		if (overlaps(this.#asked) || overlaps(this.#givenUp) || overlaps(this.#heads)) {
-			this.#stoppedReading(start, end);
-		}
-	}
-
 	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
 	// again only the fills owing it there, so a hand-out costs what it touches, not every fill.
 	#stoppedReading(start: bigint, end: bigint): void {
-		if (this.#adopted.length > 0) this.#adopted = removeRun(this.#adopted, start, end);
 		const asker = this.#state.asker;
 		const producer = this.#state.producer;
 		if (!asker || !producer) return;
@@ -4298,12 +4233,6 @@ export class Subscriber {
 		if (producer && !this.#left && keys.length > 0) reofferKeys(producer, this.#state, keys);
 	}
 
-	// Parts of `[start, end)` not yet reported to this reader (above its floor).
-	#untold(start: bigint, end: bigint): Run[] {
-		const from = max(start, this.#floor);
-		return from < end ? runGaps(this.#reported.overlapping(from, end), from, end) : [];
-	}
-
 	// The publisher's view of this reader's record.
 	#wireRecord(): WireRecord {
 		this.#wired = true;
@@ -4311,12 +4240,8 @@ export class Subscriber {
 		return {
 			told: (key) => reported.at(key) !== undefined,
 			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
-			tell: (start, end, skip = false) => {
-				if (start >= end) return;
-				reported.set(start, end, { start, end });
-				if (skip && this.#delivered.bridgeSkip(start, end)) {
-					this.#pruneSkip(start, end);
-				}
+			tell: (start, end) => {
+				if (start < end) reported.set(start, end, { start, end });
 			},
 			// A front's copies forget it too, so ranges that later ask for it report it again.
 			untell: (start, end) => {
@@ -5516,8 +5441,6 @@ export class Subscriber {
 				subscriber.#settled(key, key + 1n);
 			}
 		};
-		hooks.bridgeSkips = (subscriber, delivered, key, seen, allow, onBridge) =>
-			bridgeTrackSkips(subscriber.#state.drops, delivered, key, seen, allow, onBridge);
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.taking = (subscriber) => {
 			// One staleness verdict for the whole walk, as the Rust `Subscriber::taking` takes.
@@ -5651,8 +5574,6 @@ export class Subscriber {
 				close: (abort) => {
 					closeTrackState(state, abort);
 				},
-				floor: () => subscriber.#floor,
-				untold: (start, end) => subscriber.#untold(start, end),
 			});
 			return subscriber;
 		};
@@ -6270,9 +6191,6 @@ export class Subscriber {
 		const [gap] = runGaps(this.#reported.overlapping(start, to), start, to);
 		if (!gap) return undefined;
 		this.#reported.set(gap.start, gap.end, { start: gap.start, end: gap.end });
-		if (hole.skip && this.#delivered.bridgeSkip(gap.start, gap.end)) {
-			this.#pruneSkip(gap.start, gap.end);
-		}
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
 

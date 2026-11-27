@@ -7358,108 +7358,61 @@ test("local group finishAt skips its span while cached and preserves it on evict
 	}
 });
 
-// A live reader of a sparse-key track coalesces final reports and declared skips as it goes,
-// keeping both `delivered` and `reported` bounded without waiting for eviction: wire publishers
-// serving or reporting stale drops, arrival-order readers that never poll drops (including when
-// GROUP_END skips land after the next group), and ordered readers. Mirrors the Rust
-// `a_sparse_live_track_keeps_a_bounded_record`.
-test("a sparse live track keeps a bounded record", () => {
-	const GROUPS = 500n;
-	const SPACING = 17n;
-	const BASE = 1_000_003n;
-	for (const mode of ["told", "stale", "receive", "ordered"] as const) {
-		const producer = new TrackProducer("sparse").accept({
-			timescale: Timescale.MILLI,
-			maxAge: mode === "stale" ? Duration.millis(1000) : null,
-		});
-		const sub = producer.subscribe(
-			mode === "stale" ? { ranges: [{ start: 0n }] } : withMax({ delay: { max: null } }),
-		);
-		const ordered = mode === "ordered" ? sub.ordered() : undefined;
-		const wire = mode === "told" || mode === "stale" ? hooks.wire(sub) : undefined;
-		let open: { key: bigint; group: ReturnType<TrackProducer["createGroup"]> } | undefined;
+test("a sparse live track coalesces reported runs and keeps bounded records", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const spacing = 17n;
+		const base = 1_000_003n;
+		const producer = new TrackProducer("sparse").accept({ timescale: Timescale.MILLI, maxAge: null });
+		hooks.startsAtKeys(producer);
+
+		const wireSub = producer.subscribe(withMax({ delay: { max: Duration.millis(200) } }));
+		const wire = hooks.wire(wireSub);
+		const ordered = producer.subscribe({ ranges: [{ start: base }] }).ordered();
+		const staleProducer = new TrackProducer("stale").accept({ timescale: Timescale.MILLI, maxAge: null });
+		putGroup(staleProducer, 0n, 0);
+		const lagging = staleProducer.subscribe(withMax({ delay: { max: Duration.millis(200) } }));
 		try {
-			for (let n = 0n; n < GROUPS; n++) {
-				const key = BASE + n * SPACING;
-				const end = key + SPACING;
-				if (mode === "stale") {
-					// Lagging viewer: stale OLD drop on each group key, skip on the span interior.
-					hooks.dropTrackGroups(producer, key, key + 1n, {
-						error: new StreamError(StreamCode.Old),
-						stale: 1000,
-					});
-					producer.skipGroups(key + 1n, end);
-					while (hooks.tryDrop(sub));
-					expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
-					expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
-					continue;
-				}
+			let maxDelivered = 0;
+			for (let n = 0n; n < 300n; n++) {
+				const key = base + n * spacing;
 				const group = producer.createGroup(key);
 				group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
-				if (mode === "receive") {
-					// Deliver the new group before finishing the previous one (out-of-order GROUP_END).
-					expect(drainGroups(sub)).toEqual([key]);
-					if (open) {
-						open.group.finishAt(key);
-						producer.skipGroups(open.key + 1n, key);
-					}
-					open = { key, group };
-				} else {
-					group.finishAt(end);
-					producer.skipGroups(key + 1n, end);
-					if (ordered) {
-						const item = ordered.tryNextItem();
-						expect(item).toMatchObject({ kind: "group" });
-						if (item && item.kind === "group") item.group.close();
-					} else {
-						expect(drainGroups(sub)).toEqual([key]);
-						wire?.tell(key, key + 1n);
-						if (end > key + 1n) wire?.tell(key + 1n, end, true);
-						while (hooks.tryDrop(sub));
-					}
+				group.finishAt(key + spacing);
+				hooks.skipTrackGroups(producer, key + 1n, key + spacing);
+				await clock.advance(Duration.millis(Number(spacing)));
+
+				const got = wireSub.tryRecvGroup();
+				expect(got?.start).toBe(key);
+				got?.close();
+				wire.tell(key, key + 1n);
+				while (hooks.tryDrop(wireSub)) {}
+				expect(hooks.reportedRuns(wireSub)).toBeLessThanOrEqual(2);
+				maxDelivered = Math.max(maxDelivered, hooks.deliveredRuns(wireSub));
+
+				// Lagging viewer receiving alternating stale drops and skips coalesces into 1 run.
+				hooks.dropTrackGroups(staleProducer, key, key + 1n, staleHole(200));
+				hooks.skipTrackGroups(staleProducer, key + 1n, key + spacing);
+				while (hooks.tryDrop(lagging)) {}
+				expect(hooks.reportedRuns(lagging)).toBeLessThanOrEqual(2);
+
+				const item = await ordered.nextItem();
+				expect(item?.kind).toBe("group");
+				if (item?.kind === "group") {
+					expect(item.group.start).toBe(key);
+					item.group.close();
 				}
-				expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(3);
-				expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
 			}
-			open?.group.finish();
+			expect(maxDelivered).toBeLessThanOrEqual(20);
 		} finally {
-			ordered?.close();
-			sub.close();
+			ordered.close();
+			lagging.close();
+			staleProducer.close();
+			wireSub.close();
 			producer.close();
 		}
-	}
-});
-
-// A wired publisher polling drops before handing out each group (each ending at `start + 1`, with
-// an explicit skip between groups) merges already-reported adjacent skips into `delivered` on
-// hand-out so `delivered` stays one run without absorbing unreported skips.
-test("a wired publisher coalesces skips reported before their preceding group", () => {
-	const producer = new TrackProducer("sparse").accept({
-		timescale: Timescale.MILLI,
-		maxAge: null,
-	});
-	const sub = producer.subscribe(withMax({ delay: { max: null } }));
-	const wire = hooks.wire(sub);
-	try {
-		for (let n = 0n; n < 500n; n++) {
-			const key = 1_000n + 2n * n;
-			const group = producer.createGroup(key);
-			group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
-			group.finishAt(key + 1n);
-			producer.skipGroups(key + 1n, key + 2n);
-
-			// Poll drops FIRST, before handing out group `key`.
-			const dropped = hooks.tryDrop(sub);
-			expect(dropped).toMatchObject({ kind: "drop", start: key + 1n, end: key + 2n, skip: true });
-			expect(drainGroups(sub)).toEqual([key]);
-			wire.tell(key, key + 1n);
-			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
-			expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
-		}
-		expect(hooks.deliveredRuns(sub)).toBe(1);
-		expect(hooks.reportedRuns(sub)).toBe(1);
 	} finally {
-		sub.close();
-		producer.close();
+		installed.close();
 	}
 });

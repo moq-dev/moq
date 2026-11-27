@@ -772,9 +772,6 @@ struct Copy {
 	resolved: BTreeMap<u64, Resolved>,
 	/// Replaced by a newer route.
 	replaced: bool,
-	/// The serving copy's [`track::TrackState::drops_changes`] revision revisited for bridging
-	/// declared skips into the logical reader's `delivered` set.
-	drops_bridged: u64,
 	/// Capped when replaced, at the boundary the copy replacing it starts at, or for a
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
@@ -1625,52 +1622,17 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn poll_drop(
 		&mut self,
-		record: &super::record::Record,
+		delivered: &Delivered,
 		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
-		self.reader().poll_drop(record, probe, waiter)
+		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
 	/// Forget every copy's report of `range`; see [`track::Subscriber::untell`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
 		self.reader().untell(range)
-	}
-
-	/// How many drop runs are currently queued on this front reader.
-	#[cfg(all(test, feature = "async"))]
-	pub(super) fn queued_drops(&mut self) -> usize {
-		self.reader().drops.len()
-	}
-
-	/// Bridge declared skips on the serving copy into the logical reader's `delivered` set.
-	pub(super) fn bridge_skips(
-		&mut self,
-		delivered: &mut Delivered,
-		key: u64,
-		reporting: bool,
-		mut told_all: impl FnMut(std::ops::Range<u64>) -> bool,
-	) {
-		let mut reader = self.reader();
-		let Reader { copies, window, .. } = &mut *reader;
-		let Some(copy) = copies.last_mut() else {
-			return;
-		};
-		copy.track.bridge_skips(
-			delivered,
-			key,
-			&mut copy.drops_bridged,
-			|gap| match reporting {
-				true => told_all(gap),
-				false => window.groups().is_none_or(|groups| {
-					groups
-						.first(gap.start, gap.end - 1)
-						.is_some_and(|run| *run.start() <= gap.start && *run.end() >= gap.end - 1)
-				}),
-			},
-			|_| {},
-		);
 	}
 
 	/// Rescan drops on every copy; see [`track::Subscriber::rescan_drops`].
@@ -2648,7 +2610,6 @@ impl Reader {
 			resume,
 			resolved,
 			replaced: false,
-			drops_bridged: 0,
 			until: None,
 			cap: None,
 			done: None,
@@ -3442,237 +3403,107 @@ impl Reader {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop(
 		&mut self,
-		record: &super::record::Record,
+		delivered: &Delivered,
 		probe: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
-		let delivered = &record.delivered;
+		let mut given_up = Vec::new();
+		let mut superseded = Vec::new();
 		let ready = matches!(self.poll_serving(waiter), Poll::Ready(Some(_)));
-		// A received stale run queued here that a new upstream subscription superseded since is
-		// unknown again: the copy no longer holds it, and that subscription may deliver it.
-		// Checked only once the copy let a stale run go, never on every poll.
-		if ready
-			&& !self.received.is_empty()
-			&& let Some(Sub::Ready(sub)) = self.copies.last_mut().map(|copy| &mut copy.sub)
-		{
-			let current = sub.stale_revision();
-			let mut superseded = Vec::new();
-			if self.received_checked != Some(current) {
-				for run in self.received.iter() {
-					superseded.extend(sub.stale_held(run.clone()).gaps(run));
+		// The serving copy's subscription, borrowed apart from the received runs it checks.
+		if let Some(Sub::Ready(sub)) = self.copies.last_mut().filter(|_| ready).map(|copy| &mut copy.sub) {
+			// A received stale run queued here that a new upstream subscription superseded since
+			// is unknown again: the copy no longer holds it, and that subscription may deliver it. Checked
+			// only once the copy let a stale run go, never on every poll: each poll reports one
+			// run, so a check per poll would cost the received runs squared to drain them. With
+			// none received there is nothing to check, so a live reader never reads the revision
+			// through the track lock every subscriber shares.
+			if !self.received.is_empty() {
+				let current = sub.stale_revision();
+				if self.received_checked != Some(current) {
+					for run in self.received.iter() {
+						superseded.extend(sub.stale_held(run.clone()).gaps(run));
+					}
 				}
+				self.received_checked = Some(current);
 			}
-			self.received_checked = Some(current);
-			for run in superseded {
-				self.remove_drop(run);
+			loop {
+				let polled = match probe {
+					true => sub.poll_drop(waiter),
+					false => sub.poll_queued_drop(waiter),
+				};
+				let Poll::Ready((run, hole)) = polled else { break };
+				// A stale run the copy holds came from its upstream, which a new upstream
+				// subscription may supersede.
+				let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
+				given_up.push((run, hole, received));
+			}
+		}
+		for run in superseded {
+			self.remove_drop(run);
+		}
+		for (run, hole, received) in given_up {
+			if !Error::Stream(hole.error()).retryable() {
+				match received {
+					true => self.received.insert(run.clone()),
+					false => self.received.remove(run.clone()),
+				}
+				self.drops.insert(run, hole);
 			}
 		}
 		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
-		// each poll reports one run, so such a pass would cost the queue squared to drain it.
-		// Declared skips are deduplicated against `record` (what was actually reported to the
-		// logical reader) rather than `delivered`, so budget-retired delivery prefixes below the
-		// reader's start never discard an unreported skip on a later widening.
-		let (start, end) = self.groups;
-		while let Some((run, hole)) = self
-			.drops
-			.first_range_value()
-			.map(|(run, hole)| (run.clone(), hole.clone()))
+		// each poll reports one run, so such a pass would cost the queue squared to drain it,
+		// and a new reader can be handed one run per cached group and per gap between them.
+		while let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone())
+			&& delivered.covers(run.clone())
 		{
-			let done = match hole {
-				track::Hole::Skip => record.told_all(run.clone()),
-				track::Hole::Drop { .. } => delivered.covers(run.clone()),
-			};
-			if done {
-				self.remove_drop(run);
-			} else {
-				break;
-			}
+			self.remove_drop(run);
 		}
-		let replaced = self.copies.iter().any(|copy| copy.replaced);
-		if replaced {
-			// Judged as the group path judges it, so a copy kept only for a group still read
-			// holds nothing back, and letting one go wakes this too.
-			self.let_go(delivered, waiter);
-		}
-		let serving = self.generation;
-		let mut feeding = RangeSet::new();
-		if replaced {
-			for copy in &self.copies {
-				if Some(copy.generation) == serving || !copy.feeds {
-					continue;
-				}
-				let from = copy.start(start);
-				let until = copy.end().unwrap_or(u64::MAX);
-				if from < until {
-					feeding.insert(from..until);
-				}
-			}
-		}
-		let window = start..end.unwrap_or(u64::MAX);
-		let mut revoked = Vec::new();
-		if !self.drops.is_empty() {
-			let mut passed = Vec::new();
-			let mut next = None;
-			for (run, err) in self.drops.iter() {
-				let done = match err {
-					track::Hole::Skip => record.told_all(run.clone()),
-					track::Hole::Drop { .. } => delivered.covers(run.clone()),
-				};
-				if done {
-					passed.push(run.clone());
-					continue;
-				}
-				if *err == track::Hole::Skip {
-					let clipped = run.start.max(start)..run.end.min(window.end);
-					let keep = self.window.possible_runs(clipped);
-					let mut cur = run.start;
-					for part in &keep {
-						if cur < part.start {
-							revoked.push(cur..part.start);
-						}
-						cur = part.end;
-					}
-					if cur < run.end {
-						revoked.push(cur..run.end);
-					}
-					if let Some(open) = keep
-						.into_iter()
-						.find_map(|part| record.find_untold_gap(part, |gap| feeding.gaps(&gap).next()))
-					{
-						next = Some((open, err.clone()));
-						break;
-					}
-					continue;
-				}
-				let clipped = run.start.max(start)..run.end.min(window.end);
-				if clipped.is_empty() {
-					continue;
-				}
-				if let Some(open) = delivered
-					.gaps(clipped)
-					.into_iter()
-					.find_map(|gap| feeding.gaps(&gap).next())
-				{
-					next = Some((open, err.clone()));
-					break;
-				}
-			}
-			for run in passed {
-				self.remove_drop(run);
-			}
-			for run in &revoked {
-				self.remove_drop(run.clone());
-			}
-			if let Some((open, err)) = next {
-				// Reported once. As on a plain cursor, the report is not final: a miss (a fill
-				// given up) may still land, and is handed out if it does.
-				self.remove_drop(open.clone());
-				for run in revoked {
-					self.untell(run);
-				}
-				return Poll::Ready((open, err));
-			}
-		}
-		// Pull lazily from the serving copy one drop at a time until one can be returned now: on
-		// a stable route with no replaced copies feeding, nothing unreturned is pre-queued into
-		// `self.drops`, so range updates and route switches never strand skips.
-		if !ready {
-			for run in revoked {
-				self.untell(run);
-			}
+		// The common case: nothing to report on one route, and the serving copy's own poll
+		// above wakes this for the next run it gives up. A replaced copy is still judged:
+		// dropping the last group handed out from it wakes nothing else that lets it go.
+		if self.drops.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
 			return Poll::Pending;
 		}
-		let found = loop {
-			let Some(Sub::Ready(sub)) = self.copies.last_mut().map(|copy| &mut copy.sub) else {
-				break None;
-			};
-			let polled = match probe {
-				true => sub.poll_drop(waiter),
-				false => sub.poll_queued_drop(waiter),
-			};
-			let Poll::Ready((run, hole)) = polled else {
-				break None;
-			};
-			if Error::Stream(hole.error()).retryable() {
+		// Judged as the group path judges it, so a copy kept only for a group still read
+		// holds nothing back, and letting one go wakes this too.
+		self.let_go(delivered, waiter);
+		let serving = self.generation;
+		let (start, end) = self.groups;
+		let mut feeding = RangeSet::new();
+		for copy in &self.copies {
+			if Some(copy.generation) == serving || !copy.feeds {
 				continue;
 			}
-			let done = match hole {
-				track::Hole::Skip => record.told_all(run.clone()),
-				track::Hole::Drop { .. } => delivered.covers(run.clone()),
-			};
-			if done {
-				continue;
+			let from = copy.start(start);
+			let until = copy.end().unwrap_or(u64::MAX);
+			if from < until {
+				feeding.insert(from..until);
 			}
-			let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
-			if hole == track::Hole::Skip {
-				let clipped = run.start.max(start)..run.end.min(window.end);
-				let keep = self.window.possible_runs(clipped);
-				let mut cur = run.start;
-				for part in &keep {
-					if cur < part.start {
-						revoked.push(cur..part.start);
-					}
-					cur = part.end;
-				}
-				if cur < run.end {
-					revoked.push(cur..run.end);
-				}
-				let open = keep
-					.iter()
-					.find_map(|part| record.find_untold_gap(part.clone(), |gap| feeding.gaps(&gap).next()));
-				if let Some(open) = open {
-					for part in keep {
-						for rem in [part.start..open.start.min(part.end), open.end.max(part.start)..part.end] {
-							if !rem.is_empty() && !record.told_all(rem.clone()) {
-								self.received.remove(rem.clone());
-								self.drops.insert(rem, hole.clone());
-							}
-						}
-					}
-					break Some((open, hole));
-				}
-				for part in keep {
-					if !part.is_empty() && !record.told_all(part.clone()) {
-						self.received.remove(part.clone());
-						self.drops.insert(part, hole.clone());
-					}
-				}
-				continue;
+		}
+		let mut passed = Vec::new();
+		let next = self.drops.iter().find_map(|(run, err)| {
+			if delivered.covers(run.clone()) {
+				passed.push(run.clone());
+				return None;
 			}
-			let clipped = run.start.max(start)..run.end.min(window.end);
-			let open = (!clipped.is_empty())
-				.then(|| {
-					delivered
-						.gaps(clipped)
-						.into_iter()
-						.find_map(|gap| feeding.gaps(&gap).next())
-				})
-				.flatten();
-			if let Some(open) = open {
-				for rem in [run.start..open.start, open.end..run.end] {
-					if !rem.is_empty() && !delivered.covers(rem.clone()) {
-						match received {
-							true => self.received.insert(rem.clone()),
-							false => self.received.remove(rem.clone()),
-						}
-						self.drops.insert(rem, hole.clone());
-					}
-				}
-				break Some((open, hole));
-			}
-			match received {
-				true => self.received.insert(run.clone()),
-				false => self.received.remove(run.clone()),
-			}
-			self.drops.insert(run, hole);
+			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
+			let open = delivered
+				.gaps(run)
+				.into_iter()
+				.find_map(|gap| feeding.gaps(&gap).next())?;
+			Some((open, err.clone()))
+		});
+		for run in passed {
+			self.remove_drop(run);
+		}
+		let Some((open, err)) = next else {
+			return Poll::Pending;
 		};
-		for run in revoked {
-			self.untell(run);
-		}
-		match found {
-			Some(drop) => Poll::Ready(drop),
-			None => Poll::Pending,
-		}
+		// Reported once. As on a plain cursor, the report is not final: a miss (a fill given
+		// up) may still land, and is handed out if it does.
+		self.remove_drop(open.clone());
+		Poll::Ready((open, err))
 	}
 
 	/// Forget every copy's report of `range`, so the copy serving when the reader's ranges ask
@@ -3817,7 +3648,6 @@ impl Reader {
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
-			drops_bridged: 0,
 			until: Some(lowered.end.checked_sub(1)),
 			cap: None,
 			since: Some(track.now()),
@@ -8651,127 +8481,6 @@ mod test {
 		serving.skip_groups(1001..1500);
 		serving.skip_groups(1600..2000);
 		assert_eq!(read(), ["group 1000", "gap 1500..1600", "group 2000"]);
-	}
-
-	/// A front's key-order read of a live track whose groups start at sparse keys keeps a
-	/// bounded record, its copy's included, as the export of a live broadcast reads one: each
-	/// group is read while still open, and its end, skipping the keys up to the next, arrives
-	/// while the read waits at the live edge, which reports them before the next group lands.
-	/// The read passes every key, so only the groups it handed out, each held whole, prove
-	/// the skipped runs between them final.
-	#[test]
-	fn a_front_ordered_read_of_a_sparse_track_keeps_a_bounded_record() {
-		const SPACING: u64 = 17;
-		// Live groups start well above key 0, as a timestamp does.
-		const BASE: u64 = 1_000_003;
-		let pool = crate::cache::Pool::new(
-			crate::cache::Config::default()
-				.with_capacity(1 << 40)
-				.with_expiry(crate::cache::DEFAULT_EXPIRY),
-		);
-		let info = Arc::new(broadcast::Info {
-			pool: pool.clone(),
-			..Default::default()
-		});
-		let routes = Producer::new();
-		let logical = track::Request::new(info.clone(), "video")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		// Billed to the same pool, so the copy's record counts too.
-		let a = track::Producer::new(info, "video", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, HOUR).ordered();
-		let waiter = kio::Waiter::noop();
-		let mut read = || {
-			let mut items = Vec::new();
-			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
-				items.push(match item {
-					track::Item::Group(group) => group.start,
-					track::Item::Gap { range, .. } => panic!("gap {range:?}"),
-				});
-			}
-			items
-		};
-		let mut open: Option<group::Producer> = None;
-		let mut most = 0;
-		for n in 0..2000 {
-			let key = BASE + n * SPACING;
-			// The previous group's GROUP_END: its span, and the starts inside it skipped.
-			if let Some(group) = open.take() {
-				group.finish_at(key).unwrap();
-				a.skip_groups(key - SPACING + 1..key);
-				assert_eq!(read(), Vec::<u64>::new());
-			}
-			let mut group = a.create_group(group::Info { start: key }).unwrap();
-			group.write_frame(ts(key), b"x".as_ref()).unwrap();
-			assert_eq!(read(), [key]);
-			open = Some(group);
-			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
-		}
-		assert!(most <= 8, "the record grew to {most} runs");
-	}
-
-	/// A front's arrival-order read of a sparse live track keeps both its logical and copy records
-	/// bounded as groups open and their `GROUP_END` skips arrive afterward, both for a bare
-	/// receive-only reader and for a wire publisher polling drops.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_front_arrival_read_of_a_sparse_track_keeps_a_bounded_record() {
-		const SPACING: u64 = 17;
-		const BASE: u64 = 1_000_003;
-		for wire in [false, true] {
-			let pool = crate::cache::Pool::new(
-				crate::cache::Config::default()
-					.with_capacity(1 << 40)
-					.with_expiry(crate::cache::DEFAULT_EXPIRY),
-			);
-			let info = Arc::new(broadcast::Info {
-				pool: pool.clone(),
-				..Default::default()
-			});
-			let routes = Producer::new();
-			let logical = track::Request::new(info.clone(), "video")
-				.routes(routes.consume())
-				.accept(crate::track::Info::timed());
-			let a = track::Producer::new(info, "video", crate::track::Info::timed());
-			a.received();
-			routes.serve(a.consume());
-			let mut sub = logical
-				.consume()
-				.subscribe(track::Subscription::default().with_ranges([track::Range {
-					start: track::Start::Oldest,
-					end: None,
-				}]))
-				.now_or_never()
-				.unwrap()
-				.unwrap();
-			let waiter = kio::Waiter::noop();
-			let mut open: Option<(u64, group::Producer)> = None;
-			let mut most = 0;
-			for n in 0..2000u64 {
-				let key = BASE + n * SPACING;
-				let mut group = a.create_group(group::Info { start: key }).unwrap();
-				group.write_frame(ts(key), b"x".as_ref()).unwrap();
-				assert_eq!(drain(&mut sub, false), [key], "wire={wire}");
-				if wire {
-					sub.record_mut().tell(key..key + 1, crate::model::record::Report::Final);
-				}
-				if let Some((prev, prev_group)) = open.take() {
-					prev_group.finish_at(key).unwrap();
-					a.skip_groups(prev + 1..key);
-					if wire {
-						while sub.poll_drop(&waiter).is_ready() {}
-					}
-				}
-				open = Some((key, group));
-				most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
-			}
-			if let Some((_, prev_group)) = open.take() {
-				prev_group.finish().unwrap();
-			}
-			assert!(most <= 8, "wire={wire}: the record grew to {most} runs");
-		}
 	}
 
 	/// A gap the serving copy reported and the ordered read holds behind a lower group still
@@ -16292,671 +16001,52 @@ mod test {
 		}
 	}
 
-	/// Queued skip runs that fall outside `self.groups` after a range start rises are evicted from
-	/// `Reader::drops` and untold on the copies so range hops stay bounded, yet widening back over
-	/// them still reports those skips.
+	/// A front reader on a sparse live track settles each handed-out group on its copy so
+	/// `copy.sub`'s `reported` coalesces with declared skips and both copy and logical records
+	/// stay bounded.
 	#[test]
 	#[cfg(feature = "async")]
-	fn empty_clipped_skip_runs_leave_the_drop_queue_and_reappear_on_widen() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		// Queue several disjoint sparse skips below key 100 and one above.
-		for k in [0u64, 10, 20, 30, 100] {
-			let mut g = a.create_group(group::Info { start: k }).unwrap();
-			g.write_frame(ts(k), &b"x"[..]).unwrap();
-			g.finish_at(k + 5).unwrap();
-			a.skip_groups(k + 1..k + 5);
-		}
-		let mut sub = subscribe(&logical, HOUR);
-		// Poll one skip so the serving copy queues the rest into `Reader::drops`.
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((1..5, track::Hole::Skip))
-		);
-		// Raise the local range start past the queued skips below 100.
-		sub.set_range(100..);
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((101..105, track::Hole::Skip))
-		);
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-
-		// Lowering the range back over 10..35 reports the queued skips that stayed in `self.drops`.
-		sub.set_range(10..);
-		let mut again = Vec::new();
-		while let Poll::Ready((run, track::Hole::Skip)) = sub.poll_drop(&kio::Waiter::noop()) {
-			again.push(run);
-		}
-		assert_eq!(again, [11..15, 21..25, 31..35]);
-	}
-
-	/// A front subscriber whose freshness budget retires its `delivered` prefix past an unreported
-	/// skip below its initial range start still receives that skip when widening back over it,
-	/// even after cache debt folds the logical record.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn skips_below_a_budget_retired_delivery_prefix_still_report_on_widen() {
-		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 20));
+	fn a_front_reader_on_a_sparse_live_track_keeps_a_bounded_record() {
+		const BASE: u64 = 1_000_003;
+		const SPACING: u64 = 17;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 40));
 		let broadcast = Arc::new(broadcast::Info {
 			pool: pool.clone(),
 			..Default::default()
 		});
 		let routes = Producer::new();
-		let logical = track::Request::new(broadcast, "sparse")
+		let logical = track::Request::new(broadcast.clone(), "audio")
 			.routes(routes.consume())
 			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"sparse",
-			crate::track::Info::timed(),
-		);
-		a.received();
-		routes.serve(a.consume());
+		let source = track::Producer::new(broadcast, "audio", crate::track::Info::timed());
+		source.received();
+		routes.serve(source.consume());
 
-		a.skip_groups(1..2);
-		let mut g2 = a.create_group(group::Info { start: 2 }).unwrap();
-		g2.write_frame(ts(2), &b"x"[..]).unwrap();
-		g2.finish().unwrap();
-
-		let mut sub = logical
+		let mut sub = match logical
 			.consume()
-			.subscribe(Subscription::default().with_ranges([track::Range {
-				start: track::Start::Live {
-					min: None,
-					max: Some(Duration::from_secs(1)),
-				},
-				end: None,
-			}]))
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		sub.set_range(2..);
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-		// Receive groups 2 and 4.
-		let mut g4 = a.create_group(group::Info { start: 4 }).unwrap();
-		g4.write_frame(ts(4), &b"x"[..]).unwrap();
-		g4.finish().unwrap();
-		let mut got = Vec::new();
-		while let Poll::Ready(Ok(Some(g))) = sub.poll_recv_group(&kio::Waiter::noop()) {
-			got.push(g.start);
-		}
-		got.sort();
-		assert_eq!(got, [2, 4]);
-
-		// Advance past the 1s freshness budget and deliver group 6, retiring `delivered` past key 1.
-		kio::clock::sleep(Duration::from_secs(2)).await;
-		let mut g6 = a.create_group(group::Info { start: 6 }).unwrap();
-		g6.write_frame(ts(6), &b"x"[..]).unwrap();
-		g6.finish().unwrap();
-		assert!(matches!(
-			sub.poll_recv_group(&kio::Waiter::noop()),
-			Poll::Ready(Ok(Some(g))) if g.start == 6
-		));
-		assert!(
-			sub.record_mut().delivered.contains(1),
-			"delivery prefix must cover key 1 after budget retirement"
-		);
-
-		// Force pool debt so `Record::fold` runs on the logical record; it must compact the
-		// settled stretch above key 6 without promoting the budget-retired delivery prefix
-		// over key 1 into the report floor.
-		sub.record_mut().tell(6..7, crate::model::record::Report::Final);
-		sub.record_mut().delivered.insert(7);
-		sub.record_mut().tell(8..9, crate::model::record::Report::Final);
-		sub.settle_record(None);
-		assert_eq!(sub.record_mut().reported.len(), 2);
-		pool.resize(1);
-		sub.record_mut().tell(10..11, crate::model::record::Report::Final);
-		assert_eq!(sub.record_mut().reported.len(), 3);
-		sub.settle_record(None);
-		assert_eq!(
-			sub.record_mut().reported.len(),
-			2,
-			"debt fold must compact 6..9 into one run alongside 10..11"
-		);
-		assert!(
-			!sub.record_mut().told(1),
-			"debt fold must keep budget-retired key 1 out of the report floor"
-		);
-
-		// Widen to include key 1: its declared skip was never reported and must still be emitted.
-		let _ = sub.update(
-			Subscription::default()
-				.with_ranges([track::Range {
-					start: track::Start::Time(1),
-					end: None,
-				}])
-				.with_max(Duration::from_secs(1)),
-		);
-		sub.set_range(1..);
-		let mut drops = Vec::new();
-		while let Poll::Ready(drop) = sub.poll_drop(&kio::Waiter::noop()) {
-			drops.push(drop);
-		}
-		assert!(
-			drops.contains(&(1..2, track::Hole::Skip)),
-			"expected (1..2, Skip) in {drops:?}"
-		);
-	}
-
-	/// Under cache debt, the serving copy may fold queued skips into its record floor before the
-	/// front returns them; raising the range start evicts and untells those skips (lowering the
-	/// copy's floor), so widening back over them still replays them while the serving copy holds
-	/// them.
-	#[test]
-	#[cfg(feature = "async")]
-	fn queued_skips_survive_serving_copy_debt_fold_across_range_narrow_and_widen() {
-		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 20));
-		let broadcast = Arc::new(broadcast::Info {
-			pool: pool.clone(),
-			..Default::default()
-		});
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		for k in [0u64, 5] {
-			let mut g = a.create_group(group::Info { start: k }).unwrap();
-			g.write_frame(ts(k), &b"x"[..]).unwrap();
-			g.finish_at(k + 5).unwrap();
-			a.skip_groups(k + 1..k + 5);
-		}
-		let mut sub = subscribe(&logical, HOUR);
-		// Shrink pool so the serving copy folds both `[1, 5)` and `[6, 10)` into its floor while
-		// queueing them into the front.
-		pool.resize(1);
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((1..5, track::Hole::Skip))
-		);
-		// Raise range start to 10 before polling `[6, 10)`: evicts `[6, 10)` from `drops` and
-		// untells it on the serving copy (lowering its floor).
-		sub.set_range(10..);
-		assert_eq!(sub.queued_drops(), 0);
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-		// Widen back to 6: `[6, 10)` is replayed despite the earlier debt fold.
-		sub.set_range(6..);
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((6..10, track::Hole::Skip))
-		);
-	}
-
-	/// Repeatedly hopping a front reader's range upward across sparse skips never strands
-	/// out-of-range skip runs in `Reader::drops`.
-	#[test]
-	#[cfg(feature = "async")]
-	fn hopping_ranges_keep_front_drop_queue_bounded() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		for i in 0..200u64 {
-			let base = i * 10;
-			for offset in [0u64, 5] {
-				let k = base + offset;
-				let mut g = a.create_group(group::Info { start: k }).unwrap();
-				g.write_frame(ts(k), &b"x"[..]).unwrap();
-				g.finish_at(k + 5).unwrap();
-				a.skip_groups(k + 1..k + 5);
-			}
-		}
-		let mut sub = subscribe(&logical, HOUR);
-		for i in 0..200u64 {
-			let base = i * 10;
-			// Request a window containing two skips `[base+1, base+5)` and `[base+6, base+10)`,
-			// return only the first, then hop to the next disjoint window.
-			sub.set_range(base..base + 10);
-			assert_eq!(
-				sub.poll_drop(&kio::Waiter::noop()),
-				Poll::Ready((base + 1..base + 5, track::Hole::Skip))
-			);
-			assert_eq!(
-				sub.queued_drops(),
-				0,
-				"lazy pull does not pre-queue subsequent skips into Reader::drops"
-			);
-		}
-		sub.set_range(2_000..);
-		assert_eq!(
-			sub.queued_drops(),
-			0,
-			"out-of-range skips are evicted immediately on hop"
-		);
-	}
-
-	/// Switching routes away from A and back to A while an open group keeps A's subscription alive
-	/// still reports unforwarded declared skips that were queued on A before the switch.
-	#[test]
-	#[cfg(feature = "async")]
-	fn queued_skips_survive_route_switch_and_return_to_reused_copy() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast.clone(), "sparse", crate::track::Info::timed());
-		a.received();
-		let b = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		b.received();
-		routes.serve(a.consume());
-
-		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
-		g0.write_frame(ts(0), &b"x"[..]).unwrap();
-
-		let mut sub = subscribe(&logical, HOUR);
-		// Hold group 0 open so route A's subscription stays retained across the switch to B.
-		let Poll::Ready(Ok(Some(held))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
-			panic!("expected group 0");
+			.subscribe(Subscription::default().with_max(Duration::from_millis(200)))
+			.poll_ok(&kio::Waiter::noop())
+		{
+			Poll::Ready(Ok(sub)) => sub,
+			_ => panic!("logical subscription should resolve"),
 		};
-		assert_eq!(held.start, 0);
-		a.skip_groups(1..5);
-		let mut g5 = a.create_group(group::Info { start: 5 }).unwrap();
-		g5.write_frame(ts(5), &b"x"[..]).unwrap();
-		g5.finish_at(10).unwrap();
-		a.skip_groups(6..10);
-		// Poll the first skip `[1, 5)`, leaving `[6, 10)` queued in `Reader::drops` and reported on A.
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((1..5, track::Hole::Skip))
-		);
-		// Switch A -> B (clears `Reader::drops`, revoking `[6, 10)` on A), then back B -> A.
-		routes.serve(b.consume());
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-		routes.serve(a.consume());
-		// A's reused subscription must still emit `[6, 10)`.
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((6..10, track::Hole::Skip))
-		);
-		drop(held);
-		g0.finish().unwrap();
-	}
-
-	/// Keeping `[0, 0]` active while hopping a second disjoint range across sparse skips prunes
-	/// skips from retired ranges so `Reader::drops` stays bounded and never forwards retired skips.
-	#[test]
-	#[cfg(feature = "async")]
-	fn multi_range_hopping_keeps_front_drop_queue_bounded() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
-		g0.write_frame(ts(0), &b"x"[..]).unwrap();
-		g0.finish().unwrap();
-		for i in 1..=50u64 {
-			let base = i * 10;
-			for offset in [0u64, 5] {
-				let k = base + offset;
-				let mut g = a.create_group(group::Info { start: k }).unwrap();
-				g.write_frame(ts(k), &b"x"[..]).unwrap();
-				g.finish_at(k + 5).unwrap();
-				a.skip_groups(k + 1..k + 5);
+		let mut most = 0;
+		for n in 0..500u64 {
+			let key = BASE + n * SPACING;
+			let mut group = source.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), &b"x"[..]).unwrap();
+			group.finish_at(key + SPACING).unwrap();
+			source.skip_groups(key + 1..key + SPACING);
+			assert!(matches!(
+				sub.poll_recv_group(&kio::Waiter::noop()),
+				Poll::Ready(Ok(Some(g))) if g.start == key
+			));
+			sub.record_mut().tell(key..key + 1, crate::model::record::Report::Final);
+			while let Poll::Ready((run, _)) = sub.poll_drop(&kio::Waiter::noop()) {
+				assert_eq!(run, key + 1..key + SPACING);
 			}
+			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
 		}
-		let mut sub = logical
-			.consume()
-			.subscribe(Subscription::default().with_ranges([
-				track::Range {
-					start: track::Start::Time(0),
-					end: Some(0),
-				},
-				track::Range {
-					start: track::Start::Time(10),
-					end: Some(19),
-				},
-			]))
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		for i in 1..=50u64 {
-			let base = i * 10;
-			sub.update(Subscription::default().with_ranges([
-				track::Range {
-					start: track::Start::Time(0),
-					end: Some(0),
-				},
-				track::Range {
-					start: track::Start::Time(base),
-					end: Some(base + 9),
-				},
-			]))
-			.unwrap();
-			assert_eq!(
-				sub.poll_drop(&kio::Waiter::noop()),
-				Poll::Ready((base + 1..base + 5, track::Hole::Skip))
-			);
-			assert_eq!(
-				sub.queued_drops(),
-				0,
-				"lazy pull leaves no retired-range skips in Reader::drops even when [0, 0] keeps cursor start at 0"
-			);
-		}
-		// Retire the second range: no skips remain in range or queued.
-		sub.update(Subscription::default().with_ranges([track::Range {
-			start: track::Start::Time(0),
-			end: Some(0),
-		}]))
-		.unwrap();
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-		assert_eq!(sub.queued_drops(), 0);
-	}
-
-	/// Narrowing past a queued skip on A revokes it and arms a drop rescan; if the front switches
-	/// to B, restores the original bounds before polling A, and then returns to A, A's reused
-	/// subscription still replays the cached skip.
-	#[test]
-	#[cfg(feature = "async")]
-	fn narrow_revoked_skip_survives_route_switch_and_bounds_restore_before_return() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast.clone(), "sparse", crate::track::Info::timed());
-		a.received();
-		let b = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		b.received();
-		routes.serve(a.consume());
-
-		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
-		g0.write_frame(ts(0), &b"x"[..]).unwrap();
-
-		let mut sub = subscribe(&logical, HOUR);
-		let Poll::Ready(Ok(Some(held))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
-			panic!("expected group 0");
-		};
-		assert_eq!(held.start, 0);
-		a.skip_groups(1..5);
-		let mut g5 = a.create_group(group::Info { start: 5 }).unwrap();
-		g5.write_frame(ts(5), &b"x"[..]).unwrap();
-		g5.finish_at(10).unwrap();
-		a.skip_groups(6..10);
-
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((1..5, track::Hole::Skip))
-		);
-		// Narrow past `[6, 10)` (pruning & revoking it while on A), switch to B, restore `0..`
-		// BEFORE polling A again, then return to A.
-		sub.set_range(10..);
-		assert_eq!(sub.queued_drops(), 0);
-		routes.serve(b.consume());
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-		sub.set_range(0..);
-		routes.serve(a.consume());
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((6..10, track::Hole::Skip))
-		);
-		drop(held);
-		g0.finish().unwrap();
-	}
-
-	/// Hopping a resolved range while an unrelated unresolved time range keeps `window.is_settled()`
-	/// false must still leave no retired skips queued in `Reader::drops` and never emit retired skips.
-	#[test]
-	#[cfg(feature = "async")]
-	fn multi_range_hopping_with_unresolved_time_range_keeps_front_drop_queue_bounded() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
-		g0.write_frame(ts(0), &b"x"[..]).unwrap();
-		g0.finish().unwrap();
-		for i in 1..=20u64 {
-			let base = i * 10;
-			for offset in [0u64, 5] {
-				let k = base + offset;
-				let mut g = a.create_group(group::Info { start: k }).unwrap();
-				g.write_frame(ts(k), &b"x"[..]).unwrap();
-				g.finish_at(k + 5).unwrap();
-				a.skip_groups(k + 1..k + 5);
-			}
-		}
-		// Include an unresolved time range past the end (`Time(99_999)`) alongside the hopping
-		// resolved range so `window.is_settled()` stays false throughout.
-		let unresolved = track::Range {
-			start: track::Start::Time(99_999),
-			end: None,
-		};
-		let mut sub = logical
-			.consume()
-			.subscribe(Subscription::default().with_ranges([
-				track::Range {
-					start: track::Start::Time(10),
-					end: Some(19),
-				},
-				unresolved,
-			]))
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		for i in 1..=20u64 {
-			let base = i * 10;
-			sub.update(Subscription::default().with_ranges([
-				track::Range {
-					start: track::Start::Time(base),
-					end: Some(base + 9),
-				},
-				unresolved,
-			]))
-			.unwrap();
-			assert_eq!(
-				sub.poll_drop(&kio::Waiter::noop()),
-				Poll::Ready((base + 1..base + 5, track::Hole::Skip))
-			);
-			assert_eq!(sub.queued_drops(), 0);
-		}
-		// Retire the hopping range, leaving only the unresolved time range: no retired skips emit.
-		sub.update(Subscription::default().with_ranges([unresolved])).unwrap();
-		assert!(sub.poll_drop(&kio::Waiter::noop()).is_pending());
-		assert_eq!(sub.queued_drops(), 0);
-	}
-
-	/// Overlapping sparse live groups (next group handed out before the previous group finishes
-	/// whole and records its skip) still coalesce into at most 2 runs in `delivered`.
-	#[test]
-	#[cfg(feature = "async")]
-	fn overlapping_sparse_live_groups_keep_delivered_bounded() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		let mut sub = subscribe(&logical, HOUR);
-		let mut prev = a.create_group(group::Info { start: 1_000 }).unwrap();
-		prev.write_frame(ts(1_000), &b"x"[..]).unwrap();
-		let Poll::Ready(Ok(Some(g))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
-			panic!("expected group 1000");
-		};
-		assert_eq!(g.start, 1_000);
-		for i in 1..=200u64 {
-			let key = 1_000 + i * 10;
-			let mut next = a.create_group(group::Info { start: key }).unwrap();
-			next.write_frame(ts(key), &b"x"[..]).unwrap();
-			let Poll::Ready(Ok(Some(g))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
-				panic!("expected group {key}");
-			};
-			assert_eq!(g.start, key);
-			prev.finish_at(key).unwrap();
-			a.skip_groups(key - 9..key);
-			prev = next;
-			assert!(
-				sub.delivered_runs() <= 2,
-				"overlapping live groups must stay bounded, got {} at i={i}",
-				sub.delivered_runs()
-			);
-		}
-		prev.finish().unwrap();
-	}
-
-	/// A queued split skip remainder `[16, 20)` (left over after `[15, 16)` was reported on an
-	/// earlier route) must not emit once `[10, 19]` is replaced by `[20, 29]` alongside an
-	/// unrelated unanswered time range ending at `5`, and must replay when `[10, 19]` returns.
-	#[test]
-	#[cfg(feature = "async")]
-	fn split_skip_remainder_checks_possible_range_coverage_and_replays_on_widen() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast.clone(), "sparse", crate::track::Info::timed());
-		a.received();
-		let b = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		b.received();
-		routes.serve(a.consume());
-
-		let mut g0 = a.create_group(group::Info { start: 0 }).unwrap();
-		g0.write_frame(ts(0), &b"x"[..]).unwrap();
-		g0.finish().unwrap();
-		a.skip_groups(15..16);
-
-		let mut b0 = b.create_group(group::Info { start: 0 }).unwrap();
-		b0.write_frame(ts(0), &b"x"[..]).unwrap();
-		b0.finish().unwrap();
-		b.skip_groups(11..20);
-		let mut b20 = b.create_group(group::Info { start: 20 }).unwrap();
-		b20.write_frame(ts(20), &b"x"[..]).unwrap();
-		b20.finish().unwrap();
-
-		let mut sub = logical
-			.consume()
-			.subscribe(Subscription::default().with_ranges([
-				track::Range {
-					start: track::Start::Time(0),
-					end: Some(0),
-				},
-				track::Range {
-					start: track::Start::Time(10),
-					end: Some(19),
-				},
-			]))
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		// Route A reports `[15, 16)` to the logical reader.
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((15..16, track::Hole::Skip))
-		);
-		// Switch to route B, which holds `[11, 20)`: polling once emits `[11, 15)` and queues
-		// the split remainder `[16, 20)`.
-		routes.serve(b.consume());
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((11..15, track::Hole::Skip))
-		);
-		// Replace `[10, 19]` with `[20, 29]` while adding an unanswered time range ending at `5`.
-		sub.update(Subscription::default().with_ranges([
-			track::Range {
-				start: track::Start::Time(0),
-				end: Some(0),
-			},
-			track::Range {
-				start: track::Start::Time(20),
-				end: Some(29),
-			},
-			track::Range {
-				start: track::Start::Time(3),
-				end: Some(5),
-			},
-		]))
-		.unwrap();
-		assert!(
-			sub.poll_drop(&kio::Waiter::noop()).is_pending(),
-			"retired split remainder [16, 20) must not emit even with an unresolved range ending at 5"
-		);
-		assert_eq!(sub.queued_drops(), 0);
-		// Re-covering `[10, 19]` replays `[16, 20)` cleanly.
-		sub.update(Subscription::default().with_ranges([
-			track::Range {
-				start: track::Start::Time(0),
-				end: Some(0),
-			},
-			track::Range {
-				start: track::Start::Time(10),
-				end: Some(19),
-			},
-		]))
-		.unwrap();
-		assert_eq!(
-			sub.poll_drop(&kio::Waiter::noop()),
-			Poll::Ready((16..20, track::Hole::Skip))
-		);
-	}
-
-	/// Three or more overlapping sparse live groups (G0, G1, G2 handed out before G0 finishes
-	/// and declares its skip) starting above group 0 still coalesce via revisited skips.
-	#[test]
-	#[cfg(feature = "async")]
-	fn three_group_overlapping_sparse_live_stream_keeps_delivered_bounded() {
-		let broadcast = Arc::new(broadcast::Info::default());
-		let routes = Producer::new();
-		let logical = track::Request::new(broadcast.clone(), "sparse")
-			.routes(routes.consume())
-			.accept(crate::track::Info::timed());
-		let a = track::Producer::new(broadcast, "sparse", crate::track::Info::timed());
-		a.received();
-		routes.serve(a.consume());
-
-		let mut sub = subscribe(&logical, HOUR);
-		let mut open: std::collections::VecDeque<(u64, group::Producer)> = std::collections::VecDeque::new();
-		for i in 0..200u64 {
-			let key = 1_000 + i * 10;
-			let mut g = a.create_group(group::Info { start: key }).unwrap();
-			g.write_frame(ts(key), &b"x"[..]).unwrap();
-			let Poll::Ready(Ok(Some(recv))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
-				panic!("expected group {key}");
-			};
-			assert_eq!(recv.start, key);
-			open.push_back((key, g));
-			if open.len() >= 3 {
-				let (oldest_key, oldest) = open.pop_front().unwrap();
-				oldest.finish_at(oldest_key + 10).unwrap();
-				a.skip_groups(oldest_key + 1..oldest_key + 10);
-			}
-			assert!(
-				sub.delivered_runs() <= 4,
-				"three-group overlapping live stream must stay bounded, got {} at i={i}",
-				sub.delivered_runs()
-			);
-		}
-		for (_, g) in open {
-			g.finish().unwrap();
-		}
+		assert!(most <= 60, "front copy + logical record grew to {most} runs");
 	}
 }

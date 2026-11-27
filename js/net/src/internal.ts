@@ -595,10 +595,6 @@ export interface ResumeShell {
 	commit(info: Info): void;
 	/** End the logical track: cleanly, or with `abort`. */
 	close(abort?: Error): void;
-	/** The floor below which the logical reader folded its record for good. */
-	floor(): bigint;
-	/** Parts of `[start, end)` not yet reported to the logical reader (above its floor). */
-	untold(start: bigint, end: bigint): Run[];
 }
 
 /** A drift policy a handed-out group keeps applying; see `hooks.expireGroup`. */
@@ -731,13 +727,6 @@ export interface ResumeSource {
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
 	 */
 	untell(start: bigint, end: bigint): void;
-	/** Bridge declared skips on the serving copy into the logical reader's `delivered` set. */
-	bridgeSkips(
-		delivered: Delivered,
-		key: bigint,
-		allow: (start: bigint, end: bigint) => boolean,
-		onBridge?: (start: bigint, end: bigint) => void,
-	): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1281,15 +1270,6 @@ export const hooks: {
 	 * `Subscriber::settle_if_dropping`.
 	 */
 	settleIfDropping: (subscriber: Subscriber, key: bigint) => void;
-	/** Bridge declared skips on `subscriber`'s track into `delivered`, returning the new drops revision. */
-	bridgeSkips: (
-		subscriber: Subscriber,
-		delivered: Delivered,
-		key: bigint,
-		seen: number,
-		allow: (start: bigint, end: bigint) => boolean,
-		onBridge?: (start: bigint, end: bigint) => void,
-	) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1825,9 +1805,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	settleIfDropping: () => {
-		throw new Error("track.ts not loaded");
-	},
-	bridgeSkips: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

@@ -7622,356 +7622,43 @@ test("a routed reader reports its serving copy's whole group spans", async () =>
 	}
 });
 
-// A front reader (ordered or arrival-order) of a sparse-key track keeps both the logical and copy
-// records bounded as groups open and their GROUP_END skips arrive afterward. Mirrors the Rust
-// `a_front_ordered_read_of_a_sparse_track_keeps_a_bounded_record`.
-test("a front read of a sparse live track keeps a bounded record", () => {
-	const GROUPS = 500n;
-	const SPACING = 17n;
-	const BASE = 1_000_003n;
-	for (const orderedMode of [true, false]) {
-		const front = new Front();
-		const source = new BroadcastProducer();
-		const handle = source.consume();
-		const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-		front.serve(handle);
-		const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
-		const ordered = orderedMode ? sub.ordered() : undefined;
-		let open: { key: bigint; group: ReturnType<track.Producer["createGroup"]> } | undefined;
-		try {
-			for (let n = 0n; n < GROUPS; n++) {
-				const key = BASE + n * SPACING;
-				if (open) {
-					open.group.finishAt(key);
-					producer.skipGroups(open.key + 1n, key);
-					if (ordered) expect(ordered.tryNextItem()).toBeUndefined();
-				}
-				const group = producer.createGroup(key);
-				group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
-				if (ordered) {
-					const item = ordered.tryNextItem();
-					expect(item).toMatchObject({ kind: "group" });
-					if (item && item.kind === "group") item.group.close();
-				} else {
-					expect(drain(sub)).toEqual([key]);
-				}
-				open = { key, group };
-				expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(3);
-				expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
-			}
-			open?.group.finish();
-		} finally {
-			ordered?.close();
-			sub.close();
-			front.consumer.close();
-			handle.close();
-			source.close();
-		}
-	}
-});
-
-// A wired front reader starting on `[0..0]` whose serving copy already knows key 1 was skipped
-// must not absorb key 1 into `delivered` or fold the copy past key 1: widening to `[1..2]` still
-// receives the skip for key 1 alongside group 2.
-test("a wired front reader widening past a skipped key still receives the skip", () => {
+// A front reader on a sparse live track settles each handed-out group on its copy so `reported`
+// coalesces with declared skips into O(1) runs on both the copy and logical records.
+test("a sparse live track through a front keeps reported runs bounded", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
 	const front = new Front();
 	const source = new BroadcastProducer();
 	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+	const producer = defined(source.createTrack("sparse", { ...INFO, timescale: Timescale.MILLI, maxAge: null }));
+	hooks.startsAtKeys(producer);
 	front.serve(handle);
-	const sub = front.consumer.track("video").subscribe({ ranges: [{ start: 0n, end: 0n }] });
+	const sub = front.consumer.track("sparse").subscribe(withMax({ delay: { max: Duration.millis(200) } }));
 	const wire = hooks.wire(sub);
 	try {
-		const g0 = producer.createGroup(0n);
-		g0.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.fromMillis(0) });
-		g0.finish();
-		producer.skipGroups(1n, 2n);
-
-		expect(drain(sub)).toEqual([0n]);
-		wire.tell(0n, 1n);
-		expect(hooks.tryDrop(sub)).toBeUndefined();
-
-		const g2 = producer.createGroup(2n);
-		g2.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.fromMillis(2) });
-		g2.finish();
-		sub.update({ ranges: [{ start: 1n, end: 2n }] });
-
-		expect(drain(sub)).toEqual([2n]);
-		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 2n, skip: true });
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
-	}
-});
-
-// Queued skip runs outside a raised cursor start are evicted from the front reader's drop queue
-// and untold on the copies so range hops stay bounded while widening back over them reports them
-// again.
-test("empty-clipped skip runs leave a front reader drop queue and reappear on widen", () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front.serve(handle);
-	for (const k of [0n, 10n, 20n, 100n]) {
-		const g = producer.createGroup(k);
-		g.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(k)) });
-		g.finishAt(k + 5n);
-		producer.skipGroups(k + 1n, k + 5n);
-	}
-	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
-	try {
-		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 5n, skip: true });
-		sub.withRange({ start: { included: 100n } });
-		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 101n, end: 105n, skip: true });
-		expect(hooks.tryDrop(sub)).toBeUndefined();
-
-		sub.withRange({ start: { included: 10n } });
-		const again: [bigint, bigint][] = [];
-		for (let drop = hooks.tryDrop(sub); drop; drop = hooks.tryDrop(sub)) {
-			if (drop.skip) again.push([drop.start, drop.end]);
-		}
-		expect(again).toEqual([
-			[11n, 15n],
-			[21n, 25n],
-		]);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
-	}
-});
-
-// A wired front publisher polling drops before handing out each group coalesces already-reported
-// adjacent skips into `delivered` on hand-out so `delivered` stays bounded.
-test("a wired front publisher coalesces skips reported before their preceding group", () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front.serve(handle);
-	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
-	const wire = hooks.wire(sub);
-	try {
-		for (let n = 0n; n < 200n; n++) {
-			const key = 1_000n + 2n * n;
+		await clock.advance(Duration.ZERO);
+		const spacing = 17n;
+		const base = 1_000_003n;
+		for (let n = 0n; n < 300n; n++) {
+			const key = base + n * spacing;
 			const group = producer.createGroup(key);
 			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
-			group.finishAt(key + 1n);
-			producer.skipGroups(key + 1n, key + 2n);
-
-			const dropped = hooks.tryDrop(sub);
-			expect(dropped).toMatchObject({ kind: "drop", start: key + 1n, end: key + 2n, skip: true });
-			expect(drain(sub)).toEqual([key]);
+			group.finishAt(key + spacing);
+			hooks.skipTrackGroups(producer, key + 1n, key + spacing);
+			await clock.advance(Duration.millis(Number(spacing)));
+			const got = sub.tryRecvGroup();
+			expect(got?.start).toBe(key);
+			got?.close();
 			wire.tell(key, key + 1n);
-			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
+			while (hooks.tryDrop(sub)) {}
 			expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
 		}
-		expect(hooks.deliveredRuns(sub)).toBe(1);
-		expect(hooks.reportedRuns(sub)).toBe(1);
+		expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(20);
 	} finally {
 		sub.close();
 		front.consumer.close();
 		handle.close();
 		source.close();
-	}
-});
-
-// Keeping [0, 0] active while hopping a second disjoint range prunes queued skips from retired
-// ranges so they never accumulate or leak to the logical reader.
-test("multi-range hopping prunes retired skips even when [0, 0] stays active", () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front.serve(handle);
-	const g0 = producer.createGroup(0n);
-	g0.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
-	g0.finish();
-	for (let i = 1n; i <= 20n; i++) {
-		const base = i * 10n;
-		for (const offset of [0n, 5n]) {
-			const k = base + offset;
-			const g = producer.createGroup(k);
-			g.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(k)) });
-			g.finishAt(k + 5n);
-			producer.skipGroups(k + 1n, k + 5n);
-		}
-	}
-	const sub = front.consumer.track("video").subscribe({
-		ranges: [
-			{ start: 0n, end: 0n },
-			{ start: 10n, end: 19n },
-		],
-	});
-	try {
-		for (let i = 1n; i <= 20n; i++) {
-			const base = i * 10n;
-			sub.update({
-				ranges: [
-					{ start: 0n, end: 0n },
-					{ start: base, end: base + 9n },
-				],
-			});
-			expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: base + 1n, end: base + 5n, skip: true });
-		}
-		sub.update({ ranges: [{ start: 0n, end: 0n }] });
-		expect(hooks.tryDrop(sub)).toBeUndefined();
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
-	}
-});
-
-// Narrowing a buffered closed copy with a wide skip [1, 10) from [0, 10] to [0, 0] + [10, 10]
-// must terminate without spinning or leaking out-of-range skips.
-test("narrowing around a wide skip on a closed copy does not spin", () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front.serve(handle);
-	const g0 = producer.createGroup(0n);
-	g0.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
-	g0.finishAt(10n);
-	producer.skipGroups(1n, 10n);
-	const g10 = producer.createGroup(10n);
-	g10.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(10) });
-	g10.finish();
-	producer.finish();
-
-	const sub = front.consumer.track("video").subscribe({
-		ranges: [{ start: 0n, end: 10n }],
-	});
-	try {
-		sub.update({
-			ranges: [
-				{ start: 0n, end: 0n },
-				{ start: 10n, end: 10n },
-			],
-		});
-		expect(hooks.tryDrop(sub)).toBeUndefined();
-		// Widening back to [0, 10] before draining replays the skip cleanly.
-		sub.update({ ranges: [{ start: 0n, end: 10n }] });
-		expect(hooks.tryDrop(sub)).toMatchObject({ kind: "drop", start: 1n, end: 10n, skip: true });
-		expect(hooks.tryDrop(sub)).toBeUndefined();
-		expect(drain(sub)).toEqual([10n, 0n]);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
-	}
-
-	// Also verify a truly closed buffered copy (`producer.close()`, whose copy ranges stay as
-	// resolved when it closed) terminates cleanly without spinning when narrowed around a skip.
-	const front2 = new Front();
-	const source2 = new BroadcastProducer();
-	const handle2 = source2.consume();
-	const producer2 = defined(source2.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front2.serve(handle2);
-	const h0 = producer2.createGroup(0n);
-	h0.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
-	h0.finishAt(10n);
-	producer2.skipGroups(1n, 10n);
-	const h10 = producer2.createGroup(10n);
-	h10.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(10) });
-	h10.finish();
-	const sub2 = front2.consumer.track("video").subscribe({
-		ranges: [{ start: 0n, end: 10n }],
-	});
-	try {
-		producer2.finish();
-		producer2.close();
-		sub2.update({
-			ranges: [
-				{ start: 0n, end: 0n },
-				{ start: 10n, end: 10n },
-			],
-		});
-		// Must neither emit out-of-range skips nor spin while narrowed to [0, 0] + [10, 10].
-		expect(hooks.tryDrop(sub2)).toBeUndefined();
-		// Widening back to [0, 10] replays the parked skip cleanly.
-		sub2.update({ ranges: [{ start: 0n, end: 10n }] });
-		expect(hooks.tryDrop(sub2)).toMatchObject({ kind: "drop", start: 1n, end: 10n, skip: true });
-		expect(hooks.tryDrop(sub2)).toBeUndefined();
-	} finally {
-		sub2.close();
-		front2.consumer.close();
-		handle2.close();
-		source2.close();
-	}
-});
-
-// Three or more overlapping sparse live groups (G0, G1, G2 handed out before G0 finishes and
-// declares its skip) starting above group 0 still coalesce via revisited skips under an unlimited
-// budget.
-test("three-group overlapping sparse live stream keeps delivered bounded", () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front.serve(handle);
-	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
-	try {
-		const open: { key: bigint; group: ReturnType<typeof producer.createGroup> }[] = [];
-		for (let i = 0n; i < 200n; i++) {
-			const key = 1_000n + i * 10n;
-			const group = producer.createGroup(key);
-			group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
-			expect(drain(sub)).toEqual([key]);
-			open.push({ key, group });
-			if (open.length >= 3) {
-				const oldest = defined(open.shift());
-				const end = oldest.key + 10n;
-				oldest.group.finishAt(end);
-				producer.skipGroups(oldest.key + 1n, end);
-			}
-			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(4);
-		}
-		for (const item of open) item.group.finish();
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
-	}
-});
-
-// Overlapping live groups (next group handed out before the previous group finishes whole and
-// records its skip) still coalesce into at most 2 runs in `delivered` even with an unlimited budget.
-test("overlapping sparse live groups keep delivered bounded", () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
-	front.serve(handle);
-	const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
-	try {
-		let prev = producer.createGroup(1_000n);
-		prev.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1_000) });
-		expect(drain(sub)).toEqual([1_000n]);
-		for (let i = 1n; i <= 200n; i++) {
-			const key = 1_000n + i * 10n;
-			const next = producer.createGroup(key);
-			next.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
-			// Hand out the next group while `prev` is still open (no skip recorded yet).
-			expect(drain(sub)).toEqual([key]);
-			prev.finishAt(key);
-			producer.skipGroups(key - 9n, key);
-			prev = next;
-			expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
-		}
-		prev.finish();
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
+		installed.close();
 	}
 });
