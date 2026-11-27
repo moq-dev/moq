@@ -14141,7 +14141,8 @@ impl Subscriber {
 	/// handed out, in its [`Order`]; a group is never handed out twice while the
 	/// subscription's ranges hold it (see [`Self::update`]). Groups past the cap stay cached,
 	/// and lowering the cap below the cursor waits until it rises again or the track
-	/// finishes. [`Self::poll_largest`] reports within these bounds.
+	/// finishes, unless bounded subscription ranges have nothing left to deliver, which
+	/// ends the read. [`Self::poll_largest`] reports within these bounds.
 	///
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set

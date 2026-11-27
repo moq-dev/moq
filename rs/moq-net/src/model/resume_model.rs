@@ -319,6 +319,8 @@ struct Reader {
 	/// Groups handed out that a range edit since left outside the ranges: ranges holding one
 	/// again may hand it out again, as a new subscription would.
 	released: BTreeSet<u64>,
+	/// The earlier readings of groups handed out again, each still checked to its end.
+	superseded: Vec<(u64, Reading)>,
 	/// Groups reported dropped.
 	dropped: BTreeSet<u64>,
 	/// Only groups past this one are owed: older ones were cached history at join, or
@@ -412,9 +414,8 @@ impl Reader {
 
 	/// Everything observed, to tell whether a poll found anything new.
 	fn observed(&self) -> (usize, usize, bool, usize) {
-		let frames = self
-			.reading
-			.values()
+		let frames = (self.reading.values())
+			.chain(self.superseded.iter().map(|(_, read)| read))
 			.map(|read| read.frames + usize::from(read.end.is_some()))
 			.sum();
 		(self.handed.len(), frames, self.end.is_some(), self.dropped.len())
@@ -796,6 +797,7 @@ impl Model {
 			passed: None,
 			holding: None,
 			released: BTreeSet::new(),
+			superseded: Vec::new(),
 		};
 		self.readers[index] = Some(reader);
 		self.poll(index)
@@ -859,7 +861,7 @@ impl Model {
 						return Err(fail(index, format!("group {key} handed out before any route had it")));
 					}
 					reader.handed.push(key);
-					reader.reading.insert(
+					let earlier = reader.reading.insert(
 						key,
 						Reading {
 							consumer: Some(group),
@@ -867,6 +869,7 @@ impl Model {
 							end: None,
 						},
 					);
+					reader.superseded.extend(earlier.map(|earlier| (key, earlier)));
 				}
 				Poll::Ready(Ok(None)) => {
 					// A bounded read ends once its range is read, a local cap holding nothing
@@ -926,7 +929,8 @@ impl Model {
 			}
 		}
 
-		for (key, read) in &mut reader.reading {
+		let superseded = reader.superseded.iter_mut().map(|(key, read)| (&*key, read));
+		for (key, read) in reader.reading.iter_mut().chain(superseded) {
 			let Some(consumer) = &mut read.consumer else {
 				continue;
 			};
@@ -1118,7 +1122,8 @@ impl Model {
 			let _ = write!(problems, "missing groups {missing:?}; ");
 		}
 		if !reader.expires {
-			for (key, read) in &reader.reading {
+			let superseded = reader.superseded.iter().map(|(key, read)| (key, read));
+			for (key, read) in reader.reading.iter().chain(superseded) {
 				if carried(*key) && !identity.given_up.contains(key) && !matches!(read.end, Some(Ok(()))) {
 					let _ = write!(
 						problems,

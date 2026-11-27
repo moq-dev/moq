@@ -316,6 +316,8 @@ interface Reader {
 	 * may hand it out again, as a new subscription would.
 	 */
 	released: Set<number>;
+	/** The earlier readings of groups handed out again, each still checked to its end. */
+	superseded: Reading[];
 	/** Groups reported dropped. */
 	dropped: Set<number>;
 	/** Only groups past this one are owed: older ones were cached history at join, or may have expired. */
@@ -397,10 +399,18 @@ function admits(reader: Reader, group: number, resolved: number | undefined): bo
 	return ranges && within(reader.local, group);
 }
 
+/** Every group handed out with its reading, the earlier readings of one handed out again included. */
+function readings(reader: Reader): [number, Reading][] {
+	return [
+		...reader.reading,
+		...reader.superseded.map((reading): [number, Reading] => [Number(reading.group.start), reading]),
+	];
+}
+
 /** Everything observed, to tell whether a poll found anything new. */
 function observed(reader: Reader): string {
 	let read = 0;
-	for (const reading of reader.reading.values()) read += reading.frames + (reading.end !== undefined ? 1 : 0);
+	for (const [, reading] of readings(reader)) read += reading.frames + (reading.end !== undefined ? 1 : 0);
 	return JSON.stringify([reader.handed.length, read, reader.end !== undefined, reader.dropped.size]);
 }
 
@@ -723,6 +733,7 @@ class Model {
 			handed: [],
 			reading: new Map(),
 			released: new Set(),
+			superseded: [],
 			dropped: new Set(),
 			floor: this.identities[identity].newest(),
 			doomed: false,
@@ -740,7 +751,7 @@ class Model {
 		this.readers[index] = undefined;
 		reader.gone = true;
 		reader.unwatch?.();
-		for (const reading of reader.reading.values()) reading.group.close();
+		for (const [, reading] of readings(reader)) reading.group.close();
 		reader.sub.close();
 		reader.request.close();
 	}
@@ -812,6 +823,8 @@ class Model {
 				}
 				reader.handed.push(key);
 				const reading: Reading = { group, frames: 0 };
+				const earlier = reader.reading.get(key);
+				if (earlier) reader.superseded.push(earlier);
 				reader.reading.set(key, reading);
 				void this.#read(index, reader, reading);
 			} else if (recv.kind === "done") {
@@ -969,7 +982,7 @@ class Model {
 			if (!reader) continue;
 			this.poll(index);
 			// A frame read still waiting with a frame or its end ready was never woken.
-			for (const [key, reading] of reader.reading) {
+			for (const [key, reading] of readings(reader)) {
 				if (reading.end !== undefined) continue;
 				const ready = reading.group.done ? "its end" : reading.group.tryReadFrame() ? "a frame" : undefined;
 				if (ready) throw fail(index, `group ${key} has ${ready} ready that never woke its read`);
@@ -1015,7 +1028,7 @@ class Model {
 		let problems = "";
 		if (missing.length > 0) problems += `missing groups ${missing}; `;
 		if (!reader.expires) {
-			for (const [key, reading] of reader.reading) {
+			for (const [key, reading] of readings(reader)) {
 				if (reading.end === null || !carried(key) || identity.givenUp.has(key)) continue;
 				// Like a group under the floor, one older than an expiry may be gone from its own copy
 				// or from the route it would continue from.
