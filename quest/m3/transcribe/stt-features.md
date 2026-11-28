@@ -40,7 +40,11 @@ Guidance:
     contains word-level speaker transitions, finalize the original segment
     `id` with the first speaker's span and emit each subsequent speaker span
     in the utterance as a final segment with a fresh `id`, carrying its own
-    source-clock start/end timestamps and `words` slice. Remap each entity's
+    source-clock start/end timestamps and `words` slice. When diarization is
+    enabled, defer append-only translation and dubbing of provisional interim
+    text until `is_final` establishes each speaker span, so clauses that a
+    final speaker split moves onto a new `id` are never translated or dubbed
+    twice. Remap each entity's
     half-open `[start_word, end_word)` indices relative to its split segment's
     `words` slice, and drop any entity whose span crosses a speaker boundary.
   - Redaction: repeated `redact=<kind>` parameters (for example `pii`,

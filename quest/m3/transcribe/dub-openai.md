@@ -4,16 +4,16 @@
 
 `moq-transcribe`'s dubbing stage gains an OpenAI TTS backend implementing the
 same internal TTS trait as Deepgram Aura-2, covering target languages outside
-Aura-2's 7-language set and proving the trait across both streaming WebSocket
-and HTTP streaming backends.
+Aura-2's 7-language set and proving the trait across two distinct TTS
+providers.
 
 ## Plan
 
 Decided 2026-11-27 (maintainer, `/quest-plan`): ✅ implement OpenAI TTS as a
 separate follow-up quest behind [Deepgram Aura-2 dubbing](/quest/m3/transcribe/dub.md)
-so the private TTS trait is proven across two distinct provider protocols and
-languages outside Aura-2's set are supported without bloating the initial
-dubbing PR (rejected: Aura-2 only; OpenAI only; shipping both in one PR).
+so the private TTS trait is proven across two providers and languages outside
+Aura-2's set are supported without bloating the initial dubbing PR (rejected:
+Aura-2 only; OpenAI only; shipping both in one PR).
 
 Guidance:
 

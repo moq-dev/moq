@@ -105,7 +105,7 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
   and bounded-lag skip: Deepgram Aura-2 first behind a private TTS trait
   ([dubbing](/quest/m3/transcribe/dub.md)), followed by an OpenAI TTS
   fallback ([OpenAI TTS](/quest/m3/transcribe/dub-openai.md)) to prove the
-  trait across streaming WebSocket and HTTP backends and cover languages
-  outside Aura-2's set (rejected: Aura-2 only; OpenAI only; ducked original
-  audio mix; time-stretching before measuring lag; truncating active clips;
-  waiting for final segments instead of streaming clause deltas).
+  trait across two providers and cover languages outside Aura-2's set
+  (rejected: Aura-2 only; OpenAI only; ducked original audio mix;
+  time-stretching before measuring lag; truncating active clips; waiting for
+  final segments instead of streaming clause deltas).

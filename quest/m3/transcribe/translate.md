@@ -55,7 +55,10 @@ interim's text up to its last clause boundary as stable. It asks the model to
 translate only the stable text past what it already translated, continuing
 the segment's translation, and publishes the result appended as the next
 interim. When the source's final arrives, the translator translates the rest
-and publishes the final. If the backend's final rewrote text the translator
+and publishes the final. (When speaker diarization is enabled, the translator
+defers provisional interim clauses until `is_final` settles speaker splits so
+a clause moved to a new speaker segment ID is never translated twice; see
+[STT features](/quest/m3/transcribe/stt-features.md).) If the backend's final rewrote text the translator
 already translated, the translation keeps its published words and continues
 from the last clause boundary the two share. A rewritten phrase may then read
 twice; the rule that published text never changes accepts that, as the
