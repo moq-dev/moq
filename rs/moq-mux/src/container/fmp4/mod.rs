@@ -661,6 +661,7 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 		frames.push(Frame {
 			// Placeholder until the earliest PTS is known.
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			payload,
 			keyframe,
 			duration,
@@ -1930,6 +1931,7 @@ mod tests {
 		let timescale = moq_net::Timescale::MICRO;
 		let input = vec![Frame {
 			timestamp: ts(0),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: Some(ts(33_333)),
@@ -1950,6 +1952,7 @@ mod tests {
 		let over = u64::from(u32::MAX) + 1;
 		let frame = Frame {
 			timestamp: Timestamp::from_scale(0, timescale.as_u64()).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: Some(Timestamp::from_scale(over, timescale.as_u64()).unwrap()),
@@ -1973,6 +1976,7 @@ mod tests {
 		let timescale = moq_net::Timescale::SECOND;
 		let frame = Frame {
 			timestamp: Timestamp::from_secs(0).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: Some(Timestamp::from_millis(33).unwrap()),
@@ -1997,6 +2001,7 @@ mod tests {
 		let output_scale = moq_net::Timescale::MILLI;
 		let frame = Frame {
 			timestamp: Timestamp::new(0, input_scale).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: Some(Timestamp::new(1, input_scale).unwrap()),
@@ -2017,6 +2022,7 @@ mod tests {
 		let timescale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
 		let frame = Frame {
 			timestamp: Timestamp::from_secs(1 << 40).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,
@@ -2032,18 +2038,21 @@ mod tests {
 		let input = vec![
 			Frame {
 				timestamp: ts(0),
+				decode: None,
 				payload: Bytes::from_static(&[0x00]),
 				keyframe: true,
 				duration: Some(ts(33_000)),
 			},
 			Frame {
 				timestamp: ts(99_000),
+				decode: None,
 				payload: Bytes::from_static(&[0x01]),
 				keyframe: false,
 				duration: Some(ts(33_000)),
 			},
 			Frame {
 				timestamp: ts(33_000),
+				decode: None,
 				payload: Bytes::from_static(&[0x02]),
 				keyframe: false,
 				duration: Some(ts(33_000)),
@@ -2070,6 +2079,7 @@ mod tests {
 		let input: Vec<Frame> = (0..3)
 			.map(|i| Frame {
 				timestamp: Timestamp::new(i * 960, timescale).unwrap(),
+				decode: None,
 				payload: Bytes::from_static(&[0x00]),
 				keyframe: i == 0,
 				duration: Some(Timestamp::new(960, timescale).unwrap()),
@@ -2150,6 +2160,7 @@ mod tests {
 	fn sample(micros: u64) -> Frame {
 		Frame {
 			timestamp: ts(micros),
+			decode: None,
 			payload: Bytes::from_static(&[0xAB]),
 			keyframe: false,
 			duration: Some(ts(33_000)),
@@ -2286,6 +2297,7 @@ mod tests {
 		let timescale = moq_net::Timescale::new(90_000).unwrap();
 		let frames = vec![Frame {
 			timestamp: ts(0),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,

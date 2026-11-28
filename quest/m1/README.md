@@ -2,11 +2,23 @@
 
 ## Goal
 
-Improvements, fixes, and checks that need no semver-breaking release: each
-lands on `main` and ships with the next cut, or as a `release` patch when it
-is backported. Breaking work for the same cut lives in m2.
+Until the `0.22.0` cut, only in-flight additive work that open PRs claimed
+before 2026-11-28: each lands with its PR, and what a PR leaves moves to m3
+once its claim ends. Non-breaking work the cut or lite-07 finalization
+requires joins m2, and other additive work joins m3. The cut does not wait on
+m1.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
+to m2 hold only what the cut or lite-07 finalization needs, plus
+semver-breaking API or wire changes; every other quest moved to m3 and ships
+later in a patch version (rejected: moving only m1; keeping all of m0 as an
+ops bucket). The [questline](/quest/README.md) states the rule.
+
+Every m1 quest no open PR claimed moved to m3. Each quest still here was
+claimed by an open PR on 2026-11-28 (open PRs from `quest/m1/` branches show
+the current claims).
 
 Decided 2026-11-05 (maintainer, milestone re-cut): m1 is the additive half
 of what was "everything before the cut" (2026-10-20). A quest stays here when

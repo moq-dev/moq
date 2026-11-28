@@ -256,8 +256,8 @@ async fn a_huge_run_settles_in_one_step() {
 			if let Huge::Skipped = huge {
 				chain.source.skip_groups(1..FAR);
 			}
-			// Presented just after group 0, since its key in milliseconds overflows.
-			write(&chain.source, FAR, 1);
+			// Presented at its key, as a lite-07 group starts at its first frame.
+			write(&chain.source, FAR, FAR);
 			let _finished = chain.source.clone().finish().unwrap();
 
 			let started = kio::clock::now();
@@ -559,7 +559,7 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 		let group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
 		group.abort(moq_net::Error::App(1)).unwrap();
 	}
-	write(&chain.source, 2, 0);
+	write(&chain.source, 2, 2);
 	assert_eq!(received(&mut reader).await, [2].into());
 
 	let mut viewer = chain.subscribe(reading(None, [support::keys(0..3)])).await;

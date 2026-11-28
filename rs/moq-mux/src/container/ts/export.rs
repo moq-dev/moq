@@ -2140,6 +2140,7 @@ where
 		self.number(&mut out);
 		Ok(Some(Frame {
 			timestamp,
+			decode: None,
 			duration: None,
 			payload: Bytes::from(out),
 			keyframe: false,
@@ -4270,6 +4271,7 @@ where
 			self.number(&mut payload);
 			let frame = Frame {
 				timestamp: slot_stamp(slot.index)?,
+				decode: None,
 				duration: None,
 				payload: Bytes::from(payload),
 				keyframe: slot.keyframe,
@@ -5459,6 +5461,7 @@ mod tests {
 			let mut pending = super::Pending {
 				frame: super::Frame {
 					timestamp: ms(at),
+					decode: None,
 					duration: None,
 					payload: bytes::Bytes::new(),
 					keyframe,
@@ -5579,6 +5582,7 @@ mod tests {
 			}
 			let frame = |at| super::Frame {
 				timestamp: ms(at),
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from_static(b"frame"),
 				keyframe: at % 600 == 0,
@@ -5667,6 +5671,7 @@ mod tests {
 		packet.extend_from_slice(&[0x01, 0x52, 0xf2]);
 		let frame = super::Frame {
 			timestamp: ms(0),
+			decode: None,
 			payload: packet.clone().into(),
 			keyframe: true,
 			duration: None,
@@ -5713,6 +5718,7 @@ mod tests {
 					}
 					let frame = super::Frame {
 						timestamp: ms(0),
+						decode: None,
 						payload: payload.into(),
 						keyframe,
 						duration: None,

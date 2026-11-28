@@ -9,6 +9,7 @@ import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY, liveMillis, rangeBudget, rangeTime } from "../window.ts";
 import * as Duration from "./duration.ts";
+import { servedError } from "./error.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./identity.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -1528,7 +1529,8 @@ export class SubscribeDrop {
 			start,
 			end,
 			// Before lite-07 the code is the application's, so it says nothing of why.
-			error: hasDropCode(version) ? toStreamCode(err) : 0,
+			// The groups are a served track's: its violation is another session's (see servedError).
+			error: hasDropCode(version) ? toStreamCode(servedError(err)) : 0,
 		});
 	}
 

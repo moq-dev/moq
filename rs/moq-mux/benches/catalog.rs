@@ -258,6 +258,7 @@ fn bench_write_order(c: &mut Criterion) {
 							producer
 								.write(moq_mux::container::Frame {
 									timestamp: Timestamp::from_micros(timestamp.as_micros() as u64).unwrap(),
+									decode: None,
 									payload: bytes::Bytes::from_static(&[0; 64]),
 									keyframe: frame == 0,
 									duration: None,

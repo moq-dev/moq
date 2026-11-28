@@ -364,6 +364,7 @@ mod tests {
 	fn frame(micros: u64, keyframe: bool) -> Frame {
 		Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe,
 			duration: None,
@@ -448,6 +449,7 @@ mod tests {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::ZERO,
+				decode: None,
 				// Key frame tag, start code, and 320x240 geometry.
 				payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]),
 				keyframe: true,
@@ -606,6 +608,7 @@ mod tests {
 		let opus = Muxer::audio(&AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap();
 		let packet = Frame {
 			timestamp: at(3_980_500),
+			decode: None,
 			payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 			keyframe: true,
 			duration: None,
@@ -644,6 +647,7 @@ mod tests {
 
 		let frame = Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,
@@ -657,6 +661,7 @@ mod tests {
 		let muxer = video_muxer();
 		let input = [0, 33_333, 66_667].map(|micros| Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: micros == 0,
 			duration: None,
@@ -679,6 +684,7 @@ mod tests {
 
 		let frame = Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,
@@ -697,6 +703,7 @@ mod tests {
 
 		let frame = Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,
@@ -727,6 +734,7 @@ mod tests {
 		// One 30 fps frame period is 3000 ticks at 90 kHz.
 		let frame = Frame {
 			timestamp: Timestamp::from_scale(3_000, 90_000).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: Some(Timestamp::from_scale(3_000, 90_000).unwrap()),
@@ -746,6 +754,7 @@ mod tests {
 		let muxer = video_muxer().with_timescale(timescale).unwrap();
 		let frame = Frame {
 			timestamp: Timestamp::ZERO,
+			decode: None,
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: true,
 			duration: None,

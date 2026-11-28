@@ -12,6 +12,15 @@
 //! AVCC/HVCC -> Annex-B rewrite. The whole encoder lives on the dedicated encode
 //! thread (see `encode::sink`), so its COM apartment stays balanced and its
 //! blocking waits never park a tokio worker.
+//!
+//! Rate control is settled at open from what the MFT lists, and reported in
+//! [`Applied`]. An MFT that lists peak-constrained VBR runs it with the bitrate
+//! as both the mean and the leaky bucket's drain rate, so a busy scene is held
+//! to the cap; any other runs CBR at the cap. Either way a quantizer floor
+//! ([`MIN_QP`]), where the MFT supports one, is the quality: a calm scene the
+//! floor already codes cleanly spends less than the cap. Microsoft's own H.265
+//! MFT, for one, runs CBR when asked for a mode it lacks, so what the MFT lists
+//! decides, not whether setting the mode succeeds.
 
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
@@ -19,11 +28,12 @@ use std::ptr;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
-use windows::Win32::Foundation::{VARIANT_BOOL, VARIANT_TRUE};
+use windows::Win32::Foundation::{S_OK, VARIANT_BOOL, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-	CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
-	CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
+	CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
+	CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame,
+	CODECAPI_AVEncVideoMinQP, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
 	IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform, METransformDrainComplete,
 	METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
 	MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
@@ -38,9 +48,10 @@ use windows::Win32::Media::MediaFoundation::{
 	MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoPrimaries_BT2020,
 	MFVideoPrimaries_EBU3213, MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_709, MFVideoTransFunc_2084,
 	MFVideoTransFunc_HLG, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709, MFVideoTransferMatrix_BT2020_10,
-	eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
+	eAVEncCommonRateControlMode_CBR, eAVEncCommonRateControlMode_PeakConstrainedVBR, eAVEncH264VProfile_High,
+	eAVEncH265VProfile_Main_420_8,
 };
-use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
+use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_I4, VT_UI4, VariantClear};
 use windows::core::{GUID, Interface};
 
 use super::super::encoder::{Applied, Codec, Config};
@@ -58,6 +69,17 @@ pub(crate) const NAME: &str = "mediafoundation";
 /// MFT echoes the sample time on its output, which is what pairs the two back up.
 const HNS_PER_SEC: i64 = 10_000_000;
 
+/// The quantizer floor, which is the quality: the coarsest quantizer that kept
+/// a 720p30 talking head at VMAF 95, the usual mark for transparent, on the
+/// Intel and AMD encoders measured through VA-API (`moq_vaapi`'s `MIN_QP`).
+/// The same silicon sits behind their Media Foundation MFTs.
+const MIN_QP: u32 = 24;
+
+/// The rate controller's buffer, in frames of the bitrate. A second of buffer
+/// lets a busy second after a still one run that much over the cap; three
+/// frames is what VA-API and NVENC hold to.
+const BUFFER_FRAMES: u32 = 3;
+
 pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
 	events: IMFMediaEventGenerator,
@@ -67,6 +89,8 @@ pub(crate) struct MediaFoundation {
 	height: u32,
 	framerate: crate::FrameRate,
 	bitrate: u32,
+	/// How the MFT holds the stream to `bitrate`, settled at open.
+	rate: Rate,
 	/// Keyframe interval in frames.
 	gop: u32,
 	/// The color space of the input frames, stamped onto both media types so the
@@ -142,12 +166,14 @@ impl MediaFoundation {
 		let codec_api = transform
 			.cast::<ICodecAPI>()
 			.map_err(|e| mf_err("MFT has no ICodecAPI", e))?;
+		let rate = Rate::probe(&codec_api);
 
 		tracing::info!(
 			encoder = NAME,
 			codec = format.label,
 			width = config.width,
 			height = config.height,
+			%rate,
 			"opened encoder"
 		);
 		Ok(Box::new(Self {
@@ -159,6 +185,7 @@ impl MediaFoundation {
 			height: config.height,
 			framerate: config.framerate,
 			bitrate: clamp_u32(config.resolved_bitrate().as_bps()),
+			rate,
 			gop: config.keyframe_interval(),
 			color: config.resolved_color(),
 			phase: Phase::Unstarted,
@@ -239,21 +266,87 @@ impl MediaFoundation {
 		}
 	}
 
+	/// Set the codec properties before the media types, which is when the MFT
+	/// reads the static ones such as the rate control mode.
 	fn configure_codec_api(&self) -> Result<(), Error> {
 		// Low latency: no B-frames / lookahead, so output tracks input closely.
 		self.set_codec(&CODECAPI_AVLowLatencyMode, variant_bool(true))?;
-		self.set_codec(
-			&CODECAPI_AVEncCommonRateControlMode,
-			variant_u32(eAVEncCommonRateControlMode_CBR.0 as u32),
-		)?;
-		self.set_codec(&CODECAPI_AVEncCommonMeanBitRate, variant_u32(self.bitrate))?;
 		self.set_codec(&CODECAPI_AVEncMPVGOPSize, variant_u32(self.gop))?;
+
+		// The rate controls the MFT advertised at open: refusing one now would
+		// leave the stream on a rate control [`Applied`] does not report.
+		let mode = match self.rate.mode {
+			Mode::Capped => eAVEncCommonRateControlMode_PeakConstrainedVBR,
+			Mode::Constant => eAVEncCommonRateControlMode_CBR,
+		};
+		self.require(&CODECAPI_AVEncCommonRateControlMode, mode.0 as u32, "rate control mode")?;
+		self.set_rate(self.bitrate, None)?;
+		if self.rate.floor {
+			self.require(&CODECAPI_AVEncVideoMinQP, MIN_QP, "quantizer floor")?;
+		}
 		Ok(())
 	}
 
+	/// Hold the stream to `bitrate`, moving from `from` (`None` before the
+	/// stream starts): the mean, the peak in peak-constrained VBR, and the
+	/// buffer. A raise sets the peak first and a cut sets the mean first, so the
+	/// mean never passes the peak in between. A refusal puts back what this call
+	/// already set, so the MFT runs at the rate the encoder reports.
+	fn set_rate(&self, bitrate: u32, from: Option<u32>) -> Result<(), Error> {
+		let mut knobs = match from.is_some_and(|from| bitrate < from) {
+			true => vec![Knob::Mean, Knob::Peak],
+			false => vec![Knob::Peak, Knob::Mean],
+		};
+		knobs.retain(|knob| *knob != Knob::Peak || self.rate.mode == Mode::Capped);
+		// Mid-stream, only where the MFT says the buffer can change now: one
+		// that cannot keeps the buffer it opened with, and the mean and peak
+		// still hold the cap.
+		if self.rate.buffer && (from.is_none() || self.modifiable(&CODECAPI_AVEncCommonBufferSize)) {
+			knobs.push(Knob::Buffer);
+		}
+		for (done, knob) in knobs.iter().enumerate() {
+			if let Err(err) = self.set_knob(*knob, bitrate) {
+				// The error already reports the retune failed; a refused restore
+				// on top of it is a second failure with nothing left to try.
+				if let Some(from) = from {
+					for knob in knobs[..done].iter().rev() {
+						let _ = self.set_knob(*knob, from);
+					}
+				}
+				return Err(err);
+			}
+		}
+		Ok(())
+	}
+
+	/// Set one rate control to what holds the stream to `bitrate`.
+	fn set_knob(&self, knob: Knob, bitrate: u32) -> Result<(), Error> {
+		match knob {
+			Knob::Mean => self.require(&CODECAPI_AVEncCommonMeanBitRate, bitrate, "mean bitrate"),
+			Knob::Peak => self.require(&CODECAPI_AVEncCommonMaxBitRate, bitrate, "peak bitrate"),
+			Knob::Buffer => self.require(
+				&CODECAPI_AVEncCommonBufferSize,
+				buffer_bytes(bitrate, self.framerate),
+				"rate control buffer",
+			),
+		}
+	}
+
+	/// Whether the MFT accepts `api` in its current state. Only `S_OK` says so,
+	/// as with [`supports`].
+	fn modifiable(&self, api: &GUID) -> bool {
+		unsafe { self.codec_api.IsModifiable(api) == S_OK }
+	}
+
+	/// Set a codec property the encoder cannot run correctly without.
+	fn require(&self, api: &GUID, value: u32, what: &str) -> Result<(), Error> {
+		unsafe { self.codec_api.SetValue(api, &variant_u32(value)) }
+			.map_err(|e| mf_err(&format!("set the {what} to {value}"), e))
+	}
+
 	fn set_codec(&self, api: *const windows::core::GUID, value: VARIANT) -> Result<(), Error> {
-		// Some knobs are advisory; a failure here shouldn't sink the encoder, but
-		// it's worth surfacing in logs.
+		// Low latency and the GOP are advisory: the stream is still correct
+		// without them, so a refusal is only logged.
 		if let Err(e) = unsafe { self.codec_api.SetValue(api, &value) } {
 			tracing::debug!(error = %e, "encoder codec-api set failed");
 		}
@@ -618,7 +711,7 @@ impl MediaFoundation {
 	///
 	/// Falls back to the oldest frame still outstanding when the MFT reports no
 	/// usable sample time: the encoder emits access units in the order it was fed
-	/// (low-latency CBR, no reordering), so oldest-first is the right pairing, and
+	/// (low latency, no reordering), so oldest-first is the right pairing, and
 	/// dropping the packet or stamping it with the wrong frame would both be worse.
 	fn take_timestamp(&mut self, sample_time: Option<i64>) -> Timestamp {
 		let found = sample_time.and_then(|time| self.pending.iter().position(|(fed, _)| *fed == time));
@@ -707,12 +800,16 @@ impl Backend for MediaFoundation {
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		let bitrate = clamp_u32(bitrate);
 
-		// Not `set_codec`: that swallows failures because the knobs it sets at
-		// open are advisory, whereas an MFT refusing a rate change means the
-		// control loop is talking to itself and should hear about it.
-		let value = variant_u32(bitrate);
-		unsafe { self.codec_api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value) }
-			.map_err(|e| mf_err(&format!("set bitrate to {bitrate}"), e))?;
+		// Before the first frame the MFT has no rate control mode yet, so the
+		// rate waits for `configure_codec_api` to set it with the rest.
+		if matches!(self.phase, Phase::Unstarted) {
+			self.bitrate = bitrate;
+			return Ok(());
+		}
+
+		// An MFT refusing a rate change means the control loop is talking to
+		// itself, and a peak left behind breaks the cap, so either is an error.
+		self.set_rate(bitrate, Some(self.bitrate))?;
 
 		// Keep the cache in step: a later format renegotiation rebuilds the
 		// output type from it, and it would otherwise reinstate the old rate.
@@ -731,8 +828,114 @@ impl Backend for MediaFoundation {
 	fn applied(&self) -> Applied {
 		// `set_codec` only logs a refused knob, and the MFT is configured lazily on
 		// the first frame, so nothing confirms low-latency mode took.
-		Applied::unconfirmed("AVLowLatencyMode requested, unconfirmed; CBR")
+		Applied::unconfirmed(format!("AVLowLatencyMode requested, unconfirmed; {}", self.rate))
 	}
+}
+
+/// How the MFT holds the stream to the cap, settled at open from the controls
+/// it advertises.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rate {
+	mode: Mode,
+	/// Whether the MFT supports a quantizer floor, set at [`MIN_QP`].
+	floor: bool,
+	/// Whether the MFT supports sizing the buffer, set at [`BUFFER_FRAMES`];
+	/// otherwise it keeps its own.
+	buffer: bool,
+}
+
+/// One of the codec properties `set_rate` moves with the bitrate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knob {
+	Mean,
+	Peak,
+	Buffer,
+}
+
+/// The rate control mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+	/// Peak-constrained VBR, the bitrate both the mean and the leaky bucket's
+	/// drain rate.
+	Capped,
+	/// CBR at the bitrate, for an MFT that does not list peak-constrained VBR.
+	Constant,
+}
+
+impl Rate {
+	/// Read what the MFT advertises; nothing is set until the stream starts.
+	fn probe(codec_api: &ICodecAPI) -> Self {
+		let capped = rate_modes(codec_api).contains(&(eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32));
+		Self {
+			mode: if capped { Mode::Capped } else { Mode::Constant },
+			floor: supports(codec_api, &CODECAPI_AVEncVideoMinQP),
+			buffer: supports(codec_api, &CODECAPI_AVEncCommonBufferSize),
+		}
+	}
+}
+
+/// Whether the MFT supports `api`. Only `S_OK` says so: the binding's `Result`
+/// would also take `S_FALSE`, a success code that answers no.
+fn supports(codec_api: &ICodecAPI, api: &GUID) -> bool {
+	unsafe { (Interface::vtable(codec_api).IsSupported)(Interface::as_raw(codec_api), api) == S_OK }
+}
+
+impl std::fmt::Display for Rate {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.mode {
+			Mode::Capped => f.write_str("peak-constrained VBR at the cap")?,
+			Mode::Constant => f.write_str("CBR at the cap")?,
+		}
+		match self.floor {
+			true => write!(f, ", QP floor {MIN_QP}")?,
+			false => f.write_str(", no QP floor")?,
+		}
+		match self.buffer {
+			true => write!(f, ", {BUFFER_FRAMES}-frame buffer"),
+			false => f.write_str(", the MFT's own buffer"),
+		}
+	}
+}
+
+/// The rate control modes the MFT lists, empty when it lists none (listing is
+/// optional for an MFT).
+fn rate_modes(codec_api: &ICodecAPI) -> Vec<u32> {
+	let mut values: *mut VARIANT = ptr::null_mut();
+	let mut count = 0u32;
+	if unsafe { codec_api.GetParameterValues(&CODECAPI_AVEncCommonRateControlMode, &mut values, &mut count) }.is_err()
+		|| values.is_null()
+	{
+		return Vec::new();
+	}
+	// SAFETY: the MFT handed back `count` VARIANTs in one CoTaskMemAlloc block,
+	// which we own: each is cleared, then the block freed.
+	let entries = unsafe { std::slice::from_raw_parts_mut(values, count as usize) };
+	let modes = entries
+		.iter_mut()
+		.filter_map(|value| {
+			let inner = unsafe { &value.Anonymous.Anonymous };
+			let mode = match inner.vt {
+				VT_UI4 => Some(unsafe { inner.Anonymous.ulVal }),
+				VT_I4 => u32::try_from(unsafe { inner.Anonymous.lVal }).ok(),
+				_ => None,
+			};
+			// Clearing an integer frees nothing, so a failure leaks nothing either.
+			let _ = unsafe { VariantClear(value) };
+			mode
+		})
+		.collect();
+	unsafe {
+		windows::Win32::System::Com::CoTaskMemFree(Some(values as *const std::ffi::c_void));
+	}
+	modes
+}
+
+/// [`BUFFER_FRAMES`] of `bitrate`, in bytes, the unit Media Foundation's H.264
+/// and H.265 encoders take.
+fn buffer_bytes(bitrate: u32, framerate: crate::FrameRate) -> u32 {
+	let bytes = u64::from(bitrate) * u64::from(BUFFER_FRAMES) * u64::from(framerate.denominator())
+		/ (8 * u64::from(framerate.numerator().max(1)));
+	bytes.clamp(1, u64::from(u32::MAX)) as u32
 }
 
 /// Pick the first hardware encoder MFT (NV12 in, `subtype` out).
@@ -856,4 +1059,80 @@ fn variant_bool(value: bool) -> VARIANT {
 		inner.Anonymous.boolVal = if value { VARIANT_TRUE } else { VARIANT_BOOL(0) };
 	}
 	variant
+}
+
+#[cfg(test)]
+mod tests {
+	use super::super::test_util::{Scene, spend};
+	use super::*;
+
+	/// What the first hardware MFT for `codec` advertises, or `None` without one.
+	fn advertised(codec: Codec) -> Option<Rate> {
+		let _com = ComGuard::new().ok()?;
+		let transform = enumerate_encoder(OutputFormat::for_codec(codec).subtype).ok()?;
+		Some(Rate::probe(&transform.cast::<ICodecAPI>().ok()?))
+	}
+
+	/// A calm scene spends well under a generous cap, held there by the
+	/// quantizer floor; a busy one, and a still one turning busy, are held to
+	/// the cap plus the buffer, and to a lower cap once `set_bitrate` moves it.
+	/// An MFT keeping its own buffer is allowed a second of it. One opening
+	/// keyframe, so the seconds measured are rate control's alone. Skips without
+	/// a hardware MFT, which GitHub's Windows runners lack.
+	#[test]
+	fn quality_under_a_cap() {
+		for codec in [Codec::H264, Codec::H265] {
+			let Some(rate) = advertised(codec) else {
+				eprintln!("skipping: no hardware {codec:?} MFT");
+				continue;
+			};
+			eprintln!("{codec:?}: {rate}");
+			let mut config = Config::new(640, 360, crate::FrameRate::new(30, 1).unwrap());
+			config.kind = crate::encode::Kind::Named(NAME.into());
+			config.codec = codec;
+			config.join = std::time::Duration::from_secs(10);
+			let at = |bps: u64| Config {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(bps)),
+				..config.clone()
+			};
+			let ceiling = |cap: u64| match rate.buffer {
+				true => cap + cap * u64::from(BUFFER_FRAMES) / 30,
+				false => 2 * cap,
+			};
+
+			let calm = spend(&at(8_000_000), Scene::Calm, None).unwrap();
+			eprintln!("{codec:?} calm under 8 Mbit/s: {calm:?}");
+			if rate.floor {
+				assert!(
+					calm.mean < 8_000_000 / 3,
+					"{codec:?}: a calm scene filled the cap: {calm:?}"
+				);
+			}
+
+			let busy = spend(&at(2_000_000), Scene::Busy, None).unwrap();
+			eprintln!("{codec:?} busy under 2 Mbit/s: {busy:?}");
+			assert!(
+				busy.mean > 1_000_000,
+				"{codec:?}: a busy scene fell short of the cap: {busy:?}"
+			);
+			assert!(
+				busy.peak <= ceiling(2_000_000),
+				"{codec:?}: a busy scene broke the cap: {busy:?}"
+			);
+
+			let waking = spend(&at(2_000_000), Scene::Waking, None).unwrap();
+			eprintln!("{codec:?} still turning busy under 2 Mbit/s: {waking:?}");
+			assert!(
+				waking.peak <= ceiling(2_000_000),
+				"{codec:?}: a still scene turning busy broke the cap: {waking:?}"
+			);
+
+			let moved = spend(&at(2_000_000), Scene::Busy, Some(1_000_000)).unwrap();
+			eprintln!("{codec:?} busy, cap moved to 1 Mbit/s: {moved:?}");
+			assert!(
+				moved.peak <= ceiling(1_000_000),
+				"{codec:?}: the cap did not follow set_bitrate: {moved:?}"
+			);
+		}
+	}
 }

@@ -311,9 +311,9 @@ pub struct Content {
 impl Content {
 	/// Fold another readout into this one, counter by counter.
 	pub(crate) fn add(&mut self, other: Self) {
-		self.bytes += other.bytes;
-		self.frames += other.frames;
-		self.groups += other.groups;
+		self.bytes = self.bytes.saturating_add(other.bytes);
+		self.frames = self.frames.saturating_add(other.frames);
+		self.groups = self.groups.saturating_add(other.groups);
 	}
 }
 
@@ -556,19 +556,19 @@ pub struct Traffic {
 impl Traffic {
 	/// Fold another readout into this one, counter by counter.
 	pub fn add(&mut self, other: Traffic) {
-		self.announces_started += other.announces_started;
-		self.announces_ended += other.announces_ended;
-		self.announced_bytes += other.announced_bytes;
-		self.broadcasts_started += other.broadcasts_started;
-		self.broadcasts_ended += other.broadcasts_ended;
-		self.subscriptions_started += other.subscriptions_started;
-		self.subscriptions_ended += other.subscriptions_ended;
-		self.fetches += other.fetches;
-		self.bytes += other.bytes;
-		self.frames += other.frames;
-		self.groups += other.groups;
-		self.datagrams += other.datagrams;
-		self.inflated += other.inflated;
+		self.announces_started = self.announces_started.saturating_add(other.announces_started);
+		self.announces_ended = self.announces_ended.saturating_add(other.announces_ended);
+		self.announced_bytes = self.announced_bytes.saturating_add(other.announced_bytes);
+		self.broadcasts_started = self.broadcasts_started.saturating_add(other.broadcasts_started);
+		self.broadcasts_ended = self.broadcasts_ended.saturating_add(other.broadcasts_ended);
+		self.subscriptions_started = self.subscriptions_started.saturating_add(other.subscriptions_started);
+		self.subscriptions_ended = self.subscriptions_ended.saturating_add(other.subscriptions_ended);
+		self.fetches = self.fetches.saturating_add(other.fetches);
+		self.bytes = self.bytes.saturating_add(other.bytes);
+		self.frames = self.frames.saturating_add(other.frames);
+		self.groups = self.groups.saturating_add(other.groups);
+		self.datagrams = self.datagrams.saturating_add(other.datagrams);
+		self.inflated = self.inflated.saturating_add(other.inflated);
 		self.stale.add(other.stale);
 	}
 
@@ -691,23 +691,23 @@ impl Presence {
 	pub fn add(&mut self, other: Presence) {
 		self.sessions_refused.add(other.sessions_refused);
 		self.sessions_failed.add(other.sessions_failed);
-		self.requests += other.requests;
-		self.wire_tx += other.wire_tx;
-		self.wire_rx += other.wire_rx;
-		self.wire_lost += other.wire_lost;
-		self.cwnd_blocked_us += other.cwnd_blocked_us;
-		self.pacing_blocked_us += other.pacing_blocked_us;
-		self.credit_stalls += other.credit_stalls;
-		self.credit_stalled_us += other.credit_stalled_us;
-		self.credit_held_readers_us += other.credit_held_readers_us;
-		self.credit_held_evicted_us += other.credit_held_evicted_us;
-		self.sessions_started += other.sessions_started;
-		self.sessions_ended += other.sessions_ended;
-		self.sent_bytes += other.sent_bytes;
-		self.received_bytes += other.received_bytes;
+		self.requests = self.requests.saturating_add(other.requests);
+		self.wire_tx = self.wire_tx.saturating_add(other.wire_tx);
+		self.wire_rx = self.wire_rx.saturating_add(other.wire_rx);
+		self.wire_lost = self.wire_lost.saturating_add(other.wire_lost);
+		self.cwnd_blocked_us = self.cwnd_blocked_us.saturating_add(other.cwnd_blocked_us);
+		self.pacing_blocked_us = self.pacing_blocked_us.saturating_add(other.pacing_blocked_us);
+		self.credit_stalls = self.credit_stalls.saturating_add(other.credit_stalls);
+		self.credit_stalled_us = self.credit_stalled_us.saturating_add(other.credit_stalled_us);
+		self.credit_held_readers_us = self.credit_held_readers_us.saturating_add(other.credit_held_readers_us);
+		self.credit_held_evicted_us = self.credit_held_evicted_us.saturating_add(other.credit_held_evicted_us);
+		self.sessions_started = self.sessions_started.saturating_add(other.sessions_started);
+		self.sessions_ended = self.sessions_ended.saturating_add(other.sessions_ended);
+		self.sent_bytes = self.sent_bytes.saturating_add(other.sent_bytes);
+		self.received_bytes = self.received_bytes.saturating_add(other.received_bytes);
 		self.announces_peak = self.announces_peak.max(other.announces_peak);
 		self.subscriptions_peak = self.subscriptions_peak.max(other.subscriptions_peak);
-		self.routes_refused += other.routes_refused;
+		self.routes_refused = self.routes_refused.saturating_add(other.routes_refused);
 		self.routes.add(other.routes);
 	}
 

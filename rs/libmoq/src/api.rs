@@ -4198,8 +4198,10 @@ pub extern "C" fn moq_group_request_free(request: u32) -> i32 {
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
 /// The timestamp is converted to the track's timescale. A scale-less track has no
-/// time, so there it is the group's unscaled key (`has_scale` false). NULL fails with
-/// `MOQ_ERROR_INVALID_POINTER`.
+/// time, so there it is the group's unscaled key (`has_scale` false). A group's
+/// timestamps never decrease, so one below the previous frame's fails; a reordered
+/// (B-frame) stream publishes through a media container whose payload carries its
+/// presentation time. NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

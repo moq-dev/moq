@@ -1649,6 +1649,7 @@ mod read_tests {
 					&mut group,
 					&[moq_mux::container::Frame {
 						timestamp: timestamp(us),
+						decode: None,
 						payload,
 						keyframe: true,
 						duration: None,

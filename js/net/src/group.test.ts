@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
-import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
+import { FrameTooLarge, StreamCode, StreamError, TimestampMismatch } from "./error.ts";
 import { encodable } from "./flate/group.ts";
 import { Producer } from "./group.ts";
 import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { Timestamp } from "./time.ts";
-import { Producer as TrackProducer } from "./track.ts";
+import { Timescale, Timestamp } from "./time.ts";
+import { authoredInfo, Producer as TrackProducer } from "./track.ts";
 
 const dec = new TextDecoder();
 
@@ -32,7 +32,7 @@ test("a transport offset costs no frame storage and proves no group start", asyn
 		}
 		reader.close();
 	}
-	expect(() => producer.writeFrame(textFrame("more"))).not.toThrow();
+	expect(() => producer.writeFrame(textFrame("more", Timestamp.fromMillis(9000)))).not.toThrow();
 });
 
 test("a compressed group cannot start without its dictionary prefix", () => {
@@ -42,30 +42,76 @@ test("a compressed group cannot start without its dictionary prefix", () => {
 	producer.finish();
 });
 
-test("reordered frames keep the highest group PTS in live and later mirrors", () => {
-	const installed = new Manual().install();
-	try {
-		const producer = new Producer(0n);
-		const shared = producer.consume();
-		const live = producer.mirror();
-		for (const timestamp of [Timestamp.fromMillis(0), Timestamp.fromMicros(80_000), Timestamp.fromMillis(40)])
-			producer.writeFrame({ payload: new Uint8Array([1]), timestamp });
-		expect(hooks.groupTimestamp(shared)?.asMillis()).toBe(0);
-		expect(hooks.groupLatest(shared)?.asMillis()).toBe(80);
-		expect(hooks.groupLatest(live)?.asMillis()).toBe(80);
-		// A reader left with only the B-frame keeps the high PTS it already read past.
-		shared.tryReadFrame();
-		shared.tryReadFrame();
-		expect(hooks.groupLatest(shared)?.asMillis()).toBe(80);
-		// Reads are per handle, so a later mirror still replays every frame.
-		const later = producer.mirror();
-		expect(hooks.groupLatest(later)?.asMillis()).toBe(80);
-		expect(later.tryReadFrame()?.timestamp?.asMillis()).toBe(0);
-		for (const reader of [shared, live, later]) reader.close();
+// A group's timestamps never decrease, so a frame below its predecessor is refused where it is
+// written, whole or streamed; a tie is fine. Mirrors the Rust `a_frame_below_its_predecessor_is_refused`.
+test.each([
+	[0, [0, 40, 40], undefined],
+	[0, [0, 80, 40], 2],
+	[10, [15, 12, 20], 1],
+] as const)("from %d, frames at %p refuse the one at %p", (start, frames, refused) => {
+	const track = authoredInfo({ timescale: Timescale.MILLI });
+	for (const streamed of [false, true]) {
+		const producer = new Producer(BigInt(start));
+		hooks.bindGroupTimed(producer, track);
+		frames.forEach((ms, index) => {
+			const timestamp = Timestamp.fromMillis(ms);
+			const write = () => {
+				if (!streamed) return producer.writeFrame({ payload: new Uint8Array([index]), timestamp });
+				const frame = producer.createFrame({ size: 1, timestamp });
+				frame.write(new Uint8Array([index]));
+				frame.finish();
+			};
+			if (index === refused) expect(write).toThrow(TimestampMismatch);
+			else write();
+		});
 		producer.finish();
-	} finally {
-		installed.close();
 	}
+});
+
+// A lite-05/06 copy may carry the decreasing presentation times its publisher stamped, which lite-07
+// egress then refuses instead.
+test("an unchecked copy takes a frame below its predecessor", () => {
+	const producer = new Producer(0n);
+	hooks.bindGroupTimed(producer, authoredInfo({ timescale: Timescale.MILLI, unchecked: true }));
+	for (const ms of [0, 80, 40]) producer.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+	expect(hooks.groupFrameCount(producer)).toBe(3);
+	producer.finish();
+});
+
+// moq-timestamp Object IDs come from the held frames in order from frame 0: each is its timestamp's
+// offset from the start, or one past the previous ID on a tie. A copy without frame 0 proves none,
+// so only its last ID's lower bound is known. Mirrors the Rust `GroupState::timed_ids`.
+test("timed Object IDs follow the held frames from frame 0", () => {
+	const track = authoredInfo({ timescale: Timescale.MILLI });
+	const producer = new Producer(1000n);
+	hooks.bindGroupTimed(producer, track);
+	for (const ms of [1000, 1033, 1033, 1033, 1100]) producer.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+	const reader = producer.consume();
+	expect([0, 1, 2, 3, 4].map((index) => hooks.groupTimedId(reader, index, Timescale.MILLI))).toEqual([
+		0n,
+		33n,
+		34n,
+		35n,
+		100n,
+	]);
+	expect(hooks.groupLastTimedId(producer, Timescale.MILLI)).toBe(100n);
+	expect(hooks.groupTimedFrame(producer, 34n, Timescale.MILLI)).toBe(2);
+	expect(hooks.groupTimedFrame(producer, 36n, Timescale.MILLI)).toBe(4);
+	expect(hooks.groupTimedFrame(producer, 101n, Timescale.MILLI)).toBe(5);
+	reader.close();
+	producer.finish();
+
+	const resumed = new Producer(1000n);
+	hooks.startGroup(resumed, 2);
+	hooks.bindGroupTimed(resumed, track);
+	resumed.writeFrame(textFrame("x", Timestamp.fromMillis(1033)));
+	const tail = resumed.consume();
+	expect(hooks.groupTimedId(tail, 2, Timescale.MILLI)).toBeUndefined();
+	expect(hooks.groupTimedFrame(resumed, 33n, Timescale.MILLI)).toBeUndefined();
+	// The ID of frame 2 at 1033 is at least 33.
+	expect(hooks.groupLastTimedId(resumed, Timescale.MILLI)).toBe(33n);
+	tail.close();
+	resumed.finish();
 });
 
 test("a frame read late keeps the instant it landed, plain, compressed, or resumed", async () => {

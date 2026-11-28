@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.
 - [**breaking**] `encode::Config`, `decode::Config`, `resize::Config`, and `encode::Capture` pick hardware with one `device: Device` field, present on every platform and feature set, in place of the `cfg`-gated `vaapi` and `v4l2` paths. `Device::Render` also places NVENC and NVDEC on the NVIDIA GPU behind the node, where they used to open CUDA device 0, and a named node steers automatic backend selection to the backends that drive it.
 - [**breaking**] `capture::Config::cursor` is a `capture::Cursor` (`Drawn`, the default, or `Hidden`) instead of a bool, and `capture::Mode` is `#[non_exhaustive]`.
+- The Media Foundation encoder runs peak-constrained VBR with the bitrate as its peak where the hardware MFT lists that mode, and CBR at the bitrate otherwise, with a quantizer floor and a three-frame buffer where the MFT supports them, so a calm scene can spend less than the cap. `Applied::controls` reports which it got, and a rate change the MFT refuses is an error.
 
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-video-v0.1.9...moq-video-v0.1.10) - 2026-10-05
 

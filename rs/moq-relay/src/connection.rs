@@ -412,57 +412,63 @@ impl Lifecycle {
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
-pub async fn supervise(
+pub fn supervise(
 	session: moq_net::Session,
 	lease: auth::Lease,
 	mut serving: crate::shutdown::Serving,
 	registration: Option<crate::session::Registration>,
-) -> anyhow::Result<()> {
+) -> impl std::future::Future<Output = anyhow::Result<()>> {
 	let mut lease = lease.authorizing(&session);
 	let mut shutdown = serving.shutdown.clone();
-	let reported = lease.reported();
-	let result = loop {
-		let nudged = async {
-			match &registration {
-				Some(registration) => registration.nudged().await,
-				None => std::future::pending().await,
+	// An async block, not an async fn: an async fn stores each argument twice, as a capture and
+	// as a local, and this future lives as long as the session.
+	// The arguments above are bound when this is called, not on the first poll: any setup that
+	// can panic belongs inside the block, where the caller's isolation catches it.
+	async move {
+		let reported = lease.reported();
+		let result = loop {
+			let nudged = async {
+				match &registration {
+					Some(registration) => registration.nudged().await,
+					None => std::future::pending().await,
+				}
+			};
+			tokio::select! {
+				// A close withdraws every in-band credential in the same step, so the lease
+				// can end with it; the close is the cause, not a revocation.
+				biased;
+				err = session.closed() => {
+					lease.close_session(&err, session_bytes(&session));
+					break Err(err.into());
+				}
+				why = lease.ended() => {
+					tracing::info!(%why, "lease ended, closing session");
+					session.abort(crate::auth::error(&why));
+					lease.close(why, session_bytes(&session));
+					break Ok(());
+				}
+				_ = shutdown.started() => {
+					tracing::info!("relay shutting down; draining session");
+					// Empty URI: "reconnect to me" (the relay is restarting). The session's
+					// machine runs on its own, so the GOAWAY still reaches the wire while
+					// we wait here, and the drain deadline closes it if the peer stays.
+					serving.drain(&session).await;
+					lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
+					break Ok(());
+				}
+				() = nudged => lease.revalidate(),
 			}
 		};
-		tokio::select! {
-			// A close withdraws every in-band credential in the same step, so the lease
-			// can end with it; the close is the cause, not a revocation.
-			biased;
-			err = session.closed() => {
-				lease.close_session(&err, session_bytes(&session));
-				break Err(err.into());
-			}
-			why = lease.ended() => {
-				tracing::info!(%why, "lease ended, closing session");
-				session.abort(crate::auth::error(&why));
-				lease.close(why, session_bytes(&session));
-				break Ok(());
-			}
-			_ = shutdown.started() => {
-				tracing::info!("relay shutting down; draining session");
-				// Empty URI: "reconnect to me" (the relay is restarting). The session's
-				// machine runs on its own, so the GOAWAY still reaches the wire while
-				// we wait here, and the drain deadline closes it if the peer stays.
-				serving.drain(&session).await;
-				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
-				break Ok(());
-			}
-			() = nudged => lease.revalidate(),
+		// Abort requests are executed by the driver, so observe the transport close first.
+		session.closed().await;
+		serving.closed();
+		if let Some(registration) = &registration {
+			registration.closed();
 		}
-	};
-	// Abort requests are executed by the driver, so observe the transport close first.
-	session.closed().await;
-	serving.closed();
-	if let Some(registration) = &registration {
-		registration.closed();
+		// Keep `serving` and the registration until the end report finishes.
+		reported.await;
+		result
 	}
-	// Keep `serving` and the registration until the end report finishes.
-	reported.await;
-	result
 }
 
 /// The transport's own totals, read once at the end so the `end` event carries
