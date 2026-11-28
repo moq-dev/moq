@@ -55,11 +55,11 @@ quest gate just rs tla moq-net/verify/credit/ReceiveCredit.tla -config rs/moq-ne
 | `ReceiveCreditThree.cfg` | Three streams, readers from the start; also the allowance rules | 1.62M | 30 s |
 | `ReceiveCreditGuards.cfg` | `Guarded`, on one-unit frames | 12.1k | 4 min |
 | `ReceiveCreditMixedGuards.cfg` | `Guarded`, on one frame of a plain-read and a leased stream, with a shrink | 1.1k | 2 s |
-| `SendCredit.cfg` | two subscriptions, one newest first and one oldest first, one stream of credit | 89k | 5 s |
-| `SendCreditPriority.cfg` | one subscription at a higher priority, so its opens preempt; also `Guarded` | 99k | 2 min |
-| `SendCreditStreams.cfg` | two streams of credit, the orders swapped | 300k | 17 s |
-| `SendCreditLive.cfg` | a middle group of each subscription never finishes | 42.2k | 2 s |
-| `SendCreditMixed.cfg` | one subscription's groups at mixed policies (history only, live aging into history, live only), arriving in any order; also `Guarded` | 4.3k | 9 s |
+| `SendCredit.cfg` | two subscriptions, one newest first and one oldest first, one stream of credit | 88.3k | 5 s |
+| `SendCreditPriority.cfg` | one subscription at a higher priority, so its opens preempt; also `Guarded` | 102k | 2 min |
+| `SendCreditStreams.cfg` | two streams of credit, the orders swapped | 331k | 17 s |
+| `SendCreditLive.cfg` | a middle group of each subscription never finishes | 44.9k | 2 s |
+| `SendCreditMixed.cfg` | one subscription's groups at mixed policies (history only, live aging into history, live only), arriving in any order; also `Guarded` | 5.1k | 9 s |
 
 Every config passes. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
@@ -78,7 +78,7 @@ In a receive trace, follow `pc`, `q[s]`'s `arr`, `taken`, `rel`, and `msd`, `cha
 
 ## Coverage
 
-Sync commit: `065a4c184340f7fc6035db97695327ef7d7e69a8`. Run `git log 065a4c1843.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/model/group.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `e1dd5f6b5b9323ded4457c7a32b399c5fea9bede`. Run `git log e1dd5f6b5b.. -- rs/moq-quic/src/connection/streams rs/moq-net/src/coding/reader.rs rs/moq-net/src/transport/boxed.rs rs/moq-net/src/transport/open.rs rs/moq-net/src/model/pace.rs rs/moq-net/src/model/frame.rs rs/moq-net/src/model/group.rs rs/moq-net/src/lite/publisher.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
