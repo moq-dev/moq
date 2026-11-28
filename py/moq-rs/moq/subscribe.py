@@ -120,7 +120,8 @@ class TrackConsumer(_Stream[GroupConsumer]):
         Convenience for tracks using one-frame-per-group (like moq-boy's
         status/command tracks). Completed empty groups are skipped, and so are
         failed ones. Returns `None` only when the track ends, and raises only
-        when it ends with an error. Cancelling one call keeps the current group
+        when it ends with an error, or with ``Error.AlreadyCommitted`` once
+        this track was read with :meth:`recv_group`. Cancelling one call keeps the current group
         so a later :meth:`read_frame` or :meth:`next_group` still sees it.
         """
         return _frame(await self._inner.read_frame())
