@@ -3423,6 +3423,37 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 	}
 });
 
+// A probe asks on behalf of the demand's readers, at the demand's priority and order, so a
+// background copy's probe never promotes its groups above other traffic. Mirrors the Rust
+// `wanted_probes` caller.
+test("a lite-07 copy's probe carries the demand's policy", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const oldest = broadcast.track("video").subscribe(withMax({ priority: -10, delay: { max: null } }));
+	let reader: ReturnType<typeof oldest.fork> | undefined;
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 5n) }]);
+		await drainReactions();
+		reader = oldest.fork(withMax({ priority: -10, delay: { max: null }, ranges: [{ start: 3n }] }));
+		const probe = await SubscribeUpdate.decode(sent, version);
+		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n }, priority: -10 }]);
+	} finally {
+		reader?.close();
+		oldest.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A range the publisher answers with no group to deliver lands none of its groups, so the copy is
 // told, and an ordered read holds no later group back for its time. Only one whose end takes in its
 // time says so, as one following the live edge does: its publisher answers it empty only once the

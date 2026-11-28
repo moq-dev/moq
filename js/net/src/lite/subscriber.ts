@@ -3382,7 +3382,9 @@ export class Subscriber {
 				// The probes the readers' asks and joins need, as many as fit beside the rest: those left
 				// out go once an answer lets the readers waiting on others go.
 				const wanted = wantedProbes(entry, asks, joins, fitted.ranges);
-				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], wanted.probes);
+				// A probe asks on behalf of the demand's readers, at what the demand asks as a whole.
+				const asked = wanted.probes.map((probe) => withPolicy(probe, demandPolicy));
+				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], asked);
 				// A live probe asked afresh is retired and added again, which the publisher answers anew.
 				const renew = fittedReasks(wanted.reasked, entry.live, probed);
 				// The demand's ranges, then the probes, then the fills'.

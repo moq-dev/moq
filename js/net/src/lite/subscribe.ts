@@ -1721,7 +1721,7 @@ export class SubscribeDrop {
 	 * Name `[start, end)` given up as `hole`: lite-07 skips what was never produced with `SKIP`, and
 	 * earlier versions drop it as not found. A stale verdict names the budget it was judged under, no
 	 * limit being the publisher's own max age; an `OLD` drop with no verdict of its own, such as one
-	 * shed to make room, names `unjudged`. Mirrors the Rust `SubscribeDrop::given_up`.
+	 * whose upstream stream was reset as old, names `unjudged`. Mirrors the Rust `SubscribeDrop::given_up`.
 	 */
 	static hole(start: bigint, end: bigint, hole: Hole, unjudged: number | undefined, version: Version): SubscribeDrop {
 		if (hole.skip && hasSkip(version))

@@ -1389,7 +1389,7 @@ impl SubscribeDrop {
 	/// Name `groups` given up as `hole`: lite-07 skips what was never produced with `SKIP`,
 	/// and earlier versions drop it as not found. A stale verdict names the budget it was
 	/// judged under, no limit being the publisher's own max age; an `OLD` drop with no verdict
-	/// of its own, such as one shed to make room, names `unjudged`.
+	/// of its own, such as one whose upstream stream was reset as old, names `unjudged`.
 	pub(crate) fn given_up(
 		groups: std::ops::Range<u64>,
 		hole: &crate::track::Hole,

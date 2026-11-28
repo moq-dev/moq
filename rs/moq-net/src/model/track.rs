@@ -35911,6 +35911,33 @@ mod test {
 			.collect()
 	}
 
+	/// A newest-first ranked read gets past a group gone stale by its own successor to an older
+	/// one still fresh by its: groups arriving out of order age out of key order.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_ranked_read_passes_a_stale_group_to_an_older_fresh_one() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(1)));
+		let waiter = kio::Waiter::noop();
+		write_group(&producer, 3);
+		write_group(&producer, 4);
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group_above(None, &waiter) else {
+			panic!("the newest group is read");
+		};
+		assert_eq!(group.start, 4);
+
+		// Group 3 went stale behind group 4, while group 2 lands right behind group 1 now.
+		kio::clock::sim::advance(Duration::from_secs(2)).await;
+		write_group(&producer, 1);
+		write_group(&producer, 2);
+		// The ranked pick stops at group 3, which the read writes off, as group 2, before ranking
+		// again: group 1 still goes out ranked, above a waiting group's rank.
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group_above(Some((i8::MIN, i64::MIN)), &waiter) else {
+			panic!("group 1 outranks the floor");
+		};
+		assert_eq!(group.start, 1);
+	}
+
 	/// A group the source no longer has fails its fetch, and is named dropped for good only
 	/// once the live feed gave up on it too: a fetch answered before a late group header
 	/// arrives says nothing about the feed.

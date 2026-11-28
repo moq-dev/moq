@@ -5738,7 +5738,7 @@ enum Admit {
 	/// Any, in the subscription's order.
 	All,
 	/// Any, the group ranked highest by the policy it would go out at now first: one that gave
-	/// way may wait among them.
+	/// way may wait among them, or the ranges rank at more than one policy.
 	Best,
 	/// Behind a group waiting for credit it cannot make room for, ranked here: the group ranked
 	/// highest by the policy it would go out at now, if it outranks that one; see
@@ -5795,6 +5795,15 @@ impl Steer {
 			priority: self.priority,
 			order: self.order,
 		}
+	}
+
+	/// Whether its ranges rank groups at more than one policy, so the next group in the
+	/// subscription's order may not be its best.
+	fn mixed(&self) -> bool {
+		let mut policies = self.ranges.values().map(|steering| steering.policy);
+		policies
+			.next()
+			.is_some_and(|first| policies.any(|policy| policy != first))
 	}
 
 	/// The policy and budget of the live range with Range ID `id`, `None` when it carries
@@ -6936,9 +6945,16 @@ impl TrackRun {
 		let _ = self.children.poll(waiter);
 		// The group waiting for stream credit joins the others once it has one, or fails
 		// without one, and the cursor fills its place.
-		if let Some(opening) = &mut self.opening
-			&& let Poll::Ready(res) = opening.poll_open(&mut self.ctx.session, self.ctx.group.as_ref(), waiter)
-		{
+		let polled = self.opening.as_mut().map(|opening| {
+			let ranked = opening.rank();
+			let polled = opening.poll_open(&mut self.ctx.session, self.ctx.group.as_ref(), waiter);
+			(polled, opening.rank() != ranked)
+		});
+		// One that moved where it ranks, aging out of a range, is ranked anew against the cache.
+		if let Some((Poll::Pending, true)) = polled {
+			Idle::disarm(&mut self.idle);
+		}
+		if let Some((Poll::Ready(res), _)) = polled {
 			// The track side takes groups again.
 			Idle::disarm(&mut self.idle);
 			let mut opening = self.opening.take().expect("polled above");
@@ -7070,7 +7086,8 @@ impl TrackRun {
 		// is handed out, so none holds back one ranked higher: the backlog waits in the cache,
 		// which ages and evicts it. Behind a group that can make room, it waits there too.
 		let admit = match (&self.opening, self.stuck()) {
-			(None, _) if self.gave_way => Admit::Best,
+			// Free credit goes to the best group too where ranges rank at more than one policy.
+			(None, _) if self.gave_way || self.ctx.steer_seen.mixed() => Admit::Best,
 			(None, _) => Admit::All,
 			(Some(_), None) => Admit::None,
 			(Some(_), Some(waiting)) => Admit::Above(waiting),
@@ -12211,6 +12228,89 @@ mod serve_group_test {
 			3,
 			"every group went out"
 		);
+	}
+
+	/// A subscription whose ranges rank at more than one policy spends free credit on its
+	/// best group first, not the next in its order: an urgent live group opens before the
+	/// older history the same oldest-first order would take first.
+	#[kio::test]
+	async fn lite07_mixed_ranges_open_the_best_group_first() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_open_uni(gate.consume()).with_groups();
+		let log = session.log.clone();
+		let urgent = lite::Range {
+			start: Some(lite::Anchor::Absolute(track::Position::group(5))),
+			end: None,
+			priority: 9,
+			order: Order::Ascending,
+		};
+		let ranges = [urgent, from_group(0, 1, Order::Ascending)];
+		let open = [write_open(&mut track, 0), write_open(&mut track, 5)];
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &ranges);
+		let waiter = kio::Waiter::noop();
+
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		let groups: std::collections::HashMap<usize, i64> = log.groups().into_iter().collect();
+		let opened: Vec<i64> = (log.joins().into_iter()).map(|(_, group)| groups[&group]).collect();
+		let at = |priority: i8| crate::priority::group(priority, 0);
+		assert_eq!(opened, [at(9), at(1)], "by rank");
+		drop(open);
+	}
+
+	/// A group waiting for credit that ages out of its live join into a lower history rank is
+	/// ranked anew against the groups waiting in the cache, so one that now outranks it takes its
+	/// place without a track event first.
+	#[kio::test]
+	async fn lite07_a_waiting_group_aging_down_lets_a_cached_one_take_its_place() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume());
+		let live = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: None,
+				max: Some(Duration::from_secs(1)),
+			}),
+			end: Some(lite::Anchor::Absolute(track::Position::group(6))),
+			priority: 9,
+			order: Order::Descending,
+		};
+		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[live, from_group(0, 1, Order::Ascending)]);
+		let waiter = kio::Waiter::noop();
+
+		let mut open = vec![write_open(&mut track, 5)];
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(5));
+		// Only the history range wants group 1, below the live group waiting.
+		open.push(write_open(&mut track, 1));
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(
+			run.opening.as_ref().map(|serve| serve.key),
+			Some(5),
+			"group 1 ranks below"
+		);
+
+		// Group 6, past the live join's end, supersedes group 5, which ages past the join's max
+		// into the history range, where the older group 1 goes first.
+		open.push(write_open(&mut track, 6));
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(
+			run.opening.as_ref().map(|serve| serve.key),
+			Some(5),
+			"group 6 ranks below"
+		);
+		kio::clock::sim::advance(Duration::from_secs(2)).await;
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(1), "group 5 gave way");
+		drop(open);
 	}
 
 	/// Under congestion, history ranked below the group waiting for credit never holds back a

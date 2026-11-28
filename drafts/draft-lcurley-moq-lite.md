@@ -894,7 +894,7 @@ Dropping a whole held Group names `[start, max(End, start + 1))`.
 
 Drops are final on their subscription and, for any `Error Code` but `SKIP`, end active readers of affected Groups with it (unless another Group Stream already completed the Group).
 A publisher names each start once, besides the starts of a `GROUP_END` a reset may have cut ([Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
-An `OLD` drop's `Max Age` (ms + 1) is what the publisher judged the Groups stale under: the largest `Max Age` of the live joins covering them, or `0` for `Publisher Max Age`, which settles every reader. A drop with no verdict of its own, such as a Group given up for one that outranks it, names the narrowest `Max Age` the subscription's live joins ask.
+An `OLD` drop's `Max Age` (ms + 1) is what the publisher judged the Groups stale under: the largest `Max Age` of the live joins covering them, or `0` for `Publisher Max Age`, which settles every reader. A drop with no verdict of its own, such as a Group whose upstream stream was reset `OLD`, names the narrowest `Max Age` the subscription's live joins ask.
 A relay settles downstream readers with an upstream `OLD` drop only if their `Max Age <=` the drop's `Max Age` and their Ranges cover every group above the dropped start.
 
 #### Skips (`SKIP`) {#subscribe-skip}

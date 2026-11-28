@@ -836,7 +836,8 @@ function asked(range: WireRange): Asked {
  *   lowest at `served`, which delivery starts at or below, so a range waiting on its start holds back
  *   no other's. The groups given up meanwhile are named once delivery resolves.
  * - `withheld`: lite-07, delivery starts at `from`, but no range is answered yet, as one following an
- *   edge this hop does not know leaves it: the drops given up since go out after the first START.
+ *   edge this hop does not know leaves it: the drops given up since go out after the first START,
+ *   each built then, so an unjudged drop names the max age its subscription asks at that time.
  * - `answered`: lite-07, a range is answered, so drops go out as they are given up.
  */
 type StartAnswer =
@@ -848,7 +849,7 @@ type StartAnswer =
 	  }
 	| { kind: "started"; from: bigint }
 	| { kind: "unresolved"; served?: bigint; skipped: Runs<DropRun> }
-	| { kind: "withheld"; from: bigint; held: SubscribeResponse[] }
+	| { kind: "withheld"; from: bigint; held: [bigint, bigint, Hole][] }
 	| { kind: "answered"; from: bigint };
 
 /** What `version` has said of where delivery starts before anything resolved it. */
@@ -2074,7 +2075,8 @@ export class Publisher {
 			if (answer.kind !== "withheld") return true;
 			const { from, held } = answer;
 			answer = { kind: "answered", from };
-			for (const msg of held) {
+			for (const [low, high, hole] of held) {
+				const msg = holeMessage(low, high, hole);
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
@@ -2084,7 +2086,7 @@ export class Publisher {
 		// stream failed, is named once it does.
 		const sendHole = (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (answer.kind === "unresolved") answer.skipped.set(start, end, { ...hole, start, end });
-			else if (answer.kind === "withheld") answer.held.push(holeMessage(start, end, hole));
+			else if (answer.kind === "withheld") answer.held.push([start, end, hole]);
 			else return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
 			return Promise.resolve(true);
 		};
