@@ -190,9 +190,9 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 		description: config.codec === "opus" || !config.description ? undefined : Hex.toBytes(config.description),
 	});
 
-	const sub = bc.track(name).subscribe(
-		Container.subscription(AUDIO_DELAY, { ranges: [{ priority: Catalog.PRIORITY.audio }] }),
-	);
+	const sub = bc
+		.track(name)
+		.subscribe(Container.subscription(AUDIO_DELAY, { ranges: [{ priority: Catalog.PRIORITY.audio }] }));
 	const consumer = new Container.Consumer(sub, { format: containerFormat(config, "audio"), delay: AUDIO_DELAY });
 	const feed = (async () => {
 		// The consumer also hands back the backlog the relay served behind the live edge, older
