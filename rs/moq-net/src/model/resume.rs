@@ -1651,10 +1651,17 @@ impl Subscriber {
 		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
-	/// Forget every copy's report of `range`; see [`track::Subscriber::untell`].
+	/// Forget every copy's report of `range`; see [`track::Subscriber::untell_copies`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
 		self.reader().untell(range)
+	}
+
+	/// Forget what every copy reported of the stale runs in `range` its fills gave up, returning
+	/// them; see [`track::Subscriber::untell_stale`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn untell_misses(&mut self, range: std::ops::Range<u64>) -> RangeSet<u64> {
+		self.reader().untell_misses(range)
 	}
 
 	/// Rescan drops on every copy; see [`track::Subscriber::rescan_drops`].
@@ -3541,9 +3548,24 @@ impl Reader {
 	fn untell(&mut self, range: std::ops::Range<u64>) {
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.untell(range.clone());
+				// A copy that is itself a front reported what its own copies did.
+				sub.record_mut().untell(range.clone());
+				sub.untell_copies(range.clone());
 			}
 		}
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn untell_misses(&mut self, range: std::ops::Range<u64>) -> RangeSet<u64> {
+		let mut untold = RangeSet::new();
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				for run in sub.untell_misses(range.clone()).iter() {
+					untold.insert(run.clone());
+				}
+			}
+		}
+		untold
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
