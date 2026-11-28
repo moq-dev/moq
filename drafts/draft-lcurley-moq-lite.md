@@ -100,7 +100,8 @@ The two kinds occupy separate namespaces, so a datagram Track and a Track of Gro
 Each subscription targets one Track and combines publisher preferences (`Publisher Priority`, `Publisher Max Age`) with subscriber preferences (`Subscriber Priority`, `Group Order`, and per-live-join `Max Age`) to prioritize and expire Groups under congestion ({{prioritization}}, {{expiration}}).
 
 ## Group {#group}
-A Group is an append-only sequence of Frames addressed by its **start**: a timestamp in the Track's `Timescale` (normally its frame 0 timestamp, or a bare number when `Timescale = 0`).
+A Group is an append-only sequence of Frames addressed by its **start**: its frame 0's timestamp in the Track's `Timescale` (a bare number when `Timescale = 0`).
+Every Group holds a frame 0, so no Group is empty.
 No two Groups of a Track share a start; moq-lite carries no Group sequence numbers.
 
 A Group's span is `[start, End)` ({{group-end}}).
@@ -120,7 +121,6 @@ A Group's timestamps never decrease in write order.
 Whether a timestamp is a presentation or a decode time is up to the payload format: one with B-frames stamps decode time and carries the composition offset in its payload, as hang's `cts` container does.
 When `Timescale = 0` (scale-less), frames carry no timestamp delta and inherit their Group's start.
 
-Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any lower-start Group; a receiver MAY reset violating streams (`STOP_SENDING`) with `TIMESTAMP_MISMATCH`.
 Relays forward timestamps as received unless an extension specifies otherwise.
 
 ## Positions {#positions}
@@ -202,7 +202,7 @@ Unrecognized codes MUST be treated as unspecified errors (never inferred as auth
 | `0x36` | `UNROUTABLE` | No route to broadcast, or upstream serving session ended. |
 | `0x37` | `WRONG_SIZE` | Frame payload length disagreed with declared size. |
 | `0x38` | `FRAME_TOO_LARGE` | Frame exceeded receiver payload limit. |
-| `0x39` | `TIMESTAMP_MISMATCH` | Group frame 0 timestamp at or before a lower-start group. |
+| `0x39` | `TIMESTAMP_MISMATCH` | A frame timestamp out of order with its Group's other frames or a neighboring Group's. |
 | `0x3A` | `SKIP` | Publisher declared it will never produce a Group at these starts ({{subscribe-skip}}); final, ends no reader, and relays cache it. |
 | `0x3B` | `UNAUTHORIZED` | Request outside active authorization scope (session stays up). |
 
@@ -287,7 +287,9 @@ A second Setup Stream MUST close the session with `PROTOCOL_VIOLATION`.
 Each endpoint MAY open one unidirectional Announce Stream (`0x3`) carrying all discovery and routing messages in order; see [Discovery and Routing](#announce).
 
 ### Group {#group-stream}
-Opened by a publisher per Group served to a Subscribe Stream: `GROUP`, zero or more `FRAME`s, and `GROUP_END` + `FIN` if finished (or `FIN` alone if closed, or reset if aborted).
+Opened by a publisher per Group served to a Subscribe Stream: `GROUP`, its `FRAME`s, and `GROUP_END` + `FIN` if finished (or `FIN` alone if closed, or reset if aborted).
+A stream from `Frame Start` 0 carries at least frame 0 before `GROUP_END`; one without is a malformed Track.
+A stream from a later `Frame Start` MAY carry no `FRAME` before `GROUP_END`, as when a subscriber that read every frame resumes there to learn the Group's End.
 A publisher MUST NOT send `GROUP_END` for an unfinished Group, MUST NOT send two Group Streams for the same Group Start on one subscription, and a subscriber treats bytes after `GROUP_END` as a malformed Track.
 
 A publisher that resets a Group Stream after sending its `GROUP` message, toward a peer that negotiated `RESET_STREAM_AT` {{reliable-reset}} over QUIC or QMux, SHOULD send it with a Reliable Size at the end of the `GROUP` message.
@@ -1004,14 +1006,14 @@ GROUP Message {
 ~~~
 FRAME Message {
   Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END); metadata: inflated size + 1
-  [Timestamp Delta (i)],  ; zigzag on a stream's first FRAME, else unsigned; omitted if Timescale == 0
+  [Timestamp Delta (i)],  ; unsigned; omitted on frame 0 and if Timescale == 0
   [Inflated Size (i)],    ; present iff Track Compression != none and not metadata
   [Payload (..)],         ; absent on a metadata subscription
 }
 ~~~
 `Timestamp Delta` counts in `Timescale` ticks.
-The first `FRAME` of a stream carries a signed delta from the `GROUP`'s Group Start, zigzag-mapped (encode `(signed << 1) ^ (signed >> 63)` with an arithmetic shift, decode `(unsigned >> 1) ^ -(unsigned & 1)`), so frame 0 at its Group Start carries `0` and one presenting before it, as a joined Group's leading media may, still fits.
-Every later `FRAME` carries an unsigned delta from the prior `FRAME`'s timestamp on this stream: a Group's timestamps never decrease, so a publisher MUST NOT write a frame below its predecessor.
+Frame 0, the first `FRAME` of a stream from `Frame Start` 0, carries none: its timestamp is the Group Start.
+The first `FRAME` of a stream from a later `Frame Start` carries an unsigned delta from the Group Start, and every other `FRAME` an unsigned delta from the prior `FRAME`'s timestamp on this stream: a Group's timestamps never decrease, so a publisher MUST NOT write a frame below its predecessor.
 A receiver treats a delta that leaves the timestamp range as malformed.
 When compressed, receivers MUST check `Inflated Size` against resource limits before inflating and treat any mismatching inflated length as malformed.
 On a [metadata subscription](#metadata)'s Group Stream, a `FRAME` carries no `Inflated Size` and no `Payload`, and its `Payload Length` is the inflated size + 1, so an empty frame still reads `1` and `GROUP_END` keeps `0`.
@@ -1022,7 +1024,7 @@ Shares `FRAME`'s leading varint using the reserved value `0`:
 ~~~
 GROUP_END Message {
   Payload Length (i) = 0,
-  End Delta (i),          ; non-negative delta from last stream frame timestamp (or Group Start if empty/scale-less)
+  End Delta (i),          ; delta from the last stream frame's timestamp (or Group Start if none/scale-less)
 }
 ~~~
 End is never below any frame timestamp of the Group (including frames not carried on this stream, e.g., before a Position `Start`), and no greater than the next Group's start.
@@ -1096,7 +1098,8 @@ This document has no IANA actions.
 - Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
 - Removed the Fetch Stream (`0x3`) and `FETCH`: single-group and frame-slice reads are bounded `SUBSCRIBE` Ranges with `Position` Anchors. A `Position` Anchor allows `Frame = 0`, names only the Group starting exactly at its `Timestamp`, and is exclusive as an `End`; reaching it closes the Group Stream with `FIN` and no `GROUP_END`. A subscriber's clean `FIN` ends only its updates: the publisher delivers the remaining Ranges and then FINs, so a `SUBSCRIBE` followed at once by `FIN` is a one-round-trip request, and a reset cancels.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
-- `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a `Timestamp Delta` (omitted when scale-less) that is zigzag from the Group Start on a stream's first `FRAME` and unsigned from the prior `FRAME` after it, replacing earlier versions' zigzag delta on every `FRAME`, and optional `Inflated Size`.
+- `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), an unsigned `Timestamp Delta` (omitted on frame 0, which sits at the Group Start, and when scale-less) from the prior `FRAME`, or from the Group Start on a later `Frame Start`'s first `FRAME`, replacing earlier versions' zigzag delta on every `FRAME`, and optional `Inflated Size`.
+- A Group starts at its frame 0's timestamp and always holds one: a stream from `Frame Start` 0 with no `FRAME` before `GROUP_END` is malformed.
 - A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time, and never decreases within a Group.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - Added stream error code `SKIP` (`0x3A`) on `SUBSCRIBE_DROP` for starts the publisher declared it will never produce: final, ends no reader, and cached by relays. A start nothing accounts for is still owed, so a subscriber waits out no grace period.

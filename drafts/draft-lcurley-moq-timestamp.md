@@ -91,7 +91,7 @@ Receivers treat an absent `TIMESTAMP_TIE` as `0`, and MUST treat a duplicate `TI
 
 On a track declaring `ID_TIMESCALE`:
 
-- **Group ID**: the group's start time in `ID_TIMESCALE` ticks.
+- **Group ID**: the group's start time in `ID_TIMESCALE` ticks, which is its first object's timestamp: that object has `Object ID = 0` and no `TIMESTAMP_TIE`.
 - **Object timestamp (decode time)**: for each object in a group with `Group ID`, `Object ID`, and `TIMESTAMP_TIE` (`0` when absent):
 
 ~~~
@@ -104,11 +104,13 @@ Because {{moqt}} requires Object IDs within a subgroup to strictly increase, con
 For each frame with decode timestamp `dts` in a group starting at `group_id` (with `prev_oid` being the prior frame's Object ID, or unset for frame 0):
 
 1. `min_oid = 0` for frame 0, or `prev_oid + 1` thereafter.
-2. `oid = max(max(dts - group_id, 0), min_oid)`.
+2. `oid = max(dts - group_id, min_oid)`.
 3. `tie = (group_id + oid) - dts`.
 4. Emit the object with Object ID `oid`; attach `TIMESTAMP_TIE = tie` if and only if `tie > 0`.
 
-In the common case where frame 0 has `dts == group_id` and subsequent frames advance by at least 1 tick, `tie == 0` on every frame and zero object-property bytes are sent.
+Frame 0 has `dts == group_id`, so it takes `Object ID = 0` with no `TIMESTAMP_TIE`, and no later frame falls below it.
+A receiver MUST refuse a group whose first object's timestamp is not its Group ID.
+When later frames advance by at least 1 tick, `tie == 0` on every frame and zero object-property bytes are sent.
 When three consecutive frames tie at `dts = group_id` (e.g., parameter sets or multi-slice pictures), they take Object IDs `0, 1, 2` with `TIMESTAMP_TIE` omitted (`0`), `1`, and `2`, each decoding to `group_id`.
 A stream with B-frames stamps decode time and carries each frame's presentation offset in its media container (e.g., a `CTS` offset added to the transport timestamp).
 
@@ -174,6 +176,7 @@ Provisional registrations in the "MOQ Properties" registry ({{moqt}}) from the F
 - Added per-object transport decode timestamps via `Object ID` and optional `TIMESTAMP_TIE` (`0x40B72`): `timestamp = Group ID + Object ID - TIMESTAMP_TIE`.
 - A group's timestamps never decrease; B-frame streams stamp decode time.
 - Object IDs are derived from a group's first object, so every copy of a group yields the same IDs.
+- A group starts at its first object's timestamp, so that object is `Object ID = 0` with no `TIMESTAMP_TIE`, and a receiver refuses a group whose first object misses its Group ID.
 
 ## moq-timestamp-02
 {:numbered="false"}

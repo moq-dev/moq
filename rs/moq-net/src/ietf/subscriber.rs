@@ -6584,9 +6584,9 @@ impl OpenGroup {
 						// A group delivered from its start stands alone, unless the fill already
 						// headed this very key: the publisher then served those objects
 						// twice, and the model has one producer per group. Refuse both unfinished
-						// pieces rather than cache a cut group as complete. On a timed track, a
-						// group's first object may sit past Object ID 0 when its DTS exceeds the
-						// Group ID, marked by FIRST_OBJECT.
+						// pieces rather than cache a cut group as complete. A stream claiming
+						// FIRST_OBJECT past Object ID 0 opens it too: the ingest refuses one whose
+						// first object misses a timed group's Group ID.
 						Some(id) if id == 0 || (header.flags.first_object && self.timestamp_ids) => {
 							let headed = matches!(*fill.read(), Fill::Ready { key: s, .. } if s == key);
 							if headed {
@@ -6698,6 +6698,8 @@ pub(crate) struct GroupIngest {
 	/// The track a Prior Group ID Gap skips keys on, none to ignore it.
 	pub(crate) track: Option<track::Producer>,
 	has_extensions: bool,
+	/// The stream claims the group's first object (FIRST_OBJECT).
+	first_object: bool,
 	timing: ObjectTiming,
 	version: Version,
 	prior_object: Option<u64>,
@@ -6741,6 +6743,7 @@ impl GroupIngest {
 		Self {
 			track: None,
 			has_extensions: group.flags.has_extensions,
+			first_object: group.flags.first_object,
 			timing: ObjectTiming {
 				timescale,
 				timestamp_ids: timescale.is_some() && version.timestamp_object_ids(),
@@ -8469,9 +8472,10 @@ fn object_time(timing: ObjectTiming, key: u64, object_id: u64, tie: u64) -> Resu
 
 impl GroupIngest {
 	/// A draft-23 group starts at its frame 0's time, so the Group ID is where its first
-	/// object sits.
-	fn check_first(&self, group: &crate::recv::Group, timestamp: crate::Timestamp) -> Result<(), Error> {
-		match self.timing.timestamp_ids && group.frame_count() == 0 && timestamp.value() != group.start {
+	/// object sits: one this stream carries, by FIRST_OBJECT or at Object ID 0, must sit there.
+	fn check_first(&self, group: &crate::recv::Group, id: u64, timestamp: crate::Timestamp) -> Result<(), Error> {
+		let first = group.frame_count() == 0 && (self.first_object || id == 0);
+		match self.timing.timestamp_ids && first && timestamp.value() != group.start {
 			true => Err(Error::TimestampMismatch),
 			false => Ok(()),
 		}
@@ -8586,7 +8590,7 @@ impl GroupIngest {
 					}
 					let id = self.prior_object.expect("payload follows object ID");
 					let timestamp = object_time(self.timing, group.start, id, self.tie.unwrap_or(0))?;
-					self.check_first(group, timestamp)?;
+					self.check_first(group, id, timestamp)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Admit { header };
 				}
@@ -8611,7 +8615,7 @@ impl GroupIngest {
 					if status == 0 {
 						let id = self.prior_object.expect("status follows object ID");
 						let timestamp = object_time(self.timing, group.start, id, self.tie.unwrap_or(0))?;
-						self.check_first(group, timestamp)?;
+						self.check_first(group, id, timestamp)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
 						self.phase = IngestPhase::Admit { header };
 						continue;
@@ -15115,6 +15119,11 @@ mod stitch_tests {
 	/// publisher delivers nothing before it: that head is the fill's job. Each object
 	/// carries the Timestamp of its Object ID.
 	pub(super) fn tail_stream(key: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+		subgroup_stream(key, start == 0, start, payloads)
+	}
+
+	/// [`tail_stream`], claiming FIRST_OBJECT as `first_object` says.
+	pub(super) fn subgroup_stream(key: u64, first_object: bool, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
@@ -15122,7 +15131,7 @@ mod stitch_tests {
 			sub_group_id: 0,
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
-				first_object: start == 0,
+				first_object,
 				has_extensions: true,
 				..Default::default()
 			},
@@ -17289,13 +17298,13 @@ mod stitch_tests {
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
 	}
 
-	/// A draft-23 group starts at its frame 0's time, its Group ID, so one whose first object
-	/// sits past it is refused, and the track lives on.
+	/// A draft-23 group starts at its frame 0's time, its Group ID, so a stream claiming its
+	/// first object past it is refused, and the track lives on.
 	#[kio::test]
 	async fn a_timed_group_whose_first_object_misses_its_group_id_is_refused() {
 		use futures::FutureExt;
 
-		let h = Harness::new(Fill::Done, vec![tail_stream(KEY, 3, &[b"late"])]);
+		let h = Harness::new(Fill::Done, vec![subgroup_stream(KEY, true, 3, &[b"late"])]);
 		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().timing =
 			ObjectTiming::timed(Some(Timescale::MICRO));
 		let mut consumer = h.track.subscribe(None);
