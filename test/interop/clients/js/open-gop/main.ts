@@ -91,16 +91,21 @@ window.runRecovery = async (packets) => {
 		while (!demand.refresh.peek() && !failed) await Promise.race([demand.refresh.changed(), inputDone]);
 		// Every group is written before the decoder reads past the first, so none may go stale.
 		let group: Moq.Group.Producer | undefined;
+		// A group's transport times never decrease, so a leading picture rides at the newest so far
+		// while its payload keeps its own presentation time, as `Container.Legacy.Producer` does.
+		let newest = 0;
 		for (const packet of packets) {
 			if (group?.start !== BigInt(packet.group)) {
 				group?.finish();
 				group = track.createGroup(BigInt(packet.group));
+				newest = packet.timestamp;
 			}
+			newest = Math.max(newest, packet.timestamp);
 			const timestamp = Duration.micros(packet.timestamp);
 			const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
 			group.writeFrame({
 				payload: Container.Legacy.encodeFrame(payload, timestamp),
-				timestamp: Moq.Time.Timestamp.fromMicros(packet.timestamp),
+				timestamp: Moq.Time.Timestamp.fromMicros(newest),
 			});
 		}
 		group?.finish();
