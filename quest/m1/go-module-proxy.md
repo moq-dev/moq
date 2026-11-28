@@ -51,11 +51,32 @@ backfill had nothing to copy (proxy.golang.org and go.moq.dev both list the
 same 46 versions), and `verify --proxy direct` and
 `verify --proxy https://proxy.golang.org` each printed 46 go.sum lines.
 
+The cutover broke releases: tags are cut from `release`, whose
+`release-go-ffi.yml` still pushed only to the mirror, so `moq-ffi-v0.4.28`
+(2026-11-23) never reached go.moq.dev, `go get moq.dev/moq-ffi@v0.4.28`
+fails, and every Release Go wrapper run since has failed downloading it.
+moq-dev/moq#9844 backports the publisher to `release`, and `just infra go
+backfill` now also builds mirror tags newer than proxy.golang.org's list from
+their trees with `sh/go/modzip`. Built from the mirror's `v0.4.27` tree, modzip
+reproduces the hash sum.golang.org pinned for it.
+
 ## Waiting
 
-- Maintainer: once the next `moq-ffi` release publishes through go.moq.dev
-  (its `Publish to go.moq.dev` step succeeds), archive the mirror with
-  `gh repo archive moq-dev/moq-go-ffi --yes`, step 6. Done when
+- moq-dev/moq: [#9844](https://github.com/moq-dev/moq/pull/9844) merges into
+  `release`, so the next `moq-ffi` tag publishes to go.moq.dev. Done when
+  `git show origin/release:sh/go/ffi-origin.sh` succeeds.
+- Maintainer (PC): publish `moq.dev/moq-ffi` v0.4.28, which only the
+  moq-dev/moq-go-ffi mirror holds, to go.moq.dev, with any later tag the
+  mirror took before `release` carried the go.moq.dev publisher. An agent has no key that writes
+  the `go-moq-dev` bucket. From a `main` checkout's dev shell plus rclone
+  (`nix shell .#packaging`), with an R2 token that writes `go-moq-dev`
+  exported as `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`, run
+  `just infra go backfill` then `just infra go verify --proxy direct`. Done
+  when `curl -fsS https://go.moq.dev/moq.dev/moq-ffi/@v/list` lists v0.4.28
+  and the mirror's newest tag.
+- Maintainer (action): once a `moq-ffi` release publishes through go.moq.dev
+  (its `Publish to go.moq.dev` step succeeds), archive the
+  moq-dev/moq-go-ffi mirror with `gh repo archive moq-dev/moq-go-ffi --yes`. Done when
   `gh api repos/moq-dev/moq-go-ffi --jq .archived` prints `true`.
 
 ## Related

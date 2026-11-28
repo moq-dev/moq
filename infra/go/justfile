@@ -10,7 +10,7 @@ create:
     bun install --frozen-lockfile
     bun wrangler r2 bucket create go-moq-dev --update-config=false
 
-# Copy every moq.dev/moq-ffi version proxy.golang.org lists into the bucket, as sum.golang.org pinned it.
+# Copy every moq.dev/moq-ffi version proxy.golang.org lists into the bucket, as sum.golang.org pinned it, and build newer mirror tags.
 backfill:
     ./backfill.sh
 

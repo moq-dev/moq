@@ -448,7 +448,8 @@ A 404 is final: nothing falls back past this proxy.
 from the `publish` Environment, reusing its `R2_ACCESS_KEY_ID` and
 `R2_SECRET_ACCESS_KEY`. Until the cutover below, it reads moq.dev's go-import
 tag (`just go ffi-origin`) and keeps publishing to the moq-dev/moq-go-ffi git
-mirror. sum.golang.org pins the first hash it sees for each version, so the
+mirror. Tags are cut from `release`, so the cutover waits until `release`
+carries this job. sum.golang.org pins the first hash it sees for each version, so the
 upload never replaces an object: a rerun skips identical files and fails on
 different ones.
 
@@ -478,7 +479,8 @@ release in flight between steps 3 and 5.
    ```
 
    `backfill` copies every version proxy.golang.org lists, byte for byte as
-   `go mod download` checked it against sum.golang.org. `verify` downloads each
+   `go mod download` checked it against sum.golang.org, and builds any newer
+   mirror tag with `sh/go/modzip`. `verify` downloads each
    one through `https://go.moq.dev` from a clean module cache, so the go
    command checks it against sum.golang.org again, and fails if any listed
    version is missing.
@@ -495,7 +497,7 @@ release in flight between steps 3 and 5.
 5. **Catch up and verify the paths users take**, from a clean module cache:
 
    ```bash
-   just infra go backfill   # any release the mirror took before the cutover
+   just infra go backfill   # any release the mirror took around the cutover
    just infra go verify --proxy direct
    just infra go verify --proxy https://proxy.golang.org
    ```
