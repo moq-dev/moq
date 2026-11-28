@@ -67,11 +67,11 @@ Subscribers read groups in arrival order (out-of-order included) and track each
 subscription's sequence span. A span wider than the count received means groups
 in between were skipped, so loss reflects dropped groups rather than QUIC packet
 loss (which the transport already repairs). A gap is blamed only once the player
-can no longer receive it: a group overtaken by newer ones still arrives within the
-`--max-delay` budget, so the count stops at the newest group whose start is more
-than that budget behind the newest start seen, below which the subscriber's live
-read skips any missing group as stale; a group arriving already past the budget is
-lost too, and a track's end settles every gap. The span
+can no longer receive it. A group overtaken by newer ones may still be handed out
+within the `--max-delay` budget, so a gap counts once the group above it is that
+stale on either of the reader's clocks: its start trails the newest by the budget,
+or it arrived the budget ago. A subscription that waits a budget for its next group
+settles its gaps by the second clock, and a track's end settles every gap. The span
 starts at the first group a subscription receives: an older group that arrives
 later is history, counted in `history_groups` rather than widening the span, so
 a join that over-fetches history never reads as loss. A group the

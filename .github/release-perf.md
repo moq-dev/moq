@@ -13,10 +13,10 @@ joined, which the generator never counted.
   single groups reached every viewer about 0.5 s behind their neighbours,
   inside the 2 s that players wait. One `main` round counted 11.7% lost with
   every group delivered, and every `release` round counted 0.5% to 1.8% the
-  same way. The generator now settles a gap only once the group above it
-  starts more than `--max-delay` behind the newest, past which the viewer's
-  live read skips a missing group as stale. `groups_lost` then equals the
-  gaps still open at the end of every round.
+  same way. The generator now counts a gap only once the group above it is
+  as stale as the viewer's live read allows on either of its clocks: its start
+  `--max-delay` behind the newest, or its arrival that long ago. `groups_lost`
+  then equals the gaps still open at the end of every round.
 - **Relay receive backlog, real.** In every round that lost groups the
   relay's UDP receive queue was 6.4 MiB or deeper, and in most it reached the
   16 MiB buffer and the kernel dropped datagrams. The publisher's groups reached
