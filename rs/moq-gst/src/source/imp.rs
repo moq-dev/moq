@@ -5029,8 +5029,7 @@ mod session_tests {
 		drop(first);
 	}
 
-	/// A publisher handoff after a sibling track finished, the catalog naming the new identity's
-	/// identity, plays that identity on the same pad.
+	/// A publisher handoff after a sibling track finished plays the new identity on the same pad.
 	#[test]
 	fn an_identity_handoff_after_a_sibling_finish_plays_the_new_identity() {
 		let _pad_ids = pad_ids();
