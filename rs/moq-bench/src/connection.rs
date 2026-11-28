@@ -1,5 +1,5 @@
 use kio::clock::Wall;
-use std::collections::{BTreeMap, HashSet, btree_map};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -451,15 +451,15 @@ fn spawn_drain(
 	});
 }
 
-/// Subscribe to the broadcast's track, counting every frame received and tracking
-/// group-sequence gaps to report skipped groups.
+/// Subscribe to the broadcast's track and read it in key order, counting every frame
+/// received and the groups skipped between those delivered.
 ///
 /// Only a track- or session-level failure ends the subscription. A group that
 /// fails mid-read is the relay giving up on that one group, which a real player
 /// skips over while it keeps watching.
 ///
-/// `max_delay` is the player's staleness budget: a group still in flight when a
-/// newer one starts is waited on that long before it is skipped.
+/// `max_delay` is the player's staleness budget: the ordered read waits that long for a
+/// group still in flight before it gives the group up and moves on.
 async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
@@ -467,54 +467,40 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 		min: Some(max_delay),
 		max: Some(max_delay),
 	})]);
-	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
-	let mut gaps = GapTracker::new(stats, max_delay);
+	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?.ordered();
+	let mut sequence = Sequence::new(stats);
 	let mut learned_shape = false;
 	let mut established = None;
 
-	// `recv_group` yields groups in arrival order, including out of sequence, so we
-	// can spot holes. `next_group` would silently drop late arrivals and hide them.
-	let ended = loop {
-		// A wait a full budget long ages every pending group, as the reader's wall clock
-		// would, so a stalled subscription still counts its gaps. A zero budget settles each
-		// group as it arrives, so it needs no wait.
-		let next = match max_delay.is_zero() {
-			true => track.recv_group().await,
-			false => match kio::clock::timeout(max_delay, track.recv_group()).await {
-				Ok(next) => next,
-				Err(_) => {
-					gaps.settle(kio::clock::now(), false);
-					continue;
-				}
-			},
+	while let Some(item) = track.next_item().await? {
+		// A gap names the starts given up, which are times rather than a count of groups, so
+		// loss is counted from the sequence numbers either side of it instead.
+		let track::Item::Group(mut group) = item else {
+			continue;
 		};
-		let mut group = match next {
-			Ok(Some(group)) => group,
-			Ok(None) => break Ok(()),
-			Err(err) => break Err(err.into()),
-		};
-		// Group starts are times, so holes are counted by the number the keyframe header carries.
-		let mut sequence = None;
-		let read = read_group(&mut group, &mut learned_shape, &mut sequence, stats).await;
-		let arrived = kio::clock::now();
-		match read {
+		let mut number = None;
+		match read_group(&mut group, &mut learned_shape, &mut number, stats).await {
 			// Only a group read end to end counts as delivered.
 			Ok(()) => {
 				if established.is_none() {
 					established = Some(Gauge::inc(&stats.subscriptions_established));
 				}
-				gaps.complete(group.start, sequence, arrived);
+				stats.groups_recv.fetch_add(1, Ordering::Relaxed);
+				if let Some(number) = number {
+					sequence.reached(number, true);
+				}
 			}
-			// The relay failed this one group: `Error::Lagged` once we fall behind.
+			// The relay failed this one group: `Error::Lagged` once we fall behind. One that
+			// failed before its header named it is counted by the next group's gap instead.
 			Err(err) => {
-				gaps.fail(group.start, sequence, arrived);
-				tracing::debug!(start = group.start, ?sequence, %err, "group ended early");
+				if let Some(number) = number {
+					sequence.reached(number, false);
+				}
+				tracing::debug!(start = group.start, ?number, %err, "group ended early");
 			}
 		}
-	};
-	// No group can arrive once the track ends, cleanly or not.
-	gaps.settle(kio::clock::now(), true);
-	ended
+	}
+	Ok(())
 }
 
 /// Read one group to its end, counting every frame and sampling the keyframe header, whose
@@ -548,164 +534,37 @@ async fn read_group(
 	Ok(())
 }
 
-/// Tracks group-sequence continuity for one subscription so we can report skipped
-/// groups. Groups arrive out of order, so rather than diffing consecutive sequences
-/// we measure how many sequences the received groups span against how many actually
-/// landed: a span wider than the count means groups in between never showed up.
+/// Counts one subscription's lost groups from the numbers their keyframe headers carry.
 ///
-/// A missing group is lost only once the player can no longer receive it. The subscription
-/// reads live with `budget` as its staleness limit, and its reader skips a superseded group
-/// once its successor is that stale on either clock: the successor's start trails the newest
-/// by the budget, or the successor arrived the budget ago (`track::Info::max_age`). The span
-/// therefore ends at `cap`, the newest group received that is that stale: any gap below it
-/// can never be filled. Groups above `cap` wait in `pending`, so one overtaken by newer
-/// groups but handed out within the budget is delivered, not lost. A zero budget settles
-/// each group as it arrives, and a track's end settles everything.
-///
-/// The span's floor is pinned at the first group the subscription receives. A
-/// completed group older than that, such as cached history a relay fills in after
-/// the subscribe, is counted in `groups_history` and never widens the span, so a
-/// join that over-fetches history does not read as loss.
-///
-/// A group that explicitly fails is known lost immediately wherever it falls,
-/// even below the floor or above the cap, and settles like a completed one. Each observation feeds the shared [`Stats`]
-/// incrementally so the reporter sees losses live and many subscriptions sum
-/// correctly: `groups_expected - groups_present` is the gaps still outstanding.
-///
-/// `groups_lost` only grows: one observation either fills a counted gap or adds
-/// new ones, never both, so summing the gap's increases counts each skipped or
-/// failed group once, and a late arrival cannot cancel a later loss.
-struct GapTracker<'a> {
+/// The ordered read hands out groups in increasing order, so every number skipped
+/// between two groups it reached was given up, as is a reached group that failed. The
+/// first group reached sets the baseline: groups before the subscription's start are
+/// not loss. A number that does not increase, as from a publisher that restarted its
+/// count, sets a new baseline.
+struct Sequence<'a> {
 	stats: &'a Stats,
-	/// The player's staleness limit.
-	budget: Duration,
-	/// First sequence received: the span's floor. `None` until a group arrives.
-	floor: Option<u64>,
-	/// The newest group settled: every sequence from `floor` through it is decided.
-	cap: Option<u64>,
-	/// Groups above `cap`, by sequence: still within the budget.
-	pending: BTreeMap<u64, Pending>,
-	/// The newest start seen.
-	newest: u64,
-	/// Completed groups from `floor` through `cap`.
-	settled: u64,
-	/// Lost groups in `pending`: already counted, so not counted again once `cap` passes them.
-	failed: u64,
-	/// Failed groups below the floor: outside the span, but still lost.
-	failed_history: u64,
-	/// This subscription's current contributions, remembered so each update pushes
-	/// only the delta into the shared counters.
-	expected: u64,
-	present: u64,
+	/// The last group number reached, delivered or failed.
+	last: Option<u64>,
 }
 
-/// A group above the cap, waiting for the budget to settle the gaps below it.
-struct Pending {
-	/// Its start, in the track's milliseconds.
-	start: u64,
-	/// When it arrived.
-	arrived: kio::clock::Instant,
-	/// Whether it was read end to end.
-	delivered: bool,
-}
-
-impl<'a> GapTracker<'a> {
-	fn new(stats: &'a Stats, budget: Duration) -> Self {
-		Self {
-			stats,
-			budget,
-			floor: None,
-			cap: None,
-			pending: BTreeMap::new(),
-			newest: 0,
-			settled: 0,
-			failed: 0,
-			failed_history: 0,
-			expected: 0,
-			present: 0,
-		}
+impl<'a> Sequence<'a> {
+	fn new(stats: &'a Stats) -> Self {
+		Self { stats, last: None }
 	}
 
-	/// A group starting at `start` read end to end at `now`, numbered `sequence` when its
-	/// header said.
-	fn complete(&mut self, start: u64, sequence: Option<u64>, now: kio::clock::Instant) {
-		self.stats.groups_recv.fetch_add(1, Ordering::Relaxed);
-		if let Some(sequence) = sequence {
-			self.record(start, sequence, true, now);
-		}
-	}
-
-	/// A group starting at `start` that failed at `now`. One that failed before its header
-	/// named it is counted once the cap passes its number instead.
-	fn fail(&mut self, start: u64, sequence: Option<u64>, now: kio::clock::Instant) {
-		if let Some(sequence) = sequence {
-			self.record(start, sequence, false, now);
-		}
-	}
-
-	fn record(&mut self, start: u64, sequence: u64, complete: bool, now: kio::clock::Instant) {
-		let floor = *self.floor.get_or_insert(sequence);
-		if sequence < floor {
-			// History from before the subscription's start: outside the span.
-			if complete {
-				self.stats.groups_history.fetch_add(1, Ordering::Relaxed);
-				return;
-			}
-			self.failed_history += 1;
-		} else if self.cap.is_some_and(|cap| sequence <= cap) {
-			// Already settled as a gap, so it stays lost; a completed one is present all the same.
-			self.settled += u64::from(complete);
-		} else if let btree_map::Entry::Vacant(entry) = self.pending.entry(sequence) {
-			entry.insert(Pending {
-				start,
-				arrived: now,
-				delivered: complete,
-			});
-			self.failed += u64::from(!complete);
-		}
-		self.newest = self.newest.max(start);
-		self.settle(now, false);
-	}
-
-	/// Settle the pending groups the budget has left behind at `now`, or all of them once
-	/// `all`, oldest first: the gaps below them can no longer be filled.
-	fn settle(&mut self, now: kio::clock::Instant, all: bool) {
-		let budget = u64::try_from(self.budget.as_millis()).unwrap_or(u64::MAX);
-		let Some(floor) = self.floor else {
-			return;
+	/// The ordered read reached group `number`, which was `delivered` end to end or failed.
+	fn reached(&mut self, number: u64, delivered: bool) {
+		let skipped = match self.last {
+			Some(last) if number > last => number - last - 1,
+			_ => 0,
 		};
-
-		while let Some((&sequence, pending)) = self.pending.first_key_value()
-			&& (all
-				|| pending.start.saturating_add(budget) < self.newest
-				|| now.saturating_duration_since(pending.arrived) >= self.budget)
-		{
-			let delivered = pending.delivered;
-			self.pending.pop_first();
-			self.cap = Some(sequence);
-			// A lost group the cap passes moves from `failed` into the span, still lost.
-			match delivered {
-				true => self.settled += 1,
-				false => self.failed -= 1,
-			}
-		}
-
-		let span = self.cap.map_or(0, |cap| cap - floor + 1);
-		let expected = span + self.failed + self.failed_history;
-		let present = self.settled;
-		let grown = (expected - present).saturating_sub(self.expected - self.present);
-		// Grow the denominator first and release the counters bounded by it, so a
-		// snapshot that acquires them before reading `groups_expected` never sees
-		// more lost or present groups than expected.
+		self.last = Some(number);
+		// Grow the denominator first, so a snapshot that acquires `groups_lost` before
+		// reading `groups_expected` never sees more lost than expected.
+		self.stats.groups_expected.fetch_add(skipped + 1, Ordering::Relaxed);
 		self.stats
-			.groups_expected
-			.fetch_add(expected - self.expected, Ordering::Relaxed);
-		self.stats.groups_lost.fetch_add(grown, Ordering::Release);
-		self.stats
-			.groups_present
-			.fetch_add(present - self.present, Ordering::Release);
-		self.expected = expected;
-		self.present = present;
+			.groups_lost
+			.fetch_add(skipped + u64::from(!delivered), Ordering::Release);
 	}
 }
 
@@ -1302,225 +1161,46 @@ mod tests {
 		assert_eq!(pool, vec![1, 2]);
 	}
 
-	/// One arrival instant for the tests that age groups by media time alone.
-	const AT: kio::clock::Instant = kio::clock::Instant::ZERO;
-
 	fn lost(stats: &Stats) -> u64 {
 		stats.groups_lost.load(Ordering::Relaxed)
 	}
 
-	fn outstanding(stats: &Stats) -> u64 {
-		stats.groups_expected.load(Ordering::Relaxed) - stats.groups_present.load(Ordering::Relaxed)
+	fn expected(stats: &Stats) -> u64 {
+		stats.groups_expected.load(Ordering::Relaxed)
 	}
 
-	/// A hole below the frontier (group 2 never arrives, but 3 and 4 do) is one skip.
+	/// Numbers skipped between groups reached are lost; the first group reached is the baseline.
 	#[test]
-	fn gap_tracker_counts_skips() {
+	fn sequence_counts_skipped_numbers() {
 		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(50));
-		for seq in [0, 1, 3, 4] {
-			gaps.complete(seq * 100, Some(seq), AT);
+		let mut sequence = Sequence::new(&stats);
+		for number in [10, 11, 14, 15] {
+			sequence.reached(number, true);
 		}
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
-		assert_eq!(lost(&stats), 1);
+		assert_eq!((lost(&stats), expected(&stats)), (2, 6));
 	}
 
-	/// A group that lands after the budget settled past it closes the gap but
-	/// stays lost, so recovering an old gap cannot hide a new loss.
+	/// A failed group is lost, and the groups after it count from it, so it is counted once.
 	#[test]
-	fn gap_tracker_late_arrival_stays_lost() {
+	fn sequence_counts_a_failed_group_once() {
 		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(50));
-
-		for seq in [0, 1, 3, 4] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
-
-		gaps.complete(200, Some(2), AT);
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
-		assert_eq!((lost(&stats), outstanding(&stats)), (1, 0), "the late group stays lost");
-
-		// 6 is skipped; 8 settles 7, confirming it.
-		for seq in [5, 7, 8] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!((lost(&stats), outstanding(&stats)), (2, 1));
+		let mut sequence = Sequence::new(&stats);
+		sequence.reached(0, false);
+		assert_eq!((lost(&stats), expected(&stats)), (1, 1));
+		sequence.reached(1, true);
+		sequence.reached(2, false);
+		sequence.reached(4, true);
+		assert_eq!((lost(&stats), expected(&stats)), (3, 5));
 	}
 
-	/// A group overtaken by newer ones but arriving within the budget is delivered, not lost;
-	/// one still missing once the newest group is further ahead than the budget is lost.
+	/// A number that does not increase starts a new baseline rather than counting backwards.
 	#[test]
-	fn gap_tracker_waits_out_the_budget() {
+	fn sequence_rebases_on_a_restarted_count() {
 		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
-		// Group n starts at n * 100 ms; 2 is overtaken by 3 and 4.
-		for seq in [0, 1, 3, 4, 2, 5, 6, 8, 9, 10] {
-			gaps.complete(seq * 100, Some(seq), AT);
+		let mut sequence = Sequence::new(&stats);
+		for number in [7, 8, 0, 1, 3] {
+			sequence.reached(number, true);
 		}
-		assert_eq!(
-			(lost(&stats), outstanding(&stats)),
-			(0, 0),
-			"8 is within the budget, so 7 may come"
-		);
-		gaps.complete(1_100, Some(11), AT);
-		assert_eq!(
-			(lost(&stats), outstanding(&stats)),
-			(1, 1),
-			"8 is stale, so 7 never will"
-		);
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 9);
-	}
-
-	/// The reader also ages a superseded group by when its successor arrived, so a stalled
-	/// subscription still counts the gap below a group that arrived a budget ago.
-	#[test]
-	fn gap_tracker_ages_on_the_wall_clock() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
-		for seq in [0, 2] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		gaps.settle(AT.saturating_add(Duration::from_millis(249)), false);
-		assert_eq!(lost(&stats), 0);
-		gaps.settle(AT.saturating_add(Duration::from_millis(250)), false);
-		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 3);
-	}
-
-	/// Failed groups settle as media time advances, so a viewer losing every group holds only
-	/// the budget's worth of them.
-	#[test]
-	fn gap_tracker_settles_failed_groups() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
-		for seq in 0..100 {
-			gaps.fail(seq * 100, Some(seq), AT);
-		}
-		assert_eq!(lost(&stats), 100);
-		assert!(gaps.pending.len() <= 3, "{} pending", gaps.pending.len());
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 100);
-	}
-
-	/// A track's end settles the gaps no newer group will ever confirm.
-	#[test]
-	fn gap_tracker_settles_at_the_end() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_secs(2));
-		for seq in [0, 2] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!(lost(&stats), 0);
-		gaps.settle(AT, true);
-		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 3);
-	}
-
-	/// Out-of-order arrivals within the budget that fill the whole span count as zero loss.
-	#[test]
-	fn gap_tracker_handles_out_of_order() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
-		for seq in [0, 3, 1, 2, 4] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
-		gaps.settle(AT, true);
-		assert_eq!((lost(&stats), outstanding(&stats)), (0, 0));
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 5);
-	}
-
-	/// Groups older than the first one received are history a relay filled in after
-	/// the subscribe: counted apart, never as loss. Gaps at or after the start still count.
-	#[test]
-	fn gap_tracker_counts_history_apart() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(50));
-		let history = |stats: &Stats| stats.groups_history.load(Ordering::Relaxed);
-
-		// Joins live at 10; 11 and 12 settle the span from 10.
-		for seq in [10, 11, 12] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 2);
-
-		// Cached history arrives behind the live frontier, leaving 0..=4 and 6 unsent.
-		for seq in [5, 7, 8, 9] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 7);
-		assert_eq!(history(&stats), 4);
-		assert_eq!(
-			(lost(&stats), outstanding(&stats)),
-			(0, 0),
-			"history never widens the span"
-		);
-		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 2);
-
-		// A skip after the start is still loss: 13 never arrives, 15 settles 14.
-		for seq in [14, 15] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
-
-		// A failed history group is lost wherever it falls.
-		gaps.fail(300, Some(3), AT);
-		assert_eq!(history(&stats), 4, "a failed group is not history");
-		assert_eq!((lost(&stats), outstanding(&stats)), (2, 2));
-	}
-
-	/// The newest group is the live frontier: a hole directly behind it isn't blamed
-	/// yet (it may still be in flight), but once the frontier moves past, it counts.
-	#[test]
-	fn gap_tracker_excludes_live_frontier() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(50));
-
-		// 3 is missing, 4 is the live frontier: nothing is settled past 2 yet.
-		for seq in [0, 1, 2, 4] {
-			gaps.complete(seq * 100, Some(seq), AT);
-		}
-		assert_eq!(lost(&stats), 0);
-
-		// 5 advances the frontier, settling 4 and confirming 3 was skipped.
-		gaps.complete(500, Some(5), AT);
-		assert_eq!(lost(&stats), 1);
-	}
-
-	/// An explicitly failed first group is lost even before a frontier can settle it.
-	#[test]
-	fn gap_tracker_counts_failed_first_group() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(50));
-
-		gaps.fail(0, Some(0), AT);
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 0);
-		assert_eq!(lost(&stats), 1);
-
-		gaps.complete(100, Some(1), AT);
-		assert_eq!(
-			lost(&stats),
-			1,
-			"advancing the frontier must not count the failure twice"
-		);
-	}
-
-	/// An explicitly failed live frontier is lost without waiting for another group.
-	#[test]
-	fn gap_tracker_counts_failed_final_group() {
-		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::from_millis(50));
-
-		gaps.complete(0, Some(0), AT);
-		gaps.fail(100, Some(1), AT);
-		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
-		assert_eq!(lost(&stats), 1);
-
-		gaps.complete(200, Some(2), AT);
-		assert_eq!(
-			lost(&stats),
-			1,
-			"advancing the frontier must not count the failure twice"
-		);
+		assert_eq!((lost(&stats), expected(&stats)), (1, 6));
 	}
 }

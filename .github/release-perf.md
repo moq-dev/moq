@@ -13,10 +13,12 @@ joined, which the generator never counted.
   single groups reached every viewer about 0.5 s behind their neighbours,
   inside the 2 s that players wait. One `main` round counted 11.7% lost with
   every group delivered, and every `release` round counted 0.5% to 1.8% the
-  same way. The generator now counts a gap only once the group above it is
-  as stale as the viewer's live read allows on either of its clocks: its start
-  `--max-delay` behind the newest, or its arrival that long ago. `groups_lost`
-  then equals the gaps still open at the end of every round.
+  same way. The generator had read in arrival order and kept its own gap
+  ledger since before the ordered reader reported what it gave up
+  ([moq-dev/moq#8910](https://github.com/moq-dev/moq/pull/8910)). It now reads
+  each track in key order as a player does, waiting `--max-delay` for a
+  missing group, and counts the group numbers skipped between those it
+  reaches.
 - **Relay receive backlog, real.** In every round that lost groups the
   relay's UDP receive queue was 6.4 MiB or deeper, and in most it reached the
   16 MiB buffer and the kernel dropped datagrams. The publisher's groups reached

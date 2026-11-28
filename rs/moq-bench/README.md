@@ -46,12 +46,8 @@ Every `--report` interval, `moq-bench` logs throughput (`send_mbps`/`recv_mbps`
 and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
 - `recv_groups`: cumulative groups read end to end across all subscriptions.
-- `history_groups`: the part of `recv_groups` older than its subscription's
-  first group, such as cached history a relay fills in after the subscribe.
-  These are never counted as lost.
-- `lost_groups`: cumulative groups that were skipped at or after a
-  subscription's first group, or that the relay gave up on part-way. It never
-  decreases: a group that lands after being counted lost stays lost.
+- `lost_groups`: cumulative groups after a subscription's first that its
+  ordered read skipped past, or that the relay gave up on part-way.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -63,24 +59,17 @@ and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
   many samples that interval contains. Do not read the interval percentiles
   against the cumulative `latency_samples`.
 
-Subscribers read groups in arrival order (out-of-order included) and track each
-subscription's sequence span. A span wider than the count received means groups
-in between were skipped, so loss reflects dropped groups rather than QUIC packet
-loss (which the transport already repairs). A gap is blamed only once the player
-can no longer receive it. A group overtaken by newer ones may still be handed out
-within the `--max-delay` budget, so a gap counts once the group above it is that
-stale on either of the reader's clocks: its start trails the newest by the budget,
-or it arrived the budget ago. A subscription that waits a budget for its next group
-settles its gaps by the second clock, and a track's end settles every gap. The span
-starts at the first group a subscription receives: an older group that arrives
-later is history, counted in `history_groups` rather than widening the span, so
-a join that over-fetches history never reads as loss. A group the
+Subscribers read each track in key order, the way a player does, and count loss
+from the group numbers the keyframe headers carry: every number skipped between two
+groups the read reached is lost, so loss reflects dropped groups rather than QUIC
+packet loss (which the transport already repairs). The first group a subscription
+reaches is its baseline, so the history a join skips is never loss. A group the
 relay fails part-way (it gives up on a subscriber that fell behind) ends that
 group alone and lands in the same accounting; the subscription stays for the next
 one, so the offered load holds at the configured count. Subscribers use
 `--max-delay` (default `2s`, the players' automatic budget), so a group still in
-flight when the next one starts is waited on, as a viewer would, rather than
-counted lost. A new subscription also starts up to that far behind the live
+flight when a newer one arrives is waited on that long, as a viewer would, and
+delivered in order rather than counted lost. A new subscription also starts up to that far behind the live
 edge, so its first latency samples include the catch-up. `--max-delay 0` keeps
 only the live edge, which with short groups measures skip timing more than
 relay cost. The JSON keyframe at the start of each group is parsed back to recover the publisher's
@@ -199,10 +188,9 @@ rates, the same convention as `moq-stats` frames. Resource `active` and
 `established` counts are live gauges that fall as work ends; diff only the counters.
 
 `groups_lost` is the logged `lost_groups`, so its increase over a window is the
-groups lost inside it. `groups_expected - groups_present` is the gaps still
-outstanding, which a late arrival closes; it is not monotonic, so do not diff
-it to count loss. `groups_history` is the logged `history_groups`: late history
-included in `groups_recv` but outside `groups_expected`.
+groups lost inside it. `groups_expected` is every group number the ordered reads
+reached or skipped past, from each subscription's first group, so `loss_pct` is
+`groups_lost` over it.
 
 Latency is measured from wall-clock milliseconds embedded by the publisher.
 Run each publisher and its subscribers on the same host so a latency sample closes

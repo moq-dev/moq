@@ -10,10 +10,10 @@ UDP receive queue fills the 16 MiB buffer no more often than `release`'s.
 ## Plan
 
 Found by [Chat startup loss](/.github/release-perf.md#chat-startup-loss-2026-11-27).
-Placed in m3 because the 0.22.0 cut does not need it (the m0-m2 rule from
-[moq-dev/moq#9842](https://github.com/moq-dev/moq/pull/9842)); whether the cut
-accepts the loss is the maintainer's open decision on
-[moq-dev/moq#9825](https://github.com/moq-dev/moq/pull/9825).
+Decided 2026-11-28 (maintainer, on
+[moq-dev/moq#9825](https://github.com/moq-dev/moq/pull/9825)): the 0.22.0 cut
+accepts this loss, and the quest stays in m3. Rejected: holding the cut on it in
+m0, and adding a cut gate first.
 
 Facts:
 
