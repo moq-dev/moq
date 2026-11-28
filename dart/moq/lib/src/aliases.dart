@@ -64,7 +64,7 @@ typedef OriginConsumer = MoqOriginConsumer;
 /// A requested broadcast not yet answered: serve a held broadcast, route a new one, or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// How a route advertises itself: hidden until announced, its static cost, and a stable [Instance].
+/// How a route advertises itself: hidden until announced, its static cost, and a stable [Identity].
 typedef RouteOptions = MoqRouteOptions;
 
 /// A stream of announce events under a prefix.
@@ -73,18 +73,18 @@ typedef AnnounceConsumer = MoqAnnounceConsumer;
 /// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
 typedef AnnounceConfig = MoqAnnounceConfig;
 
-/// Follows a specific broadcast path across the publisher instances that serve it.
+/// Follows a specific broadcast path across the publisher identities that serve it.
 typedef Following = MoqFollowing;
 
-/// The read-only facts on a received route: a static cost, the stream's instance, and
+/// The read-only facts on a received route: a static cost, the stream's identity, and
 /// whether a usable path reaches it.
 typedef RouteInfo = MoqRouteInfo;
 
-/// One continuous stream at a path: `Instance.parse` names one, and only a session mints one.
+/// One continuous stream at a path: `Identity.parse` names one, and only a session mints one.
 ///
 /// Two are equal only when their text and minted flag both match, so pass an
-/// instance a route reported back as is, rather than re-parsing its text.
-typedef Instance = MoqInstance;
+/// identity a route reported back as is, rather than re-parsing its text.
+typedef Identity = MoqIdentity;
 
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
@@ -92,7 +92,7 @@ typedef Announce = MoqAnnounce;
 /// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
 /// [AnnounceEventAbsent].
 ///
-/// Another publisher instance taking a path over keeps it present: hold a
+/// Another publisher identity taking a path over keeps it present: hold a
 /// [Following] to see the broadcast change.
 typedef AnnounceEvent = MoqAnnounceEvent;
 
@@ -136,11 +136,20 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
+/// The read side of a metadata subscription: yields a track's groups in arrival order, each frame as its header alone.
+typedef MetaConsumer = MoqMetaConsumer;
+
+/// One group of a metadata subscription: yields its frames' headers, without their payloads.
+typedef MetaGroup = MoqMetaGroup;
+
 /// A datagram payload with its own sequence and timestamp.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
+
+/// A frame's header without its payload: its declared size in bytes (0 for an empty frame) and timestamp.
+typedef FrameHeader = MoqFrameHeader;
 
 /// An exact media time: `value` units at `scale` units per second.
 ///
@@ -202,7 +211,8 @@ Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 /// following the live edge.
 typedef Range = MoqRange;
 
-/// Which pending group the publisher sends first.
+/// Which group comes first, as the publisher sends them and `recvGroup` returns those held.
+/// Before moq-lite-07 the publisher sends newest first whatever this asks.
 typedef Order = MoqOrder;
 
 /// A location within a track: a group start and a frame index in it.

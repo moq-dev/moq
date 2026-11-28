@@ -124,11 +124,21 @@ pub(super) fn next_frame(bytes: &mut Bytes) -> Result<Option<Frame>, TransportEr
 	Ok(Some(frame))
 }
 
+/// The bytes [`encode_transport_parameters`] writes for `params`
+pub(super) fn transport_parameters_size(params: &[u8]) -> usize {
+	VarInt::from_u64(QX_TRANSPORT_PARAMETERS).unwrap().size()
+		+ VarInt::from_u64(params.len() as u64).map_or(8, |len| len.size())
+		+ params.len()
+}
+
 pub(super) fn encode_transport_parameters(buf: &mut impl BufMut, params: &[u8]) {
 	buf.write_var(QX_TRANSPORT_PARAMETERS);
 	buf.write_var(params.len() as u64);
 	buf.put_slice(params);
 }
+
+/// The most bytes [`encode_ping`] writes: an 8-byte type and an 8-byte sequence number
+pub(super) const PING_SIZE_BOUND: usize = 16;
 
 pub(super) fn encode_ping(buf: &mut impl BufMut, response: bool, seq: VarInt) {
 	buf.write_var(match response {

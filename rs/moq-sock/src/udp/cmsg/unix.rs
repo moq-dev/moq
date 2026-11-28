@@ -63,37 +63,58 @@ const fn cmsg_space(len: usize) -> usize {
 	unsafe { libc::CMSG_SPACE(len as _) as usize }
 }
 
-/// Space for every control message one datagram can carry: the send set (ECN, GSO segment size,
-/// and source address) and the larger receive set `UdpSocketState::new` enables, sized for
-/// whichever family needs more.
+const fn max(a: usize, b: usize) -> usize {
+	if a > b { a } else { b }
+}
+
+/// Space for every control message one datagram can carry: the larger of the receive set
+/// `UdpSocketState::new` enables and the send set (ECN, GSO segment size, and source address),
+/// each sized for whichever family needs more. Taking the max means no reasoning about which
+/// set is bigger, and a new option on either side only needs adding to its own sum.
 ///
 /// An IPv4 datagram on a dual-stack socket carries the IPv6 packet info and the IPv4 TOS, which
 /// the IPv6 set covers.
 pub(crate) const LEN: usize = {
-	// IP_TOS (or IP_RECVTOS) and IPV6_TCLASS, budgeted as the wider `c_int`.
+	// IP_TOS (or IP_RECVTOS) and IPV6_TCLASS, budgeted as the wider `c_int`, in both directions.
 	let ecn = cmsg_space(size_of::<c_int>());
 
+	// Receive: the destination address.
 	#[cfg(any(target_os = "linux", target_os = "android"))]
-	let v4_dst = cmsg_space(size_of::<libc::in_pktinfo>());
+	let recv_v4 = cmsg_space(size_of::<libc::in_pktinfo>());
 	#[cfg(any(bsd, apple, solarish))]
-	let v4_dst = cmsg_space(size_of::<libc::in_addr>());
+	let recv_v4 = cmsg_space(size_of::<libc::in_addr>());
 	#[cfg(not(any(target_os = "linux", target_os = "android", bsd, apple, solarish)))]
-	let v4_dst = 0;
+	let recv_v4 = 0;
 
+	// Send: the source address. Apple sends `in_pktinfo` but receives `in_addr`.
+	#[cfg(any(target_os = "linux", target_os = "android", apple))]
+	let send_v4 = cmsg_space(size_of::<libc::in_pktinfo>());
+	#[cfg(any(bsd, solarish))]
+	let send_v4 = cmsg_space(size_of::<libc::in_addr>());
+	#[cfg(not(any(target_os = "linux", target_os = "android", apple, bsd, solarish)))]
+	let send_v4 = 0;
+
+	// Both directions carry `in6_pktinfo`.
 	#[cfg(not(any(target_os = "redox", target_os = "hurd")))]
-	let v6_dst = cmsg_space(size_of::<libc::in6_pktinfo>());
+	let v6_addr = cmsg_space(size_of::<libc::in6_pktinfo>());
 	#[cfg(any(target_os = "redox", target_os = "hurd"))]
-	let v6_dst = 0;
+	let v6_addr = 0;
 
-	// UDP_GRO's segment size and SO_TIMESTAMPNS's receive time, for either family.
+	// Receive: UDP_GRO's segment size and SO_TIMESTAMPNS's receive time, for either family.
 	#[cfg(any(target_os = "linux", target_os = "android"))]
-	let shared = cmsg_space(size_of::<c_int>()) + cmsg_space(size_of::<libc::timespec>());
+	let recv_shared = cmsg_space(size_of::<c_int>()) + cmsg_space(size_of::<libc::timespec>());
 	#[cfg(not(any(target_os = "linux", target_os = "android")))]
-	let shared = 0;
+	let recv_shared = 0;
 
-	let v4 = v4_dst + ecn;
-	let v6 = v6_dst + ecn;
-	shared + if v4 > v6 { v4 } else { v6 }
+	// Send: UDP_SEGMENT's GSO segment size, for either family.
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	let send_shared = cmsg_space(size_of::<u16>());
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	let send_shared = 0;
+
+	let recv = recv_shared + max(recv_v4, v6_addr) + ecn;
+	let send = send_shared + max(send_v4, v6_addr) + ecn;
+	max(recv, send)
 };
 // Linux on 64-bit: the IPv4 set needs 112 bytes and the IPv6 one 120.
 #[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]

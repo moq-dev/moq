@@ -69,6 +69,25 @@ class MigrateTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_guide_added_with_its_package_passes(self):
+        (self.repo / "rs/new").mkdir()
+        self.write("rs/new/Cargo.toml", "[package]\n")
+        self.write("rs/new/MIGRATE.md", "# Migrating\n\n## Unreleased\n\n### A break\n")
+        self.commit()
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_guide_added_to_an_existing_package_fails(self):
+        (self.repo / "rs/old").mkdir()
+        self.write("rs/old/Cargo.toml", "[package]\n")
+        self.commit()
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.write("rs/old/MIGRATE.md", "# Migrating\n\n## Unreleased\n\n### A break\n")
+        self.commit()
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rs/old/MIGRATE.md", result.stderr)
+
     def test_uncommitted_edit_fails(self):
         self.write("rs/pkg/MIGRATE.md", GUIDE + "\nMore.\n")
         self.assertNotEqual(self.check().returncode, 0)

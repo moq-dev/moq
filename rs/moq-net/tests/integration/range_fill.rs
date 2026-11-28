@@ -261,8 +261,7 @@ async fn a_recovery_takes_a_skip_inside_it() {
 	.expect("timed out");
 }
 
-/// One group, or a slice of one, is what lite-07 FETCH carries, so a miss of one group still
-/// fetches it.
+/// On lite-07, FETCH is removed and a miss of one group is served by a one-shot bounded SUBSCRIBE.
 #[kio::test]
 async fn a_one_group_miss_still_fetches() {
 	kio::clock::timeout(TIMEOUT, async {
@@ -273,8 +272,8 @@ async fn a_one_group_miss_still_fetches() {
 			.expect("fetched");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"x");
-		assert_eq!(fixture.opened(FETCH), 1);
-		assert_eq!(fixture.opened(SUBSCRIBE), 0, "no subscription for one group");
+		assert_eq!(fixture.opened(FETCH), 0, "lite-07 never sends FETCH");
+		assert_eq!(fixture.opened(SUBSCRIBE), 1, "one-shot SUBSCRIBE for one group");
 	})
 	.await
 	.expect("timed out");

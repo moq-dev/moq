@@ -17,22 +17,11 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-if [[ "$(rustc --version)" == *-nightly* ]]; then
-    sysroot=$(rustc --print sysroot)
-elif command -v rustup >/dev/null 2>&1; then
-    sysroot=$(rustup run nightly rustc --print sysroot)
-else
-    echo "rs: nightly Rust is missing; select it or run rustup toolchain install nightly --component miri,rust-src" >&2
-    exit 1
-fi
-
-# Nix puts its pinned stable compiler first; cargo and rustc must both be nightly.
-export PATH="$sysroot/bin:$PATH"
+COMPONENTS=miri,rust-src source sh/rs/nightly.sh
 if ! cargo miri --version >/dev/null 2>&1; then
     echo "rs: Miri is missing: rustup component add --toolchain nightly miri rust-src" >&2
     exit 1
 fi
-rustc --version
 
 # Nextest unions repeated filtersets, so a caller's `-E` would add tests to a pass
 # rather than narrow it; intersect it with each pass's filter instead.

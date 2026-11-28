@@ -137,7 +137,7 @@ impl Egress {
 	///
 	/// `discontinuity` is the muxer's counter for `frame`. A change means the muxer
 	/// restarted its program clock (a marker breaking the timeline, or a switch to another
-	/// publisher instance, whose timeline starts wherever its own does), so the anchor
+	/// publisher identity, whose timeline starts wherever its own does), so the anchor
 	/// this pacer holds belongs to a timeline that no longer applies: mapping a new
 	/// generation that starts earlier through it puts every frame of that span before the
 	/// first packet, where the floor collapses all of them onto one instant and the
@@ -532,11 +532,11 @@ pub struct Export<'a> {
 	pub subscriber: &'a origin::Consumer,
 	/// The broadcast to send, relative to the consumer's root.
 	pub broadcast: moq_net::Path,
-	/// How long to wait for the same publisher instance, or when [stitching](Self::stitch) a
+	/// How long to wait for the same publisher identity, or when [stitching](Self::stitch) a
 	/// replacement, to come back once the broadcast ends, carrying on with the same stream.
-	/// Zero (the default) follows only an instance already serving, else ends the stream.
+	/// Zero (the default) follows only an identity already serving, else ends the stream.
 	pub follow: Duration,
-	/// Follow another publisher instance replacing the broadcast, as a full program switch on
+	/// Follow another publisher identity replacing the broadcast, as a full program switch on
 	/// the same SRT connection. Off by default, which ends the stream with
 	/// [`moq_mux::Error::Replaced`].
 	pub stitch: bool,
@@ -987,7 +987,7 @@ mod tests {
 	}
 
 	/// Regression for the SRT half of #2833: a new program clock can start earlier than the
-	/// old one (a switch to another publisher instance starts its timeline over), so an
+	/// old one (a switch to another publisher identity starts its timeline over), so an
 	/// egress that keeps its old anchor maps the whole new span into the past, where the
 	/// first-packet floor collapses it onto one instant. The receiver then sees the program
 	/// stop until the media climbs back to where it left off, then the accumulated backlog
@@ -1004,7 +1004,7 @@ mod tests {
 		assert_eq!(first[0].0, start, "the first payload anchors the connection");
 		assert_eq!(second[0].0, start.saturating_add(SLOT));
 
-		// The program switches to an instance whose timeline starts at zero.
+		// The program switches to an identity whose timeline starts at zero.
 		let mut now = start.saturating_add(2 * SLOT);
 		let switched = egress.push(&frame(0, &[2; SRT_PAYLOAD]), 1, now);
 		assert_eq!(switched[0].0, now, "the new generation becomes the live edge");
@@ -1189,15 +1189,15 @@ mod tests {
 		egress.abort();
 	}
 
-	/// One publisher instance of `live`: an announced broadcast under its own instance with one
+	/// One publisher identity of `live`: an announced broadcast under its own identity with one
 	/// Legacy AAC track, for the egress tests.
-	struct Instance {
+	struct Identity {
 		_route: moq_net::origin::Route,
 		catalog: moq_mux::catalog::Producer<moq_mux::container::ts::Ext>,
 		audio: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	}
 
-	impl Instance {
+	impl Identity {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
 			let route = origin.route("live", moq_net::origin::RouteOptions::default()).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
@@ -1304,13 +1304,13 @@ mod tests {
 			.collect()
 	}
 
-	/// With stitch, another instance replacing the broadcast switches the program on the same
+	/// With stitch, another identity replacing the broadcast switches the program on the same
 	/// SRT connection: the caller keeps receiving, now under a new PAT version.
 	#[tokio::test]
 	async fn a_stitched_replacement_keeps_the_srt_connection() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut old = Instance::publish(&origin, "old.aac");
+		let mut old = Identity::publish(&origin, "old.aac");
 		let (mut receiver, egress) = egress(&origin, Duration::from_secs(10), true).await;
 
 		old.write(30, 600_000_000);
@@ -1321,8 +1321,8 @@ mod tests {
 			.unwrap();
 		assert_eq!(pat_versions(&first.1), [0], "the old program opens the connection");
 
-		// The replacement starts its own timeline over while the old instance stays up.
-		let mut new = Instance::publish(&origin, "new.aac");
+		// The replacement starts its own timeline over while the old identity stays up.
+		let mut new = Identity::publish(&origin, "new.aac");
 		new.write(30, 0);
 		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
@@ -1350,7 +1350,7 @@ mod tests {
 		const FOLLOW: Duration = Duration::from_secs(1);
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut live = Instance::publish(&origin, "a.aac");
+		let mut live = Identity::publish(&origin, "a.aac");
 		let (mut receiver, egress) = egress(&origin, FOLLOW, false).await;
 
 		live.write(5, 0);
@@ -1380,7 +1380,7 @@ mod tests {
 		kio::clock::host_time(); // real SRT sockets
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut live = Instance::publish(&origin, "a.aac");
+		let mut live = Identity::publish(&origin, "a.aac");
 		let (mut receiver, egress) = egress(&origin, Duration::from_secs(600), false).await;
 
 		live.write(5, 0);

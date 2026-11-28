@@ -27,14 +27,7 @@ pub struct Consumer<T> {
 /// Zero-to-one transitions share the state lock with idle teardown. Existing
 /// demand can be incremented without relocking when closed-channel reads are allowed.
 fn mint<T>(state: &Arc<Channel<T>>, counts: &Arc<Counts>, only_open: bool) -> Option<Consumer<T>> {
-	let first = if !only_open
-		&& counts
-			.consumers
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-				(count > 0).then(|| count + 1)
-			})
-			.is_ok()
-	{
+	let first = if !only_open && counts.join_consumers() {
 		// The successful increment keeps the count above zero, so an idle teardown
 		// cannot commit. Callers may already hold the state lock on this path.
 		false

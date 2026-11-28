@@ -251,7 +251,7 @@ The in-tree control lanes also run with `--tail`:
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
 - On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
-  the same publisher instance. The JS reconnect loop retains its reader across the
+  the same publisher identity. The JS reconnect loop retains its reader across the
   move. A separate read through the replacement proves it serves data before the
   original transport is cut; only the replacement can deliver the final group.
   The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
@@ -499,7 +499,7 @@ Each run covers, against a real local relay:
   `src/native.test.ts` renders the filters and requires the fixture's own
   decoder to read back every frame number and tone step.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
-  `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
+  `AudioContext`, and `Worker` to count live identities, so a detach that leaks a
   session is visible rather than merely invisible.
 
 Tolerances come from the fixture: video must present at half the fixture's 30fps
@@ -520,7 +520,7 @@ pass makes no claim about those omitted checks.
 `just test media --media-cases replacement` keeps publisher A open while B takes
 the same path, then closes B and follows A again. Lite-07, lite-06, and IETF draft
 22 viewers must present each run's marked pixels and synchronized audio, with
-no A pictures spliced into B. Instance-aware viewers also check the broadcast
+no A pictures spliced into B. Identity-aware viewers also check the broadcast
 identities. Both publishers use lite-07. Each switch must present within a bound
 derived from its parts, counted from B's readiness (connected, with catalogs) or
 B's withdrawal: the relay's 300 ms announcement hold, five loopback round trips
@@ -534,7 +534,7 @@ The player joins live, so a moq-lite viewer asks for its min delay. A relay serv
 moq-transport SUBSCRIBE asks for a live join with no min delay, so neither wire replays
 the retention ahead of the live edge.
 
-The CLI integration suite's `instances` cases exercise the real QUIC relay with
+The CLI integration suite's `identities` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
 subscriptions keep A while fresh catalog handles resolve B with fresh sibling
 pins. Later metadata and FETCH work cannot join B through A's retired handle;
@@ -678,6 +678,11 @@ subscriber reads them.
 The finite-tail matrix also publishes compressed tracks from Rust and native JS through
 the relay, in both directions on lite-07 and lite-06. It checks multiple frames in each
 DEFLATE window, empty frames, the plain fallback and the received track's codec flag.
+
+The same finite track also crosses the relay on lite-07 as a metadata subscription
+(`broadcast.meta`), Rust to Rust and in both directions with each native JS runtime:
+the reader checks every group arrives, with each frame's declared size and no
+payload read, and the declared end.
 
 The compressed-catalog lane then fans one Rust hang catalog out to three native JS
 readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and reading it as

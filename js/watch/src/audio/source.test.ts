@@ -92,6 +92,22 @@ test("a rejected replacement catalog clears previously available audio", async (
 	}
 });
 
+test("prefers a timestamped container, falling back to raw and then cts", async () => {
+	const container = (kind: string) => config("opus", { container: { kind } });
+	const state = broadcast({ cts: container("cts"), raw: container("raw"), loc: container("loc") });
+	const source = new Source({ broadcast: state.broadcast });
+	try {
+		await settled(source);
+		expect(source.out.track.peek()).toBe("loc");
+
+		state.catalog.set({ audio: { renditions: { cts: container("cts"), raw: container("raw") } } });
+		await settled(source);
+		expect(source.out.track.peek()).toBe("raw");
+	} finally {
+		source.close();
+	}
+});
+
 test("skips a disabled rendition on the initial selection", async () => {
 	const state = broadcast({ mic: config("opus", { enabled: false }) });
 	const source = new Source({ broadcast: state.broadcast });

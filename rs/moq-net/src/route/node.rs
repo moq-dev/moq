@@ -25,7 +25,7 @@ use std::{
 
 use kio::clock::{Deadlines, Instant};
 
-use crate::{Instance, Path};
+use crate::{Identity, Path};
 
 use super::{
 	Error, Id, Item, Kind, Metric,
@@ -76,10 +76,10 @@ pub(crate) type Claim = relay::Claim<Attr>;
 pub(crate) type Change = relay::Change<Attr>;
 
 /// A message on a session's announce stream.
-pub(crate) type Msg = relay::Msg<Instance, Attr>;
+pub(crate) type Msg = relay::Msg<Identity, Attr>;
 
 /// A broadcast on the route layer.
-pub(crate) type Broadcast = relay::Broadcast<Instance>;
+pub(crate) type Broadcast = relay::Broadcast<Identity>;
 
 /// A claim as the origin serves it through one session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,14 +116,14 @@ pub(crate) enum Output {
 	Serve {
 		origin: NodeId,
 		path: Path,
-		instance: Instance,
+		identity: Identity,
 		served: Served,
 	},
 	/// Stop serving it, for the reason `gone` gives.
 	Unserve {
 		origin: NodeId,
 		path: Path,
-		instance: Instance,
+		identity: Identity,
 		gone: Gone,
 	},
 }
@@ -206,7 +206,7 @@ struct Slot {
 type SlotKey = (NodeId, Key);
 
 struct State {
-	router: Router<Key, Instance, Attr>,
+	router: Router<Key, Identity, Attr>,
 	clock: Deadlines,
 	next_key: Key,
 	/// The next [`Served::lifecycle`].
@@ -828,9 +828,9 @@ impl State {
 		}
 		dirty.append(&mut self.redrawn);
 		let moved = !dirty.is_empty();
-		// What the reader shows first, so the instance that replaces another at a path is
+		// What the reader shows first, so the identity that replaces another at a path is
 		// served before the one it replaces goes.
-		let shown = |(path, instance): &Broadcast| self.router.shown().contains_key(&(instance.clone(), path.clone()));
+		let shown = |(path, identity): &Broadcast| self.router.shown().contains_key(&(identity.clone(), path.clone()));
 		let (staying, going): (Vec<Broadcast>, Vec<Broadcast>) = dirty.into_iter().partition(shown);
 		for broadcast in staying.into_iter().chain(going) {
 			self.relane(&broadcast, ended.contains(&broadcast));
@@ -849,8 +849,8 @@ impl State {
 
 	/// Bring how the origin serves `broadcast` in line with the router.
 	fn relane(&mut self, broadcast: &Broadcast, ended: bool) {
-		let (path, instance) = broadcast;
-		let shown = self.router.shown().contains_key(&(instance.clone(), path.clone()));
+		let (path, identity) = broadcast;
+		let shown = self.router.shown().contains_key(&(identity.clone(), path.clone()));
 		let mut wanted: BTreeMap<SlotKey, Served> = BTreeMap::new();
 		// A slot still held keeps its showing; none, and this is a new one.
 		let held = (self.lanes.get(broadcast)).and_then(|slots| slots.values().next());
@@ -933,8 +933,8 @@ impl State {
 	/// Release every slot of `broadcast` that is leaving, once a wanted one serves it or
 	/// the reader no longer shows it. With `ended`, its publisher withdrew it.
 	fn settle(&mut self, broadcast: &Broadcast, ended: bool) {
-		let (path, instance) = broadcast;
-		let shown = self.router.shown().contains_key(&(instance.clone(), path.clone()));
+		let (path, identity) = broadcast;
+		let shown = self.router.shown().contains_key(&(identity.clone(), path.clone()));
 		let Some(slots) = self.lanes.get_mut(broadcast) else {
 			return;
 		};
@@ -984,13 +984,13 @@ impl State {
 			match slot.orphan {
 				Some(orphan) => self.released.push((orphan, gone)),
 				None => {
-					let (path, instance) = broadcast.clone();
+					let (path, identity) = broadcast.clone();
 					outputs.push((
 						session,
 						Output::Unserve {
 							origin,
 							path,
-							instance,
+							identity,
 							gone,
 						},
 					));
@@ -1023,9 +1023,9 @@ impl State {
 			};
 		};
 		let (Next::Via(session) | Next::Local(session)) = next;
-		let (path, instance) = broadcast;
-		// The claim it follows: the most specific one covering the path.
-		let claim = |above: Path| (above, instance.clone());
+		let (path, identity) = broadcast;
+		// A claim of the broadcast's Identity, filed at a path covering it.
+		let claim = |above: Path| (above, identity.clone());
 		// A session not filed here yet is told nothing, so any claim may serve it.
 		let admits = |claim: &Broadcast| from.is_none_or(|from| self.router.admits(from, origin, claim));
 		if session == LOCAL || session == LOCAL_MARKED {
@@ -1035,8 +1035,10 @@ impl State {
 		if Some(session) == from {
 			return Some(None);
 		}
-		let slot = (ancestors(path).rev()).find_map(|above| {
-			let claim = claim(above);
+		// The lane of the filing the router followed, not a deeper one of the same claimant
+		// that may be unavailable.
+		let slot = self.router.filed(origin, broadcast, from).and_then(|from| {
+			let claim = claim(from);
 			let slot = self.lanes.get(&claim)?.get(&(origin, session))?;
 			Some((admits(&claim), slot))
 		});
@@ -1058,11 +1060,11 @@ impl Slot {
 		self.stay = Stay::Leaving { ended: was || ended };
 	}
 
-	fn output(&self, origin: NodeId, (path, instance): &Broadcast) -> Output {
+	fn output(&self, origin: NodeId, (path, identity): &Broadcast) -> Output {
 		Output::Serve {
 			origin,
 			path: path.clone(),
-			instance: instance.clone(),
+			identity: identity.clone(),
 			served: self.served.clone(),
 		}
 	}

@@ -3,7 +3,13 @@ import { type Container, ContainerSchema, containerSupported } from "./container
 import { RootSchema } from "./root.ts";
 
 test("known containers round-trip", () => {
-	const known: Container[] = [{ kind: "legacy" }, { kind: "cmaf", init: "AAEC" }, { kind: "loc" }];
+	const known: Container[] = [
+		{ kind: "legacy" },
+		{ kind: "cmaf", init: "AAEC" },
+		{ kind: "loc" },
+		{ kind: "raw" },
+		{ kind: "cts" },
+	];
 	for (const container of known) {
 		const parsed = ContainerSchema.parse(container);
 		expect(parsed).toEqual(container);

@@ -50,22 +50,30 @@ effect.run((e) => {
 	scene.status(lines);
 });
 
-effect.run((e) => {
+// The publisher republishes its catalog as its bitrate and timing estimates settle, so the picture
+// and the sound rebuild only when a field they lay out by changes. Rebuilding the audio graph on
+// every update would glitch the sound and drop anything tapping the mix.
+const picture = effect.computed((e) => {
 	const config = e.get(videoSrc.out.config);
-	if (config) scene.layout(config.projection, config.stereo);
+	return config && { projection: config.projection, stereo: config.stereo };
+});
+const placement = effect.computed((e): Placement | undefined => {
+	const config = e.get(audioSrc.out.config);
+	if (!config) return undefined;
+	if (config.layout === "ambisonic") return { kind: "ambisonic" };
+	if (e.get(picture)?.projection?.kind === "equirectangular") return { kind: "head" };
+	return { kind: "point", position: scene.speaker };
+});
+
+effect.run((e) => {
+	const layout = e.get(picture);
+	if (layout) scene.layout(layout.projection, layout.stereo);
 });
 effect.run((e) => {
 	const root = e.get(audio.out.root);
-	const config = e.get(audioSrc.out.config);
-	if (!root || !config) return;
-	const projection = e.get(videoSrc.out.config)?.projection?.kind;
-	const placement: Placement =
-		config.layout === "ambisonic"
-			? { kind: "ambisonic" }
-			: projection === "equirectangular"
-				? { kind: "head" }
-				: { kind: "point", position: scene.speaker };
-	const spatial = new Spatial(root, placement);
+	const where = e.get(placement);
+	if (!root || !where) return;
+	const spatial = new Spatial(root, where);
 	scene.listener = spatial;
 	e.run((inner) => {
 		spatial.muted = inner.get(scene.muted);

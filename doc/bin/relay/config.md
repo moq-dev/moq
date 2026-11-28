@@ -211,8 +211,12 @@ Zero admits no entries of that kind, not unlimited entries.
 `live_edges` bounds the newest group of every track a session publishes to the
 relay. The cache keeps that group whatever its `capacity` or `headroom`, so a
 publisher holding many quiet tracks would otherwise hold one group each past
-any budget. Past the bound, the frames of the session's own live edges are
-shed, the one that moved longest ago first. A viewer reaching a shed frame
+any budget. Past the bound, the session's own live edges are shed in delivery's
+priority order: the lowest-priority track first, and among equals the edge that
+moved longest ago. Frames viewers already read go before any frame a viewer is
+still owed, a compressed track's decoded copies included, except where other
+fetches share the group's content: those go with their whole edge. A viewer
+reaching a shed frame
 meets it as it would any frame the cache dropped; the group's place on the
 timeline stays, so live joins land where they did. Another session's edges
 are never touched. Here zero means no bound.
@@ -405,7 +409,7 @@ roots = true                         # Also give each root its own stats under <
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
+Each run announces under a fresh [identity](/concept/moq-lite#publisher-identities),
 so a restart is a new broadcast at the same path. Each bucket is a
 [track](/concept/stats#bucket-tracks) of that broadcast, and one returning after
 its linger restarts its counters under a new run id without an announce. The

@@ -231,6 +231,8 @@ impl<T> Channel<T> {
 	/// Count a write, closing the channel too when `close`. Call it holding the value's
 	/// lock, on an open channel, before [`wake`](Self::wake).
 	fn publish(&self, close: bool) {
+		#[cfg(feature = "sim")]
+		crate::clock::sim::event();
 		self.version.fetch_add(STEP | close as u64, Ordering::Release);
 	}
 

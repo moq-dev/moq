@@ -480,7 +480,7 @@ class ReportTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 report.kixel(head, bases)
-        many = [{"name": f"rust/{index:0500}", "unit": "ns", "value": 1} for index in range(2100)]
+        many = [{"name": f"rust/{index:0500}", "unit": "ns", "value": 1} for index in range(17000)]
         with self.assertRaises(ValueError):
             report.kixel(many, {})
 

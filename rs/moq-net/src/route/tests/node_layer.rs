@@ -1593,7 +1593,7 @@ fn a_flat_domain_needs_warm_routes_to_fan_out() {
 /// The tables in the PR body: every failure on every single-domain shape, for the
 /// shipped router and both layers, then what settled routes cost to carry.
 #[test]
-#[ignore = "a sweep; prints the node layer's tables"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_node_layer() {
 	let sizes: Vec<usize> = std::env::var("MOQ_BAKEOFF_RELAYS").map_or(vec![12, 32], |sizes| {
 		sizes
@@ -1649,7 +1649,7 @@ fn benchmark_node_layer() {
 /// What a domain costs to build and hold, and what one link closing and one transit
 /// dying cost, as relays, announcing relays, and broadcasts grow.
 #[test]
-#[ignore = "a sweep; prints the node layer's growth table"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_node_layer_growth() {
 	println!(
 		"grows,relays,links,publishers,announcers,broadcasts,rule,build_route_messages,build_claim_items,held_routes,held_claims,close_route_messages,death_route_messages,death_claim_items,death_unfed"

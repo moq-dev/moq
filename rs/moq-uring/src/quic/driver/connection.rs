@@ -329,6 +329,18 @@ impl Connection {
 		self.shared.conn.borrow_mut().set_limits(limits)
 	}
 
+	/// Start `keep_alive`, replacing any running; see
+	/// [`moq_quic::connection::Connection::set_keep_alive`].
+	pub fn set_keep_alive(&self, keep_alive: crate::quic::KeepAlive) -> Result<(), crate::quic::KeepAliveError> {
+		self.shared.conn.borrow_mut().set_keep_alive(keep_alive)
+	}
+
+	/// Wait until the keep-alive's stale signal differs from `stale`; see
+	/// [`moq_quic::connection::Connection::poll_stale`].
+	pub fn poll_stale(&self, waiter: &kio::Waiter, stale: bool) -> std::task::Poll<bool> {
+		self.shared.conn.borrow_mut().poll_stale(waiter, stale)
+	}
+
 	/// The wire counters this connection updates as it sends and receives.
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.shared.wire.clone()
@@ -337,6 +349,12 @@ impl Connection {
 	/// The target this connection probes up to, or `None` when its congestion controller cannot probe.
 	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
 		self.shared.probe.clone()
+	}
+
+	/// Whether a reset still delivers its prefix to the peer's reader: the peer accepts
+	/// RESET_STREAM_AT.
+	pub(crate) fn reset_stream_at(&self) -> bool {
+		self.shared.conn.borrow().reset_stream_at()
 	}
 
 	/// The receive windows now in force: the connection's, and the most one stream holds.
@@ -506,6 +524,27 @@ impl Connection {
 		options: send::Options<'_>,
 	) -> Poll<Result<(send::Stream, recv::Stream), Error>> {
 		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
+	}
+
+	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it
+	/// has, as [`moq_quic::connection::Connection::poll_quiesce`] does.
+	pub(crate) fn poll_quiesce(
+		&self,
+		waiter: &kio::Waiter,
+		code: VarInt,
+		keep: &[crate::quic::stream::Id],
+	) -> Poll<Result<(), Error>> {
+		let quiesced = self.shared.conn.borrow_mut().poll_quiesce(waiter, code, keep);
+		match ready!(quiesced) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(_) => Poll::Ready(Err(self.shared.lost())),
+		}
+	}
+
+	/// Give up a quiesce that is not ready, as
+	/// [`moq_quic::connection::Connection::abandon_quiesce`] does.
+	pub(crate) fn abandon_quiesce(&self, code: VarInt, keep: &[crate::quic::stream::Id]) {
+		self.shared.conn.borrow_mut().abandon_quiesce(code, keep);
 	}
 
 	/// Receive the next datagram.

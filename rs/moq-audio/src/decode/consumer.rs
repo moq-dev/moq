@@ -19,6 +19,7 @@ pub use moq_mux::container::Delay;
 /// The most lost media concealed per gap; the rest is a [`Read::Gap`]. libopus CELT turns to
 /// noise past five lost packets (100 ms at 20 ms), still about -20 dB below the speech it
 /// replaces, and the audio after a longer concealment recovers twice as far from the original.
+/// SILK fades to near silence over the same span.
 const CONCEAL_MAX: Duration = Duration::from_millis(100);
 
 /// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
@@ -27,6 +28,7 @@ const CONCEAL_MAX: Duration = Duration::from_millis(100);
 /// `moq_video::decode::Read` has, so a player handles loss and ends alike for
 /// every media type.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Read {
 	/// Decoded PCM.
 	Frame(Frame),
@@ -34,11 +36,12 @@ pub enum Read {
 	/// or a packet's timestamp did not continue the previous one. What follows does not
 	/// continue what came before, and every sample decoded before the loss precedes it.
 	///
-	/// A codec that conceals loss (CELT-coded Opus) fills up to the first 100 ms of the
+	/// A codec that conceals loss (Opus) fills up to the first 100 ms of the
 	/// loss with [`Read::Frame`]s first, so the gap covers only the rest, and a shorter loss
 	/// reads as no gap at all. A loss across a declared [`Read::End`] is never concealed.
 	///
 	/// The span is an upper bound, in the scale of the frame that follows.
+	#[non_exhaustive]
 	Gap {
 		/// The furthest presentation point already read.
 		timestamp: moq_net::Timestamp,
@@ -50,6 +53,7 @@ pub enum Read {
 	/// Frames that follow and start before `end` are the stopped encoder's remaining
 	/// media: its codec drain, trimmed at `end`, and the resampler's tail. The first frame
 	/// at or past `end` comes from a fresh encoder, since a timeline only moves forward.
+	#[non_exhaustive]
 	End {
 		/// Where the stopped encoder's media stops.
 		end: moq_net::Timestamp,
@@ -2086,18 +2090,33 @@ mod tests {
 		assert_eq!(total, 18 * 960 - 2 * 312);
 	}
 
-	/// SILK concealment is broken in the bundled decoder, so a SILK stream's loss stays a gap.
+	/// SILK and hybrid Opus conceal a short loss whole too, fading the audio rather than
+	/// playing it at full scale.
 	#[tokio::test(start_paused = true)]
-	async fn opus_silk_loss_stays_a_gap() {
-		let config = EncodeConfig {
-			kind: Some(crate::encode::Kind::Voice),
-			bitrate: Some(moq_net::bandwidth::Rate::from_bps(12_000)),
-			..EncodeConfig::new(48_000, Layout::Mono)
-		};
-		let events = opus_loss(config, 5..7, Loss::Groups).await;
-		assert_eq!(gaps(&events), [(100_000, 40_000)]);
-		let (total, _) = heard(&events, 0..0);
-		assert_eq!(total, 18 * 960 - 312);
+	async fn opus_conceals_a_short_silk_and_hybrid_loss() {
+		// 12 kbps codes SILK, 32 kbps hybrid, as `decoder::opus_conceals_silk_and_hybrid` checks.
+		for bitrate in [12_000, 32_000] {
+			let config = EncodeConfig {
+				kind: Some(crate::encode::Kind::Voice),
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(bitrate)),
+				..EncodeConfig::new(48_000, Layout::Mono)
+			};
+			let events = opus_loss(config, 5..7, Loss::Groups).await;
+			assert_eq!(gaps(&events), [], "{bitrate}");
+			assert!(contiguous(&events), "{bitrate}: {events:?}");
+			let (total, quietest) = heard(&events, 100_000..140_000);
+			assert_eq!(total, 20 * 960 - 312, "{bitrate}");
+			assert!(quietest > 0.02, "{bitrate}: concealed at {quietest}");
+			// The sine runs at 0.35 RMS; saturated concealment reads about 1.0.
+			let loudest = events
+				.iter()
+				.filter_map(|event| match event {
+					Event::Frame(at, _, rms) if (100_000..140_000).contains(at) => Some(*rms),
+					_ => None,
+				})
+				.fold(0f32, f32::max);
+			assert!(loudest < 0.5, "{bitrate}: concealed at {loudest}");
+		}
 	}
 
 	/// A refused packet primed nothing, so the window starts at the first one that decodes.

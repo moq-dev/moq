@@ -7,7 +7,7 @@ A bench whose count cannot be made repeatable leaves `sh/rs/instructions.sh`'s s
 
 ## Plan
 
-Decided 2026-11-24 (maintainer, pick round on [moq-dev/moq#9555](https://github.com/moq-dev/moq/pull/9555)): ✅ keep this quest and move it to `m0`, since noisy series now feed Kixel Quest's regression filing and bisects (rejected: drop it; keep it in `m9`). ✅ land rust2-bench counting every target meanwhile (rejected: leave the 11 noisy targets out until they repeat): "land now, we don't want hosted runners eventually anyway". The counts are expected to move off GitHub-hosted runners, so a fix must hold on any host rust2-bench runs on, not only on `ubuntu-24.04`; that move belongs here or in a quest of its own.
+Decided 2026-11-24 (maintainer, pick round on [moq-dev/moq#9555](https://github.com/moq-dev/moq/pull/9555)): ✅ keep this quest and move it to `m0`, since noisy series now feed Kixel Quest's regression filing and bisects (rejected: drop it; keep it in `m9`). ✅ land rust2-bench counting every target meanwhile (rejected: leave the 11 noisy targets out until they repeat): "land now, we don't want hosted runners eventually anyway". Superseded 2026-11-26 by the org's runner rule, which lets a public repository's jobs outside merge gates, such as these Nightly and bisect counts, stay on GitHub-hosted runners, so no move off them is planned. A fix must still hold in any checkout, as the Goal says, not only on `ubuntu-24.04`.
 
 Measured 2026-11-24 on rust2-bench at kixel-ai/rust2@6ead6d56 (fingerprint `x86_64-3059cd1d9e65`), with no code change between runs:
 
@@ -26,10 +26,8 @@ Found 2026-11-24 on [moq-dev/moq#9574](https://github.com/moq-dev/moq/pull/9574)
 
 Decided 2026-11-24 (maintainer, /quest-run pick on [moq-dev/moq#9574](https://github.com/moq-dev/moq/pull/9574#issuecomment-7153370314)): ✅ the fixed-seed and fixed-clock fix lives in rust2-bench, deterministic randomness and clock for every counted job, both in the fingerprint so Kixel Quest starts new series, binaries that bypass it refused (rejected: a paused clock in each moq bench, which cannot reach std's `RandomState` inside library code). kixel-ai/rust2's [`quest/m0/bench-determinism.md`](https://github.com/kixel-ai/rust2/blob/main/quest/m0/bench-determinism.md) owns it, together with the canonical job environment ([kixel-ai/rust2#1016](https://github.com/kixel-ai/rust2/pull/1016)).
 
-What remains here once it ships: bump `rust2`, count every benchmark twice in two checkouts at different paths, one run on an idle host and one on a host loaded to its core count, and find every count equal; then drop the `--jobs 1` from `.github/workflows/codspeed.yml` and the wall-clock caveats in it and `sh/rs/instructions.sh`.
+Shipped 2026-11-25: [kixel-ai/rust2#1023](https://github.com/kixel-ai/rust2/pull/1023) preloads a library that fixes the randomness and clock each counted process reads through glibc and pads every job's launch to 1 MiB, and [kixel-ai/rust2#1030](https://github.com/kixel-ai/rust2/pull/1030) counts both sides of `compare` from one directory. moq pins it since kixel-ai/rust2@cda8fc3e (fingerprint `x86_64-ce1501c93c32`). [kixel-ai/rust2#1044](https://github.com/kixel-ai/rust2/pull/1044) then found all 1,284 counts equal between an idle start (`--jobs 1`, load 0.46) and a loaded one (`--jobs 4` beside 4 CPU burners) on one `ubuntu-24.04` runner, from one checkout.
+
+What remains: count every benchmark twice in two checkouts at different paths, one run from an idle start and one loaded to the runner's core count, and find every count equal; then drop the `--jobs 1` from `.github/workflows/codspeed.yml` and the wall-clock caveats in it and `sh/rs/instructions.sh`.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- kixel-ai/rust2: ship [`quest/m0/bench-determinism.md`](https://github.com/kixel-ai/rust2/blob/main/quest/m0/bench-determinism.md) (deterministic randomness and clock for counted jobs, launched with a canonical environment, cwd, and fixed-length workspace-root path), claimed by [kixel-ai/rust2#1023](https://github.com/kixel-ai/rust2/pull/1023). Check: that PR merged and its quest file deleted on rust2's `main`.

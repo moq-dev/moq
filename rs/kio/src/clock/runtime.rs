@@ -233,8 +233,8 @@ impl Timer {
 /// Let timers wait on the host clock in this process, as real I/O does: real sockets, devices, or processes.
 ///
 /// With `KIO_DENY_HOST_TIMERS=1` in the environment, a timer that waits on the host clock
-/// aborts the process unless it called this. It lasts for the process, which is one test
-/// under nextest. `@moq/clock/test`'s `hostTime()` is the JS counterpart.
+/// exits the process with a failure unless it called this. It lasts for the process, which is one test
+/// under nextest.
 pub fn host_time() {
 	#[cfg(feature = "runtime")]
 	guard::ALLOWED.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -292,7 +292,9 @@ mod guard {
 		if !denied() || ALLOWED.load(Ordering::Relaxed) || !running() {
 			return;
 		}
-		// Abort rather than panic: a panic in a spawned task never reaches the test.
+		// Exit rather than panic: a panic in a spawned task never reaches the test. Exit rather
+		// than abort: an abort hands the host's crash reporter (apport, systemd-coredump,
+		// ReportCrash) a core dump, which costs about a second each and serializes.
 		// Written to the handle, since libtest's capture of `eprintln!` dies with the process.
 		let _ = writeln!(
 			std::io::stderr(),
@@ -303,7 +305,8 @@ mod guard {
 			 any process it spawns.\n{}",
 			std::backtrace::Backtrace::force_capture()
 		);
-		std::process::abort();
+		// libtest's exit code for a failed run.
+		std::process::exit(101);
 	}
 }
 
@@ -590,10 +593,10 @@ mod tests {
 	const GUARD_CHILD: &str = "KIO_GUARD_TEST_CHILD";
 
 	/// Run `case` in a child process that denies host timers, and assert whether the guard
-	/// aborted it. In that child, run `case` and return.
+	/// exited it. In that child, run `case` and return.
 	///
 	/// Call it from the test's own thread, which libtest names after the test.
-	fn guard(aborts: bool, case: fn()) {
+	fn guard(exits: bool, case: fn()) {
 		if std::env::var_os(GUARD_CHILD).is_some() {
 			case();
 			return;
@@ -611,9 +614,11 @@ mod tests {
 		let stdout = String::from_utf8_lossy(&output.stdout);
 		let stderr = String::from_utf8_lossy(&output.stderr);
 		assert!(stdout.contains("running 1 test"), "no test named {test}: {stdout}");
-		let aborted = stderr.contains("timer fired on the host clock");
-		assert_eq!(output.status.success(), !aborted, "{stdout}{stderr}");
-		assert_eq!(aborted, aborts, "{stdout}{stderr}");
+		let exited = stderr.contains("timer fired on the host clock");
+		// 101, not a signal: an abort would hand the host's crash reporter a core dump.
+		let code = if exited { 101 } else { 0 };
+		assert_eq!(output.status.code(), Some(code), "{stdout}{stderr}");
+		assert_eq!(exited, exits, "{stdout}{stderr}");
 	}
 
 	fn real() -> tokio::runtime::Runtime {
@@ -633,7 +638,7 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_wait_on_the_host_clock_aborts() {
+	fn a_wait_on_the_host_clock_exits() {
 		guard(true, || {
 			real().block_on(sleep_until_one_waits());
 		});
@@ -641,7 +646,7 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_real_interval_aborts() {
+	fn a_real_interval_exits() {
 		guard(true, || {
 			real().block_on(async {
 				let mut interval = crate::clock::interval(Duration::from_millis(1));
@@ -657,7 +662,7 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_resumed_runtime_aborts() {
+	fn a_resumed_runtime_exits() {
 		guard(true, || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_time()
@@ -674,7 +679,7 @@ mod tests {
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_wait_in_a_spawned_task_aborts() {
+	fn a_wait_in_a_spawned_task_exits() {
 		guard(true, || {
 			let runtime = real();
 			let task = runtime.spawn(sleep_until_one_waits());

@@ -392,8 +392,8 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 });
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
-// same instance, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
-// withdraws the route at once and keeps it, broadcast and instance, for the next announce.
+// same identity, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
+// withdraws the route at once and keeps it, broadcast and identity, for the next announce.
 test("a re-announce continues the catalog's group sequence", async () => {
 	const announce = new Signal(true);
 	const broadcast = new Broadcast({
@@ -411,8 +411,8 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
 	const start = (await first.nextGroup())?.start;
 	if (start === undefined) throw new Error("expected the first catalog");
-	const instance = announced?.active.peek()?.instance;
-	expect(instance).toBeDefined();
+	const identity = announced?.active.peek()?.identity;
+	expect(identity).toBeDefined();
 
 	announce.set(false);
 	await settle();
@@ -422,9 +422,9 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	announce.set(true);
 	await settle();
 
-	// The follower continues the same instance, the same track keeps serving, and its newest group
+	// The follower continues the same identity, the same track keeps serving, and its newest group
 	// is past the first.
-	expect(announced?.active.peek()?.instance).toBe(instance);
+	expect(announced?.active.peek()?.identity).toBe(identity);
 	expect(broadcast.net.peek()).toBe(net);
 	const group = await first.nextGroup();
 	expect(group?.start).toBeGreaterThan(start);
@@ -645,7 +645,7 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 });
 
 // A name always means the same content, so a served rendition whose decoder identity changes moves to
-// a fresh track name under the same catalog ID and instance, ending the old track on its old instance.
+// a fresh track name under the same catalog ID and identity, ending the old track on its old identity.
 // Fields a decoder needn't reinitialize for update the served track in place.
 test("a served decoder identity change moves the rendition to a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("identity.hang") });
@@ -663,7 +663,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-	const instance = announced?.active.peek()?.instance;
+	const identity = announced?.active.peek()?.identity;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK),
 	});
@@ -699,7 +699,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		// The replacement is handed over at once, with or without a subscriber.
 		expect(video.track.peek()?.name).toBe("video/1");
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.instance).toBe(instance);
+		expect(announced?.active.peek()?.identity).toBe(identity);
 
 		const second = net.track("video/1").subscribe();
 		await settle();

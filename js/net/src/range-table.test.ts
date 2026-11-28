@@ -14,7 +14,7 @@ import { accept as acceptSession, connect as connectSession } from "./connection
 import { defined } from "./defined.test-util.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
-import * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -57,8 +57,8 @@ const ARRIVAL = Duration.millis(20_000);
 
 const url = new URL("https://localhost:4443/test");
 const path = Path.from("room");
-// The origin's instance, which both routes of a switch carry, so the front resumes across them.
-const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
+// The origin's identity, which both routes of a switch carry, so the front resumes across them.
+const IDENTITY = Identity.parse("01900000-0000-7000-8000-000000000001");
 
 // Each live join under no max, so only its lag decides what it gets, and history otherwise.
 function subscription(ask: Ask): Subscription {
@@ -214,7 +214,7 @@ async function warm(clock: Manual, broadcast: BroadcastConsumer, c: Case): Promi
 
 // Serve `copy` to `front` as one route of the broadcast, at `cost`, until the returned close.
 function serve(front: OriginProducer, copy: () => BroadcastConsumer, cost: bigint): () => void {
-	const handle = wireOf(front).receive(path, WireRoute.normalize({ instance: INSTANCE, cost }));
+	const handle = wireOf(front).receive(path, WireRoute.normalize({ identity: IDENTITY, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) request.serve(copy());
 	})();

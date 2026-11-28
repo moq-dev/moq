@@ -4,11 +4,12 @@ import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Goaway as Received } from "../connection/goaway.ts";
+import type { Liveness } from "../connection/keep_alive.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop } from "../hop.ts";
+import { closeError, error, fromClose, ProtocolViolation, peerEnded, StreamCode, sessionCause } from "../error.ts";
+import { type Cost, type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -37,6 +38,7 @@ import {
 	hasAuth,
 	hasDatagrams,
 	hasDatagramTracks,
+	hasFetch,
 	hasGoaway,
 	hasProbeRtt,
 	hasRoutes,
@@ -77,6 +79,12 @@ export interface ConnectionProps {
 	implementation?: string;
 	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
 	probeTarget?: Getter<number>;
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	liveness?: Getter<Liveness>;
+	/** This link's price, declared in our SETUP and winning over the peer's (lite-06+). */
+	cost?: Cost;
+	/** This link's rank, which every route the peer sends carries at most. Defaults to 0. */
+	priority?: number;
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
@@ -120,6 +128,9 @@ export class Connection implements Session {
 	/** The peer's PROBE estimates; see {@link Session.probe}. */
 	readonly probe: Getter<Probe>;
 
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	readonly liveness: Getter<Liveness> | undefined;
+
 	// Our tokens and grants, and the answers to the peer's; see {@link Session.auth}.
 	#auth: AuthSession;
 
@@ -148,6 +159,8 @@ export class Connection implements Session {
 	#implementation: string;
 	// See {@link ConnectionProps.probeTarget}.
 	#probeTarget?: Getter<number>;
+	// See {@link ConnectionProps.cost}.
+	#cost?: Cost;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
@@ -175,7 +188,14 @@ export class Connection implements Session {
 		token,
 		implementation = IMPLEMENTATION,
 		probeTarget,
+		liveness,
+		cost,
+		priority = 0,
 	}: ConnectionProps) {
+		this.liveness = liveness;
+		// A free link would leave a route as cheap as the one it came from, so lite-07 refuses one.
+		if (cost === 0n && hasRoutes(version)) throw new RangeError("a moq-lite-07 link cannot cost 0");
+		this.#cost = cost;
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
 		this.#token = client && hasAuth(version) ? token : undefined;
@@ -223,12 +243,15 @@ export class Connection implements Session {
 			(info) => this.#closed.set(fromClose(info)),
 			(err: unknown) => this.#closed.set(error(err)),
 		);
-		// Lite-07: a send on this endpoint's Announce Stream failed while the session lives, so
-		// what it said is lost and the session cannot go on, as rs/moq-net closes it. An ending
-		// session's own end says why.
+		// Lite-07: a send on this endpoint's Announce Stream failed while the session lives. A peer
+		// that stopped it with no code of its own is leaving, as a server closing the session stops
+		// it before its close arrives: the peer's routes end, and the session's close says why.
+		// Otherwise what this endpoint said is lost and the session cannot go on, as rs/moq-net
+		// closes it.
 		if (hasRoutes(version)) {
 			void AnnounceStream.of(quic, version).broken.then((err) => {
 				if (this.#transportClosed || this.#phase.kind === "closed") return;
+				if (peerEnded(err)) return this.#subscriber.announceFinished();
 				this.#fail(error(err));
 			});
 		}
@@ -252,6 +275,7 @@ export class Connection implements Session {
 			this.#auth.scope,
 			undefined,
 			this.#auth,
+			{ cost, priority },
 		);
 		this.#client = client;
 		this.#implementation = implementation;
@@ -259,7 +283,7 @@ export class Connection implements Session {
 		// Only the lite-05+ Setup Stream carries it.
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
-			consume: (path, instance) => this.#subscriber.consume(path, instance),
+			consume: (path, identity) => this.#subscriber.consume(path, identity),
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,
@@ -436,6 +460,7 @@ export class Connection implements Session {
 			const probe = await probeLevel(this.#quic, this.#version);
 			await new Setup({
 				probe,
+				cost: this.#cost,
 				hop: this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
@@ -455,6 +480,7 @@ export class Connection implements Session {
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
+					stream.reader.stop(err);
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream would leave it free to repeat malformed input.
 					const violation = closeViolation(this.#quic, err);
@@ -494,7 +520,7 @@ export class Connection implements Session {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
-			if (!hasTrackStream(this.#version)) throw new Error("FETCH is not supported on this version");
+			if (!hasFetch(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);
@@ -589,17 +615,20 @@ export class Connection implements Session {
 	}
 
 	// Lite-07: everything the peer says about discovery and routing, in order, until it leaves.
-	// The peer may only finish the stream: a reset or a message cut short breaks the session.
+	// The peer leaves by finishing the stream, or resetting it with no code of its own.
 	async #runAnnounce(stream: Reader) {
 		for (;;) {
 			let msg: AnnounceBroadcast | undefined;
 			try {
 				msg = await decodeAnnounceBroadcastMaybe(stream, this.#version);
 			} catch (err: unknown) {
-				// While the session lives, whatever broke the stream, a reset, a message cut
-				// short, or one that does not decode, lost what the peer said. An ending
-				// session's own end says why.
+				// An ending session's own end says why. A peer that reset the stream with no code
+				// of its own, even mid-message, is leaving: a server closing the session resets it
+				// before its close arrives, with a code Chrome reports as an application's 0. Any
+				// other reset, a message cut short, or one that does not decode lost what the peer
+				// said.
 				if (this.#transportClosed || this.#phase.kind === "closed") throw err;
+				if (peerEnded(err)) break;
 				throw new ProtocolViolation("Announce Stream broke", { cause: err });
 			}
 			if (!msg) break;

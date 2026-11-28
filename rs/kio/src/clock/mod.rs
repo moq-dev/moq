@@ -18,7 +18,7 @@
 //!
 //! The `runtime` feature arms timers on tokio's clock. Without it, reads fall back
 //! to std, and waiting on the host clock panics. With `KIO_DENY_HOST_TIMERS=1` in the
-//! environment, a host timer that waits aborts the process, so a test that waits on
+//! environment, a host timer that waits exits the process, so a test that waits on
 //! real time fails every run; one that needs real time calls [`host_time`].
 //!
 //! The `manual` feature adds `Manual::install`, which makes a [`Manual`] clock
@@ -110,9 +110,8 @@ pub fn wall() -> Wall {
 /// The ambient clock's origin: an instant and its wall time, fixed at the first read.
 ///
 /// It maps instants onto wall time and, unlike [`wall`], does not move after a clock
-/// correction. `@moq/clock`'s `origin()` returns only the wall time of instant zero, in
-/// milliseconds; here [`Wall`] is nanoseconds and comes paired with an instant, since a
-/// runtime clock's instant zero predates 1970.
+/// correction. It is a pair rather than the wall time of instant zero, since a runtime
+/// clock's instant zero predates 1970.
 pub fn origin() -> (Instant, Wall) {
 	#[cfg(feature = "manual")]
 	if let Some(clock) = deadline::installed() {

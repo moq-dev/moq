@@ -64,7 +64,11 @@ marked identity hangs off the node by one free, marked link at session 0, so its
 route there is the node's marked route, `[marked identity, node]`, whose marked
 hop counts toward the 32.
 
-**Claims.** The destination is a broadcast: one Instance at one path. A claim
+**Claims.** The destination is a broadcast: one Identity at one path. A claim
+filed at a prefix of the path reaches it lowered, its Above counted from the
+path, so the claims of one prefix tie on precedence wherever each is filed and
+rank as one tier, as `Router::tier` gathers them and the draft's Resolution
+ranks them. A claim
 leads with its precedence (a claim exactly at its path before a broader one shown
 there, then the newer run) and orders, among equal ranks, marks, and lengths, by
 its claimant's Node ID and then the key its holder gives the neighbour that gave
@@ -77,7 +81,7 @@ link against or whose path reaches the longest chain; or a domain step
 (`Claim::over`), which joins an announcer's claim with the settled route there.
 Every step into a node refuses a claim below the best precedence the node knows
 of, reachable or not, so the rank chooses only among claims of that precedence,
-as `closest` does. A claim's path names each relay that handed it on, then the
+as `Router::tier` and `closest` do. A claim's path names each relay that handed it on, then the
 publisher and the broadcast: Rust's chain backward, with the holder in front
 where it holds another node's claim.
 
@@ -91,9 +95,9 @@ where it holds another node's claim.
   tie-break; crossing a session never makes a route preferred; a path naming
   its receiver is invalid and a path grows by exactly the hop it crossed; each
   filter maps a route to invalid; the named drain keeps one order.
-- The route instance with every filter: claimed, the mark's export filter, the
+- The route identity with every filter: claimed, the mark's export filter, the
   hop limit, the metric, the floor, and the named drain (`Route`).
-- The claim instance with precedence leading, the mark and its export filter,
+- The claim identity with precedence leading, the mark and its export filter,
   the chain's limit, the best known precedence, and the claimant and giver order
   (`Claim`). Echoes never beat the claims they echo because every step is
   increasing.
@@ -161,7 +165,7 @@ claim's path in Rust grows by exactly the relay that took it
   [warmth](https://github.com/moq-dev/moq/pull/8903) argues it separately.
 - **Liveness under churn that never stops.** Convergence needs each epoch to
   last long enough.
-- **The chain where a claim stays inside a domain.** The claim instance's path
+- **The chain where a claim stays inside a domain.** The claim identity's path
   names every relay that took the claim, and each refuses a claim naming it.
   Rust's chain names the relays a claim entered or left a routing domain by:
   the announcing relay, then each grant's exporter and adopter, a relay that

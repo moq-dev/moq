@@ -277,14 +277,14 @@ impl Session {
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		// Each run is a new stream under a fresh instance, which the route mints: a restarted
+		// Each run is a new stream under a fresh identity, which the route mints: a restarted
 		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
 		let route = origin.route(&settings.broadcast, moq_net::origin::RouteOptions::default())?;
 		gst::info!(
 			CAT,
-			"publishing {} under instance {}",
+			"publishing {} under identity {}",
 			settings.broadcast,
-			route.instance()
+			route.identity()
 		);
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())?;
@@ -588,20 +588,20 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_instance(route: &moq_net::origin::Route) -> moq_net::Instance {
+	fn announced_identity(route: &moq_net::origin::Route) -> moq_net::Identity {
 		assert!(route.is_announced());
-		route.instance()
+		route.identity()
 	}
 
-	// Under one instance, a restart whose old route lingers would resume viewers into the old run's groups.
+	// Under one identity, a restart whose old route lingers would resume viewers into the old run's groups.
 	#[test]
-	fn each_run_announces_a_new_instance() {
+	fn each_run_announces_a_new_identity() {
 		let (first, first_broadcast) = started_with_broadcast();
-		let first_instance = announced_instance(&first_broadcast);
+		let first_identity = announced_identity(&first_broadcast);
 		first.stop();
 
 		let (second, second_broadcast) = started_with_broadcast();
-		assert_ne!(announced_instance(&second_broadcast), first_instance);
+		assert_ne!(announced_identity(&second_broadcast), first_identity);
 		second.stop();
 	}
 

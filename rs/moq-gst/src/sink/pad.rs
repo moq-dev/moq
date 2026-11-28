@@ -4,8 +4,6 @@
 //! that pad's own streaming thread, so this type is touched from one thread and needs no generation
 //! tagging or cross-thread failure map.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
@@ -109,10 +107,10 @@ pub(super) struct Closed {
 /// An audio or video pad, published through a codec importer.
 struct Media {
 	track: import::Track,
-	/// Audio is independently decodable, so bound its groups by media time instead of keyframes.
+	/// Audio is independently decodable, so its groups roll by media time instead of keyframes.
 	audio: bool,
-	/// The media time of the first packet in the current audio group.
-	group_start: Option<Duration>,
+	/// Where the current audio group closes.
+	join: moq_mux::container::Join,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
 	/// Video can start or resume mid-GOP, so deltas drop until a keyframe opens a group. Stays set:
@@ -126,20 +124,14 @@ struct Media {
 impl Media {
 	/// Publish one frame at `micros` on the media clock. Returns false when a frame is dropped while
 	/// waiting for a keyframe at or beyond the live edge.
-	fn write(&mut self, data: &Bytes, micros: u64) -> Result<bool> {
+	///
+	/// An audio buffer's `duration`, when it states one, lets the buffer that fills its group close
+	/// it at once; without one, the group closes on the first buffer starting a join past it.
+	fn write(&mut self, data: &Bytes, micros: u64, duration: Option<gst::ClockTime>) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
 			self.keyframe = !self.audio;
-			self.group_start = None;
-		}
-		let timestamp = Duration::from_micros(micros);
-		if self.audio
-			&& self
-				.group_start
-				.is_some_and(|start| timestamp.saturating_sub(start) >= Duration::from_millis(20))
-		{
-			self.track.cut(None)?;
-			self.group_start = None;
+			self.join.reset();
 		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		match self.track.decode(data, ts) {
@@ -148,13 +140,21 @@ impl Media {
 				// A rejected delta leaves its group open; later deltas cannot decode across that gap.
 				self.track.cut(None)?;
 				self.keyframe = !self.audio;
-				self.group_start = None;
+				self.join.reset();
 				return Ok(false);
 			}
 			result => result?,
 		}
-		if self.audio {
-			self.group_start.get_or_insert(timestamp);
+		if self.audio
+			&& let Some(start) = ts
+		{
+			let end = duration
+				.map(|duration| hang::container::Timestamp::from_micros(micros.saturating_add(duration.useconds())))
+				.transpose()?;
+			if let Some(reach) = self.join.fill(start, end.unwrap_or(start)) {
+				// The group ends past its furthest media, which a rewound buffer's own end can fall below.
+				self.track.cut(end.map(|_| reach))?;
+			}
 		}
 		Ok(true)
 	}
@@ -664,7 +664,7 @@ impl Pad {
 		let media = Media {
 			track,
 			audio,
-			group_start: None,
+			join: moq_mux::container::Join::default(),
 			discontinuity: false,
 			keyframe: !audio,
 			pre_skip,
@@ -843,23 +843,39 @@ impl Pad {
 	}
 
 	/// Place the run on the wall clock before its first valid timestamp can reach an importer.
-	pub(super) fn place_wall(&self, buffer: &gst::BufferRef, sample: super::wall::Sample) -> Result<()> {
+	///
+	/// `pts` is the one `buffer` publishes at ([`timeline_pts`](Self::timeline_pts)), so the
+	/// placement is decided on the timestamp that publishes. It places on the buffer's own PTS,
+	/// which its reference timestamp describes and every pad's running time shares.
+	pub(super) fn place_wall(
+		&self,
+		buffer: &gst::BufferRef,
+		pts: Option<gst::ClockTime>,
+		sample: super::wall::Sample,
+	) -> Result<()> {
 		let Some(wall) = &self.wall else { return Ok(()) };
 		let Some(track) = self.track() else {
 			return Ok(());
 		};
-		let timestamp = if matches!(track, Sink::Opaque(_)) && buffer.pts().is_none() && self.state == PadState::Active
-		{
+		let timestamp = if matches!(track, Sink::Opaque(_)) && pts.is_none() && self.state == PadState::Active {
 			sample
 				.running
 				.map(|time| time.useconds())
 				.ok_or("no current running time")
 		} else {
-			self.frame_timestamp(buffer.pts())
+			self.frame_timestamp(pts)
 		};
-		if let Ok(micros) = timestamp {
-			wall.place(buffer, Duration::from_micros(micros), sample)?;
-		}
+		let Ok(micros) = timestamp else {
+			return Ok(());
+		};
+		let running = match (self.segment.as_ref(), buffer.pts()) {
+			(Some(segment), Some(own)) if pts.is_some() => segment
+				.to_running_time_full(own)
+				.context("the buffer's PTS has no running time")?,
+			// Unstamped opaque data runs at the pipeline's current running time.
+			_ => gst::Signed::Positive(gst::ClockTime::from_useconds(micros)),
+		};
+		wall.place(buffer, running, sample)?;
 		Ok(())
 	}
 
@@ -902,36 +918,41 @@ impl Pad {
 		};
 		match timestamp {
 			Ok(micros) => {
-				let result: Result<()> = match &mut publishing.track {
-					Sink::Media(media) => match media.write(&data, micros) {
-						Ok(false) => {
-							gst::debug!(
-								CAT,
-								"dropping frame until the next decodable frame at or beyond the live edge"
-							);
-							return Ok(PushOutcome::Dropped);
-						}
-						result => result.map(|_| ()),
-					},
-					Sink::Text(text) => match std::str::from_utf8(&data) {
-						// A cue with no duration would never be dismissed, so drop it rather than pin it
-						// on screen; the demuxer supplies one for every real subtitle sample.
-						Ok(cue) => match duration {
-							Some(duration) => text.write(cue, micros, duration.useconds()),
-							None => {
-								gst::warning!(CAT, "dropping subtitle cue without a duration");
+				// Onto the catalog's clock, which a pre-fixed or shared catalog keeps elsewhere.
+				let shifted = self.wall.as_ref().map_or(Ok(micros), |wall| wall.shift(micros));
+				let result: Result<()> = match shifted.map(|micros| (micros, &mut publishing.track)) {
+					Err(err) => Err(err),
+					Ok((micros, track)) => match track {
+						Sink::Media(media) => match media.write(&data, micros, duration) {
+							Ok(false) => {
+								gst::debug!(
+									CAT,
+									"dropping frame until the next decodable frame at or beyond the live edge"
+								);
 								return Ok(PushOutcome::Dropped);
 							}
+							result => result.map(|_| ()),
 						},
-						Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
+						Sink::Text(text) => match std::str::from_utf8(&data) {
+							// A cue with no duration would never be dismissed, so drop it rather than pin it
+							// on screen; the demuxer supplies one for every real subtitle sample.
+							Ok(cue) => match duration {
+								Some(duration) => text.write(cue, micros, duration.useconds()),
+								None => {
+									gst::warning!(CAT, "dropping subtitle cue without a duration");
+									return Ok(PushOutcome::Dropped);
+								}
+							},
+							Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
+						},
+						Sink::Opaque(producer) => {
+							let Some(ts) = hang::container::Timestamp::from_micros(micros).ok() else {
+								gst::warning!(CAT, "dropping frame: timestamp out of range");
+								return Ok(PushOutcome::Dropped);
+							};
+							producer.write_frame(ts, &data).map_err(Into::into)
+						}
 					},
-					Sink::Opaque(producer) => {
-						let Some(ts) = hang::container::Timestamp::from_micros(micros).ok() else {
-							gst::warning!(CAT, "dropping frame: timestamp out of range");
-							return Ok(PushOutcome::Dropped);
-						};
-						producer.write_frame(ts, &data).map_err(Into::into)
-					}
 				};
 				match result {
 					Ok(()) => Ok(PushOutcome::Published),
@@ -1383,6 +1404,7 @@ pub(crate) fn h264_keyframe_au() -> Bytes {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::time::Duration;
 
 	/// Local producers, no network: a broadcast plus its catalog, exactly what the element holds.
 	fn producers() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
@@ -1433,6 +1455,111 @@ mod tests {
 		assert!(!pad.is_failed());
 		assert!(pad.finalize().unwrap(), "a producer was built");
 		assert!(!pad.finalize().unwrap(), "second finalize is a no-op");
+	}
+
+	/// An Opus packet stamped just before the segment starts publishes inside it once its pre-skip
+	/// moves it onto hang's timeline, so it places the run rather than anchoring it on arrival, and
+	/// the next one's placement holds. Its reference timestamp describes its own PTS, which every
+	/// pad's running time shares, so the run's zero lands by that, not by the pre-skip.
+	#[test]
+	fn an_opus_run_is_placed_on_its_published_timestamp() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &Names::default());
+		// A mono OpusHead with a 312-sample (6.5 ms) pre-skip.
+		let mut head = b"OpusHead".to_vec();
+		head.extend([1, 1]);
+		head.extend(312u16.to_le_bytes());
+		head.extend(48_000u32.to_le_bytes());
+		head.extend([0, 0, 0]);
+		let caps = opus_caps(1, None, Some(gst::Buffer::from_slice(head)));
+		pad.observe_caps(&broadcast, &catalog, producer_options(&caps, Some("audio")));
+		pad.observe_segment(time_segment_at(1_000, 0));
+
+		let sample = super::super::wall::Sample {
+			running: Some(gst::ClockTime::ZERO),
+			wall: kio::clock::wall(),
+		};
+		// The first packet's own PTS, 3 ms before the segment, was captured a second ago.
+		let captured = kio::clock::wall() - Duration::from_secs(1);
+		for micros in [997_000, 1_017_000] {
+			let mut buffer = gst::Buffer::from_slice([0xf8]);
+			let b = buffer.get_mut().unwrap();
+			b.set_pts(gst::ClockTime::from_useconds(micros));
+			gst::ReferenceTimestampMeta::add(
+				b,
+				&gst::Caps::builder("timestamp/x-unix").build(),
+				gst::ClockTime::from_nseconds(
+					(captured + Duration::from_micros(micros - 997_000))
+						.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
+						.as_nanos() as u64,
+				),
+				None,
+			);
+			let pts = pad.timeline_pts(&buffer).unwrap();
+			pad.place_wall(&buffer, pts, sample).unwrap();
+			let pushed = pad.push_buffer(Bytes::from_static(&[0xf8]), pts, None, None);
+			assert_eq!(pushed, Ok(PushOutcome::Published), "the packet at {micros} µs");
+		}
+		let zero = catalog.clock().wall_clock(moq_net::Timestamp::ZERO).unwrap();
+		let expected = captured + Duration::from_millis(3);
+		let error = zero.saturating_duration_since(expected) + expected.saturating_duration_since(zero);
+		assert!(
+			error < Duration::from_micros(1),
+			"running-time zero landed {error:?} off"
+		);
+	}
+
+	/// A run on a catalog whose clock was fixed before it, as by `Config::with_clock`, shifts its
+	/// running times onto that clock: a buffer lands where its reference timestamp says.
+	#[test]
+	fn a_fixed_clock_is_shifted_onto() {
+		gst::init().unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = moq_mux::catalog::Config::default().with_clock(moq_mux::Clock::new());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let mut pad = Pad::new();
+		pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &Names::default());
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+
+		// Captured a second ago, at running time 3 s.
+		let captured = kio::clock::wall() - Duration::from_secs(1);
+		let mut buffer = gst::Buffer::from_slice(h264_keyframe_au());
+		let b = buffer.get_mut().unwrap();
+		b.set_pts(gst::ClockTime::from_seconds(3));
+		gst::ReferenceTimestampMeta::add(
+			b,
+			&gst::Caps::builder("timestamp/x-unix").build(),
+			gst::ClockTime::from_nseconds(
+				captured
+					.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
+					.as_nanos() as u64,
+			),
+			None,
+		);
+		let sample = super::super::wall::Sample {
+			running: None,
+			wall: kio::clock::wall(),
+		};
+		pad.place_wall(&buffer, buffer.pts(), sample).unwrap();
+		let mut consumer = moq_mux::container::Consumer::new(
+			futures::executor::block_on(broadcast.consume().track("camera").unwrap().subscribe(None)).unwrap(),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::from_seconds(3)), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+
+		let std::task::Poll::Ready(Ok(Some(moq_mux::container::Read::Frame { frame, .. }))) =
+			consumer.poll_read(&kio::Waiter::noop())
+		else {
+			panic!("published media frame")
+		};
+		let wall = catalog.clock().wall_clock(frame.timestamp).unwrap();
+		// Within the microsecond the catalog clock counts in.
+		let error = wall.saturating_duration_since(captured) + captured.saturating_duration_since(wall);
+		assert!(error < Duration::from_micros(1), "landed {error:?} from its capture");
 	}
 
 	// A named pad reserves that track instead of the generated one, and the catalog advertises the same
@@ -1655,53 +1782,60 @@ mod tests {
 		builder.build()
 	}
 
+	/// The buffer that brings a group to 100 ms closes it when buffers state their duration, and
+	/// otherwise the first buffer starting 100 ms past the group's start does.
 	#[tokio::test(start_paused = true)]
-	async fn audio_groups_carry_twenty_milliseconds() {
+	async fn audio_groups_carry_one_hundred_milliseconds() {
 		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let consumer = broadcast.consume();
-		let mut pad = Pad::new();
-		pad.observe_caps(
-			&broadcast,
-			&catalog,
-			producer_options(&opus_caps(1, None, None), Some("audio")),
-		);
-		pad.observe_segment(time_segment());
-		let mut track = consumer
-			.track("audio")
-			.unwrap()
-			.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
-						min: Some(Duration::from_secs(1)),
-						max: Some(Duration::from_secs(1)),
-					},
-				)]),
-			)
-			.await
-			.unwrap();
-		for index in 0..17 {
-			assert_eq!(
-				pad.push_buffer(
-					Bytes::from_static(&[0x80, 0xff, 0xfe]),
-					Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
-					None,
-					None
-				)
-				.unwrap(),
-				PushOutcome::Published
+		for (duration, expected) in [
+			(Some(gst::ClockTime::from_useconds(2_500)), [40, 40, 10]),
+			(None, [41, 41, 8]),
+		] {
+			let (broadcast, catalog) = producers();
+			let consumer = broadcast.consume();
+			let mut pad = Pad::new();
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				producer_options(&opus_caps(1, None, None), Some("audio")),
 			);
-		}
-		pad.finalize().unwrap();
-		for expected in [8, 8, 1] {
-			let mut group = track.recv_group().await.unwrap().unwrap();
-			let mut count = 0;
-			while group.read_frame().await.unwrap().is_some() {
-				count += 1;
+			pad.observe_segment(time_segment());
+			let mut track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						})])
+						.with_order(moq_net::track::Order::Ascending),
+				)
+				.await
+				.unwrap();
+			for index in 0..90 {
+				assert_eq!(
+					pad.push_buffer(
+						Bytes::from_static(&[0x80, 0xff, 0xfe]),
+						Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
+						duration,
+						None
+					)
+					.unwrap(),
+					PushOutcome::Published
+				);
 			}
-			assert_eq!(count, expected);
+			pad.finalize().unwrap();
+			for expected in expected {
+				let mut group = track.recv_group().await.unwrap().unwrap();
+				let mut count = 0;
+				while group.read_frame().await.unwrap().is_some() {
+					count += 1;
+				}
+				assert_eq!(count, expected, "{duration:?}");
+			}
+			assert!(track.recv_group().await.unwrap().is_none());
 		}
-		assert!(track.recv_group().await.unwrap().is_none());
 	}
 
 	fn published_opus(

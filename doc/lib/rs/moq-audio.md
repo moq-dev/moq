@@ -37,7 +37,7 @@ on that clock, such as decoded media timed against its video; given a stretch
 bound, it glides onto positions that move with a playout target, as playback
 glides onto its clock, instead of writing silence or failing at each step.
 
-Without a subscriber the encoder keeps raw PCM
+Without a subscriber (a track info query or a fetch alone does not count) the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the
 subscribers want, from a live join's lag (its playout delay plus the codec's warmup)
 bounded by its max delay, before continuing live when someone subscribes. A join with
@@ -46,8 +46,8 @@ no lag limit, as every join before moq-lite-07 is, gets the retained audio withi
 to encode continuously instead. Dropping an encoder leaves the shared capture running. A device
 failure keeps the retained history on the track until it is subscribed or expires, then the
 encoder returns the error. Opus packs 20 ms per packet by default,
-or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default,
-so 10 ms packets pair up. `encode::Options::join`
+or 10 ms with a shorter `frame_duration`. Groups carry at least 100 ms by default,
+so a relay keeps one stream per 100 ms rather than one per packet. `encode::Options::join`
 changes that minimum; a join shorter than a packet puts every packet in its own
 group, and zero is refused. Longer groups
 mean fewer streams per relay but coarser loss. An encode of `Kind::Voice`, as

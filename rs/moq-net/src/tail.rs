@@ -4,7 +4,10 @@
 //! but QUIC does not order streams, so one opened before the end can still reach us after
 //! it. The subscriber keeps the subscription routable until each owed group is accounted
 //! for, or a grace expires for a group whose stream was reset before its header arrived.
-//! A reset that keeps the header (reliable reset) would make the grace unnecessary.
+//! A lite-07 publisher names every start: a group's GROUP_END proves its span, SUBSCRIBE_DROP
+//! with SKIP names any other start it declared empty, a reset delivers the header (reliable reset) or
+//! names the group in a drop, and SUBSCRIBE_END names every start past the last group. So a lite-07 tail waits for no
+//! grace: it settles once everything owed is accounted for.
 //!
 //! A stream whose header arrived is read to its end whatever the grace says: a group ends
 //! on its own stream's FIN or reset, never because its track ended. A lost datagram is not
@@ -36,6 +39,8 @@ pub(crate) struct Tail {
 	// The publisher's FIN ended the track, its only end before lite-05, so a session that
 	// dies before the tail settles declares that end before aborting.
 	ended: bool,
+	// Lite-07: the publisher names every start, so no gap ages out.
+	proven: bool,
 }
 
 impl Default for Tail {
@@ -54,6 +59,16 @@ impl Tail {
 			first: None,
 			active: 0,
 			ended: false,
+			proven: false,
+		}
+	}
+
+	/// A lite-07 tail, whose publisher names every start: no gap ages out, whatever max delay
+	/// its subscription asks, so it settles only once everything owed is accounted for.
+	pub fn proven() -> Self {
+		Self {
+			proven: true,
+			..Self::new(Duration::MAX)
 		}
 	}
 
@@ -67,9 +82,11 @@ impl Tail {
 		self.ended
 	}
 
-	/// Change the grace, for a subscription whose max delay changed.
+	/// Change the grace, for a subscription whose max delay changed. A proven tail keeps none.
 	pub fn set_grace(&mut self, grace: Duration) {
-		self.ledger.set_grace(grace);
+		if !self.proven {
+			self.ledger.set_grace(grace);
+		}
 	}
 
 	/// Follow the copy `track`: wait on its max age and `budget`, and bill the ledger to its
@@ -284,6 +301,30 @@ mod tests {
 		);
 
 		drop(reading);
+		settled.await;
+	}
+
+	/// A proven tail waits for what it owes however long that takes, and settles once it has it.
+	#[kio::test]
+	async fn a_proven_tail_waits_out_no_grace() {
+		let runtime = crate::time::sim();
+		let tail = kio::Producer::new(Tail::proven());
+		if let Ok(mut tail) = tail.write() {
+			tail.set_grace(GRACE);
+			tail.account(0..1, runtime.now());
+		}
+		let mut settle = Settle::new(&runtime, tail.consume());
+		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |tail| tail.covers(0..3))));
+
+		kio::clock::sleep(GRACE * 100).await;
+		if let Ok(mut tail) = tail.write() {
+			tail.expire(runtime.now());
+		}
+		assert!(futures::poll!(settled.as_mut()).is_pending(), "1 and 2 are still owed");
+
+		if let Ok(mut tail) = tail.write() {
+			tail.account(1..3, runtime.now());
+		}
 		settled.await;
 	}
 

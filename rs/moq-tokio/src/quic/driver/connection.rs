@@ -333,6 +333,27 @@ impl Connection {
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
+	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it
+	/// has, as [`moq_quic::connection::Connection::poll_quiesce`] does.
+	pub(crate) fn poll_quiesce(
+		&self,
+		waiter: &kio::Waiter,
+		code: VarInt,
+		keep: &[StreamId],
+	) -> Poll<Result<(), Error>> {
+		let mut state = self.0.state.lock();
+		match ready!(state.inner.poll_quiesce(waiter, code, keep)) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(err) => Poll::Ready(Err(state.lost_as(err))),
+		}
+	}
+
+	/// Give up a quiesce that is not ready, as
+	/// [`moq_quic::connection::Connection::abandon_quiesce`] does.
+	pub(crate) fn abandon_quiesce(&self, code: VarInt, keep: &[StreamId]) {
+		self.0.state.lock().inner.abandon_quiesce(code, keep);
+	}
+
 	/// Receive an application datagram
 	///
 	/// # Cancel safety
@@ -481,6 +502,12 @@ impl Connection {
 		self.0.state.lock().inner.stats()
 	}
 
+	/// Whether a reset still delivers its prefix to the peer's reader: the peer accepts
+	/// RESET_STREAM_AT.
+	pub(crate) fn reset_stream_at(&self) -> bool {
+		self.0.state.lock().inner.reset_stream_at()
+	}
+
 	/// The receive windows now in force: the connection's, and the most one stream holds.
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
@@ -543,6 +570,16 @@ impl Connection {
 	/// See [`moq_quic::connection::Connection::set_limits`]
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
 		self.0.state.lock().inner.set_limits(limits)
+	}
+
+	/// See [`moq_quic::connection::Connection::set_keep_alive`]
+	pub fn set_keep_alive(&self, keep_alive: moq_quic::KeepAlive) -> Result<(), moq_quic::KeepAliveError> {
+		self.0.state.lock().inner.set_keep_alive(keep_alive)
+	}
+
+	/// See [`moq_quic::connection::Connection::poll_stale`]
+	pub fn poll_stale(&self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		self.0.state.lock().inner.poll_stale(waiter, stale)
 	}
 }
 

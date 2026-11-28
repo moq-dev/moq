@@ -15,7 +15,7 @@ implement in an afternoon. The wire spec is
 Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 18
 through 22. Clients offer `moq-lite-06` first. moq-lite 07 is still in progress
 (`moq-lite-07-wip`, and only when both sides enable it). It is the version that
-carries [publisher instances](#publisher-instances).
+carries [publisher identities](#publisher-identities).
 
 ## Terminology
 
@@ -75,7 +75,7 @@ the synced mark is new at the source, through any number of hops.
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
 among several routes to the same broadcast. On moq-lite 07 it also carries a
-[publisher instance](#publisher-instances), which says which routes serve the same
+[publisher identity](#publisher-identities), which says which routes serve the same
 bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
 route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
@@ -101,37 +101,38 @@ whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.
 
-### Publisher instances
+### Publisher identities
 
-Every route carries an instance: any non-empty text naming one continuous
-timeline of groups at its path, plus an epoch, a counter within that instance,
-like a cloud instance ID that survives a reboot and a count of its boots. A
-path and an instance name one stream. The path never changes, so authorization and
-hidden names work exactly as before.
+Every route carries an identity: any non-empty text of at most 256 UTF-8 bytes,
+such as a public key, naming one continuous timeline of groups at its path,
+plus an epoch, a counter within that identity, like a cloud instance ID that
+survives a reboot and a count of its boots. A path and an identity name one
+stream. The path never changes, so authorization and hidden names work exactly
+as before.
 
-- **One stream, one instance.** Every broadcast mints a random instance and
+- **One stream, one identity.** Every broadcast mints a random identity and
   keeps it across reconnects. Replicas of the same content announce that same
-  instance. A prefix claim is its own stream: its worker answers each requested
-  path by announcing that exact path under the claim's instance, so on
+  identity. A prefix claim is its own stream: its worker answers each requested
+  path by announcing that exact path under the claim's identity, so on
   moq-lite 07 a viewer resolved through the claim keeps playing (a claim that
-  names a stable instance gives each output a fresh one instead). When that
-  output ends, the claim takes a fresh instance, so a restarted output is a
+  names a stable identity gives each output a fresh one instead). When that
+  output ends, the claim takes a fresh identity, so a restarted output is a
   new stream every hop sees, and a viewer returning within a relay's cache
   window never gets the old output's groups. A different worker has its own
-  instance, so it never inherits those viewers.
+  identity, so it never inherits those viewers.
 - **Most specific, then highest epoch, then rank.** The most specific prefix
-  wins. Within one instance only its highest epoch is eligible, ahead of cost.
-  Among instances the order is link priority, cost, a broadcast published
-  locally, hop length, then a hash of the instance and the path, so relays
+  wins. Within one identity only its highest epoch is eligible, ahead of cost.
+  Among identities the order is link priority, cost, a broadcast published
+  locally, hop length, then a hash of the identity and the path, so relays
   agree and a pool's paths spread over its hosts. See
   [choosing a route](/concept/identity#choosing-a-route).
-- **Same instance resumes.** A subscription moves between routes with the same
-  instance without a seam, continuing from the first frame it lacks. That is a
+- **Same identity resumes.** A subscription moves between routes with the same
+  identity without a seam, continuing from the first frame it lacks. That is a
   floor, not a promise: groups the outage held back still arrive in full for a
   history range, but for a live join only while its max covers them, so a
   route that dies silently, noticed only at the idle timeout, costs a live
   viewer whatever aged out meanwhile.
-- **Another instance restarts.** Another instance winning the path is
+- **Another identity restarts.** Another identity winning the path is
   announced as a restart. Subscriptions already answered stay on the old
   stream until dropped or none of its routes remain, which ends them with an
   error, while new requests get the new one, so a player follows the restart
@@ -140,36 +141,36 @@ hidden names work exactly as before.
   timeline. A relay drops its copy of the old stream, so a new subscriber never
   sees its cached groups.
 
-The instance and the epoch travel on moq-lite 07, which
-is opt-in. `ANNOUNCE_START` carries the instance and epoch, `ANNOUNCE_UPDATE`
-a higher epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
-pin. A restart onto another instance, or a higher epoch of the same one, is
+The identity and the epoch travel on moq-lite 07, which
+is opt-in. `ANNOUNCE_START` carries the identity and epoch, `ANNOUNCE_UPDATE`
+a higher epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the identity they
+pin. A restart onto another identity, or a higher epoch of the same one, is
 advertised before the old one is withdrawn, so the path is never absent. Older
-moq-lite versions and moq-transport carry no instance, so the receiving session
+moq-lite versions and moq-transport carry no identity, so the receiving session
 mints one for each announcement, flagged as minted: a reconnect or a
 re-announcement through such a hop is another stream, and the first
 subscription through a claim is reset once the output's route arrives. A peer
 that ignores the end and start may keep cached objects of the old run under
 the same names, so an end and a start is not a cache flush.
 
-Independent importers use distinct instances, even when fed one stream. Only
-replicas of one publisher's bytes share its instance, such as one publisher
+Independent importers use distinct identities, even when fed one stream. Only
+replicas of one publisher's bytes share its identity, such as one publisher
 announced through multiple relays. See [Clustering](/bin/relay/cluster) for
 how a relay uses this, and [identity and recovery](/concept/identity) for
-choosing instances, following restarts, and answering work on demand.
+choosing identities, following restarts, and answering work on demand.
 
 ### Multiple CDNs
 
 An endpoint can hold sessions to several CDNs at once, each feeding one shared
 origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
 a per-link priority the endpoint sets (higher wins, 0 is neutral, negative demotes), unrelated to a subscription's priority. It decides
-among instances before cost, so metrics from different operators are never
+among identities before cost, so metrics from different operators are never
 compared. After the earlier keys of [choosing a route](/concept/identity#choosing-a-route), a subscription uses the
 route with the highest priority, on moq-lite 07 the lowest of any link along its path, and moves to the
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
-The move resumes without a seam only between routes with the same instance,
-which needs moq-lite 07 on both links. A CDN link that carries no instance
+The move resumes without a seam only between routes with the same identity,
+which needs moq-lite 07 on both links. A CDN link that carries no identity
 makes moving onto it, or back off it, a restart, and the player requests the
 path again. Both links must
 also speak the same protocol and draft: a copy's track info records the
@@ -300,6 +301,16 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Ranges** | Which groups to ask for, through the group containing an end time or onward with the live edge. A range starts at the oldest group or at the group containing a time, which asks for history, or as a live join (the default joins at the live edge). Each group arrives whole, from its first frame. |
 | **Max** (live joins) | How long a non-latest group a live join reaches stays worth delivering before it is skipped. Zero means "live edge only", the default. Unset leaves the publisher's max age alone to bound it. History has none: its groups arrive in full, bounded only by the publisher's max age. |
+
+A **metadata subscription** (`broadcast.meta(name)` in Rust and TypeScript) takes
+the same knobs and delivers a track's groups with each frame's timestamp and
+declared size, without the payload, to watch a track's progress cheaply. It is a
+subscription of its own beside any payload subscription, and never switches mode.
+On moq-lite 07 each relay hop forwards it as a metadata subscription, so no
+payload crosses a hop for it. Over an older version or moq-transport it rides the
+track's one payload subscription and drops the payload, so a track is never
+downloaded twice. A reader that wants the payload after all subscribes to the
+track from the group it reached and skips the frames it already saw.
 
 A live join is a range starting a lag behind the live edge: the playout buffer
 the subscriber holds. It starts at the group containing the live edge minus the
@@ -465,9 +476,10 @@ stream flow control pushes back hop by hop to the publisher. A reader
 that keeps up loses nothing. A slower reader is never waited on: one that trails
 the fastest by more than the group's 32 MB tail reaches a shed frame, and asks
 for a new group on tracks that opt into [refresh](#refresh) or ends with
-`Evicted`. A hop with no reader keeps receiving and shedding, so pacing never
-stalls an unwatched track, and the publisher's own writes never wait unless it
-asks to. A stopped stream keeps its receive credit, so a hop stops at most as
+`Evicted`. A group a subscriber has yet to pick up is paced from its start, where
+that reader begins. A hop with no reader keeps receiving and shedding, so pacing
+never stalls an unwatched track, and the publisher's own writes never wait unless
+it asks to. A stopped stream keeps its receive credit, so a hop stops at most as
 many streams per connection as fit in half its connection window, and the rest
 keep receiving and shedding.
 

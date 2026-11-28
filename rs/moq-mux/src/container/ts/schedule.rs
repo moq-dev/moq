@@ -66,9 +66,9 @@ const _: () = assert!(TABLE_REPEAT.as_nanos().is_multiple_of(PCR_INTERVAL.as_nan
 /// One packet in bits per second of slots: `rate` bits per second fills slot `index` up to
 /// `index * rate / PACKET` packets since the start of the timeline, so no slot rounds on
 /// its own.
-const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
+pub(super) const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
 /// The most of a packet a decoder buffer can receive: everything after its 4-byte header.
-const PAYLOAD: usize = TsPacket::SIZE - 4;
+pub(super) const PAYLOAD: usize = TsPacket::SIZE - 4;
 /// How many empty slots to lay at most before the next packets: one second's worth. Past
 /// this the media had an outage rather than a coarse cadence, and a dense clock history for
 /// a span that carried no bytes only stalls anything pacing on the asserted values.
@@ -209,7 +209,7 @@ pub(super) struct Psi {
 	/// The PAT and PMT packets.
 	pub packets: Vec<u8>,
 	/// The same tables flagging a break, for the first unit of them to go out after a switch to
-	/// another instance.
+	/// another identity.
 	pub flagged: Option<Vec<u8>>,
 	/// The PID every slot's clock rides once they have gone out.
 	pub clock: u16,
@@ -300,6 +300,38 @@ impl Unit {
 	/// When its last bytes leave the decoder buffer.
 	fn last_decode(&self) -> u128 {
 		self.frames.last().map_or(self.timing.decode, |&(decode, _)| decode)
+	}
+
+	/// When the decoder removes the frame that packet `index` starts in: a frame needs only its
+	/// own bytes in the decoder buffer when it decodes, so a PES that packs several frames is not
+	/// due whole by its first frame's decode time.
+	fn decode_at(&self, index: usize) -> u128 {
+		if self.frames.is_empty() {
+			return self.timing.decode;
+		}
+		let before: usize = self
+			.packets
+			.as_chunks::<{ TsPacket::SIZE }>()
+			.0
+			.iter()
+			.take(index)
+			.filter(|packet| pid(*packet) == self.pid)
+			.map(|packet| payload(packet).len())
+			.sum();
+		let mut end = 0;
+		for &(decode, bytes) in &self.frames {
+			end += bytes;
+			if before < end {
+				return decode;
+			}
+		}
+		self.last_decode()
+	}
+
+	/// When packet `index` has to be in the transport buffer: [`Self::timing`]'s `by`, moved on
+	/// by how much later its frame decodes than the first.
+	fn by_at(&self, index: usize) -> u128 {
+		self.timing.by + (self.decode_at(index) - self.timing.decode)
 	}
 
 	/// When each of its frames leaves the decoder buffer, with the bytes it takes: all it
@@ -791,7 +823,7 @@ impl Schedule {
 	}
 
 	/// Whether every source has ended, so what is queued still goes out, late if it must.
-	/// A source that resumes (a same-instance return) holds its deadlines again.
+	/// A source that resumes (a same-identity return) holds its deadlines again.
 	pub fn set_ended(&mut self, ended: bool) {
 		self.ended = ended;
 	}
@@ -1371,10 +1403,31 @@ impl Schedule {
 				order.append(&mut copies);
 			}
 		}
+		// The clock and rate the copies laid so far in the slot put in force, and the last one's
+		// unflagged version.
+		let (mut in_force, mut version) = ((self.clock, self.rate), None);
 		for i in order {
 			let (unit, take) = (&mut self.units[i], take[i]);
 			if take == 0 {
 				continue;
+			}
+			if unit.is_tables() {
+				let sets = unit.tables.as_ref().map(|program| (Some(program.clock), program.rate));
+				// The slot lays its copies back to back, faster than TBsys passes them on: one of
+				// the version laid just before it, putting nothing new in force, adds only a burst.
+				// It is done where it stands, as padded once Bsys holds the copy.
+				if unit.sent == 0
+					&& version.is_some()
+					&& unit.version() == version
+					&& sets.is_none_or(|sets| sets == in_force)
+				{
+					unit.packets.clear();
+					unit.runs.clear();
+					begun += usize::from(unit.tables.is_some());
+					continue;
+				}
+				in_force = sets.unwrap_or(in_force);
+				version = unit.version();
 			}
 			if unit.sent == 0 {
 				keyframe |= unit.keyframe;
@@ -1418,8 +1471,8 @@ impl Schedule {
 	/// so the grid adds one only to a period without. The copy is due in its slot and goes out
 	/// as soon as TBsys and Bsys take it, past the copies the media leads when it matches them,
 	/// never past a different version; padded, a copy of the same tables still in Bsys covers
-	/// it ([`Self::covered`]). Periods are absolute on the grid, so two exporters of a
-	/// broadcast repeat in the same slots.
+	/// it ([`Self::covered`]), and unpadded, one laid before it in the same slot. Periods are
+	/// absolute on the grid, so two exporters of a broadcast repeat in the same slots.
 	fn repeat(&mut self, index: u128) {
 		let period = index / REPEAT_SLOTS;
 		// Tables too large for Bsys to take each period repeat as fast as it takes them.
@@ -1552,7 +1605,7 @@ impl Schedule {
 			.enumerate()
 			.filter_map(|(lane, units)| {
 				let unit = &self.units[*units.front()?];
-				(self.release(unit) <= index).then_some(Reverse((unit.timing.by, lane)))
+				(self.release(unit) <= index).then_some(Reverse((unit.by_at(unit.sent), lane)))
 			})
 			.collect();
 		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
@@ -1570,7 +1623,8 @@ impl Schedule {
 			}
 			while waiting.peek().is_some_and(|Reverse((at, _))| *at <= now) {
 				let Reverse((_, lane)) = waiting.pop().unwrap();
-				ready.push(Reverse((self.units[*lanes[lane].front().unwrap()].timing.by, lane)));
+				let unit = &self.units[*lanes[lane].front().unwrap()];
+				ready.push(Reverse((unit.by_at(unit.sent), lane)));
 			}
 			let mut emitted = false;
 			// The slot's PCR opens it. Its PID's next packet carries it there when it can go
@@ -1600,7 +1654,7 @@ impl Schedule {
 					if let Some(&i) = lanes[lane].front()
 						&& self.release(&self.units[i]) <= index
 					{
-						ready.push(Reverse((self.units[i].timing.by, lane)));
+						ready.push(Reverse((self.units[i].by_at(self.units[i].sent), lane)));
 					}
 					// What it held back may go at this position.
 					ready.extend(passed.drain(..));
@@ -1745,7 +1799,7 @@ impl Schedule {
 				if !self.ended
 					&& !unit.late && unit.place.is_none()
 					&& pid == unit.pid
-					&& done > unit.timing.decode as i128
+					&& done > unit.decode_at(unit.sent) as i128
 				{
 					return Err(self.missed(pid, index, rate));
 				}
@@ -1801,7 +1855,7 @@ impl Schedule {
 				if let Some(&i) = lanes[lane].front() {
 					let unit = &self.units[i];
 					if self.release(unit) <= index {
-						ready.push(Reverse((unit.timing.by, lane)));
+						ready.push(Reverse((unit.by_at(unit.sent), lane)));
 					}
 				}
 				emitted = true;
@@ -1841,7 +1895,7 @@ impl Schedule {
 		let end = time(count);
 		if !self.ended
 			&& let Some(unit) = self.units.iter().find(|unit| {
-				!unit.late && unit.place.is_none() && unit.timing.by as i128 <= end && unit.remaining() > 0
+				!unit.late && unit.place.is_none() && unit.by_at(unit.sent) as i128 <= end && unit.remaining() > 0
 			}) {
 			return Err(self.missed(unit.pid, index, rate));
 		}
@@ -2724,6 +2778,73 @@ mod tests {
 				.enumerate()
 				.position(|(n, &place)| usize::from(place) != n % count);
 			assert_eq!(interrupted, None, "{window} {count} {leads:?}: {places:?}");
+		}
+	}
+
+	/// Unpadded, a slot lays each version of the tables once, however many copies the media and
+	/// the grid queue for it, since it lays them back to back; a revision still goes out, and
+	/// the tables keep repeating.
+	#[test]
+	fn a_slot_lays_each_version_once_unpadded() {
+		for window in [0, 100, 1_000] {
+			let mut schedule = Schedule::new(Duration::from_millis(window));
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			let psi = |mark: u8| Psi {
+				packets: marked_tables(mark, 1),
+				flagged: None,
+				clock: 1,
+			};
+			schedule.set_psi(psi(1));
+			let (mut versions, mut periods, mut media) = (Vec::new(), Vec::new(), 0);
+			let mut lay = |schedule: &mut Schedule, horizon: u128| {
+				while let Some(slot) = schedule.next(Some(slot(ms(horizon)))).unwrap() {
+					let mut marks = table_marks(&slot);
+					let laid = marks.len();
+					marks.dedup();
+					assert_eq!(
+						laid,
+						2 * marks.len(),
+						"{window} ms, slot {}: {:?}",
+						slot.index,
+						table_marks(&slot)
+					);
+					if !marks.is_empty() {
+						periods.push(slot.index / REPEAT_SLOTS);
+					}
+					if slot
+						.packets
+						.as_chunks::<{ TsPacket::SIZE }>()
+						.0
+						.iter()
+						.any(|packet| pid(packet) == 1)
+					{
+						media = slot.index / REPEAT_SLOTS;
+					}
+					versions.extend(marks);
+				}
+			};
+			// A frame every 10 ms, each leading a copy, and a revision at 1 s.
+			for ms in (0..2_000).step_by(10) {
+				if ms == 1_000 {
+					schedule.set_psi(psi(2));
+				}
+				schedule.lead(Tables {
+					rate: None,
+					added: Vec::new(),
+				});
+				schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
+				lay(&mut schedule, ms);
+			}
+			lay(&mut schedule, 4_000);
+			// While the media flows, every repeat period still carries a copy.
+			periods.dedup();
+			assert_eq!(periods, (0..=media).collect::<Vec<_>>(), "{window} ms");
+			assert!(
+				versions.contains(&1) && versions.contains(&2),
+				"{window} ms: {versions:?}"
+			);
 		}
 	}
 

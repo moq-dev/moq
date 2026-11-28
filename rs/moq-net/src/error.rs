@@ -161,7 +161,8 @@ pub enum StreamError {
 	#[error("too far behind")]
 	TooFarBehind,
 
-	/// The track's content could not be parsed.
+	/// The track's content could not be parsed, or a track asked for again was accepted with
+	/// info other than what its readers already hold.
 	#[error("malformed track")]
 	MalformedTrack,
 
@@ -201,6 +202,12 @@ pub enum StreamError {
 	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
+	/// The publisher declared that no group will ever exist at these starts.
+	///
+	/// Sent in `SUBSCRIBE_DROP` on lite-07: final, cacheable emptiness that ends no reader.
+	#[error("skipped")]
+	Skip,
+
 	/// The grant does not cover this subscription, fetch, or announcement, or no longer
 	/// does. Unlike [`SessionError::Unauthorized`], the session stays up.
 	#[error("unauthorized")]
@@ -237,6 +244,7 @@ impl StreamError {
 			Self::WrongSize => 0x37,
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
+			Self::Skip => 0x3a,
 			Self::Unauthorized => 0x3b,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
@@ -269,6 +277,7 @@ impl StreamError {
 			0x37 => Self::WrongSize,
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
+			0x3a => Self::Skip,
 			0x3b => Self::Unauthorized,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -423,8 +432,11 @@ pub enum Error {
 	#[error("unknown ALPN: {0}")]
 	UnknownAlpn(String),
 
-	/// The producer was dropped without finishing or aborting, so the content is incomplete:
-	/// released by its owner, as a binding's garbage collector does, with no cause to report.
+	/// The producer was dropped without finishing or aborting, so the content is incomplete,
+	/// with no cause to report. A track's reader sees it only when no request handler can serve
+	/// the track again, when the producer that served such a request drops too before another
+	/// reader joins, or when the next producer could not continue it (a JSON log or window): a
+	/// track nobody wants ends cleanly when its last producer drops.
 	#[error("dropped without a finish or abort")]
 	Dropped,
 
@@ -504,9 +516,15 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
-	/// The underlying connection reached its transport idle deadline.
+	/// The underlying connection reached its transport idle deadline, or a
+	/// [`KeepAlive`](crate::transport::KeepAlive)'s hard limit.
 	#[error("transport idle timeout")]
 	IdleTimeout,
+
+	/// The transport refused the session's [`KeepAlive`](crate::transport::KeepAlive), so the
+	/// session never opened.
+	#[error("keep-alive: {0}")]
+	KeepAlive(crate::transport::KeepAliveError),
 }
 
 impl Error {
@@ -588,6 +606,21 @@ impl Error {
 		self.retry() != Retry::Never
 	}
 
+	/// Whether the session carrying the request is ending, rather than one stream failing on a
+	/// session that serves on: only then does another route take over. Mirrors `closing` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn closing(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Stream(StreamError::Session(_) | StreamError::GoingAway)
+		)
+	}
+
 	/// Whether a source lost its route to the content: only another route continues it.
 	pub(crate) fn unroutable(&self) -> bool {
 		self.retry() == Retry::Reroute
@@ -653,7 +686,7 @@ impl From<&Error> for SessionError {
 			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Expired => Self::Expired,
-			Error::Unsupported => Self::Unsupported,
+			Error::Unsupported | Error::KeepAlive(_) => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
@@ -753,6 +786,7 @@ impl From<&Error> for StreamError {
 			// No stream code says so: an unknown stream type, a request only moq-transport
 			// can make, or a fault on our own side.
 			Error::Unsupported
+			| Error::KeepAlive(_)
 			| Error::UnsupportedExtension
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId
@@ -854,6 +888,7 @@ mod tests {
 			(StreamError::WrongSize, 0x37),
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
+			(StreamError::Skip, 0x3a),
 			(StreamError::Unauthorized, 0x3b),
 			(StreamError::App(7), 0x40 + 7),
 		] {

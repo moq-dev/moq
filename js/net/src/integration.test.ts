@@ -14,11 +14,11 @@ import {
 } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import { FrameTooLarge, SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
+import * as Identity from "./identity.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
-import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
@@ -999,11 +999,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const path = Path.from("test");
-	// One publisher instance, so the two compete on cost alone.
-	const instance = Instance.random();
-	const localRoute = origin.route(path, { instance: { id: instance, epoch: 0n }, cost: 5n });
+	// One publisher identity, so the two compete on cost alone.
+	const identity = Identity.random();
+	const localRoute = origin.route(path, { identity: { id: identity, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
-	const dynamic = origin.claim(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
+	const dynamic = origin.claim(path, { identity: { id: identity, epoch: 0n }, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1790,7 +1790,7 @@ test("integration: a follower waits for a late publisher", async () => {
 	if (!active) throw new Error("expected an active broadcast");
 	expect(await active.track("video").subscribe().ordered().readString()).toBe("hello");
 
-	// It goes away; the request stays open for the next publisher instance.
+	// It goes away; the request stays open for the next publisher identity.
 	first.close();
 	await servingFirst;
 	await waitFor(watched.active, (b) => b === undefined);
@@ -2463,7 +2463,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			const front = request.active.peek();
 
 			// The listing leaves. Its announce request stays open for the request beneath it rather
-			// than handing the route to a narrower one, so the instance never changes.
+			// than handing the route to a narrower one, so the identity never changes.
 			listing.close();
 			await clock.advance(Duration.millis(2000));
 			expect([started, ended]).toEqual([1, 0]);
@@ -2580,7 +2580,7 @@ test("origin: a blind request ends with its session, and the next session answer
 		const first = await waitFor(request.active, (b) => b !== undefined);
 
 		// The answering session dies once healthy, and the request it answered ends with it: the
-		// next session is another publisher instance as far as anything here can tell.
+		// next session is another publisher identity as far as anything here can tell.
 		await clock.advance(Duration.millis(1000));
 		servers[0]?.session.close();
 		await Promise.resolve(request.closed);
@@ -2807,7 +2807,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 	},
 );
 
-// Without an instance on the wire nothing says the job's route continues the claim's stream.
+// Without an identity on the wire nothing says the job's route continues the claim's stream.
 test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 	"publishing a job still resets its first subscribe on %s",
 	async (protocol) => {
@@ -2845,7 +2845,7 @@ test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 	},
 );
 
-// On lite-07 a job's exact route continues its claim's minted instance, so a reader resolved
+// On lite-07 a job's exact route continues its claim's minted identity, so a reader resolved
 // through the claim keeps its broadcast and its subscription once that route lands.
 test.each(["request", "follow"] as const)(
 	"a job's route continues a reader resolved through its claim (%s)",
@@ -2878,7 +2878,7 @@ test.each(["request", "follow"] as const)(
 
 		// Written once the job's route is listed at the reader: the same subscription carries it.
 		const { job, chat } = await serving;
-		expect(job.instance).toBe(handle.instance);
+		expect(job.identity).toBe(handle.identity);
 		expect(await listing.next()).toMatchObject({ kind: "present", prefix: path });
 		chat.writeFrame(textFrame("later", Timestamp.fromMillis(1)));
 		expect(await track.readString()).toBe("later");
@@ -3125,15 +3125,15 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 	10_000,
 );
 
-// A qmux session pair negotiating `protocol` over an in-memory socket, the client letting the server
-// open `maxStreams` streams of each kind. The client opens every bidirectional stream, so a small limit
-// bounds only the server's group streams.
-function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server: Qmux } {
+// A qmux session pair negotiating `protocol` over an in-memory socket at the `qmux` draft, the client
+// letting the server open `maxStreams` streams of each kind. The client opens every bidirectional
+// stream, so a small limit bounds only the server's group streams.
+function qmuxPair(protocol: string, maxStreams: bigint, qmux = "qmux-01"): { client: Qmux; server: Qmux } {
 	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
 		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
 		return {
 			url: "",
-			opened: Promise.resolve({ readable, writable, extensions: "", protocol: `qmux-01.${protocol}` }),
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: `${qmux}.${protocol}` }),
 			closed: closed.promise,
 			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
 		};
@@ -3148,69 +3148,73 @@ function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server:
 	return { client, server };
 }
 
-// On lite-07 a group whose stream a newer one reset to make room is dropped: its reader ends with
-// TOO_FAR_BEHIND, and a reader that wants the rest FETCHes it whole. Mirrors the Rust
-// `a_reset_group_is_fetched_whole`.
-test("integration: lite-07 drops a group reset to make room, and a FETCH reads it whole", async () => {
-	using clock = manual();
-	// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
-	// round trip.
-	const settled = async <T>(work: Promise<T>, what: string): Promise<T> => {
-		for (let i = 0; i < 100; i++) if (await settlesWithin(work, clock, Duration.millis(10))) return work;
-		throw new Error(`${what} never settled`);
-	};
-	// One unidirectional stream of credit, so a newer group's open must reset the older one.
-	const pair = qmuxPair(Lite.ALPN_07_WIP, 1n);
-	// The server learns the negotiated protocol once its socket opens.
-	await Promise.all([pair.client.ready, pair.server.ready]);
-	const origin = new OriginProducer();
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
-	const broadcast = publish(origin, Path.from("live"));
-	// Kept, so the older group is never too old for the subscription.
-	const producer = defined(broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null }));
-	const remote = wireOf(client).consume(Path.from("live"));
-	const subscriber = remote
-		.track("0")
-		.subscribe(withMax({ order: "descending", delay: { max: Duration.millis(30_000) } }));
-	try {
-		// Unfinished, so its stream holds the only credit until the newer group resets it.
-		const older = hooks.appendNext(producer);
-		older.writeFrame(textFrame("a"));
-		const reset = await settled(subscriber.recvGroup(), "the older group");
-		if (!reset) throw new Error("no older group");
-		expect(reset.start).toBe(0n);
-		expect(await settled(reset.readString(), "its first frame")).toBe("a");
+// On lite-07 a group whose stream a newer one reset to make room ends: its reader ends with
+// TOO_FAR_BEHIND, and a reader that wants the rest FETCHes it whole. The reset still delivers the
+// group's header, as a RESET_STREAM_AT on qmux-02 and ahead of a plain reset on qmux-01. Mirrors the
+// Rust `a_reset_group_is_fetched_whole`.
+test.each(["qmux-01", "qmux-02"])(
+	"integration: lite-07 over %s ends a group reset to make room, and a FETCH reads it whole",
+	async (qmux) => {
+		using clock = manual();
+		// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
+		// round trip.
+		const settled = async <T>(work: Promise<T>, what: string): Promise<T> => {
+			for (let i = 0; i < 100; i++) if (await settlesWithin(work, clock, Duration.millis(10))) return work;
+			throw new Error(`${what} never settled`);
+		};
+		// One unidirectional stream of credit, so a newer group's open must reset the older one.
+		const pair = qmuxPair(Lite.ALPN_07_WIP, 1n, qmux);
+		// The server learns the negotiated protocol once its socket opens.
+		await Promise.all([pair.client.ready, pair.server.ready]);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const broadcast = publish(origin, Path.from("live"));
+		// Kept, so the older group is never too old for the subscription.
+		const producer = defined(broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null }));
+		const remote = wireOf(client).consume(Path.from("live"));
+		const subscriber = remote
+			.track("0")
+			.subscribe(withMax({ order: "descending", delay: { max: Duration.millis(30_000) } }));
+		try {
+			// Unfinished, so its stream holds the only credit until the newer group resets it.
+			const older = hooks.appendNext(producer);
+			older.writeFrame(textFrame("a"));
+			const reset = await settled(subscriber.recvGroup(), "the older group");
+			if (!reset) throw new Error("no older group");
+			expect(reset.start).toBe(0n);
+			expect(await settled(reset.readString(), "its first frame")).toBe("a");
 
-		const newer = hooks.appendNext(producer);
-		newer.writeFrame(textFrame("new"));
-		newer.finish();
-		const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
-		expect(group?.start).toBe(1n);
-		expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
-			code: StreamCode.TooFarBehind,
-		});
+			const newer = hooks.appendNext(producer);
+			newer.writeFrame(textFrame("new"));
+			newer.finish();
+			const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
+			expect(group?.start).toBe(1n);
+			expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
+				code: StreamCode.TooFarBehind,
+			});
 
-		older.writeFrame(textFrame("b"));
-		older.finish();
-		const fetched = await settled(remote.track("0").fetchGroup(0n), "the FETCH of the dropped group");
-		const frames: string[] = [];
-		for (;;) {
-			const frame = await settled(fetched.readString(), "the fetched group");
-			if (frame === undefined) break;
-			frames.push(frame);
+			older.writeFrame(textFrame("b"));
+			older.finish();
+			const fetched = await settled(remote.track("0").fetchGroup(0n), "the FETCH of the dropped group");
+			const frames: string[] = [];
+			for (;;) {
+				const frame = await settled(fetched.readString(), "the fetched group");
+				if (frame === undefined) break;
+				frames.push(frame);
+			}
+			expect(frames).toEqual(["a", "b"]);
+		} finally {
+			subscriber.close();
+			remote.close();
+			broadcast.close();
+			client.abort();
+			server.abort();
 		}
-		expect(frames).toEqual(["a", "b"]);
-	} finally {
-		subscriber.close();
-		remote.close();
-		broadcast.close();
-		client.abort();
-		server.abort();
-	}
-});
+	},
+);
 
 // Out of credit, a late group that ranks below the stream holding it waits for credit without
 // holding back a newer group that outranks that stream. Mirrors the Rust

@@ -7394,6 +7394,15 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.stream.reset(code);
 	}
 
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		let inner = self.get_mut();
+		let code = match inner.lapse.as_ref().is_some_and(Lapse::lapsed) {
+			true => super::error::EXPIRED_AUTH_TOKEN,
+			false => code,
+		};
+		inner.stream.reset_at(offset, code);
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		let mut inner = self.inner.lock().unwrap();
 		inner.follow(waiter);
@@ -9013,7 +9022,7 @@ mod group_priority_test {
 			[(0, 0), (1, 0)],
 			"each stream joins the subscription's group"
 		);
-		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert_eq!(log.orders(), [(0, 3), (1, 1)], "newer groups first");
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		serve.set_priority(9).unwrap();
@@ -19306,7 +19315,7 @@ mod tests {
 			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
-		for key in [0, 1] {
+		for key in [1, 0] {
 			let group = subscriber
 				.recv_group()
 				.now_or_never()
@@ -20325,12 +20334,12 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		// One instance, so the second route re-prices the instance rather than restart it.
-		let instance = crate::Instance::random();
+		// One identity, so the second route re-prices the identity rather than restart it.
+		let identity = crate::Identity::random();
 		let cam = origin
 			.announce(
 				"solo-cam",
-				crate::origin::RouteInfo::new().with_instance(instance.clone(), 0),
+				crate::origin::RouteInfo::new().with_identity(identity.clone(), 0),
 			)
 			.unwrap();
 		settle().await;
@@ -20366,7 +20375,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::new().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -20427,13 +20436,13 @@ mod tests {
 			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
-		// One instance, so the warm route re-prices the instance rather than restart it.
-		let instance = crate::Instance::random();
+		// One identity, so the warm route re-prices the identity rather than restart it.
+		let identity = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
 				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_cost(4),
 			)
 			.unwrap();
@@ -20469,7 +20478,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::new().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -20505,12 +20514,12 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
 				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_cost(4),
 			)
 			.unwrap();
@@ -20563,7 +20572,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::new().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -20576,7 +20585,7 @@ mod tests {
 		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
 	}
 
-	/// A route from a different original publisher under the same instance (a replica)
+	/// A route from a different original publisher under the same identity (a replica)
 	/// withdraws the advertisement and makes it again on a fresh request rather than
 	/// updating it: a moq-cluster-01 receiver closes the session over an update that
 	/// changes the first HOP_PATH entry.
@@ -20587,12 +20596,12 @@ mod tests {
 		let origin = unheld_origin();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let _from_a = origin
 			.announce(
 				"cam",
 				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_hops(publisher_a)
 					.with_cost(4),
 			)
@@ -20622,7 +20631,7 @@ mod tests {
 			.announce(
 				"cam",
 				crate::origin::RouteInfo::new()
-					.with_instance(instance, 0)
+					.with_identity(identity, 0)
 					.with_hops(publisher_b)
 					.with_cost(0),
 			)
@@ -20664,10 +20673,10 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = unheld_origin();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let route = |hop: u64, cost: u64| {
 			crate::origin::RouteInfo::new()
-				.with_instance(instance.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_hops(crate::Hops::try_from(vec![crate::Hop::new(hop).unwrap()]).unwrap())
 				.with_cost(cost)
 		};
@@ -20714,7 +20723,7 @@ mod tests {
 			log.writes.lock().unwrap().clone()
 		};
 
-		// A cheaper route from B, the same instance, wins the selection.
+		// A cheaper route from B, the same identity, wins the selection.
 		let _from_b = origin.announce("cam", route(8, 0)).unwrap();
 		poll_until(&mut run, &log, b"cam", 3).await;
 
@@ -21245,7 +21254,7 @@ mod tests {
 		);
 	}
 
-	/// moq-transport has no restart: another source winning a namespace under another instance
+	/// moq-transport has no restart: another source winning a namespace under another identity
 	/// withdraws it and advertises it afresh, so the peer resubscribes.
 	#[kio::test]
 	async fn a_restart_re_advertises_the_namespace() {
@@ -21310,12 +21319,12 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let instance = crate::Instance::random();
+		let identity = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
 				crate::origin::RouteInfo::new()
-					.with_instance(instance.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_cost(4),
 			)
 			.unwrap();
@@ -21354,7 +21363,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
+				crate::origin::RouteInfo::new().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 

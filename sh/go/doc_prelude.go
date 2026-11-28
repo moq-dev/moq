@@ -7,8 +7,9 @@ import (
 )
 
 var (
-	ctx                    = context.Background()
-	client                 *moq.Client
-	opusInit, packet, rgba []byte
-	pts                    uint64
+	ctx            = context.Background()
+	client         *moq.Client
+	opusInit, rgba []byte
+	packets        [][]byte
+	pts            uint64
 )

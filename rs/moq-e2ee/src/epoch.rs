@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 /// One publisher instance's generation epoch, the lowercase hyphenated text of a UUIDv7.
 ///
-/// The instance announces it as its route's [`moq_net::Instance`] ([`Self::instance`]), so a
+/// The instance announces it as its route's [`moq_net::Identity`] ([`Self::identity`]), so a
 /// subscriber reads it back from the broadcast it resolved ([`Self::of`]). A wire that carries
-/// no instance hands the subscriber one its relay minted, which is no epoch: the application
+/// no identity hands the subscriber one its relay minted, which is no epoch: the application
 /// supplies the epoch over its own authenticated channel then.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(Arc<str>);
@@ -28,20 +28,20 @@ impl Epoch {
 		&self.0
 	}
 
-	/// The route instance that announces this epoch.
-	pub fn instance(&self) -> moq_net::Instance {
+	/// The route identity that announces this epoch.
+	pub fn identity(&self) -> moq_net::Identity {
 		self.as_str().parse().expect("an epoch is never empty")
 	}
 
-	/// The epoch a resolved broadcast's route announced, if its instance is one.
+	/// The epoch a resolved broadcast's route announced, if its identity is one.
 	pub fn of(broadcast: &moq_net::broadcast::Consumer) -> Option<Self> {
-		// One a session minted for a wire without instances names no epoch.
-		let instance = broadcast
+		// One a session minted for a wire without identities names no epoch.
+		let identity = broadcast
 			.info()
-			.instance
+			.identity
 			.clone()
-			.filter(|instance| !instance.is_minted())?;
-		instance.as_str().parse().ok()
+			.filter(|identity| !identity.is_minted())?;
+		identity.as_str().parse().ok()
 	}
 }
 

@@ -126,8 +126,8 @@ export type Sample = {
 	seq: number;
 	/** Whether the subscriber has resolved an announced broadcast. */
 	broadcastActive: boolean;
-	/** The instance of the active route's stream. */
-	broadcastInstance?: string;
+	/** The identity of the active route's stream. */
+	broadcastIdentity?: string;
 	/** The subscriber's catalog state, which stays offline without an announcement. */
 	broadcastStatus: ReturnType<Broadcast["out"]["status"]["peek"]>;
 	/** Whether this document has received user activation. */
@@ -167,6 +167,14 @@ export type Sample = {
 	audioTimestamp?: number;
 	/** Whether the audio buffer is waiting to refill. */
 	audioStalled: boolean;
+	/**
+	 * The audio received but not yet played, as `[start, end]` media milliseconds: what the network
+	 * delivered and the decoder holds. With `audioBytes` flat, a range here means audio arrived and the
+	 * reader held it; none means nothing arrived.
+	 */
+	audioBuffered: [number, number][];
+	/** Why the selected audio rendition failed, absent while it has not. */
+	audioError?: string;
 	/** How far playback trails the live edge, in milliseconds: the player's resolved sync delay. */
 	delay: number;
 	/** Peak frequency in the tone band, absent until the graph exists. */
@@ -189,6 +197,9 @@ export type Sample = {
 	audioRendition?: string;
 	/** The track the selected audio rendition is served on, which a format change re-mints. */
 	audioTrack?: string;
+	/** The selected audio rendition's catalog `delay` and `jitter`, in milliseconds, which a publisher's catalog update moves. */
+	audioCatalogDelay?: number;
+	audioCatalogJitter?: number;
 	/**
 	 * Root mean square of what reaches `AudioContext.destination`, after the player's volume and mute.
 	 * Absent until the graph exists; zero while nothing is connected to the speakers.

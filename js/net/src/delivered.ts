@@ -6,6 +6,13 @@
  */
 
 import { max, min } from "./util/key.ts";
+import type { Run } from "./window.ts";
+
+/** The groups a reader's ranges hold, as a fold judges a gap by. */
+export interface Judged {
+	/** The runs the placed ranges name from `from` up to the exclusive `end`, lowest first. */
+	placed(from: bigint, end: bigint): Run[];
+}
 
 /**
  * The group keys a reader handed out, as runs of consecutive keys.
@@ -17,6 +24,10 @@ import { max, min } from "./util/key.ts";
 export class Delivered {
 	// First and last key of each run, inclusive, sorted and never adjacent to each other.
 	#runs: [bigint, bigint][] = [];
+	// The keys a fold counted as handed out that no range held then, so no budget judged them: a
+	// range added later owes each it holds (see {@link reopen}). Always within `#runs`, and never
+	// more runs than {@link foldBelow} leaves. Mirrors the Rust `Delivered::unjudged`.
+	#unjudged: Delivered | undefined;
 
 	// The index of the run containing or preceding `key`, or -1 when none starts at or below it.
 	#below(key: bigint): number {
@@ -53,6 +64,7 @@ export class Delivered {
 	/** Record every key in `[start, end)` as handed out. */
 	addRun(start: bigint, end: bigint): void {
 		if (start >= end) return;
+		this.#unjudged?.remove(start, end);
 		// The runs it overlaps or touches, `first` through `last`, merge into one.
 		let first = this.#below(start - 1n);
 		if (first < 0 || this.#runs[first][1] < start - 1n) first++;
@@ -65,6 +77,21 @@ export class Delivered {
 		this.#runs.splice(first, last - first + 1, merged);
 	}
 
+	/** Forget that any key in `[start, end)` was handed out, splitting the runs it cuts. */
+	remove(start: bigint, end: bigint): void {
+		if (start >= end) return;
+		this.#unjudged?.remove(start, end);
+		// The runs reaching into it, `first` through `last`, keep only what lies outside it.
+		let first = this.#below(start);
+		if (first < 0 || this.#runs[first][1] < start) first++;
+		const last = this.#below(end - 1n);
+		if (last < first) return;
+		const kept: [bigint, bigint][] = [];
+		if (this.#runs[first][0] < start) kept.push([this.#runs[first][0], start - 1n]);
+		if (this.#runs[last][1] >= end) kept.push([end, this.#runs[last][1]]);
+		this.#runs.splice(first, last - first + 1, ...kept);
+	}
+
 	/** A record of what either this or `other` handed out. */
 	union(other: Delivered): Delivered {
 		const union = new Delivered();
@@ -74,16 +101,91 @@ export class Delivered {
 	}
 
 	/** The parts of `[start, end)` not handed out, in order. */
-	gaps(start: bigint, end: bigint): { start: bigint; end: bigint }[] {
-		const gaps: { start: bigint; end: bigint }[] = [];
+	*gaps(start: bigint, end: bigint): Generator<{ start: bigint; end: bigint }> {
 		let next = start;
 		for (let index = Math.max(this.#below(start), 0); index < this.#runs.length && next < end; index++) {
 			const [first, last] = this.#runs[index];
-			if (first > next) gaps.push({ start: next, end: min(first, end) });
+			if (first > next) yield { start: next, end: min(first, end) };
 			next = max(next, last + 1n);
 		}
-		if (next < end) gaps.push({ start: next, end });
-		return gaps;
+		if (next < end) yield { start: next, end };
+	}
+
+	/**
+	 * Count every key below `floor` as handed out, as a fold past the reader's budget does: each gap
+	 * it closes that `judged` doesn't hold, or every one while the ranges are still being placed, a
+	 * range added later that holds it owes again. Mirrors the Rust `Delivered::fold_below`.
+	 *
+	 * So that ranges moving to disjoint groups leave no more runs than they hold, what lies between
+	 * two runs it remembers that `judged` doesn't hold joins them: what ranges added over it later
+	 * hand out may then include a group handed out before, which the same identity makes harmless,
+	 * rather than miss one never handed out.
+	 */
+	foldBelow(floor: bigint, judged: Judged | undefined): void {
+		const gaps = [...this.gaps(this.runEnd(0n) ?? 0n, floor)];
+		for (const gap of gaps) {
+			let from = gap.start;
+			for (const held of judged?.placed(gap.start, gap.end) ?? []) {
+				if (held.start > from) this.#unjudge(from, held.start);
+				from = max(from, held.end);
+			}
+			if (from < gap.end) this.#unjudge(from, gap.end);
+		}
+		this.forgetBelow(floor);
+		// Placed ranges say what joins; a fold while they're placed is followed by one that is.
+		const unjudged = this.#unjudged;
+		if (!judged || gaps.length === 0 || !unjudged || unjudged.#runs.length < 2) return;
+		const [start, end] = [unjudged.#runs[0][0], unjudged.#runs[unjudged.#runs.length - 1][1] + 1n];
+		let from = start;
+		for (const held of [...judged.placed(start, end), { start: end, end }]) {
+			if (held.start > from) {
+				unjudged.addRun(from, held.start);
+				// Not what a reopen gave back since, which is owed rather than counted handed out.
+				for (const gap of [...this.gaps(from, held.start)]) unjudged.remove(gap.start, gap.end);
+			}
+			from = max(from, held.end);
+		}
+	}
+
+	// Remember `[start, end)` as folded unjudged.
+	#unjudge(start: bigint, end: bigint): void {
+		this.#unjudged ??= new Delivered();
+		this.#unjudged.addRun(start, end);
+	}
+
+	/** Whether a fold counted `key` as handed out while no range held it. */
+	unjudged(key: bigint): boolean {
+		return this.#unjudged?.has(key) ?? false;
+	}
+
+	/**
+	 * Take back each key a fold counted as handed out unjudged that `judged` now holds, so it is
+	 * owed again.
+	 *
+	 * The keys it gave back before that `judged` no longer holds, and any other gap it doesn't, it
+	 * counts as handed out unjudged again first, so the gaps never outlive the ranges that owed
+	 * them, as the Rust `Record::retire` bounds them. A live join still waiting gets back what it
+	 * holds once it places, as any range added later does.
+	 */
+	reopen(judged: Judged): void {
+		const unjudged = this.#unjudged;
+		if (!unjudged) return;
+		const held = unjudged.#runs.flatMap(([first, last]) => judged.placed(first, last + 1n));
+		if (held.length === 0) return;
+		const last = this.#runs.at(-1);
+		if (last) {
+			for (const gap of [...this.gaps(0n, last[1])]) {
+				let from = gap.start;
+				for (const run of [...judged.placed(gap.start, gap.end), { start: gap.end, end: gap.end }]) {
+					if (run.start > from) {
+						this.addRun(from, run.start);
+						this.#unjudge(from, run.start);
+					}
+					from = max(from, run.end);
+				}
+			}
+		}
+		for (const run of held) this.remove(run.start, run.end);
 	}
 
 	/** Count every key below `floor` as handed out. */
@@ -105,14 +207,19 @@ export class Delivered {
 		return first[0] === 0n ? this.#runs[1]?.[0] : first[0];
 	}
 
+	/** The lowest key handed out above a gap past `key`. */
+	nextAboveGap(key: bigint): bigint | undefined {
+		return this.#runs[this.#below(key) + 1]?.[0];
+	}
+
 	/** One past the last key of the run holding `key`, if it was handed out. */
 	runEnd(key: bigint): bigint | undefined {
 		const index = this.#below(key);
 		return index >= 0 && key <= this.#runs[index][1] ? this.#runs[index][1] + 1n : undefined;
 	}
 
-	/** How many runs it holds: one per gap, plus the floor. */
+	/** How many runs it holds: one per gap, plus the floor, plus one per run folded unjudged. */
 	get runs(): number {
-		return this.#runs.length;
+		return this.#runs.length + (this.#unjudged?.runs ?? 0);
 	}
 }

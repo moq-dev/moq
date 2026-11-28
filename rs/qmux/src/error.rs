@@ -70,8 +70,9 @@ pub enum Error {
 	#[error("idle timeout")]
 	IdleTimeout,
 
-	/// The peer never sent its transport parameters.
-	#[error("handshake timeout: peer never sent transport parameters")]
+	/// The handshake (TCP, TLS, WebSocket upgrade, and transport parameters) outlasted
+	/// [`Config::handshake_timeout`](crate::Config::handshake_timeout).
+	#[error("handshake timeout")]
 	HandshakeTimeout,
 
 	/// An application protocol name that is not an HTTP token, or an ALPN that names no

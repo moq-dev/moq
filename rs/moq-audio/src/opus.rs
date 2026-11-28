@@ -48,9 +48,9 @@ pub(crate) fn validate_rate(rate: u32) -> Result<(), Error> {
 	)))
 }
 
-pub(crate) fn validate_channels(count: u32) -> Result<i32, Error> {
+pub(crate) fn validate_channels(count: u32) -> Result<u8, Error> {
 	match count {
-		1 | 2 => Ok(count as i32),
+		1 | 2 => Ok(count as u8),
 		other => Err(Error::Unsupported(format!(
 			"opus only supports 1 or 2 channels (got {other})"
 		))),
@@ -73,10 +73,10 @@ pub(crate) fn frame_size(sample_rate: u32, duration: Duration) -> Result<usize, 
 /// Only a rejected argument or an unimplemented feature is a configuration libopus
 /// refuses. An allocation, internal, or state failure is a fault in the codec, which
 /// no other configuration is more likely to avoid.
-pub(crate) fn error(code: i32, context: &str) -> Error {
-	let message = format!("libopus {context} failed (code {code})");
-	match code {
-		unsafe_libopus::OPUS_BAD_ARG | unsafe_libopus::OPUS_UNIMPLEMENTED => Error::Unsupported(message),
+pub(crate) fn error(err: moq_opus::Error, context: &str) -> Error {
+	let message = format!("libopus {context} failed: {err}");
+	match err {
+		moq_opus::Error::BadArg | moq_opus::Error::Unimplemented => Error::Unsupported(message),
 		_ => Error::Codec(message),
 	}
 }
@@ -85,11 +85,11 @@ pub(crate) fn error(code: i32, context: &str) -> Error {
 ///
 /// Only a rejected packet is the stream's problem and worth skipping; the rest
 /// mean we handed libopus something wrong, which no later packet fixes.
-pub(crate) fn decode_error(code: i32) -> Error {
-	if code == unsafe_libopus::OPUS_INVALID_PACKET {
-		return Error::Decode(format!("libopus rejected the packet (code {code})"));
+pub(crate) fn decode_error(err: moq_opus::Error) -> Error {
+	if err == moq_opus::Error::InvalidPacket {
+		return Error::Decode(format!("libopus rejected the packet: {err}"));
 	}
-	error(code, "opus_multistream_decode_float")
+	error(err, "decode")
 }
 
 /// Classify a packet, preserving DTX across packet loss.
@@ -128,27 +128,6 @@ pub(crate) fn multistream_activity(packet: &[u8], streams: u8, in_dtx: bool) -> 
 	}
 }
 
-/// Update whether each stream of a decoded multistream packet now decodes in CELT-only mode
-/// (RFC 6716 §3.1: TOC configurations 16 to 31), rather than SILK or hybrid. A stream whose
-/// frames are all at most one byte keeps its mode, since libopus decodes such a frame as a
-/// loss in the mode before. A packet whose framing does not parse marks every stream as not CELT.
-pub(crate) fn track_celt(mut packet: &[u8], celt: &mut [bool]) {
-	let streams = celt.len();
-	for index in 0..streams {
-		let parsed = match index + 1 == streams {
-			true => largest_frame(packet).map(|largest| (largest, packet.len())),
-			false => self_delimited(packet),
-		};
-		let (Some(toc), Some((largest, offset))) = (packet.first(), parsed) else {
-			return celt.fill(false);
-		};
-		if largest > 1 {
-			celt[index] = toc >> 3 >= 16;
-		}
-		packet = &packet[offset..];
-	}
-}
-
 /// Whether every stream in a multistream packet coded no audio.
 fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 	for index in 0..streams {
@@ -176,10 +155,7 @@ fn self_delimited(data: &[u8]) -> Option<(usize, usize)> {
 	if data.is_empty() {
 		return None;
 	}
-	let framesize = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(data.as_ptr(), 48_000) };
-	if framesize <= 0 {
-		return None;
-	}
+	let framesize = moq_opus::packet::samples_per_frame(data, 48_000).filter(|&size| size > 0)?;
 
 	let toc = data[0];
 	let mut pos = 1usize;
@@ -214,7 +190,7 @@ fn self_delimited(data: &[u8]) -> Option<(usize, usize)> {
 			pos += 1;
 			len -= 1;
 			let count = (ch & 0x3f) as usize;
-			if count == 0 || count > sizes.len() || framesize as usize * count > 5760 {
+			if count == 0 || count > sizes.len() || framesize * count > 5760 {
 				return None;
 			}
 			if ch & 0x40 != 0 {
@@ -309,43 +285,10 @@ fn parse_size(data: &[u8]) -> Option<(usize, i32)> {
 /// marked packet, so it reads as active. Erring that way keeps the rule from
 /// ever calling real audio silence, which is the direction that matters.
 pub(crate) fn carries_nothing(packet: &[u8]) -> bool {
-	let Some((sizes, count)) = frame_sizes(packet) else {
-		return false;
-	};
-
-	match sizes.get(..count) {
-		Some(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
-		None => false,
+	match moq_opus::packet::frame_sizes(packet) {
+		Ok(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
+		Err(_) => false,
 	}
-}
-
-/// The largest coded frame in an accepted packet, in bytes.
-fn largest_frame(packet: &[u8]) -> Option<usize> {
-	let (sizes, count) = frame_sizes(packet)?;
-	usize::try_from(*sizes.get(..count)?.iter().max()?).ok()
-}
-
-/// Sizes of the coded frames in an accepted packet, with padding parsed off.
-fn frame_sizes(packet: &[u8]) -> Option<([i16; 48], usize)> {
-	let len = i32::try_from(packet.len()).ok()?;
-
-	// An Opus packet holds at most 48 frames (RFC 6716 section 3.2.5).
-	let mut sizes = [0i16; 48];
-	// SAFETY: `sizes` has libopus's maximum frame count, and it bounds the count
-	// it writes by that. Passing null for the TOC and frame pointers asks it to
-	// skip them, which it checks for; only `size` is required.
-	let count = unsafe {
-		unsafe_libopus::opus_packet_parse(
-			packet.as_ptr(),
-			len,
-			std::ptr::null_mut(),
-			std::ptr::null_mut(),
-			sizes.as_mut_ptr(),
-			std::ptr::null_mut(),
-		)
-	};
-
-	Some((sizes, usize::try_from(count).ok()?))
 }
 
 /// The lowest bitrate that still codes audio, in bits per second.
@@ -367,19 +310,11 @@ mod tests {
 
 	#[test]
 	fn only_argument_failures_are_unsupported() {
-		assert!(matches!(
-			error(unsafe_libopus::OPUS_BAD_ARG, "ctx"),
-			Error::Unsupported(_)
-		));
-		assert!(matches!(
-			error(unsafe_libopus::OPUS_UNIMPLEMENTED, "ctx"),
-			Error::Unsupported(_)
-		));
-		assert!(matches!(error(unsafe_libopus::OPUS_ALLOC_FAIL, "ctx"), Error::Codec(_)));
-		assert!(matches!(
-			error(unsafe_libopus::OPUS_INTERNAL_ERROR, "ctx"),
-			Error::Codec(_)
-		));
+		use moq_opus::Error as Opus;
+		assert!(matches!(error(Opus::BadArg, "ctx"), Error::Unsupported(_)));
+		assert!(matches!(error(Opus::Unimplemented, "ctx"), Error::Unsupported(_)));
+		assert!(matches!(error(Opus::AllocFail, "ctx"), Error::Codec(_)));
+		assert!(matches!(error(Opus::Internal, "ctx"), Error::Codec(_)));
 	}
 
 	#[test]
@@ -403,33 +338,6 @@ mod tests {
 		// Loss carries the last real packet's classification.
 		assert_eq!(activity(&[], true), Activity::Dtx);
 		assert_eq!(activity(&[], false), Activity::Active);
-	}
-
-	/// Each stream's mode follows its last coded frame, as libopus decodes it.
-	#[test]
-	fn track_celt_follows_each_coded_stream() {
-		// A coded stream takes its TOC's mode: CELT, SILK, CELT.
-		let mut celt = [false; 3];
-		track_celt(
-			&[0xfc, 0x02, 0xaa, 0xaa, 0x48, 0x02, 0xaa, 0xaa, 0xf8, 0xaa, 0xaa],
-			&mut celt,
-		);
-		assert_eq!(celt, [true, false, true]);
-		// A stream of empty or one-byte frames keeps its mode, whatever its TOC says.
-		track_celt(&[0xfc, 0x00, 0xfc, 0x02, 0xaa, 0xaa, 0x48, 0xaa], &mut celt);
-		assert_eq!(celt, [true, true, true]);
-
-		let mut celt = [false];
-		track_celt(&[0xf8], &mut celt);
-		assert_eq!(celt, [false], "a CELT DTX packet decodes in the SILK mode before it");
-		track_celt(&[0xf8, 0xaa], &mut celt);
-		assert_eq!(celt, [false], "libopus decodes a one-byte frame as a loss too");
-		track_celt(&[0xf8, 0xaa, 0xaa], &mut celt);
-		assert_eq!(celt, [true]);
-		track_celt(&[0x48], &mut celt);
-		assert_eq!(celt, [true], "a SILK DTX packet decodes in the CELT mode before it");
-		track_celt(&[], &mut celt);
-		assert_eq!(celt, [false], "unparsed framing conceals nothing");
 	}
 
 	/// A surround packet is one self-delimited Opus packet per stream, then a

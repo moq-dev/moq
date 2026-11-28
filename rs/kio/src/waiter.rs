@@ -375,6 +375,8 @@ impl WaiterList {
 struct Held {
 	depth: usize,
 	wakers: Vec<Weak<Waker>>,
+	// Wakes made by [`wake`], which owns its waker rather than a list's registration.
+	owned: Vec<Waker>,
 }
 
 thread_local! {
@@ -382,8 +384,24 @@ thread_local! {
 		std::cell::RefCell::new(Held {
 			depth: 0,
 			wakers: Vec::new(),
+			owned: Vec::new(),
 		})
 	};
+}
+
+/// Wake `waker` now, or under a [`Hold`] once the outermost one drops, as a
+/// [`WaiterList`] does: for a single waker kept outside a list.
+pub fn wake(waker: Waker) {
+	let mut waker = Some(waker);
+	let _ = HELD.try_with(|held| {
+		let mut held = held.borrow_mut();
+		if held.depth > 0 {
+			held.owned.extend(waker.take());
+		}
+	});
+	if let Some(waker) = waker {
+		waker.wake();
+	}
 }
 
 /// Holds back every wake this thread makes through a [`WaiterList`] until it drops.
@@ -408,19 +426,22 @@ pub fn hold() -> Hold {
 
 impl Drop for Hold {
 	fn drop(&mut self) {
-		let wakers = HELD
+		let (wakers, owned) = HELD
 			.try_with(|held| {
 				let mut held = held.borrow_mut();
 				held.depth = held.depth.saturating_sub(1);
 				match held.depth {
-					0 => std::mem::take(&mut held.wakers),
-					_ => Vec::new(),
+					0 => (std::mem::take(&mut held.wakers), std::mem::take(&mut held.owned)),
+					_ => Default::default(),
 				}
 			})
 			.unwrap_or_default();
 		// Outside the borrow: a waker may poll inline and open a hold of its own.
 		for waker in wakers.into_iter().filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
+		}
+		for waker in owned {
+			waker.wake();
 		}
 	}
 }
@@ -557,7 +578,7 @@ mod tests {
 
 	// `Waiter` is shared behind `&self` across threads, so the lazily allocated
 	// `shared` handle must use a thread-safe cell. A `!Sync` waiter silently
-	// infects `Pending` and `Shared`, and through them every moq-net consumer.
+	// infects `Pending` and `Shared`, and through them every type that holds one.
 	const fn assert_sync<T: Sync>() {}
 
 	const _: () = {
@@ -566,9 +587,8 @@ mod tests {
 		assert_sync::<crate::Shared<u32>>();
 	};
 
-	/// Three lists sit inside every kio channel's state cell, and that cell is paid
-	/// per announced broadcast and per cached group in moq-net whether or not
-	/// anything ever parks. Growing either is invisible at the call site, so bound
+	/// Three lists sit inside every kio channel's state cell, and every channel pays
+	/// for that cell whether or not anything ever parks. Growing either is invisible at the call site, so bound
 	/// them: a diff that has to raise these numbers should say why.
 	///
 	/// kio enables `smallvec/union`, which drops the inline array's enum tag, so the
@@ -579,9 +599,9 @@ mod tests {
 		let list = std::mem::size_of::<WaiterList>();
 		let state = std::mem::size_of::<crate::channel::Channel<()>>();
 		assert!(list <= 56, "WaiterList grew to {list} B");
-		// 184 B before the version counter, the value list's tag mirror (8 B each), and the
-		// waiter lists' own mutex moved the parking off the value's lock. Measured where a
-		// `Mutex` is 8 B; Darwin boxes its pthread mutex behind a 16 B one, once per lock, and a
+		// The version counter, the value list's tag mirror (8 B each), and the waiter
+		// lists' own mutex keep parking off the value's lock. Measured where a `Mutex` is
+		// 8 B; Darwin boxes its pthread mutex behind a 16 B one, once per lock, and a
 		// smaller one (2 B on Windows) leaves room.
 		let mutexes = 2 * std::mem::size_of::<std::sync::Mutex<()>>().saturating_sub(8);
 		assert!(state <= 200 + mutexes, "Channel<()> grew to {state} B");
@@ -613,6 +633,15 @@ mod tests {
 		waiter.register(&mut list);
 		list.wake();
 		assert_eq!(woken(), 2, "a wake with no hold open waited");
+
+		// A lone waker's wake waits the same way.
+		let outer = hold();
+		wake(Waker::from(count.clone()));
+		assert_eq!(woken(), 2, "a held lone wake went out");
+		drop(outer);
+		assert_eq!(woken(), 3, "the hold lost the lone wake");
+		wake(Waker::from(count.clone()));
+		assert_eq!(woken(), 4, "a lone wake with no hold open waited");
 	}
 
 	#[test]
@@ -770,8 +799,8 @@ mod tests {
 		assert_eq!(lists[PARKED].entries.len(), 3, "an unrecorded list cannot skip");
 	}
 
-	/// The relay's shape: a task parks on a few lists, one of them wakes it, and the
-	/// rest stay quiet. Retiring the waiter there cost an `Arc` per poll.
+	/// A task parks on a few lists, one of them wakes it, and the rest stay quiet.
+	/// Retiring the waiter there would cost an `Arc` per poll.
 	#[test]
 	fn partial_wakes_reuse_the_waiter() {
 		let waker = Waker::noop().clone();
@@ -789,6 +818,35 @@ mod tests {
 		}
 		for list in &lists {
 			assert!(list.entries.len() <= 1, "re-registration stacked a duplicate");
+		}
+	}
+
+	/// A park that lost count of its lists is kept once every list let go, and starts
+	/// its records over, so the lists it parks on next stay idempotent.
+	#[test]
+	fn an_overflowed_park_starts_over_once_its_lists_let_go() {
+		let waker = Waker::noop().clone();
+		let cx = Context::from_waker(&waker);
+		let mut park = Park::default();
+		let first = park.hold(&cx).shared().clone();
+		{
+			let waiter = park.hold(&cx);
+			let mut lists: Vec<_> = (0..=PARKED).map(|_| WaiterList::new()).collect();
+			for list in &mut lists {
+				waiter.register(list);
+			}
+		}
+
+		let waiter = park.hold(&cx);
+		assert!(Arc::ptr_eq(&first, waiter.shared()), "retired a waiter no list holds");
+		let mut lists: Vec<_> = (0..PARKED).map(|_| WaiterList::new()).collect();
+		for _ in 0..3 {
+			for list in &mut lists {
+				waiter.register(list);
+			}
+		}
+		for list in &lists {
+			assert_eq!(list.entries.len(), 1, "a stale record stacked a duplicate");
 		}
 	}
 
@@ -925,7 +983,7 @@ mod tests {
 
 	#[test]
 	fn wait_output_need_not_be_unpin() {
-		struct NotUnpin(#[allow(dead_code, reason = "only makes the type `!Unpin`")] std::marker::PhantomPinned);
+		struct NotUnpin(std::marker::PhantomPinned);
 
 		let mut fut = std::pin::pin!(crate::wait(|_| Poll::Ready(NotUnpin(std::marker::PhantomPinned))));
 		let mut cx = Context::from_waker(Waker::noop());

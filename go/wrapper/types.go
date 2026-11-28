@@ -31,18 +31,18 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), its static production and link cost (lower wins), and whether a usable path reaches it (Available).
+	// RouteInfo is the read-only facts on a received route: the Identity of the stream it serves (routes with one identity are one continuous stream), its static production and link cost (lower wins), and whether a usable path reaches it (Available).
 	RouteInfo = ffi.MoqRouteInfo
-	// Instance names one continuous stream at a path. Compare two with Eq: a session mints one
-	// for a route whose wire carries none, and it differs from a named instance with the same Text.
-	Instance = ffi.MoqInstance
+	// Identity names one continuous stream at a path. Compare two with Eq: a session mints one
+	// for a route whose wire carries none, and it differs from a named identity with the same Text.
+	Identity = ffi.MoqIdentity
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
 	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
 	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventPresent or AnnounceEventAbsent.
-	// Another publisher instance taking a path over keeps it present; see it with [OriginConsumer.Follow].
+	// Another publisher identity taking a path over keeps it present; see it with [OriginConsumer.Follow].
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventPresent reports a route now covering a path that was absent; it may arrive unavailable.
 	AnnounceEventPresent = ffi.MoqAnnounceEventPresent
@@ -56,7 +56,9 @@ type (
 	// live join that far behind the live edge (zero is the latest group), and an unstated one
 	// reaches back as far as Max allows. A nil End keeps following the live edge.
 	Range = ffi.MoqRange
-	// Order is which of a subscription's pending groups the publisher sends first.
+	// Order is which of a subscription's groups comes first, as the publisher sends them and
+	// RecvGroup returns those held. Before moq-lite-07 the publisher sends newest first whatever
+	// this asks.
 	Order = ffi.MoqOrder
 	// Compression is how a track's frames are compressed on the wire. Build one with
 	// DeflateCompression, and compare a received one by Name; a new compression joins as a
@@ -143,7 +145,8 @@ func NamedEncoder(name string) VideoEncoderKind {
 	return VideoEncoderKindNamed{Name: name}
 }
 
-// Order values: which pending group the publisher sends first.
+// Order values: which group comes first, as the publisher sends them and RecvGroup returns
+// those held.
 const (
 	// OrderAscending sends the oldest first, draining a backlog in start order.
 	OrderAscending = ffi.MoqOrderAscending
@@ -171,9 +174,9 @@ func UnlimitedCongestionControl() *CongestionControl {
 	return ffi.MoqCongestionControlUnlimited()
 }
 
-// ParseInstance names an instance with text, failing with ErrInvalidInstance when it is empty.
-func ParseInstance(text string) (*Instance, error) {
-	return ffi.MoqInstanceParse(text)
+// ParseIdentity names an identity with text, failing with ErrInvalidIdentity when it is empty or longer than 256 UTF-8 bytes.
+func ParseIdentity(text string) (*Identity, error) {
+	return ffi.MoqIdentityParse(text)
 }
 
 // Versions lists the protocol versions offered by default, most preferred

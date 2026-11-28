@@ -631,50 +631,9 @@ mod test {
 			r#"{"include":{"alice":null}}"#,
 			r#"{"include":{"alice":{}}}"#,
 			r#"{"include":{"alice":{"broadcast":42}}}"#,
-			r#"{"include":{"alice":{"broadcast":"./alice.hang","instance":""}}}"#,
 		] {
 			assert!(Catalog::<()>::from_str(bad).is_err(), "{bad} must be refused");
 		}
-	}
-
-	/// Every reference-bearing section carries an optional instance beside its `broadcast`.
-	#[test]
-	fn reference_instances_roundtrip_in_every_section() {
-		use crate::catalog::Reference;
-
-		const INSTANCE: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
-		let encoded = format!(
-			r#"{{
-				"include": {{"c": {{"broadcast": "./a", "instance": "{INSTANCE}"}}}},
-				"video": {{"renditions": {{"v": {{"broadcast": "./a", "instance": "{INSTANCE}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
-				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "instance": "{INSTANCE}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
-				"text": {{"renditions": {{"t": {{"broadcast": "./a", "instance": "{INSTANCE}", "format": "vtt"}}}}}},
-				"json": {{"tracks": {{"j": {{"broadcast": "./a", "instance": "{INSTANCE}", "mode": "snapshot"}}}}}},
-				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "instance": "{INSTANCE}", "mode": "snapshot"}}}}}}
-			}}"#
-		);
-		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
-		let instance: moq_net::Instance = INSTANCE.parse().unwrap();
-		let references: [&dyn Reference; 5] = [
-			&catalog.video.renditions["v"],
-			&catalog.audio.renditions["a"],
-			&catalog.text.renditions["t"],
-			&catalog.json.tracks["j"],
-			&catalog.binary.tracks["b"],
-		];
-		for reference in references {
-			assert_eq!(reference.instance(), Some(&instance));
-		}
-		assert_eq!(catalog.include["c"].instance.as_ref(), Some(&instance));
-		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
-
-		// Omitted stays omitted, and an empty instance refuses the catalog.
-		assert!(!Catalog::<()>::default().to_json().unwrap().contains("instance"));
-		let encoded = encoded.replace(INSTANCE, "");
-		assert!(
-			Catalog::<()>::from_str(&encoded).is_err(),
-			"an empty instance must be refused"
-		);
 	}
 
 	#[test]
@@ -834,7 +793,6 @@ mod test {
 			VideoConfig {
 				broadcast: None,
 				track: None,
-				instance: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -870,7 +828,6 @@ mod test {
 			AudioConfig {
 				broadcast: None,
 				track: None,
-				instance: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,
@@ -1191,7 +1148,7 @@ mod test {
 		assert_eq!(catalog.sync.interval, Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
-		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
+		let expected = moq_net::time::EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(2000).unwrap())

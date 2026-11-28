@@ -43,7 +43,7 @@ export type Routed = Omit<Announce, "route"> & { route: WireRoute };
  * {@link RouteInfo.available}). `absent`: no route covers the path any more, whether its origin
  * withdrew it or this side let go of it; carries its last advertised route.
  *
- * Another instance taking a path over keeps it present, and a change in availability is not
+ * Another identity taking a path over keeps it present, and a change in availability is not
  * reported: follow it with the origin's `follow(path)` to see the broadcast change.
  *
  * @public
@@ -54,7 +54,7 @@ export type Event = { kind: "present" | "absent" } & Announce;
  * Every change to a route, for code that forwards or routes them.
  *
  * `start`: a route now covers the prefix. `update`: the route covering it changed hops, cost,
- * or availability, in place. `restart`: another instance now serves the prefix. `end`: the
+ * or availability, in place. `restart`: another identity now serves the prefix. `end`: the
  * origin withdrew it, and no route covers it any more. `offline`: this side let go of it,
  * and no route covers it any more.
  *
@@ -80,8 +80,9 @@ export interface Options {
 	 * Also report every route that could serve a path in scope, not just those whose literal
 	 * name matches it. A route is a prefix serving everything beneath it, so a scope listing
 	 * `.chat` names at any depth still reports a route at `room`, which can serve
-	 * `room/lobby.chat`. Code that routes or forwards needs these; listing broadcasts does
-	 * not. Requests resolve through covering routes either way.
+	 * `room/lobby.chat`. A broadcast serves only its own path, yet is reported too, since it
+	 * shadows broader routes beneath it, as in Rust. Code that routes or forwards needs these;
+	 * listing broadcasts does not. Requests resolve through covering routes either way.
 	 */
 	covering?: boolean;
 }

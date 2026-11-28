@@ -210,10 +210,13 @@ impl Config {
 			return Err(ConfigError::IdleTimeout);
 		}
 		let mtu = INITIAL_MTU..=MAX_UDP_PAYLOAD;
-		let discovery = self.mtu.as_ref().map(|mtu| mtu.upper_bound);
 		if !mtu.contains(&self.initial_mtu)
 			|| !mtu.contains(&self.min_mtu)
-			|| discovery.is_some_and(|bound| !mtu.contains(&bound))
+			// A zero step never ends the discovery search.
+			|| self
+				.mtu
+				.as_ref()
+				.is_some_and(|discovery| !mtu.contains(&discovery.upper_bound) || discovery.minimum_change == 0)
 		{
 			return Err(ConfigError::Mtu);
 		}
@@ -367,5 +370,18 @@ impl fmt::Debug for Config {
 			.field("reset_stream_at", reset_stream_at)
 			.field("qlog", &qlog.is_some())
 			.finish_non_exhaustive()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn validate_refuses_a_zero_mtu_step() {
+		let mut config = Config::default();
+		assert_eq!(config.validate(), Ok(()));
+		config.mtu.as_mut().unwrap().minimum_change = 0;
+		assert_eq!(config.validate(), Err(ConfigError::Mtu));
 	}
 }

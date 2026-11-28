@@ -83,8 +83,9 @@ pub enum TracksEvent {
 		/// The track's kind and properties.
 		info: Listed,
 	},
-	/// Every track this hop listed when the listing began, and still lists, has been
-	/// reported. Sent once; later events are live.
+	/// Every track this hop listed once its listing was complete, and still lists, has been
+	/// reported: at once without a [`Lister`], else once it [`synced`](Lister::synced), as a
+	/// relay's copy does on its upstream's SYNCED. Sent once; later events are live.
 	Synced,
 	/// A track is no longer listed, unfinished: its producer dropped or aborted before
 	/// declaring its end, or the route or handler that listed it withdrew. A handler may still
@@ -386,6 +387,8 @@ impl Unlist {
 
 impl Drop for Unlist {
 	fn drop(&mut self) {
+		// As listing, unlisting wakes readers who may look the broadcast up again inline.
+		let _hold = kio::hold();
 		self.state
 			.lock()
 			.listing
@@ -402,6 +405,9 @@ pub(in crate::model) struct ListOnAccept {
 impl ListOnAccept {
 	/// List the track with the info it was accepted with. Called outside the broadcast's lock.
 	pub(in crate::model) fn list(self, info: &track::Info) -> Unlist {
+		// Listing wakes the broadcast's listing readers, who may be polled inline and look the
+		// broadcast up again: hold the wakes until the lock drops.
+		let _hold = kio::hold();
 		let mut state = self.state.lock();
 		Unlist::list(
 			&self.state,
@@ -568,7 +574,7 @@ fn removal((kind, name): Key, finished: bool) -> TracksEvent {
 
 /// The tracks a broadcast lists, from [`Consumer::tracks`].
 ///
-/// Reports every track listed when it was created, then [`TracksEvent::Synced`], then
+/// Reports every track listed once the listing is complete, then [`TracksEvent::Synced`], then
 /// each change as it happens, until the broadcast ends: a clean end comes after each
 /// track that left before it, and a track still listed then ends unfinished. Listing a broadcast never
 /// requests a track: subscribe to each listed one through [`Consumer::track`].
@@ -793,6 +799,36 @@ mod tests {
 	}
 
 	/// Every event ready now, through the end of the listing.
+	/// A waker that looks the broadcast up again, as an inline executor polling its task would.
+	struct Reenter {
+		consumer: crate::broadcast::Consumer,
+		woken: std::sync::atomic::AtomicBool,
+	}
+
+	impl Reenter {
+		fn new(consumer: &crate::broadcast::Consumer) -> Arc<Self> {
+			Arc::new(Self {
+				consumer: consumer.clone(),
+				woken: false.into(),
+			})
+		}
+
+		fn waiter(self: &Arc<Self>) -> kio::Waiter {
+			kio::Waiter::new(std::task::Waker::from(self.clone()))
+		}
+
+		fn woken(&self) -> bool {
+			self.woken.load(std::sync::atomic::Ordering::SeqCst)
+		}
+	}
+
+	impl std::task::Wake for Reenter {
+		fn wake(self: Arc<Self>) {
+			let _ = self.consumer.track("other");
+			self.woken.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
 	fn drain(tracks: &mut Tracks) -> Vec<String> {
 		let mut events = Vec::new();
 		while let Some(event) = next(tracks) {
@@ -912,6 +948,63 @@ mod tests {
 		assert!(matches!(lister.remove(Kind::Datagrams, "b"), Err(Error::NotFound)));
 		lister.remove(Kind::Track, "b").unwrap();
 		assert_eq!(drain(&mut tracks), ["~d:b", "-b"]);
+	}
+
+	/// A listed track asked for again because its producer dropped while read is listed again
+	/// once its handler serves it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewed_track_is_listed_again() {
+		let broadcast = Info::new().produce();
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		let _reader = consumer.track("a").unwrap().subscribe(None).await.unwrap();
+		assert_eq!(drain(&mut tracks), ["synced", "+a"]);
+		drop(track);
+		assert_eq!(drain(&mut tracks), ["-a"]);
+		let _next = requests.assert_request().accept(track::Info::timed());
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
+	/// Dropping a listed track's producer wakes a listing reader once the broadcast unlocks,
+	/// so an inline executor can look the broadcast up again from the wake.
+	#[test]
+	fn unlisting_wakes_a_reader_after_unlocking() {
+		let broadcast = Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		assert_eq!(drain(&mut tracks), ["synced", "+a"]);
+
+		let reenter = Reenter::new(&consumer);
+		let waiter = reenter.waiter();
+		assert!(tracks.poll_next(&waiter).is_pending());
+		drop(track);
+		assert!(reenter.woken());
+	}
+
+	/// Accepting a renewal wakes a listing reader once the broadcast unlocks, so an inline
+	/// executor can look the broadcast up again from the wake.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn relisting_wakes_a_reader_after_unlocking() {
+		let broadcast = Info::new().produce();
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		let _reader = consumer.track("a").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+		let request = requests.assert_request();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+
+		let reenter = Reenter::new(&consumer);
+		let waiter = reenter.waiter();
+		assert!(tracks.poll_next(&waiter).is_pending());
+		let _next = request.accept(track::Info::timed());
+		assert!(reenter.woken());
 	}
 
 	/// A datagram track a consumer asked for and a handler served is not in the inventory,
@@ -1184,7 +1277,7 @@ mod tests {
 		// Listing asks the handler for nothing.
 		dynamic.assert_no_request();
 
-		let _resolved = consumer.resolve_track("x", None).unwrap();
+		let _resolved = consumer.resolve_track(&"x".into(), None).unwrap();
 		let _x = dynamic.assert_request().accept(None);
 		assert_eq!(drain(&mut tracks), NONE);
 	}

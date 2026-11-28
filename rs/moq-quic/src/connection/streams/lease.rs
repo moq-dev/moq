@@ -10,6 +10,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use super::StreamId;
 use super::recv::{Error, Reader, Stream};
 use super::{StreamsState, state::Holder, state::get_or_insert_recv};
+use crate::connection::ConnectionTag;
 use crate::connection::assembler::Assembler;
 use crate::connection::waits::Wait;
 
@@ -212,12 +213,21 @@ impl Leased {
 
 /// Bytes of a receive stream leased with [`Stream::poll_lease()`], read as a [`Buf`]
 ///
-/// Reading moves past bytes for good. Hand the lease back with [`Stream::release()`] to return
-/// the connection credit of the bytes read, or with [`Stream::restore()`] to keep it, as for a
-/// message read only in part. Either way the bytes not read are leased again next time.
-#[derive(Debug, Default)]
+/// Reading moves past bytes for good. Hand the lease back to the stream it came from with
+/// [`Stream::release()`] to return the connection credit of the bytes read, or with
+/// [`Stream::restore()`] to keep it, as for a message read only in part. Either way the bytes not
+/// read are leased again next time.
+///
+/// A lease dropped instead leaves its stream leased: the stream keeps the credit of every byte it
+/// held, holds eviction off for the whole connection (counted in
+/// [`HeldStats::readers`](crate::connection::HeldStats::readers)), and panics on its next lease,
+/// until [`Stream::stop()`] discards it.
+#[derive(Debug)]
 #[must_use = "hand a lease back with `restore` or `release`"]
 pub struct Lease {
+	/// The stream and connection it came from, the only ones that take it back.
+	id: StreamId,
+	tag: ConnectionTag,
 	chunks: VecDeque<Bytes>,
 	/// Bytes in `chunks`.
 	len: usize,
@@ -329,7 +339,7 @@ impl Stream<'_> {
 			if self
 				.state
 				.recv_mut(self.id)
-				.is_some_and(|recv| recv.reader == Reader::Evicted)
+				.is_some_and(|recv| recv.reader.is_evicted())
 			{
 				return Poll::Ready(Err(Error::Evicted));
 			}
@@ -373,11 +383,14 @@ impl Stream<'_> {
 			Ok(transmit) => transmit,
 			Err(err) => return (Some(Err(err)), false),
 		};
+		let tag = self.state.tag;
 		let lease = self.state.lease_mut(self.id).expect("filled above");
 		if lease.len >= want || lease.is_fin() {
 			lease.out = true;
 			lease.lent = lease.len;
 			let out = Lease {
+				id: self.id,
+				tag,
 				chunks: std::mem::take(&mut lease.chunks),
 				len: std::mem::take(&mut lease.len) as usize,
 				fin: lease.is_fin(),
@@ -409,17 +422,26 @@ impl Stream<'_> {
 	/// Hand a lease back, keeping the connection credit of the bytes read from it
 	///
 	/// They wait for a later [`Self::release()`], as the start of a message read only in part
-	/// does.
+	/// does. Restoring assumes the reader will continue reading or releasing this stream; a
+	/// reader that parks elsewhere while holding leased bytes must release them or stop the
+	/// stream so a stuck receive window is not left holding them.
+	///
+	/// # Panics
+	/// - when `lease` came from another stream or connection
 	pub fn restore(&mut self, lease: Lease) {
 		let credit = self.put_back(lease);
 		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
-		// stuck itself, and one that is waits for more with its next lease.
+		// stuck itself (and may be about to consume it), and one that is waits for more with its
+		// next lease.
 		let transmit = self.state.stuck_waiting && self.unstick();
 		self.transmit(credit || transmit);
 	}
 
 	/// Hand a lease back, returning the connection credit of every byte read from it or from an
 	/// earlier one, once the units they belong to are complete
+	///
+	/// # Panics
+	/// - when `lease` came from another stream or connection
 	pub fn release(&mut self, lease: Lease) {
 		let credit = self.put_back(lease);
 		let transmit = self.release_credit();
@@ -439,7 +461,7 @@ impl Stream<'_> {
 			return false;
 		};
 		let freed = recv.lease.release();
-		if recv.reader == Reader::Evicted {
+		if recv.reader.is_evicted() {
 			self.state.evicted_held -= freed;
 		}
 		let transmit = self.return_credit(freed);
@@ -495,6 +517,11 @@ impl Stream<'_> {
 	///
 	/// Dropped instead once the stream was stopped, which discarded its lease and its credit.
 	fn put_back(&mut self, lease: Lease) -> bool {
+		// Another stream's byte counts would underflow this one's.
+		assert!(
+			lease.id == self.id && lease.tag == self.state.tag,
+			"lease handed back to another stream"
+		);
 		let Some(recv) = self.state.recv_mut(self.id) else {
 			return false;
 		};
@@ -503,7 +530,7 @@ impl Stream<'_> {
 			return false;
 		}
 		// An out lease holds eviction off, and nothing fills a lease while it is out.
-		debug_assert!(recv.reader != Reader::Evicted && state.chunks.is_empty());
+		debug_assert!(!recv.reader.is_evicted() && state.chunks.is_empty());
 		state.chunks = lease.chunks;
 		state.len = lease.len as u64;
 		state.lent = 0;
@@ -562,7 +589,7 @@ impl Stream<'_> {
 		assert!(!recv.lease.out, "leased again before the last lease was handed back");
 		match recv.reader {
 			Reader::Reading => {}
-			Reader::Evicted => return Err(Error::Evicted),
+			Reader::Evicted { .. } => return Err(Error::Evicted),
 			Reader::Stopped => return Err(Error::Closed),
 		}
 		self.state.unlooked.remove(&self.id);
@@ -632,7 +659,7 @@ impl StreamsState {
 		self.recv
 			.get(&id)
 			.and_then(|slot| slot.as_deref())
-			.is_some_and(|recv| recv.reader == Reader::Evicted)
+			.is_some_and(|recv| recv.reader.is_evicted())
 	}
 
 	fn recv_mut(&mut self, id: StreamId) -> Option<&mut super::Recv> {
@@ -652,6 +679,19 @@ impl StreamsState {
 		);
 		self.held -= bytes;
 		self.add_read_credits(bytes)
+	}
+
+	/// Wake every reader waiting for more than the receive window holds, whose next lease fails
+	/// with [`Error::TooLarge`].
+	pub(super) fn wake_too_large(&mut self) {
+		for (&id, slot) in &self.recv {
+			if slot
+				.as_deref()
+				.is_some_and(|recv| recv.lease.wanted() > self.receive_window)
+			{
+				self.waits.wake(id, Wait::Read);
+			}
+		}
 	}
 
 	/// Take the lease of `id`, stopped or freed, out of the eviction order and return the credit
@@ -781,8 +821,9 @@ impl StreamsState {
 		let leased = recv.lease.evict();
 		self.evicted_held += recv.lease.held;
 		// The peer hears of it when the application stops the stream with its own code.
+		let has_gaps = !recv.assembler.is_contiguous_to(recv.end);
 		let (unread, _) = recv.stop().expect("a candidate is not stopped");
-		recv.reader = Reader::Evicted;
+		recv.reader = Reader::Evicted { has_gaps };
 		self.held -= leased;
 		self.unlooked.remove(&id);
 		self.evicted += 1;
@@ -801,7 +842,7 @@ impl StreamsState {
 			};
 			let lease = &recv.lease;
 			held += lease.held;
-			if recv.reader == Reader::Evicted {
+			if recv.reader.is_evicted() {
 				evicted_held += lease.held;
 			}
 			assert_eq!(lease.ranked, self.ranks.contains(&lease.rank(id)), "{id}");

@@ -27,6 +27,9 @@
 //! [`clock`] is the time those waits run on: logical instants, wall time,
 //! deadlines, timers, and a deterministic simulator for tests.
 //!
+//! With the `model` feature, `kio::model` checks a pure state machine by visiting every
+//! state it can reach, printing the shortest trace to a broken rule.
+//!
 //! Every wait is a `poll_*` method first. The `async` feature adds the `async fn` that
 //! awaits each one, so a build without it compiles no coroutines (`async` bodies).
 //!
@@ -35,8 +38,19 @@
 //! fn` that awaits a `poll_*` method.
 
 #![warn(missing_docs)]
+// Verus's attribute syntax puts macro attributes on statements in `log`'s proof. Only
+// Verus, which allows unstable features, sets the cfg.
+#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
-use std::{fmt, sync::atomic::AtomicUsize};
+// Runs the README's example as a doctest, so it keeps building against the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct Readme;
+
+use std::{
+	fmt,
+	sync::atomic::{AtomicUsize, Ordering},
+};
 
 mod channel;
 mod lock;
@@ -45,6 +59,8 @@ mod waiter;
 pub mod clock;
 pub mod coop;
 pub mod log;
+#[cfg(feature = "model")]
+pub mod model;
 
 mod bridge;
 mod consumer;
@@ -71,7 +87,7 @@ pub use producer::{Producer, Unwanted};
 pub use queue::{PushError, Queue};
 pub use shared::Shared;
 pub use task::{Task, TaskKey, Tasks};
-pub use waiter::{Hold, Park, Waiter, WaiterList, hold, wait};
+pub use waiter::{Hold, Park, Waiter, WaiterList, hold, wait, wake};
 pub use watch::Watch;
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
@@ -152,6 +168,25 @@ impl std::error::Error for Closed {}
 pub(crate) struct Counts {
 	pub producers: AtomicUsize,
 	pub consumers: AtomicUsize,
+}
+
+impl Counts {
+	/// Add a consumer only while one already exists, so demand never goes from zero to one here.
+	// A hand-rolled loop: `fetch_update` is deprecated from Rust 1.99 and its replacement,
+	// `try_update`, needs 1.95, above the 1.91 floor.
+	pub fn join_consumers(&self) -> bool {
+		let mut count = self.consumers.load(Ordering::Acquire);
+		while count > 0 {
+			match self
+				.consumers
+				.compare_exchange_weak(count, count + 1, Ordering::AcqRel, Ordering::Acquire)
+			{
+				Ok(_) => return true,
+				Err(actual) => count = actual,
+			}
+		}
+		false
+	}
 }
 
 impl Default for Counts {

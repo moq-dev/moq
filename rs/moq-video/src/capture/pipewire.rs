@@ -1184,9 +1184,17 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					return;
 				};
 				let format = state.format.format();
+				// PipeWire hands a V4L2 camera's buffer back to the driver after
+				// about 70 ms even while this stream holds it, so a frame read late
+				// shows the next one's rows (a JPEG decode takes longer than that
+				// in a debug build). Copy the JPEG out and give the buffer back
+				// before decoding. Raw frames convert in well under a frame.
 				let read = || {
 					chunk_bytes(allocation, offset, required)
-						.map(|bytes| convert(format, bytes.as_ref(), layout, color))
+						.map(|bytes| match format {
+							VideoFormat::Encoded => Ok(Picture::Jpeg(bytes.into_owned())),
+							_ => convert(format, bytes.as_ref(), layout, color).map(Picture::I420),
+						})
 						.transpose()
 				};
 				let converted = match dma_buf {
@@ -1202,6 +1210,13 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						with_dma_buf_read(fd, read)
 					}
 					None => read(),
+				};
+				drop(buffer);
+				let converted = match converted {
+					Ok(Some(Picture::Jpeg(jpeg))) => convert(format, &jpeg, layout, color).map(Some),
+					Ok(Some(Picture::I420(i420))) => Ok(Some(i420)),
+					Ok(None) => Ok(None),
+					Err(e) => Err(e),
 				};
 				match converted {
 					Ok(None) => {}
@@ -1498,6 +1513,12 @@ fn format_requires_restart(
 	next_color: Option<Color>,
 ) -> bool {
 	geometry.is_some_and(|geometry| geometry != (width, height) || color != next_color)
+}
+
+/// A frame read out of a PipeWire buffer: converted, or a JPEG still to decode.
+enum Picture {
+	I420(I420),
+	Jpeg(Vec<u8>),
 }
 
 /// Convert one strided frame to tightly-packed I420.

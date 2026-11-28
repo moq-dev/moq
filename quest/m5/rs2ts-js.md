@@ -12,7 +12,7 @@ WebAssembly build only for a crate where it measures better.
 ## Plan
 
 Decided with the maintainer on 2026-11-09, in rust2's quest audit
-([rust2-wasm](https://github.com/moq-dev/rust2/blob/main/quest/m2/wasm/README.md)):
+([rust2-wasm](https://github.com/kixel-ai/rust2/blob/main/quest/m2/wasm/README.md)):
 ✅ WASM ships, and TypeScript must beat it (rejected: JS-only staying the
 goal with WebAssembly only a baseline; pausing the translator until
 WebAssembly is measured). This supersedes the 2026-10-12 decision here that
@@ -51,8 +51,8 @@ Public API: `@moq/net` remains; enumerate any approved changes. Wire: none.
 
 ## Waiting
 
-- moq-dev/rust2: its rust2-wasm epic reaches its gate, moq-net running in a browser with the three-way report. Check that rust2's `quest/m2/wasm/README.md` has no children left and its report exists.
+- kixel-ai/rust2: its rust2-wasm epic reaches its gate, moq-net running in a browser with the three-way report. Check that rust2's `quest/m2/wasm/README.md` has no children left and its report exists.
 
 ## Related
 
-- [Keep moq-net's model in rust2-ts's subset](/quest/m4/rs2ts-model-subset.md) - keeps the translation route measurable
+- [Keep moq-net's model in rust2-ts's subset](/quest/m5/rs2ts-model-subset.md) - keeps the translation route measurable

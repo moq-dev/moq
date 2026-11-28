@@ -219,24 +219,6 @@ impl<T: Serialize> Producer<T> {
 		inner.abort(err.into());
 		Ok(())
 	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
-	/// [`abort`](Self::abort) leaves it.
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		let mut inner = take(&self.inner);
-		// The check and the abort are one step on the track; the rest is the same cleanup.
-		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
-			drop(inner);
-			return Err(self);
-		}
-		inner.abort(err.into());
-		Ok(())
-	}
 }
 
 /// A value whose producer [finished](Producer::finish) it: it can still be read or aborted, but
@@ -614,7 +596,9 @@ mod tests {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut groups = track.subscribe(None);
+		// Oldest first, as published.
+		let mut groups =
+			track.subscribe(moq_net::track::Subscription::default().with_order(moq_net::track::Order::Ascending));
 		let mut producer = Producer::<Value>::new(track, Config::default().with_deltas(true));
 		producer
 			.update(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))

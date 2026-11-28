@@ -61,18 +61,30 @@ struct Web {
 	header_bi: Bytes,
 	header_datagram: Bytes,
 
-	/// Held so the control and QPACK streams stay open until the last clone drops.
-	_settings: Settings,
+	/// Held so the control streams stay open until the last clone drops.
+	settings: Settings,
 
 	/// The send side of the CONNECT stream, which the first close takes to write the
 	/// CloseWebTransportSession capsule.
 	connect_send: Mutex<Option<crate::quic::driver::send::Stream>>,
+
+	/// The CONNECT stream, whose capsules a close keeps reading.
+	connect_id: crate::quic::driver::stream::Id,
 
 	/// The request sent by the client.
 	request: ConnectRequest,
 
 	/// The response sent by the server, with the subprotocol it selected.
 	response: ConnectResponse,
+}
+
+impl Web {
+	/// The HTTP/3 streams a close must leave open besides the peer's QPACK ones: the CONNECT
+	/// stream, which carries the capsules, and both control streams.
+	fn critical(&self) -> [crate::quic::driver::stream::Id; 3] {
+		let [peer, ours] = self.settings.control_ids();
+		[self.connect_id, peer, ours]
+	}
 }
 
 impl Session {
@@ -108,7 +120,8 @@ impl Session {
 			header_uni: header_uni.into(),
 			header_bi: header_bi.into(),
 			header_datagram: header_datagram.into(),
-			_settings: settings,
+			settings,
+			connect_id: connect.send.id(),
 			connect_send: Mutex::new(Some(connect.send)),
 			request: connect.request.clone(),
 			response: connect.response.clone(),
@@ -341,9 +354,14 @@ impl Session {
 
 	/// Close the session with an error code and reason.
 	///
-	/// When there is a session ID (WebTransport over HTTP/3), a `CloseWebTransportSession`
-	/// capsule is written on the CONNECT stream before the QUIC connection is closed.
-	/// This allows browser clients to receive the close code and reason via `WebTransport.closed`.
+	/// When there is a session ID (WebTransport over HTTP/3), every stream either side sends on,
+	/// the HTTP/3 ones aside, is first ended with `WT_SESSION_GONE`: writers see their streams
+	/// stopped, and the close waits until the peer acknowledged what was written and reset its
+	/// own streams, for up to `max(3 RTT, 100 ms)`, since Chrome crashes on a capsule arriving
+	/// under live streams (<https://issues.chromium.org/issues/589817008>). Then a
+	/// `CloseWebTransportSession` capsule is written on the CONNECT stream before the QUIC
+	/// connection is closed, so browser clients receive the close code and reason via
+	/// `WebTransport.closed`.
 	///
 	/// The capsule write and connection close happen asynchronously in a spawned task
 	/// that keeps the session alive until then, so the caller may drop it right away.
@@ -374,6 +392,7 @@ impl Session {
 					reason: reason.to_string(),
 				};
 				let timeout = (self.conn.rtt() * 3).max(Duration::from_millis(100));
+				let critical = web.critical();
 
 				// The task owns a clone of the whole session, not just the connection:
 				// dropping the caller's last handle would otherwise end the HTTP/3
@@ -381,7 +400,7 @@ impl Session {
 				// browser treats as a connection error, losing the code and reason.
 				let session = self.clone();
 				crate::runtime::detach(crate::panic::isolate(async move {
-					session.close_with_capsule(send, capsule, code, timeout).await;
+					session.close_with_capsule(send, capsule, code, timeout, critical).await;
 				}));
 			}
 		} else {
@@ -390,15 +409,36 @@ impl Session {
 		}
 	}
 
-	/// Deliver the close capsule and FIN, then give the peer its teardown grace.
+	/// Have the peer end the streams it sends on, deliver the close capsule and FIN, then give
+	/// the peer its teardown grace.
 	async fn close_with_capsule(
 		&self,
 		mut send: crate::quic::driver::send::Stream,
 		capsule: web_transport_proto::Capsule,
 		code: u32,
 		timeout: std::time::Duration,
+		critical: [crate::quic::driver::stream::Id; 3],
 	) {
 		let http3_code: crate::quic::driver::VarInt = web_transport_proto::error_to_http3(code).try_into().unwrap();
+
+		// Chrome's renderer crashes when the capsule arrives while the page still reads and
+		// writes streams (https://issues.chromium.org/issues/589817008), so end every stream
+		// either side sends on, the HTTP/3 ones aside, and send the capsule once the peer has
+		// reset its own. The session is closed, so the resets and stops carry WT_SESSION_GONE.
+		let gone = self.close.encode_stream_code(0);
+		let web = self.web().expect("a capsule close is HTTP/3");
+		let quiesce = kio::wait(|waiter| poll_quiesce_shared(&web.accept, waiter, gone, &critical));
+		match kio::clock::timeout(timeout, quiesce).await {
+			Ok(Ok(())) => {}
+			Ok(Err(e)) => {
+				tracing::debug!(?e, "connection ended before the peer ended its streams");
+				return;
+			}
+			Err(_) => {
+				tracing::debug!("peer left streams open past the deadline; closing anyway");
+				web.accept.lock().unwrap().abandon_quiesce(gone, &critical);
+			}
+		}
 
 		// Encode the capsule, then wrap it in an HTTP/3 DATA frame.
 		// In HTTP/3, capsule data is carried inside DATA frames on the CONNECT
@@ -587,6 +627,24 @@ fn poll_accept_uni_shared(accept: &Mutex<SessionAccept>, waiter: &Waiter) -> Pol
 	result
 }
 
+// [`SessionAccept::poll_quiesce`] under the accept lock, holding back both lists' wakes as the
+// accepts above do, since it drives both.
+fn poll_quiesce_shared(
+	accept: &Mutex<SessionAccept>,
+	waiter: &Waiter,
+	code: crate::quic::driver::VarInt,
+	critical: &[crate::quic::driver::stream::Id],
+) -> Poll<Result<(), Error>> {
+	let (result, holds) = {
+		let mut accept = accept.lock().unwrap();
+		let holds = (accept.uni_waiters.hold(), accept.bi_waiters.hold());
+		(accept.poll_quiesce(waiter, code, critical), holds)
+	};
+	// Dropped after the accept lock, for the reason `poll_accept_uni_shared` gives.
+	drop(holds);
+	result
+}
+
 fn poll_accept_bi_shared(
 	accept: &Mutex<SessionAccept>,
 	waiter: &Waiter,
@@ -612,6 +670,27 @@ fn poll_accept_bi_shared(
 	}
 
 	result
+}
+
+/// A stream whose header is being read, with its ID, which a close spares until it knows the
+/// stream's type.
+pub(crate) struct Classifying<T: ?Sized> {
+	id: crate::quic::driver::stream::Id,
+	header: Pin<Box<T>>,
+}
+
+impl<T: ?Sized> Classifying<T> {
+	pub(crate) fn new(id: crate::quic::driver::stream::Id, header: Pin<Box<T>>) -> Self {
+		Self { id, header }
+	}
+}
+
+impl<T: Future + ?Sized> Future for Classifying<T> {
+	type Output = T::Output;
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T::Output> {
+		self.header.as_mut().poll(cx)
+	}
 }
 
 /// A unidirectional stream's header: its type, the session a WebTransport stream names, and the
@@ -642,8 +721,8 @@ struct SessionAccept {
 	bi_end: Option<Error>,
 
 	// Keep track of work being done to read/write the WebTransport stream header.
-	pending_uni: FuturesUnordered<Pin<Box<PendingUni>>>,
-	pending_bi: FuturesUnordered<Pin<Box<PendingBi>>>,
+	pending_uni: FuturesUnordered<Classifying<PendingUni>>,
+	pending_bi: FuturesUnordered<Classifying<PendingBi>>,
 
 	// Waiters from concurrent callers of accept_bi / accept_uni.
 	// Every clone of the session polls this one struct, so an arrival has to be fanned
@@ -667,7 +746,7 @@ impl SessionAccept {
 		conn: crate::quic::driver::connection::Connection,
 		session_id: VarInt,
 		close: Arc<CloseReason>,
-		early: Vec<Pin<Box<PendingUni>>>,
+		early: Vec<Classifying<PendingUni>>,
 	) -> Self {
 		let bi_waiters = Fan::default();
 		let uni_waiters = Fan::default();
@@ -728,7 +807,9 @@ impl SessionAccept {
 				// Start decoding the header and add the future to the list of pending streams.
 				match res {
 					Ok(recv) => {
-						self.pending_uni.push(Box::pin(read_uni_header(recv)));
+						let id = recv.id();
+						self.pending_uni
+							.push(Classifying::new(id, Box::pin(read_uni_header(recv))));
 						continue;
 					}
 					Err(err) => self.uni_end = Some(err.into()),
@@ -789,8 +870,9 @@ impl SessionAccept {
 				// Start decoding the header and add the future to the list of pending streams.
 				match res {
 					Ok((send, recv)) => {
-						self.pending_bi
-							.push(Box::pin(Self::decode_bi(send, recv, self.session_id)));
+						let id = recv.id();
+						let header = Box::pin(Self::decode_bi(send, recv, self.session_id));
+						self.pending_bi.push(Classifying::new(id, header));
 						continue;
 					}
 					Err(err) => self.bi_end = Some(err.into()),
@@ -818,6 +900,44 @@ impl SessionAccept {
 
 			// Keep looping if it's a stream we want to ignore.
 		}
+	}
+
+	/// End every stream either side sends on, sparing `critical` and the QPACK streams, as
+	/// [`Connection::poll_quiesce`](crate::quic::driver::connection::Connection::poll_quiesce)
+	/// does with `code`.
+	///
+	/// Nobody else accepts once the session closed, so this accepts and classifies the peer's
+	/// streams itself, dropping the session's, which ends them. A stream still mid-header may be
+	/// a QPACK stream, so it is spared, without waiting on it: Chrome opens its QPACK streams
+	/// without writing to them, and waiting out the grace lets the page open more streams under
+	/// the capsule. Poll it through [`poll_quiesce_shared`], which holds the wakes the
+	/// classification causes.
+	fn poll_quiesce(
+		&mut self,
+		waiter: &Waiter,
+		code: crate::quic::driver::VarInt,
+		critical: &[crate::quic::driver::stream::Id],
+	) -> Poll<Result<(), Error>> {
+		while let Poll::Ready(Ok(_)) = self.poll_accept_uni(waiter) {}
+		while let Poll::Ready(Ok(_)) = self.poll_accept_bi(waiter) {}
+		let keep = self.quiesce_keep(critical);
+		self.conn.poll_quiesce(waiter, code, &keep).map_err(Into::into)
+	}
+
+	/// Give up a quiesce that is not ready, as
+	/// [`Connection::abandon_quiesce`](crate::quic::driver::connection::Connection::abandon_quiesce)
+	/// does, sparing what [`Self::poll_quiesce`] last spared.
+	fn abandon_quiesce(&self, code: crate::quic::driver::VarInt, critical: &[crate::quic::driver::stream::Id]) {
+		self.conn.abandon_quiesce(code, &self.quiesce_keep(critical));
+	}
+
+	// The streams a quiesce spares: `critical`, the QPACK streams, and those still mid-header.
+	fn quiesce_keep(&self, critical: &[crate::quic::driver::stream::Id]) -> Vec<crate::quic::driver::stream::Id> {
+		let qpack = [&self.qpack_encoder, &self.qpack_decoder];
+		let qpack = qpack.into_iter().flatten().map(|recv| recv.id());
+		let pending = self.pending_uni.iter().map(|header| header.id);
+		let pending = pending.chain(self.pending_bi.iter().map(|header| header.id));
+		critical.iter().copied().chain(qpack).chain(pending).collect()
 	}
 
 	// Reads the stream header, returning Some if it's a WebTransport stream.
@@ -999,6 +1119,11 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(self.conn.receive_window())
 	}
+	/// Only raw QUIC: a browser's WebTransport API may discard a reset stream's prefix unread
+	/// even when its QUIC stack negotiated RESET_STREAM_AT, and nothing here tells a browser apart.
+	fn reliable_reset(&self) -> bool {
+		matches!(self.mode, Mode::Raw { .. }) && self.conn.reset_stream_at()
+	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
 		let mut quic = moq_quic::Limits::default();
@@ -1006,6 +1131,22 @@ impl moq_net::transport::poll::Session for Session {
 		self.conn
 			.set_limits(quic)
 			.map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
+	}
+	/// The connection's keep-alive, which every WebTransport session on it shares.
+	fn set_keep_alive(
+		&self,
+		keep_alive: moq_net::transport::KeepAlive,
+	) -> Result<(), moq_net::transport::KeepAliveError> {
+		self.conn
+			.set_keep_alive(moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard))
+			.map_err(|err| moq_net::transport::KeepAliveError::Refused(err.to_string()))
+	}
+	fn poll_liveness(&self, waiter: &Waiter, last: moq_net::transport::Liveness) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.conn.poll_stale(waiter, stale).map(|stale| match stale {
+			true => moq_net::transport::Liveness::Stale,
+			false => moq_net::transport::Liveness::Live,
+		})
 	}
 }
 
@@ -1234,6 +1375,21 @@ mod tests {
 			async { crate::quic::web::Request::accept(server).await.unwrap().ok().await },
 		);
 		(client.unwrap(), server.unwrap())
+	}
+
+	/// Both ends advertise RESET_STREAM_AT, so a raw QUIC reset keeps its prefix for the peer's
+	/// reader, which lets a lite-07 publisher account for a reset group by its header alone.
+	/// WebTransport never claims it, since a browser's API may drop that prefix anyway.
+	#[tokio::test]
+	async fn only_raw_quic_resets_are_reliable() {
+		use moq_net::transport::poll::Session as _;
+
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			assert_eq!(client.reliable_reset(), !framed, "framed: {framed}");
+			assert_eq!(server.reliable_reset(), !framed, "framed: {framed}");
+		}
 	}
 
 	/// Out of connection flow control, an open still returns its stream at once and the
@@ -1496,6 +1652,79 @@ mod tests {
 		assert_eq!(bi.read_to_end(2).await.unwrap(), b"bi");
 		assert!(server.accept_uni().await.is_err());
 		assert!(server.accept_bi().await.is_err());
+	}
+
+	/// A close resets every stream the server sends on, stops every stream the peer sends on,
+	/// and sends its capsule only once the peer reset them, since Chrome crashes on a capsule
+	/// arriving under a write in flight (https://issues.chromium.org/issues/589817008). It classifies the streams nobody accepted
+	/// yet itself, stopping the session's and sparing a QPACK stream and one still mid-header.
+	#[tokio::test]
+	async fn close_waits_for_the_peer_to_reset_its_streams() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+		// The connection's own streams, whose stop and reset the test sees directly: a session
+		// stream ended with WT_SESSION_GONE waits for the capsule's reason instead. The server
+		// accepts and holds one, as moq-net does, and none of the rest before the close.
+		let web = client.web().unwrap();
+		let (mut held, mut held_recv) = client.conn.open_bi(Default::default()).await.unwrap();
+		held.write_all(web.header_bi.clone()).await.unwrap();
+		let (mut held_writer, _held_reader) = server.accept_bi().await.unwrap();
+		let mut uni = client.conn.open_uni(Default::default()).await.unwrap();
+		uni.write_all(web.header_uni.clone()).await.unwrap();
+		let (mut bi, mut bi_recv) = client.conn.open_bi(Default::default()).await.unwrap();
+		bi.write_all(web.header_bi.clone()).await.unwrap();
+		let mut qpack = client.conn.open_uni(Default::default()).await.unwrap();
+		let mut header = Vec::new();
+		StreamUni::QPACK_ENCODER.encode(&mut header);
+		qpack.write_all(&header[..]).await.unwrap();
+		// And one stalled mid-header, which may yet turn out to be QPACK: it is spared, and
+		// holds neither the other streams' stops nor the capsule.
+		let mut stalled = client.conn.open_uni(Default::default()).await.unwrap();
+		stalled.write_all(&[0x40][..]).await.unwrap();
+		for stream in [&uni, &bi, &qpack, &stalled] {
+			kio::wait(|waiter| stream.poll_acked(waiter, stream.offset()))
+				.await
+				.unwrap();
+		}
+
+		// An accept parked as a session's reader keeps one, as moq-net does.
+		let parked = server.clone();
+		let _accepting = tokio::spawn(async move {
+			let mut held = Vec::new();
+			while let Ok(recv) = parked.accept_uni().await {
+				held.push(recv);
+			}
+		});
+		tokio::task::yield_now().await;
+		server.close(2, "unauthorized");
+		let gone = crate::quic::driver::VarInt::from_u64(super::super::error::WT_SESSION_GONE).unwrap();
+		assert_eq!(uni.closed().await.unwrap(), Some(gone));
+		assert_eq!(bi.closed().await.unwrap(), Some(gone));
+		assert_eq!(held.closed().await.unwrap(), Some(gone));
+		// The server's halves of the bidirectional streams are reset as well, ending the reads.
+		assert_eq!(bi_recv.received_reset().await.unwrap(), Some(gone));
+		assert_eq!(held_recv.received_reset().await.unwrap(), Some(gone));
+		// Its writer learns the session closed instead of writing on.
+		assert!(held_writer.write(&mut &b"late"[..]).await.is_err());
+		assert!(client.close.get().is_none(), "the capsule arrived before the resets");
+
+		uni.reset(gone);
+		bi.reset(gone);
+		held.reset(gone);
+		let err = client.closed().await;
+		assert!(
+			matches!(err, Error::Closed(2, ref reason) if reason == "unauthorized"),
+			"{err:?}"
+		);
+		assert_eq!(
+			server.conn.stats().frame_tx.stop_sending,
+			3,
+			"a QPACK or unclassified stream was stopped"
+		);
 	}
 
 	/// A queued capsule must survive a stalled socket beyond the teardown grace.

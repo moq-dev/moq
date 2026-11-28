@@ -7,8 +7,8 @@ use std::{fmt, ops::Sub, time::Duration};
 /// clock's range is handled rather than panicking. Instants are only comparable within one clock: the simulator
 /// starts at [`Instant::ZERO`], and the runtime backends count from an origin they
 /// pick once, reading far past zero there so earlier moments stay representable.
-/// On native, [`Instant::into_std`] and [`Instant::from_std`] convert at a third-party
-/// API that takes std's instants.
+/// [`Instant::into_std`] and [`Instant::from_std`] convert at a third-party API that takes
+/// std's instants.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instant(u64);
 

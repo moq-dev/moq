@@ -261,7 +261,7 @@ impl Muxer {
 		}
 		if matches!(
 			self.catalog_container(),
-			CatalogContainer::Legacy | CatalogContainer::Loc
+			CatalogContainer::Legacy | CatalogContainer::Loc | CatalogContainer::Raw | CatalogContainer::Cts
 		) && let Kind::Video(config) = &self.kind
 			&& catalog_dimensions(config).is_none()
 		{
@@ -276,7 +276,7 @@ impl Muxer {
 			CatalogContainer::Cmaf { init, .. } => {
 				extract_init(init, TRACK_ID, &mut ftyp, &mut traks, &mut trexs)?;
 			}
-			CatalogContainer::Legacy | CatalogContainer::Loc => {
+			CatalogContainer::Legacy | CatalogContainer::Loc | CatalogContainer::Raw | CatalogContainer::Cts => {
 				let trak = match &self.kind {
 					Kind::Video(config) => {
 						synthesize_video_trak(TRACK_ID, self.timescale.as_u64(), config, self.description.as_deref())?

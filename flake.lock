@@ -18,30 +18,13 @@
         "type": "github"
       }
     },
-    "instrument-hooks": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1793015678,
-        "narHash": "sha256-d86nCCmv++8BsuCCDbmaw4xdifbn22ic7R7dMWxfxR8=",
-        "owner": "CodSpeedHQ",
-        "repo": "instrument-hooks",
-        "rev": "8fd5b878499f819561b33219cdafaa6f8c28b4e4",
-        "type": "github"
-      },
-      "original": {
-        "owner": "CodSpeedHQ",
-        "repo": "instrument-hooks",
-        "rev": "8fd5b878499f819561b33219cdafaa6f8c28b4e4",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1794554816,
-        "narHash": "sha256-PqJ89Z/qwQa2fB2C0j/GjiviARAtBzVPDUxnbIY6EPA=",
+        "lastModified": 1794644783,
+        "narHash": "sha256-3GnIGIy15bMduoS9RnWqKTmsJLWThla42UFtm0S7+us=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "e126e9e73c335158ff8279ac14d5f4afec153716",
+        "rev": "5d2b81a7a3be3e2f832879028e4d60abbf58e9a0",
         "type": "github"
       },
       "original": {
@@ -88,19 +71,18 @@
         "flake-utils": [
           "flake-utils"
         ],
-        "nixpkgs": [
-          "nixpkgs"
-        ],
+        "nixpkgs": "nixpkgs",
         "nixpkgs-bun": "nixpkgs-bun",
         "quest-pinned": "quest-pinned",
-        "token-max": "token-max"
+        "token-max": "token-max",
+        "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1795536594,
-        "narHash": "sha256-VxMlgOXleWDB+7AemB34T1Hm89xlrufG9Hf22cyQKKc=",
+        "lastModified": 1795819093,
+        "narHash": "sha256-l2m2VA3EV6T8ccvXVqLcorhaZvYWgGsfRLDk2DOze6w=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "65fd9e0081ade0dea4be2aea60452f0b27243ed5",
+        "rev": "2422aac04f06c6098989b89f2af0802b7aead492",
         "type": "github"
       },
       "original": {
@@ -112,11 +94,11 @@
     "quest-pinned": {
       "flake": false,
       "locked": {
-        "lastModified": 1795475187,
-        "narHash": "sha256-jce7joKMWpLh6poIZVGajXvTOpYcP2XcKRYiZXb1VSQ=",
+        "lastModified": 1795644737,
+        "narHash": "sha256-pBIdZ9uKOU8so/VNeKk5RvQnfJmXKoBYwJfgHIbQtog=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "a57434cd4a670ba4f8ef4a667d406132456fff09",
+        "rev": "8bb9506515a99a2002ee596df6ab2b294948210c",
         "type": "github"
       },
       "original": {
@@ -158,7 +140,10 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": [
+          "quest",
+          "nixpkgs"
+        ],
         "quest": "quest",
         "rust-overlay": "rust-overlay",
         "rust2": "rust2"
@@ -171,11 +156,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794733384,
-        "narHash": "sha256-VaXNWDU+9dXckN4BlZbrcYTTd9pIscLeiknbhHX4+lk=",
+        "lastModified": 1794995857,
+        "narHash": "sha256-XWidHsxcg0iQuGea4URxcPV3rY+dB595L3Xs2xFrsPo=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "67f1944c7c99d8dbb57fa3d83043bc0a92cbcc56",
+        "rev": "6b05b928a40211beecaaa294e6f719aa2145a2a8",
         "type": "github"
       },
       "original": {
@@ -210,7 +195,6 @@
         "flake-utils": [
           "flake-utils"
         ],
-        "instrument-hooks": "instrument-hooks",
         "nixpkgs": "nixpkgs_2",
         "quest": [
           "quest"
@@ -219,11 +203,11 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1795549572,
-        "narHash": "sha256-pCHS+ZEcwUPCjOnUnsjMi6moaRt7E9899gk7LX7Y2iM=",
+        "lastModified": 1795681853,
+        "narHash": "sha256-rktjJlL0JIMvM69ACI1w3d3hI/SjkOrvqqyFnmFn+Yo=",
         "owner": "kixel-ai",
         "repo": "rust2",
-        "rev": "6ead6d565ef4d9c739238653c3ec01e25590ad0e",
+        "rev": "cda8fc3ed3e083df1cb26341c81c4f00cffd2721",
         "type": "github"
       },
       "original": {
@@ -272,6 +256,27 @@
       "original": {
         "owner": "kixel-ai",
         "repo": "token-max",
+        "type": "github"
+      }
+    },
+    "treefmt-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "quest",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795615686,
+        "narHash": "sha256-/C0FK2Fwq0aWE/GADYyYbAIdQeGfYBbWMin3tfks1NA=",
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "rev": "b7b56d3c8833016c650ca542b1230e6130299741",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "treefmt-nix",
         "type": "github"
       }
     }

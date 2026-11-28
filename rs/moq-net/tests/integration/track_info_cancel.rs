@@ -74,7 +74,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	let reader = produce_origin(2);
 	let mut options = origin::RouteOptions::hidden();
 	if explicit {
-		options = options.with_instance("019a1234-5678-7000-8000-000000000001".parse().unwrap(), 0);
+		options = options.with_identity("019a1234-5678-7000-8000-000000000001".parse().unwrap(), 0);
 	}
 	let broadcast = publisher.route("room", options).unwrap();
 	let mut dynamic = broadcast.broadcast().requests();

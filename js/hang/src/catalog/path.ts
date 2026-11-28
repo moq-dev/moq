@@ -28,22 +28,3 @@ export const RelativeBroadcastSchema: z.ZodMiniType<RelativeBroadcast, string> =
  * out here so the catalog schemas' inferred types stay nameable from this package.
  */
 export type RelativeBroadcast = string & { __brand: "Relative" };
-
-/**
- * Zod schema for the stream a catalog reference names: an entry's `instance` beside its
- * `broadcast`. Any non-empty text, the same text MoQ routes carry, naming the publisher's
- * stream; an empty or ill-formed one (a lone surrogate) refuses the catalog.
- */
-export const InstanceSchema: z.ZodMiniType<ReferenceInstance, string> = z.pipe(
-	z.string().check(
-		z.minLength(1, "expected a non-empty instance"),
-		z.refine((text) => text.isWellFormed(), "expected well-formed instance text"),
-	),
-	z.transform((text) => text as ReferenceInstance),
-);
-
-/**
- * A validated reference instance: the same brand as `Instance.Valid` from `@moq/net`, spelled
- * out here so the catalog schemas' inferred types stay nameable from this package.
- */
-export type ReferenceInstance = string & { readonly _brand: "instance" };

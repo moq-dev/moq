@@ -21,8 +21,15 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 }
 
+export interface KeepAlive {
+	hard: Duration;
+	soft: Duration;
+}
+
 export interface SendStream extends WritableStream<Uint8Array> {
 	getStats(): Promise<SendStreamStats>;
+	readonly reliableReset: boolean;
+	resetAt(offset: number, reason?: unknown): void;
 	sendOrder: number;
 }
 
@@ -53,10 +60,13 @@ export class Session implements WebTransport {
 	}>;
 	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
+	keepAlive(config: KeepAlive): void;
 	get protocol(): string;
 	readonly ready: Promise<void>;
 	get reliability(): "reliable-only";
 	setSendBufferSize(bytes: number): void;
+	get stale(): boolean;
+	staleChanged(): Promise<void>;
 	readonly transport: "websocket";
 }
 

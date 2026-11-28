@@ -26,7 +26,7 @@ import {
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, fillsFromStart, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
+import { ALPN_05, fillsFromStart, hasLengthFirst, hasRanges, hasSkip, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Duration.millis(100);
@@ -158,8 +158,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		late.write("1.0");
 		late.finish();
 
-		expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
 		expect(await readAll(await reader.recvGroup())).toEqual(["1.0"]);
+		expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
 		expect(await reader.recvGroup()).toBeUndefined();
 		expect(await reader.closed).toBeNull();
 		expect(hooks.subscriberEnd(reader)).toEqual({ group: 2n, frame: 0 });
@@ -202,7 +202,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.closed).toBeNull();
 	});
 
-	test("readers hold at a missing group until the grace settles the subscription", async () => {
+	// Lite-07 waits out no grace: its publisher names every start, so no group goes missing unnamed.
+	const graced = hasSkip(version) ? test.skip : test;
+	graced("readers hold at a missing group until the grace settles the subscription", async () => {
 		// The test advances this clock explicitly, without a wall-clock timer.
 		const clock = new Manual();
 		const installed = clock.install();
@@ -481,8 +483,8 @@ test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
 	await respond({ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) });
 	await fin();
 
-	expect((await reader.recvGroup())?.start).toBe(0n);
 	expect((await reader.recvGroup())?.start).toBe(2n);
+	expect((await reader.recvGroup())?.start).toBe(0n);
 	expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 	expect(await reader.closed).toBeNull();
 });

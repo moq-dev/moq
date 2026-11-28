@@ -1,7 +1,7 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Hop, Hops, Instance, Path,
+	Hop, Hops, Identity, Path,
 	coding::*,
 	origin::Cost,
 	route::{
@@ -76,10 +76,10 @@ pub enum AnnounceBroadcast {
 	/// announcement with this id. The id stays live.
 	Update { id: u64, hops: Hops, cost: Cost },
 	/// ANNOUNCE_START (lite-07): a claim of the broadcast at `suffix` serving
-	/// `instance`, which assigns it the next announce id.
+	/// `identity`, which assigns it the next announce id.
 	Start {
 		suffix: PathRef,
-		instance: Instance,
+		identity: Identity,
 		claim: Claim,
 	},
 	/// ANNOUNCE_UPDATE (lite-07): the claim with this id now stands as `claim`.
@@ -525,11 +525,11 @@ impl Encode<Version> for AnnounceBroadcast {
 				}
 				Self::Start {
 					suffix,
-					instance,
+					identity,
 					claim,
 				} => {
 					suffix.encode(w, version)?;
-					super::instance::encode_route(w, version, Some(instance), claim.item.epoch)?;
+					super::identity::encode_route(w, version, Some(identity), claim.item.epoch)?;
 					encode_claim(w, claim)?;
 				}
 				Self::Change { id, claim } => {
@@ -606,12 +606,12 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 				Ok(match typ {
 					ANNOUNCE_START if version.has_routes() => {
 						let suffix = PathRef::decode(&mut body, version)?;
-						// Every lite-07 claim names its instance.
-						let (instance, epoch) = super::instance::decode_forwarded(&mut body)?;
+						// Every lite-07 claim names its identity.
+						let (identity, epoch) = super::identity::decode_forwarded(&mut body)?;
 						let claim = decode_claim(&mut body, epoch)?;
 						Self::Start {
 							suffix,
-							instance,
+							identity,
 							claim,
 						}
 					}

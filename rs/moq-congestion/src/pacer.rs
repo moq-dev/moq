@@ -104,8 +104,12 @@ impl Pacer {
             self.last_window_inputs = Some(inputs);
         }
 
+        // Capped at the burst budget so that a datagram larger than the whole bucket, such as an
+        // MTU probe on a slow path, still goes once the bucket is full.
+        let target = Ord::min(bytes_to_send, self.capacity);
+
         // if we can already send a packet, there is no need for delay
-        if self.debt == 0 && self.tokens >= bytes_to_send {
+        if self.debt == 0 && self.tokens >= target {
             return None;
         }
 
@@ -133,12 +137,12 @@ impl Pacer {
         }
 
         // if we can already send a packet, there is no need for delay
-        if self.debt == 0 && self.tokens >= bytes_to_send {
+        if self.debt == 0 && self.tokens >= target {
             return None;
         }
 
         let unscaled_delay = smoothed_rtt
-            .checked_mul((bytes_to_send.max(self.capacity) - self.tokens + self.debt) as _)
+            .checked_mul((self.capacity - self.tokens + self.debt) as _)
             .unwrap_or(Duration::MAX)
             / window;
 
@@ -366,6 +370,28 @@ mod tests {
             "pacer never blocked while polled at a single instant, so the controller's \
              pacing rate is not being enforced"
         );
+    }
+
+    /// A datagram larger than the whole bucket, as an MTU probe on a slow path, goes once the
+    /// bucket is full rather than waiting for a level it never reaches
+    #[test]
+    fn releases_a_datagram_larger_than_the_bucket() {
+        let mtu = 1200;
+        let rtt = Duration::from_millis(500);
+        let window = 12_000;
+        let start = Instant::now();
+        for metrics in [unpaced_metrics(window), paced_metrics(window, 24_000)] {
+            let mut pacer = Pacer::new(rtt, window, mtu, start);
+            assert_eq!(pacer.capacity, u64::from(mtu));
+            assert_eq!(pacer.delay(rtt, 1500, mtu, start, metrics), None);
+
+            pacer.on_transmit(1500);
+            let resume = pacer
+                .delay(rtt, 1500, mtu, start, metrics)
+                .expect("an empty bucket waits");
+            let later = resume.saturating_add(Duration::from_millis(1));
+            assert_eq!(pacer.delay(rtt, 1500, mtu, later, metrics), None);
+        }
     }
 
     #[test]

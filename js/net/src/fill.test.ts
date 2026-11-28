@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { Once } from "@moq/signals";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { DEFAULT_EXPIRY } from "./cache.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
-import { rejectGroups } from "./fill.ts";
+import { type Asker, FillState, rejectGroups, requestsOf } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
@@ -814,10 +815,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		write(5n);
 		const requests = track.requests();
 		const reader = track.subscribe(
-			withMax({
-				ranges: [{ start: 0n, end: 5n }],
-				delay: { max: Duration.millis(1000) },
-			}),
+			withMax({ order: "ascending", ranges: [{ start: 0n, end: 5n }], delay: { max: Duration.millis(1000) } }),
 		);
 		expect((await reader.recvGroup())?.start).toBe(2n);
 		expect((await reader.recvGroup())?.start).toBe(5n);
@@ -1453,6 +1451,31 @@ test.each(["arrival", "sequence"])(
 	},
 );
 
+// A resumed reader picks across copies by what each peeks, so a peek offers the group the take hands
+// out: newest first, a bounded reader passes a group whose head a fill still owes.
+test("fill: a bounded newest-first reader peeks the group its take hands out, past a headless one", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { maxAge: null }));
+	const whole = track.createGroup(2n);
+	whole.writeFrame({ payload: enc.encode("c0"), timestamp: Timestamp.unscaled(2n) });
+	whole.finish();
+	const tail = hooks.receiveGroup(track, { start: 3n, offset: 1 });
+	tail.writeFrame({ payload: enc.encode("d1"), timestamp: Timestamp.unscaled(3n) });
+	tail.finish();
+	// Asked, never answered: the head of group 3 stays owed.
+	const requests = track.requests();
+	const reader = track.subscribe(withMax({ ranges: [{ start: 2n, end: 3n }], delay: { max: null } }));
+	await yieldNow();
+
+	expect(hooks.peekGroup(reader, false)).toBe(2n);
+	const recv = hooks.tryRecvGroup(reader, false);
+	expect(recv.kind === "group" ? recv.group.start : recv.kind).toBe(2n);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a refused head gives its group up, and the bounded reader moves past it", async () => {
 	const { broadcast, track } = headless();
 	const requests = track.requests();
@@ -1471,6 +1494,50 @@ test("fill: a refused head gives its group up, and the bounded reader moves past
 
 	requests.close();
 	broadcast.close();
+});
+
+// A head a bounded read still asks goes stale once the budget passes it: only the clock gives it up,
+// so the read wakes for that rather than waiting on a fill that never answers. An arrival read hands
+// out group 3 first, then ends; an ordered one waits on group 2 before it. Mirrors the Rust
+// `an_ordered_read_gives_up_a_head_still_asked_past_its_budget`.
+test.each(["arrival", "sequence"])("fill: a %s read gives up a head still asked past its budget", async (mode) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { broadcast, track } = headless();
+		const requests = track.requests();
+		const reader = track.subscribe({
+			ranges: [{ start: { live: { min: null, max: Duration.millis(100) } }, end: 3n }],
+		});
+		const ordered = mode === "sequence" ? reader.ordered() : undefined;
+		const next = () => (ordered ? ordered.nextGroup() : reader.recvGroup());
+		if (!ordered) expect((await next())?.start).toBe(3n);
+		// Null until the read resolves: cast, since TypeScript would narrow it to null for good.
+		let took = null as bigint | undefined | null;
+		const read = next().then((group) => {
+			took = group?.start;
+		});
+		let fill = await requests.requestedFill();
+		// The join reaches back past the oldest group held, which an ordered read asks a fill for
+		// first: none exists.
+		if (ordered && fill?.start === 0n) {
+			fill.dropGroups(fill.start, fill.end);
+			fill.close();
+			fill = await requests.requestedFill();
+		}
+		expect([fill?.start, fill?.end]).toEqual([2n, 3n]);
+		await yieldNow();
+		expect(took).toBeNull();
+
+		await clock.advance(Duration.millis(200));
+		await read;
+		expect(took).toBe(ordered ? 3n : undefined);
+
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
 });
 
 test.each([
@@ -2262,4 +2329,44 @@ test("fill: replacing the ranges withdraws a lookup still out", async () => {
 	reader.close();
 	requests.close();
 	broadcast.close();
+});
+
+// A time start asked once its group already landed, as when the cache cannot place the time by the
+// groups it holds, is answered by the cache: no arrival answers it, and the handler is never asked
+// for a group the track holds. So is a run's group the cache holds. Mirrors the Rust
+// `FillGroups::wanted`.
+test("fill: a fill answers what the cache holds whole without the handler", async () => {
+	const state = new FillState({
+		name: "video",
+		accept: () => {
+			throw new Error("asked the source for a held group");
+		},
+		drop: () => {},
+		holds: (key) => key === 2n,
+		cached: () => undefined,
+		closed: () => false,
+		released: new Once<unknown>(),
+	});
+	const requests = requestsOf(state);
+	const asker: Asker = {
+		wants: (start, end) => [{ start, end }],
+		priority: () => 0,
+		order: () => "ascending",
+		refuse: () => {},
+	};
+
+	const lookup = defined(state.timeStart(2n, 0n, asker));
+	const time = defined(await requests.requestedFill());
+	expect(time.wanted()).toBeUndefined();
+	expect([lookup.done(), lookup.answer()]).toEqual([true, { kind: "group", group: 2n }]);
+
+	state.ask(1n, 4n, asker);
+	const run = defined(await requests.requestedFill());
+	const wanted: bigint[] = [];
+	for (let key = run.wanted(); key !== undefined; key = run.wanted()) {
+		wanted.push(key);
+		run.dropGroups(key, key + 1n);
+	}
+	expect(wanted).toEqual([1n, 3n]);
+	requests.close();
 });

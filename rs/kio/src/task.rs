@@ -27,8 +27,9 @@
 //!
 //! Wakes land in a chunked atomic bitset rather than a queue (the approach
 //! [unicycle](https://github.com/udoprog/unicycle) proved out against
-//! `FuturesUnordered`'s intrusive list): a wake is one `fetch_or`, lock-free,
-//! and inherently deduplicated since setting a set bit is a no-op. Each poll
+//! `FuturesUnordered`'s intrusive list): a wake is one `fetch_or`, and
+//! inherently deduplicated since setting a set bit is a no-op. Only a burst's
+//! first wake takes a lock, to wake whoever polls the set. Each poll
 //! snapshots the woken words with `swap(0)` before running anything, so a task
 //! woken mid-pass lands in the next pass instead of spinning this one. Because
 //! tasks are closures, not pinned futures, a slot's identity is stable and its
@@ -109,6 +110,9 @@ pub struct Tasks<T> {
 	next: usize,
 	/// Stamped on each occupant, so a [`TaskKey`] outliving its task names nothing.
 	generation: u64,
+	/// Parallel to `children`.
+	#[cfg(feature = "sim")]
+	sim: Vec<Sim>,
 }
 
 /// Names a task [`insert`](Tasks::insert)ed into a set, until it finishes or is
@@ -125,6 +129,14 @@ struct Occupant<T> {
 	task: T,
 	park: Park,
 	generation: u64,
+}
+
+/// What the simulator keeps for a slot's occupant, apart from the slab so a push in a
+/// build with `sim` stays cheap.
+#[cfg(feature = "sim")]
+struct Sim {
+	/// Where it was pushed, to blame it for a lost wakeup.
+	location: &'static std::panic::Location<'static>,
 }
 
 /// Waker state shared with every slot; deliberately `T`-free so the wakers
@@ -283,6 +295,8 @@ impl Wake for SlotWaker {
 	}
 
 	fn wake_by_ref(self: &Arc<Self>) {
+		#[cfg(feature = "sim")]
+		crate::clock::sim::event();
 		// An already-set bit means the slot is queued for the next pass and the
 		// owner was already nudged: a burst of wakes is one bit and one nudge.
 		let index = (self.slot % CHUNK_SLOTS) / WORD_BITS;
@@ -320,6 +334,8 @@ impl<T> Tasks<T> {
 			scratch: Vec::new(),
 			next: 0,
 			generation: 0,
+			#[cfg(feature = "sim")]
+			sim: Vec::new(),
 		}
 	}
 
@@ -342,12 +358,14 @@ impl<T> Tasks<T> {
 	///
 	/// Wakes the owner, so a task pushed between polls (from another arm of the
 	/// owner's own poll, say) still gets started.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn push(&mut self, task: T) {
 		self.insert(task);
 	}
 
 	/// Add a task like [`push`](Self::push), returning the key that
 	/// [`remove`](Self::remove)s it before it finishes.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn insert(&mut self, task: T) -> TaskKey {
 		let index = match self.free.pop() {
 			Some(index) => index,
@@ -371,6 +389,16 @@ impl<T> Tasks<T> {
 			park: Park::default(),
 			generation: self.generation,
 		});
+		#[cfg(feature = "sim")]
+		{
+			let sim = Sim {
+				location: std::panic::Location::caller(),
+			};
+			match self.sim.get_mut(index) {
+				Some(slot) => *slot = sim,
+				None => self.sim.push(sim),
+			}
+		}
 		self.len += 1;
 		// Queue the first poll exactly the way any wake would.
 		self.wakers[index].wake_by_ref();
@@ -549,6 +577,13 @@ impl<T: Task> Tasks<T> {
 			scratch.sort_unstable_by_key(|&(word, _)| word);
 		}
 
+		#[cfg(feature = "sim")]
+		if crate::clock::sim::probing() {
+			self.probe(done);
+			self.scratch = scratch;
+			return;
+		}
+
 		let slots = self.children.len();
 		let mut advanced = false;
 		// Visit `next..slots`, then wrap through `0..next`. The snapshot stays
@@ -601,6 +636,33 @@ impl<T: Task> Tasks<T> {
 			}
 		}
 		self.scratch = scratch;
+	}
+
+	/// [`pass`](Self::pass) while the simulator probes for lost wakeups: every child,
+	/// once each in slot order, blaming the first that progresses though nothing woke it.
+	#[cfg(feature = "sim")]
+	fn probe(&mut self, done: &mut impl FnMut(T, T::Output)) {
+		for index in 0..self.children.len() {
+			let Some(occupant) = self.children[index].as_mut() else {
+				continue;
+			};
+			let events = crate::clock::sim::events();
+			let cx = Context::from_waker(&self.wakers[index]);
+			let child_waiter = occupant.park.hold(&cx);
+			let poll = {
+				let _scope = crate::coop::child();
+				occupant.task.poll(child_waiter)
+			};
+			if poll.is_ready() || crate::clock::sim::events() != events {
+				crate::clock::sim::blame(self.sim[index].location, index);
+			}
+			if let Poll::Ready(output) = poll {
+				let occupant = self.children[index].take().expect("polled slot is occupied");
+				self.free.push(index);
+				self.len -= 1;
+				done(occupant.task, output);
+			}
+		}
 	}
 }
 
@@ -989,6 +1051,53 @@ mod tests {
 
 		assert!(tasks.poll(&waiter).is_pending());
 		assert_eq!(b_polls.load(Ordering::SeqCst), 1, "one poll, not two");
+	}
+
+	/// A removed task's leftover waker firing into its reused slot costs the new
+	/// occupant at most one spurious poll; the occupant keeps its own key and
+	/// still finishes on its own wake.
+	#[test]
+	fn a_removed_tasks_wake_into_a_reused_slot_is_harmless() {
+		let mut tasks = Tasks::new();
+		let waiter = Waiter::noop();
+
+		// Two occupants park, so each slot's waker was handed out, then are removed.
+		let (_a_gate, _c_gate) = (crate::Producer::new(false), crate::Producer::new(false));
+		let a = tasks.insert(gated(_a_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		let c = tasks.insert(gated(_c_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		assert!(tasks.poll(&waiter).is_pending());
+		let stale = tasks.wakers.clone();
+		assert!(tasks.remove(a).is_some());
+		assert!(tasks.remove(c).is_some());
+
+		// Both slots are reused, and the new occupants take their first polls.
+		let (b_gate, b_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
+		let b = tasks.insert(gated(b_gate.consume(), b_polls.clone()));
+		let (_d_gate, d_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
+		let d = tasks.insert(gated(_d_gate.consume(), d_polls.clone()));
+		assert_eq!(tasks.children.len(), 2, "b and d reuse the removed slots");
+		assert!(tasks.poll(&waiter).is_pending());
+
+		// The removed tasks' wakers fire: one spurious poll each, then nothing.
+		for waker in &stale {
+			waker.wake_by_ref();
+		}
+		assert!(tasks.poll(&waiter).is_pending());
+		assert!(tasks.poll(&waiter).is_pending());
+		let polls = |polls: &AtomicUsize| polls.load(Ordering::SeqCst);
+		assert_eq!((polls(&b_polls), polls(&d_polls)), (2, 2), "one spurious poll each");
+
+		// Keys still name the live occupants, never the removed ones.
+		assert!(tasks.remove(a).is_none());
+		assert!(tasks.remove(c).is_none());
+		assert!(tasks.remove(d).is_some());
+
+		// b finishes on its own wake and is handed back.
+		open(&b_gate);
+		let mut finished = 0;
+		assert!(tasks.poll_each(&waiter, |_, ()| finished += 1).is_ready());
+		assert_eq!((finished, polls(&b_polls)), (1, 3));
+		assert!(tasks.remove(b).is_none(), "a finished task's key names nothing");
 	}
 
 	/// Counts the owner's wakes.

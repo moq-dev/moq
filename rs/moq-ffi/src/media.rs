@@ -37,7 +37,8 @@ pub enum MoqDecodeStart {
 
 /// Catalog properties shared by every video rendition.
 ///
-/// Passing an absent field clears it from the next catalog snapshot rather than preserving the previous value.
+/// Passing an absent field clears it from the next catalog snapshot rather than preserving the
+/// previous value.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoProperties {
 	/// Final rendered size after rotation, or absent to clear the explicit display size.
@@ -65,6 +66,10 @@ pub enum MoqContainer {
 	},
 	/// LOC, the low-overhead container.
 	Loc,
+	/// Zero-byte header: raw codec payload timed by the MoQ transport timestamp (DTS == PTS).
+	Raw,
+	/// QUIC varint composition time offset (in track timescale) followed by the raw codec payload.
+	Cts,
 	/// A container this version of the bindings cannot name yet. Subscribing to it fails.
 	Unknown,
 }
@@ -79,6 +84,8 @@ impl MoqContainer {
 			hang::catalog::Container::Legacy => Some(Self::Legacy),
 			hang::catalog::Container::Cmaf { init, .. } => Some(Self::Cmaf { init: init.to_vec() }),
 			hang::catalog::Container::Loc => Some(Self::Loc),
+			hang::catalog::Container::Raw => Some(Self::Raw),
+			hang::catalog::Container::Cts => Some(Self::Cts),
 			hang::catalog::Container::Unknown(unknown) => {
 				tracing::warn!(kind = unknown.kind(), "ignoring unknown container");
 				None
@@ -95,6 +102,8 @@ impl TryFrom<MoqContainer> for hang::catalog::Container {
 			MoqContainer::Legacy => Self::Legacy,
 			MoqContainer::Cmaf { init } => Self::Cmaf { init: init.into() },
 			MoqContainer::Loc => Self::Loc,
+			MoqContainer::Raw => Self::Raw,
+			MoqContainer::Cts => Self::Cts,
 			MoqContainer::Unknown => {
 				return Err(MoqError::UnsupportedConfig {
 					reason: "unknown container".into(),
@@ -138,11 +147,6 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The instance of the stream [`broadcast`](Self::broadcast) names, when the catalog
-	/// knows it. Resolving refuses a broadcast proven to serve another stream; absent names
-	/// whichever resolves first.
-	#[uniffi(default = None)]
-	pub instance: Option<String>,
 	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
 	/// the ID is the track name.
 	#[uniffi(default = None)]
@@ -179,11 +183,6 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The instance of the stream [`broadcast`](Self::broadcast) names, when the catalog
-	/// knows it. Resolving refuses a broadcast proven to serve another stream; absent names
-	/// whichever resolves first.
-	#[uniffi(default = None)]
-	pub instance: Option<String>,
 	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
 	/// the ID is the track name.
 	#[uniffi(default = None)]
@@ -273,6 +272,17 @@ pub struct MoqFrame {
 	pub timestamp: MoqTimestamp,
 }
 
+/// A frame's header without its payload, as a metadata subscription reads it
+/// ([`MoqMetaGroup::next_header`](crate::consumer::MoqMetaGroup::next_header)).
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct MoqFrameHeader {
+	/// The frame's declared plain payload size in bytes; 0 for a real empty frame.
+	pub size: u64,
+	/// Presentation timestamp, or the [unscaled](MoqTimestamp::unscaled) group key on a
+	/// scale-less track.
+	pub timestamp: MoqTimestamp,
+}
+
 /// A [`MoqFrame`] plus the codec metadata a media track carries.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqMediaFrame {
@@ -308,7 +318,8 @@ pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
 	#[uniffi(default = None)]
 	pub coded: Option<MoqDimensions>,
-	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the decoded shape.
+	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the
+	/// decoded shape.
 	#[uniffi(default = None)]
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum bitrate in bits per second.
@@ -570,11 +581,12 @@ impl MoqMediaTimebase {
 }
 
 impl MoqMediaTimebase {
-	fn reserve(
+	/// The timebase this handle names, which must belong to `broadcast`.
+	fn timebase(
 		&self,
 		broadcast: &MoqBroadcastProducer,
 		state: &crate::producer::BroadcastProducer,
-	) -> Result<moq_mux::catalog::Reserved<Extra>, MoqError> {
+	) -> Result<moq_mux::catalog::Timebase<Extra>, MoqError> {
 		if !std::ptr::eq(self.broadcast.as_ptr(), broadcast) {
 			return Err(MoqError::Codec {
 				reason: "timebase belongs to another broadcast".into(),
@@ -584,7 +596,7 @@ impl MoqMediaTimebase {
 			.timebases
 			.get(&(Arc::as_ptr(&self.key) as usize))
 			.ok_or(MoqError::Closed)?;
-		Ok(timebase.reserve())
+		Ok(timebase.clone())
 	}
 }
 
@@ -596,36 +608,6 @@ impl Drop for MoqMediaTimebase {
 			state.timebases.remove(&(Arc::as_ptr(&self.key) as usize));
 		}
 	}
-}
-
-/// Reserve a container's catalog slot under the owner lock, from `timebase` when shared, so the
-/// importer is constructed after the lock is released.
-///
-/// Also returns the broadcast's driver, which the importer checks so a driver panic reaches it.
-fn reserve_container(
-	broadcast: &MoqBroadcastProducer,
-	timebase: Option<&MoqMediaTimebase>,
-) -> Result<
-	(
-		moq_net::broadcast::Producer,
-		moq_mux::catalog::Reserved<Extra>,
-		crate::ffi::Background,
-		crate::producer::Children,
-	),
-	MoqError,
-> {
-	broadcast.with_state(|state| {
-		let reserved = match timebase {
-			Some(timebase) => timebase.reserve(broadcast, state)?,
-			None => state.catalog.reserve(),
-		};
-		Ok((
-			state.broadcast.clone(),
-			reserved,
-			state.driver.clone(),
-			state.children.clone(),
-		))
-	})
 }
 
 /// A container format, its leading bytes, and an optional shared source timebase.
@@ -694,7 +676,6 @@ pub(crate) fn convert_catalog(
 				MoqVideo {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
-					instance: config.instance.as_ref().map(ToString::to_string),
 					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
@@ -726,7 +707,6 @@ pub(crate) fn convert_catalog(
 				MoqAudio {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
-					instance: config.instance.as_ref().map(ToString::to_string),
 					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
@@ -876,10 +856,8 @@ mod test {
 	fn catalog_exposes_rendition_broadcast_references() {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 
-		let instance = moq_net::Instance::random();
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		video.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-		video.instance = Some(instance.clone());
 		catalog.video.renditions.insert("video".to_string(), video);
 		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("local".to_string(), local);
@@ -895,9 +873,6 @@ mod test {
 		assert_eq!(converted.video["video"].broadcast.as_deref(), Some("source"));
 		assert_eq!(converted.video["local"].broadcast, None);
 		assert_eq!(converted.audio["audio"].broadcast.as_deref(), Some("../elsewhere"));
-		// The instance crosses in the same canonical form `resolve` parses back.
-		assert_eq!(converted.video["video"].instance, Some(instance.to_string()));
-		assert_eq!(converted.video["local"].instance, None);
 	}
 
 	#[test]
@@ -1072,9 +1047,10 @@ struct MediaStreamProducer {
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
 ///
-/// Released before its finish, it ends its tracks with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends them with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends each track with `Dropped` (seen elsewhere as `Internal`):
+/// its input stopped mid-stream, and it serves no on-demand track. Still open when its broadcast
+/// closes, it ends them with `Unroutable`, which a moq-transport reader sees as `Internal`: its
+/// wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
@@ -1084,8 +1060,10 @@ pub struct MoqMediaContainerProducer {
 
 /// Imports complete encoded frames onto one track.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
@@ -1095,8 +1073,10 @@ pub struct MoqMediaTrackProducer {
 
 /// Imports a video byte stream onto one track.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
@@ -1104,8 +1084,10 @@ pub struct MoqMediaTrackStreamProducer {
 	children: Children,
 }
 
-// A media handle dropped or closed before its finish ends its tracks the way a publisher
-// leaving does, never as a cause-less drop.
+// A media handle closed with its broadcast before its finish ends its tracks with the close's
+// cause. A released track handle lets its track end the way a dropped track does; a released
+// container ends its tracks with `Dropped`, since its importer would otherwise finish them as if
+// the input had ended, and it serves no on-demand track.
 impl Child for MoqMediaContainerProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::enter();
@@ -1132,7 +1114,8 @@ impl Child for MoqMediaTrackProducer {
 
 impl Drop for MoqMediaTrackProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Dropped);
+		let _guard = crate::ffi::enter();
+		drop(self.inner.get_mut().unwrap().take());
 	}
 }
 
@@ -1147,7 +1130,8 @@ impl Child for MoqMediaTrackStreamProducer {
 
 impl Drop for MoqMediaTrackStreamProducer {
 	fn drop(&mut self) {
-		self.abort(moq_net::Error::Dropped);
+		let _guard = crate::ffi::enter();
+		drop(self.inner.get_mut().unwrap().take());
 	}
 }
 
@@ -1216,8 +1200,23 @@ impl MoqMediaContainerProducer {
 		init: MoqContainerInit,
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let native = moq_mux::import::ContainerInit::new(init.format.0, init.data);
-		let (target, reserved, driver, children) = reserve_container(broadcast, init.timebase.as_deref())?;
+		// Reserved under the owner lock, so the importer is constructed after it is released. The
+		// driver goes along so a driver panic reaches the importer.
+		let (target, reserved, timebase, driver, children) = broadcast.with_state(|state| {
+			let timebase = init
+				.timebase
+				.as_deref()
+				.map(|timebase| timebase.timebase(broadcast, state))
+				.transpose()?;
+			Ok((
+				state.broadcast.clone(),
+				state.catalog.reserve(),
+				timebase,
+				state.driver.clone(),
+				state.children.clone(),
+			))
+		})?;
+		let native = moq_mux::import::ContainerInit::new(init.format.0, init.data).with_timebase(timebase);
 		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 			reason: format!("init failed: {err}"),
 		})?;
@@ -1353,8 +1352,9 @@ impl MoqMediaTrackProducer {
 	/// Draw a group boundary here.
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
-	/// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
-	/// the relay forwards without waiting, or less often to batch frames into fewer groups. Video
+	/// only thing that gives it groups (one QUIC stream each): call it after the frame that brings
+	/// a group to about 100 ms, so the relay sees the group finish at once. Frames forward as they
+	/// are written either way; a cut per frame costs a stream per packet. Video
 	/// groups at its own keyframes and needs this only to override that.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -1379,31 +1379,6 @@ impl MoqMediaTrackProducer {
 			reason: format!("seek failed: {err}"),
 		})?;
 		Ok(())
-	}
-
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let MediaProducer { import, video } = guard.take().ok_or(MoqError::Closed)?;
-		match import.abort_unwanted(moq_net::Error::App(error_code)) {
-			Ok(()) => Ok(true),
-			Err(import) => {
-				*guard = Some(MediaProducer {
-					import: Box::new(import),
-					video,
-				});
-				Ok(false)
-			}
-		}
 	}
 
 	/// Finish this track and finalize encoding.
@@ -1543,31 +1518,6 @@ impl MoqMediaTrackStreamProducer {
 		Ok(())
 	}
 
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut guard = self.inner.lock().unwrap();
-		let MediaStreamProducer { import, priority } = guard.take().ok_or(MoqError::Closed)?;
-		match import.abort_unwanted(moq_net::Error::App(error_code)) {
-			Ok(()) => Ok(true),
-			Err(import) => {
-				*guard = Some(MediaStreamProducer {
-					import: Box::new(import),
-					priority,
-				});
-				Ok(false)
-			}
-		}
-	}
-
 	/// Finalize the track, publishing the last access unit still waiting for a following start code.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
@@ -1630,13 +1580,21 @@ impl MoqRendition {
 		.unwrap_or_default()
 	}
 
-	/// Split into the broadcast reference and its instance, the track name, and the container.
-	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
-		let (id, broadcast, instance, track, container) = match self {
-			Self::Video { id, config } => (id, config.broadcast, config.instance, config.track, config.container),
-			Self::Audio { id, config } => (id, config.broadcast, config.instance, config.track, config.container),
+	/// The media role its container decodes for, which tells an endpoint marker from a frame.
+	fn kind(&self) -> moq_mux::container::Kind {
+		match self {
+			Self::Video { .. } => moq_mux::container::Kind::Video,
+			Self::Audio { .. } => moq_mux::container::Kind::Audio,
+		}
+	}
+
+	/// Split into the broadcast reference, the track name, and the container.
+	pub(crate) fn into_parts(self) -> (Option<String>, String, MoqContainer) {
+		let (id, broadcast, track, container) = match self {
+			Self::Video { id, config } => (id, config.broadcast, config.track, config.container),
+			Self::Audio { id, config } => (id, config.broadcast, config.track, config.container),
 		};
-		(broadcast, instance, track.unwrap_or(id), container)
+		(broadcast, track.unwrap_or(id), container)
 	}
 }
 
@@ -1852,7 +1810,6 @@ mod read_tests {
 					config: MoqAudio {
 						label: None,
 						broadcast: None,
-						instance: None,
 						track: None,
 						codec: "opus".into(),
 						description: None,
@@ -2061,8 +2018,7 @@ impl MoqMediaTrackConsumer {
 	/// Subscribe to a catalog rendition and decode its container.
 	///
 	/// Follows the rendition's broadcast reference and track name, so a rendition served by a
-	/// sibling broadcast or under another track name subscribes to the right track, and fails
-	/// one whose broadcast is proven to serve another stream than its instance.
+	/// sibling broadcast or under another track name subscribes to the right track.
 	///
 	/// An audio rendition's [`warmup`](MoqAudio::warmup) starts the read that much further back than
 	/// the subscription's min delay, and widens the max delay the publisher serves by as much,
@@ -2076,18 +2032,13 @@ impl MoqMediaTrackConsumer {
 			rendition,
 			subscription,
 		} = config;
-		let kind = match &rendition {
-			MoqRendition::Audio { .. } => moq_mux::container::Kind::Audio,
-			MoqRendition::Video { .. } => moq_mux::container::Kind::Video,
-		};
+		let kind = rendition.kind();
 		let warmup = rendition.warmup();
-		let (reference, instance, name, container) = rendition.into_parts();
+		let (reference, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let media = media_container(container, kind)?;
-		let resolved = broadcast
-			.resolve_inner(reference.as_deref(), instance.as_deref())
-			.await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 		let (subscription, delay) = match subscription {
 			Some(subscription) => subscription.resolve()?,
 			None => (
@@ -2110,17 +2061,20 @@ impl MoqMediaTrackConsumer {
 
 #[uniffi::export]
 impl MoqMediaGroupConsumer {
-	/// Decode `group` with the track's container, as each frame lands.
+	/// Decode `group` with the catalog rendition's container and media role, as each frame lands.
 	///
-	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
-	/// to read media in arrival order: frame timestamps are container media time, not the
-	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
+	/// Only the rendition's role and container are used, since `group` is already the track's; the
+	/// role tells a video or audio endpoint marker from a frame. Pair it with
+	/// [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group) to read media
+	/// in arrival order: frame timestamps are container media time, not the transport's. Which groups arrive, and how long a stalled one stays readable, is the
 	/// subscription's `delay.max`. Takes over `group`, whose handle is closed afterward; errors
 	/// if it has already read a frame.
 	#[uniffi::constructor]
-	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
+	pub fn new(group: &MoqGroupConsumer, rendition: MoqRendition) -> Result<Arc<Self>, MoqError> {
+		let kind = rendition.kind();
+		let (_, _, container) = rendition.into_parts();
 		// Parse the container first, so a bad init leaves the raw group readable.
-		let media = media_container(container, moq_mux::container::Kind::Data)?;
+		let media = media_container(container, kind)?;
 		let (group, driver) = group.take()?;
 		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
@@ -2139,13 +2093,12 @@ impl MoqMediaGroupConsumer {
 			start,
 			options,
 		} = config;
-		let (reference, instance, name, container) = rendition.into_parts();
+		let kind = rendition.kind();
+		let (reference, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
-		let media = media_container(container, moq_mux::container::Kind::Data)?;
-		let resolved = broadcast
-			.resolve_inner(reference.as_deref(), instance.as_deref())
-			.await?;
+		let media = media_container(container, kind)?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 		let options = options.map(moq_net::group::Fetch::from);
 		let group = broadcast
 			.driver

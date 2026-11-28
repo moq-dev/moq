@@ -1,89 +1,31 @@
-# [M] Code audit
+# [M] Audit the code
 
 ## Goal
 
-Code, exports, Cargo features, and CLI flags that nothing uses are deleted.
-Code that costs the most complexity for what it delivers is simplified:
-duplicate mechanisms merged, and layers, options, and generics with one user
-collapsed. Every lint suppression in every language is still needed and says
-why, and nothing calls an API deprecated at the workspace MSRV.
+Run the `code` audit: `quest audit code` prints what it checks, what each finding becomes, and how to plan its next run.
 
 ## Plan
 
-Recurs each major release: the PR that finishes a run keeps its results in
-its own body and re-adds this file at the end of m3's `Required`, with its own `Required`
-naming the [release cut](/quest/m3/release/cut.md) and Check first rewritten. Fixes land
-in that PR; only maintainer decisions (public API, scope) and changes too
-large to review alongside become follow-ups.
+Baseline: 2026-11-23 at `890ea4e531` (before the 0.22.0 cut). `just js dead-code` (`fallow` 3.44.0, 626 entries) passed with 0 issues; all 21 `fallow-ignore-next-line` sites were verified public API members. Previous runs: dead code [moq-dev/moq#6166](https://github.com/moq-dev/moq/pull/6166), simplification [moq-dev/moq#6527](https://github.com/moq-dev/moq/pull/6527), lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
 
-Removing or reshaping a public item, narrowing a feature, or removing one of
-our deprecated exports or hidden CLI spellings is the maintainer's call, so
-each is a follow-up with a recommendation. The public-item pass before the m2 cut
-ran as the api-shape epic's own work; this audit keeps private code.
+### Excluded scope and kept baselines
 
-Decided 2026-11-11 (maintainer, on [moq-dev/moq#8461](https://github.com/moq-dev/moq/pull/8461)):
-✅ that sweep's kept hits are this audit's baselines (rejected: a new quest).
-Vendored forks kept upstream's surface: moq-v4l 1,666 hits (mostly generated
-`videodev2.rs`), moq-vaapi 707 (mostly generated `libva.rs`), moq-nvenc's
-generated `sys`, moq-quic's `RetryError::into_incoming`, and moq-rtmp's `rml`.
-moq-c kept its 11 entry points, which mirror moq-ffi for outside C callers.
+- Decided 2026-11-11 (maintainer, on [moq-dev/moq#8461](https://github.com/moq-dev/moq/pull/8461)): vendored forks keep upstream's surface (`moq-v4l`, `moq-vaapi`, `moq-nvenc` generated `sys`, `moq-quic::RetryError::into_incoming`, `moq-rtmp::rml`, and `moq-congestion::gcc`'s ported WebRTC helpers). `libmoq` keeps its C entry points mirroring `moq-ffi` for outside C callers.
+- Kept on purpose: traits with several implementations or device-free test doubles; IETF `RequestWaker` and lite `FetchWake` apart from the queue-once waker; `js/net`'s hand-written subscriber grant checks; separate lite and IETF JS datagram loops; thin Dart, C++, and Swift wrappers; one-line `until_wanted` loops over `Demand::wanted_changed`; `js/net`'s lite version gates mirroring Rust's; hidden deprecated CLI spellings (`--client-*`, `--server-*`, legacy relay auth fields) that fail with migration guidance.
 
-Previous runs: dead code [moq-dev/moq#6166](https://github.com/moq-dev/moq/pull/6166),
-simplification [moq-dev/moq#6527](https://github.com/moq-dev/moq/pull/6527),
-lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
+### Check first
 
-### Check first: dead code
+- Dead code: tokenize non-vendored Rust crates for `pub` declarations referenced only at their definition (remembering `#[kio::wrapper]` generates non-`poll_` async callers); review `cfg_attr(..., allow(dead_code))` suppressions (e.g. `DmaBuf::new` in `rs/moq-video/src/frame.rs:288`) and `fallow-ignore-next-line` suppressions in `js/`.
+- Simplification: lite and IETF `GroupServe` duplication ([shared-serve](/quest/m4/shared-serve.md)); codec importers forwarding `demand`/`flush`/`finish`/`abort`/`cut`/`discontinuity`/`seek` (API proposal); largest `moq-net` modules and bindings forwarding layers.
+- Lints: already gated (`allow_attributes_without_reason`, unfulfilled `expect`s across Linux/macOS/Windows, unused `biome-ignore`, ruff `RUF100`, pyright in `py/moq-rs`), so focus on what those miss: Swift warnings in Nightly macOS logs, `typescript-eslint` `no-deprecated`, CARLA pyright, moving crate-wide test `expect(clippy::disallowed_methods)` onto clock-reading items so `set_var`/`remove_var` can move into `clippy.toml` (decided 2026-10-31). Keep `fetch_update` while MSRV is 1.91 and AVFoundation `devicesWithMediaType` while macOS < 14 is supported.
 
-- Rustc misses unused `pub` items. Tokenize the tree and shortlist `pub`
-  declarations whose name appears only at the definition.
-- Unconditional dead-code suppressions are `expect`, so a stale one fails the
-  build; check what the `cfg_attr` ones still guard.
-- JS dead code is gated: `just js dead-code` runs fallow over the workspace
-  with the entries `.fallowrc.jsonc` lists. Review its
-  `fallow-ignore-next-line` suppressions, which mark public members with no
-  caller here.
-- Trace a CLI flag through the config merge, not prose or examples. Hidden
-  deprecated spellings (`--client-*`, `--server-*`, the relay's legacy auth
-  fields) fail with migration guidance on purpose.
-- Windows clippy reports `capture::pump::Read::Idle` (only X11 idles) and
-  `I420::from_bgra`, whose cfg still names Windows though only PipeWire calls
-  it.
+## Audit
 
-### Check first: simplification
+- code
 
-- Still open from m0: `ietf/session.rs` `start()` builds both halves twice
-  across the draft arms; lite and IETF `GroupServe` share their open, flush,
-  and FIN-settle driver.
-- The codec importers each forward `demand`, `flush`, `finish`, `abort`,
-  `cut`, `discontinuity`, and `seek` to their container producer. Dropping
-  them means a shared track handle, which is an API proposal.
-- Then the largest moq-net modules and the bindings' forwarding layers.
-  Search the quest tree before fixing a duplicate.
-- Kept on purpose: traits with several implementations or device-free test
-  doubles; ietf `RequestWaker` and lite `FetchWake` apart from the queue-once
-  waker; js/net's hand-written subscriber grant checks; the separate lite and
-  IETF JS datagram loops; the thin Dart, C++, and Swift wrappers; the
-  one-line `until_wanted` loops over `Demand::wanted_changed`; js/net's lite
-  version gates mirroring Rust's.
+## Scheduled
 
-### Check first: lints
-
-- Already gated, so skip: `clippy::allow_attributes_without_reason`,
-  unfulfilled `expect`s (on Linux, macOS, and Windows), Biome's unused `biome-ignore`, ruff's `RUF100`, and
-  pyright's unnecessary `type: ignore` in the Python wrapper. Review what
-  those can't see. Generated and vendored bindings keep their blanket allows;
-  `shellcheck disable` is out of scope.
-- Swift: read the nightly macOS job's Swift step for warnings. TypeScript:
-  run typescript-eslint's `no-deprecated` once it supports the pinned
-  TypeScript, and consider joining CI. The CARLA sim's pyright needs the
-  bindings installed to check its ignores.
-- `fetch_update` is deprecated on nightly in favor of `try_update`, stable
-  only from Rust 1.95; keep it while the MSRV is 1.91.
-- `rs lint`'s `git grep` for `set_var`/`remove_var` becomes a
-  `disallowed-methods` entry in `clippy.toml` once crate- and module-wide test
-  `expect(clippy::disallowed_methods)` move onto the items that read the
-  clock (decided 2026-10-31, maintainer).
-- AVFoundation's `devicesWithMediaType` stays: its replacement needs macOS 14.
+- 2026-11-30 - one week after the 2026-11-23 pre-0.22 audit run
 
 ## Required
 

@@ -4,9 +4,9 @@
  * Random sequences of route flips, route failures, give-ups, short closes, ranges, cache expiry,
  * and reader joins and leaves drive an origin's fronts on the manual clock. Every reader's groups,
  * frames, drops, and end are checked against what one plain cursor on the logical track would see:
- * every group its range and staleness budget allow, each once, in its order. A second instance, priced
- * below the first, wins the path while older readers stay on theirs until it has no route left,
- * then end with an error.
+ * every group its range and staleness budget allow, in its order, and once while its range holds it.
+ * A second identity, priced below the first, wins the path while older readers stay on theirs until
+ * it has no route left, then end with an error.
  *
  * `MOQ_RESUME_SEED` and `MOQ_RESUME_CASES` pick the cases; nightly sweeps a fresh seed.
  */
@@ -21,7 +21,7 @@ import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { toHop, WireRoute } from "./hop.ts";
-import * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -32,10 +32,10 @@ import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 /** Groups in the logical track; group `g` has `1 + g % 3` frames. */
 const GROUPS = 12;
-/** Routes per instance, cheaper the higher the slot. */
+/** Routes per identity, cheaper the higher the slot. */
 const SLOTS = 3;
-/** The first instance, then one whose routes all undercut it. */
-const INSTANCES: readonly Instance.Valid[] = [Instance.parse("first"), Instance.parse("second")];
+/** The first identity, then one whose routes all undercut it. */
+const IDENTITIES: readonly Identity.Valid[] = [Identity.parse("first"), Identity.parse("second")];
 const READERS = 4;
 const PATH = Path.from("room/alice");
 /** A budget spanning about three groups. */
@@ -48,9 +48,9 @@ function frames(group: number): number {
 	return 1 + (group % 3);
 }
 
-/** Frame `frame` of `group` as instance number `instance` publishes it: every route of one instance carries it. */
-function payload(instance: number, group: number, frame: number): string {
-	return `i${instance}:${group}.${frame}`;
+/** Frame `frame` of `group` as identity number `identity` publishes it: every route of one identity carries it. */
+function payload(identity: number, group: number, frame: number): string {
+	return `i${identity}:${group}.${frame}`;
 }
 
 /** How a route fails: its session closes on the far side. */
@@ -88,24 +88,24 @@ interface Spec {
 
 type Op =
 	/** The route announces itself to the origin. */
-	| { kind: "up"; instance: number; slot: number }
+	| { kind: "up"; identity: number; slot: number }
 	/** The route's session fails, failing its copy. */
-	| { kind: "down"; instance: number; slot: number }
+	| { kind: "down"; identity: number; slot: number }
 	/**
 	 * The route's copy gets up to `frames` more frames of `group`, or of the lowest group it
 	 * lacks, finishing the group once complete.
 	 */
-	| { kind: "write"; instance: number; slot: number; group?: number; frames: number }
+	| { kind: "write"; identity: number; slot: number; group?: number; frames: number }
 	/** The route gives up `group` with a verdict on its content. */
-	| { kind: "giveUp"; instance: number; slot: number; group: number }
+	| { kind: "giveUp"; identity: number; slot: number; group: number }
 	/**
 	 * The route's copy closes `group`, or the lowest group it still writes, where it got to,
 	 * without saying it is whole, as a relay whose upstream closed the group does; with `down`,
 	 * the route then fails before any reader looks, so the front replaces the copy that closed it.
 	 */
-	| { kind: "close"; instance: number; slot: number; group?: number; down: boolean }
+	| { kind: "close"; identity: number; slot: number; group?: number; down: boolean }
 	/** The route's copy declares the track's end, once it holds the last group. */
-	| { kind: "end"; instance: number; slot: number }
+	| { kind: "end"; identity: number; slot: number }
 	| { kind: "advance"; ms: number }
 	/** Long enough for idle cached groups to expire. */
 	| { kind: "expire" }
@@ -135,7 +135,7 @@ const range: fc.Arbitrary<Range> = fc.option(
 		.map(([start, len]): Range => [start, Math.min(start + len, GROUPS)]),
 	{ nil: undefined, freq: 2 },
 );
-const instance = fc.nat({ max: INSTANCES.length - 1 });
+const identity = fc.nat({ max: IDENTITIES.length - 1 });
 const slot = fc.nat({ max: SLOTS - 1 });
 const reader = fc.nat({ max: READERS - 1 });
 const spec: fc.Arbitrary<Spec> = fc.record({
@@ -152,7 +152,7 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 		weight: 30,
 		arbitrary: fc.record({
 			kind: fc.constant("write" as const),
-			instance,
+			identity,
 			slot,
 			group: fc.oneof(
 				{ weight: 7, arbitrary: fc.constant(undefined) },
@@ -161,13 +161,13 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 			frames: fc.integer({ min: 1, max: 3 }),
 		}),
 	},
-	{ weight: 8, arbitrary: fc.record({ kind: fc.constant("up" as const), instance, slot }) },
-	{ weight: 6, arbitrary: fc.record({ kind: fc.constant("down" as const), instance, slot }) },
+	{ weight: 8, arbitrary: fc.record({ kind: fc.constant("up" as const), identity, slot }) },
+	{ weight: 6, arbitrary: fc.record({ kind: fc.constant("down" as const), identity, slot }) },
 	{
 		weight: 4,
 		arbitrary: fc.record({
 			kind: fc.constant("giveUp" as const),
-			instance,
+			identity,
 			slot,
 			group: fc.nat({ max: GROUPS - 2 }),
 		}),
@@ -176,7 +176,7 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 		weight: 4,
 		arbitrary: fc.record({
 			kind: fc.constant("close" as const),
-			instance,
+			identity,
 			slot,
 			group: fc.oneof(
 				{ weight: 7, arbitrary: fc.constant(undefined) },
@@ -185,7 +185,7 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 			down: fc.boolean(),
 		}),
 	},
-	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("end" as const), instance, slot }) },
+	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("end" as const), identity, slot }) },
 	{
 		weight: 6,
 		arbitrary: fc.record({ kind: fc.constant("advance" as const), ms: fc.integer({ min: 1, max: 200 }) }),
@@ -253,7 +253,7 @@ function closed(copy: Copy, group: number, at?: number): boolean {
 	return !!entry?.closed && (at === undefined || entry.written === at);
 }
 
-/** One publisher instance: its routes, and what any of them ever carried. */
+/** One publisher identity: its routes, and what any of them ever carried. */
 class Publisher {
 	routes: (Copy | undefined)[] = Array.from({ length: SLOTS }, () => undefined);
 	/** Most frames of each group any route carried. */
@@ -292,7 +292,7 @@ interface Reading {
 }
 
 interface Reader {
-	instance: number;
+	identity: number;
 	spec: Spec;
 	request: Requesting;
 	sub: track.Subscriber;
@@ -311,11 +311,18 @@ interface Reader {
 	/** Every group handed out, in order. */
 	handed: number[];
 	reading: Map<number, Reading>;
+	/**
+	 * Groups handed out that a range edit since left outside the ranges: ranges holding one again
+	 * may hand it out again, as a new subscription would.
+	 */
+	released: Set<number>;
+	/** The earlier readings of groups handed out again, each still checked to its end. */
+	superseded: Reading[];
 	/** Groups reported dropped. */
 	dropped: Set<number>;
 	/** Only groups past this one are owed: older ones were cached history at join, or may have expired. */
 	floor?: number;
-	/** Its instance lost its last route while it read. */
+	/** Its identity lost its last route while it read. */
 	doomed: boolean;
 	/**
 	 * It once read a live join whose groups expire within a case, so any group it was handed may have
@@ -392,10 +399,18 @@ function admits(reader: Reader, group: number, resolved: number | undefined): bo
 	return ranges && within(reader.local, group);
 }
 
+/** Every group handed out with its reading, the earlier readings of one handed out again included. */
+function readings(reader: Reader): [number, Reading][] {
+	return [
+		...reader.reading,
+		...reader.superseded.map((reading): [number, Reading] => [Number(reading.group.start), reading]),
+	];
+}
+
 /** Everything observed, to tell whether a poll found anything new. */
 function observed(reader: Reader): string {
 	let read = 0;
-	for (const reading of reader.reading.values()) read += reading.frames + (reading.end !== undefined ? 1 : 0);
+	for (const [, reading] of readings(reader)) read += reading.frames + (reading.end !== undefined ? 1 : 0);
 	return JSON.stringify([reader.handed.length, read, reader.end !== undefined, reader.dropped.size]);
 }
 
@@ -423,7 +438,7 @@ class Model {
 	clock: Manual;
 	origin = new OriginProducer();
 	consumer: OriginConsumer;
-	instances = Array.from({ length: INSTANCES.length }, () => new Publisher());
+	identities = Array.from({ length: IDENTITIES.length }, () => new Publisher());
 	readers: (Reader | undefined)[] = Array.from({ length: READERS }, () => undefined);
 	/** The first check a frame read failed, which ends the case once it settles. */
 	failure?: Error;
@@ -442,13 +457,13 @@ class Model {
 	async apply(op: Op): Promise<void> {
 		switch (op.kind) {
 			case "up":
-				this.up(op.instance, op.slot);
+				this.up(op.identity, op.slot);
 				break;
 			case "down":
-				this.down(op.instance, op.slot);
+				this.down(op.identity, op.slot);
 				break;
 			case "write": {
-				const copy = this.instances[op.instance].routes[op.slot];
+				const copy = this.identities[op.identity].routes[op.slot];
 				if (!copy) return;
 				let group = op.group;
 				if (group === undefined) {
@@ -459,12 +474,12 @@ class Model {
 						}
 					}
 				}
-				if (group !== undefined) this.write(op.instance, op.slot, group, op.frames);
+				if (group !== undefined) this.write(op.identity, op.slot, group, op.frames);
 				break;
 			}
 			case "giveUp": {
-				const instance = this.instances[op.instance];
-				const copy = instance.routes[op.slot];
+				const identity = this.identities[op.identity];
+				const copy = identity.routes[op.slot];
 				if (!copy || complete(copy, op.group) || copy.givenUp.has(op.group)) return;
 				copy.givenUp.add(op.group);
 				const entry = copy.groups.get(op.group);
@@ -474,12 +489,12 @@ class Model {
 				} else if (!entry) {
 					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), { error: giveUp() });
 				}
-				instance.givenUp.add(op.group);
+				identity.givenUp.add(op.group);
 				break;
 			}
 			case "close": {
-				const instance = this.instances[op.instance];
-				const copy = instance.routes[op.slot];
+				const identity = this.identities[op.identity];
+				const copy = identity.routes[op.slot];
 				if (!copy) return;
 				let group = op.group;
 				if (group === undefined) {
@@ -495,22 +510,22 @@ class Model {
 					entry.writer.finish();
 					entry.writer = undefined;
 					entry.closed = true;
-					instance.short.add(`${group}:${entry.written}`);
+					identity.short.add(`${group}:${entry.written}`);
 				}
-				if (op.down) this.down(op.instance, op.slot);
+				if (op.down) this.down(op.identity, op.slot);
 				break;
 			}
 			case "end":
-				this.end(op.instance, op.slot);
+				this.end(op.identity, op.slot);
 				break;
 			case "advance":
 				await this.clock.advance(Duration.millis(op.ms));
 				break;
 			case "expire":
 				await this.clock.advance(Duration.millis(60_000));
-				for (const instance of this.instances) instance.expired = instance.newest();
+				for (const identity of this.identities) identity.expired = identity.newest();
 				for (const reader of this.readers) {
-					if (reader) reader.floor = this.instances[reader.instance].newest();
+					if (reader) reader.floor = this.identities[reader.identity].newest();
 				}
 				break;
 			case "join":
@@ -522,13 +537,20 @@ class Model {
 			case "ranges": {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
+				// A live join places behind the newest group, so it holds none written before.
+				const newest = this.identities[reader.identity].newest();
+				const holds = (group: number): boolean => {
+					if (op.range) return op.range[0] <= group && group < op.range[1];
+					return reader.spec.budget === "hour" || newest === undefined || group >= newest;
+				};
+				for (const group of reader.reading.keys()) if (!holds(group)) reader.released.add(group);
 				reader.ranges = op.range;
 				reader.holding = undefined;
 				reader.expires ||= expires(reader.spec, op.range);
 				reader.cursor = intersect(op.range, reader.local);
 				reader.sub.update(subscription(reader.spec.budget, op.range));
 				// A read that ended at its range's end reads on once the range widens.
-				if (reader.end === null && !this.instances[reader.instance].ended) {
+				if (reader.end === null && !this.identities[reader.identity].ended) {
 					reader.end = undefined;
 					reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 				}
@@ -550,14 +572,14 @@ class Model {
 		}
 	}
 
-	up(instance: number, slot: number): void {
-		const publisher = this.instances[instance];
+	up(identity: number, slot: number): void {
+		const publisher = this.identities[identity];
 		if (publisher.routes[slot]) return;
 		const route = WireRoute.normalize({
-			instance: INSTANCES[instance],
-			hops: [toHop(BigInt(10 * (instance + 1) + slot))],
-			// The second instance's routes all undercut the first's.
-			cost: BigInt((INSTANCES.length - instance) * SLOTS - slot),
+			identity: IDENTITIES[identity],
+			hops: [toHop(BigInt(10 * (identity + 1) + slot))],
+			// The second identity's routes all undercut the first's.
+			cost: BigInt((IDENTITIES.length - identity) * SLOTS - slot),
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
@@ -572,15 +594,15 @@ class Model {
 		}
 		void (async () => {
 			for await (const request of serving.requested()) {
-				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
+				request.serve(Upstream.of(broadcast, (key, local) => this.fill(identity, slot, key, local)));
 			}
 		})();
 		publisher.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };
 	}
 
 	/** The route's session fails, failing its copy. */
-	down(instance: number, slot: number): void {
-		const publisher = this.instances[instance];
+	down(identity: number, slot: number): void {
+		const publisher = this.identities[identity];
 		const copy = publisher.routes[slot];
 		if (!copy) return;
 		publisher.routes[slot] = undefined;
@@ -590,13 +612,13 @@ class Model {
 		copy.broadcast.close();
 		if (publisher.live().length === 0) {
 			for (const reader of this.readers) {
-				if (reader?.instance === instance) reader.doomed = true;
+				if (reader?.identity === identity) reader.doomed = true;
 			}
 		}
 	}
 
-	write(instance: number, slot: number, group: number, more: number): void {
-		const publisher = this.instances[instance];
+	write(identity: number, slot: number, group: number, more: number): void {
+		const publisher = this.identities[identity];
 		const copy = publisher.routes[slot];
 		if (!copy || copy.givenUp.has(group) || complete(copy, group) || closed(copy, group)) return;
 		let entry = copy.groups.get(group);
@@ -621,7 +643,7 @@ class Model {
 		const until = Math.min(entry.written + more, frames(group));
 		while (entry.written < until) {
 			const timestamp = Timestamp.fromMillis(group * 10 + entry.written);
-			writer.writeFrame({ payload: enc.encode(payload(instance, group, entry.written)), timestamp });
+			writer.writeFrame({ payload: enc.encode(payload(identity, group, entry.written)), timestamp });
 			entry.written++;
 		}
 		if (entry.written === frames(group)) {
@@ -633,17 +655,17 @@ class Model {
 	}
 
 	/**
-	 * Answer a fetch the route's cache missed from upstream, where the instance's publisher
+	 * Answer a fetch the route's cache missed from upstream, where the identity's publisher
 	 * holds every frame any of its routes wrote. Later writes to the route continue the group.
 	 */
 	async fill(
-		instance: number,
+		identity: number,
 		slot: number,
 		key: number,
 		local: () => Promise<GroupConsumer>,
 	): Promise<GroupConsumer> {
 		this.progress++;
-		const publisher = this.instances[instance];
+		const publisher = this.identities[identity];
 		const copy = publisher.routes[slot];
 		if (!copy) throw routeFailure();
 		if (copy.givenUp.has(key)) throw giveUp();
@@ -653,12 +675,12 @@ class Model {
 		const writer = copy.track.createGroup(BigInt(key));
 		copy.groups.set(key, { written: 0, writer });
 		const group = writer.consume();
-		this.write(instance, slot, key, written);
+		this.write(identity, slot, key, written);
 		return group;
 	}
 
-	end(instance: number, slot: number): void {
-		const publisher = this.instances[instance];
+	end(identity: number, slot: number): void {
+		const publisher = this.identities[identity];
 		const copy = publisher.routes[slot];
 		if (!copy?.groups.has(GROUPS - 1)) return;
 		copy.track.finish();
@@ -667,11 +689,11 @@ class Model {
 
 	async join(index: number, spec: Spec): Promise<void> {
 		if (this.readers[index]) return;
-		// The newest instance with a route wins the path.
+		// The newest identity with a route wins the path.
 		let expected: number | undefined;
-		for (let instance = INSTANCES.length - 1; instance >= 0; instance--) {
-			if (this.instances[instance].live().length > 0) {
-				expected = instance;
+		for (let identity = IDENTITIES.length - 1; identity >= 0; identity--) {
+			if (this.identities[identity].live().length > 0) {
+				expected = identity;
 				break;
 			}
 		}
@@ -687,18 +709,18 @@ class Model {
 			await this.clock.advance(Duration.ZERO);
 		}
 		const broadcast = request.active.peek();
-		const instance = broadcast?.instance === undefined ? -1 : INSTANCES.indexOf(broadcast.instance);
-		if (!broadcast || instance === -1) {
+		const identity = broadcast?.identity === undefined ? -1 : IDENTITIES.indexOf(broadcast.identity);
+		if (!broadcast || identity === -1) {
 			request.close();
-			throw fail(index, "resolved no known instance");
+			throw fail(index, "resolved no known identity");
 		}
-		if (instance !== expected) {
+		if (identity !== expected) {
 			request.close();
-			throw fail(index, `joined instance ${instance}, not the newest ${expected}`);
+			throw fail(index, `joined identity ${identity}, not the newest ${expected}`);
 		}
 		const sub = broadcast.track("video").subscribe(subscription(spec.budget, spec.range));
 		this.readers[index] = {
-			instance,
+			identity,
 			spec,
 			request,
 			sub,
@@ -710,8 +732,10 @@ class Model {
 			cursor: spec.range,
 			handed: [],
 			reading: new Map(),
+			released: new Set(),
+			superseded: [],
 			dropped: new Set(),
-			floor: this.instances[instance].newest(),
+			floor: this.identities[identity].newest(),
 			doomed: false,
 			expires: expires(spec, spec.range),
 			end: undefined,
@@ -727,7 +751,7 @@ class Model {
 		this.readers[index] = undefined;
 		reader.gone = true;
 		reader.unwatch?.();
-		for (const reading of reader.reading.values()) reading.group.close();
+		for (const [, reading] of readings(reader)) reading.group.close();
 		reader.sub.close();
 		reader.request.close();
 	}
@@ -738,15 +762,15 @@ class Model {
 	 * reader stops at it.
 	 */
 	#endClean(index: number, reader: Reader): void {
-		const instance = this.instances[reader.instance];
-		if (!instance.ended && reader.ranges === undefined) {
+		const identity = this.identities[reader.identity];
+		if (!identity.ended && reader.ranges === undefined) {
 			throw fail(index, "the track ended cleanly though no route declared an end");
 		}
 		// Where the range placed decides what it owes, so record it before the snapshot.
 		this.#place(reader);
 		// An ordered read passes what its floor keeps out, as `owed` judges a read that ended.
 		const covered = (group: number) =>
-			instance.ended
+			identity.ended
 				? covers(reader, group)
 				: within(owedRange(reader), group) &&
 					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0]);
@@ -754,7 +778,7 @@ class Model {
 		reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 		for (let group = 0; group < GROUPS; group++) {
 			if (passedBelow(reader, group)) continue;
-			if (covered(group) && instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
+			if (covered(group) && identity.live().every((copy) => complete(copy, group))) reader.carried.add(group);
 		}
 	}
 
@@ -762,7 +786,7 @@ class Model {
 	poll(index: number): void {
 		const reader = this.readers[index];
 		if (!reader) return;
-		const instance = this.instances[reader.instance];
+		const identity = this.identities[reader.identity];
 		reader.flag = false;
 		reader.unwatch?.();
 
@@ -778,7 +802,7 @@ class Model {
 			if (recv.kind === "group") {
 				const group = recv.group;
 				const key = Number(group.start);
-				if (reader.reading.has(key)) {
+				if (reader.reading.has(key) && !reader.released.delete(key)) {
 					throw fail(index, `group ${key} handed out twice: ${reader.handed}`);
 				}
 				const last = reader.handed.at(-1);
@@ -794,11 +818,13 @@ class Model {
 						`group ${key} outside ranges ${reader.ranges} (resolved from ${resolved}) and bounds ${reader.local}`,
 					);
 				}
-				if (!instance.written.has(key)) {
+				if (!identity.written.has(key)) {
 					throw fail(index, `group ${key} handed out before any route had it`);
 				}
 				reader.handed.push(key);
 				const reading: Reading = { group, frames: 0 };
+				const earlier = reader.reading.get(key);
+				if (earlier) reader.superseded.push(earlier);
 				reader.reading.set(key, reading);
 				void this.#read(index, reader, reading);
 			} else if (recv.kind === "done") {
@@ -808,7 +834,7 @@ class Model {
 				const end = reader.ranges && Math.min(reader.ranges[1], reader.local?.[1] ?? GROUPS);
 				if (reader.spec.ordered && end !== undefined) reader.passed = Math.max(reader.passed ?? end, end);
 			} else if (recv.kind === "error") {
-				if (!reader.doomed) throw fail(index, `the track failed while its instance had a route: ${recv.error}`);
+				if (!reader.doomed) throw fail(index, `the track failed while its identity had a route: ${recv.error}`);
 				reader.end = recv.error;
 			} else {
 				throw fail(index, `an arrival read without dispositions reported drop ${recv.start}..${recv.end}`);
@@ -855,17 +881,17 @@ class Model {
 				// group may have expired, only while a route that closed it lives: one whose route
 				// failed reads on from the route replacing it, unless that route gave the group up, so
 				// nothing continues it.
-				const instance = this.instances[reader.instance];
-				const whole = reading.frames === frames(key) && instance.complete.has(key);
-				if (!whole && !instance.short.has(`${key}:${reading.frames}`)) {
+				const identity = this.identities[reader.identity];
+				const whole = reading.frames === frames(key) && identity.complete.has(key);
+				if (!whole && !identity.short.has(`${key}:${reading.frames}`)) {
 					this.failure ??= fail(index, `group ${key} ended cleanly after ${reading.frames} frames`);
 				} else if (
 					!whole &&
 					!reader.expires &&
 					!reader.doomed &&
-					(instance.expired === undefined || key > instance.expired) &&
-					!instance.live().some((copy) => closed(copy, key, reading.frames)) &&
-					!instance.serving()?.givenUp.has(key)
+					(identity.expired === undefined || key > identity.expired) &&
+					!identity.live().some((copy) => closed(copy, key, reading.frames)) &&
+					!identity.serving()?.givenUp.has(key)
 				) {
 					this.failure ??= fail(
 						index,
@@ -875,7 +901,7 @@ class Model {
 				reading.end = null;
 				return;
 			}
-			const expected = payload(reader.instance, key, reading.frames);
+			const expected = payload(reader.identity, key, reading.frames);
 			const read = dec.decode(frame.payload);
 			if (read !== expected || reading.frames >= frames(key)) {
 				this.failure ??= fail(index, `group ${key} frame ${reading.frames} read ${read}, expected ${expected}`);
@@ -910,7 +936,7 @@ class Model {
 
 	/**
 	 * Record, for each arrival reader whose range just placed, the group holding its start time:
-	 * the newest group at or before it the instance wrote, when every live route holds it and none
+	 * the newest group at or before it the identity wrote, when every live route holds it and none
 	 * between was written or given up anywhere, so whichever route places the range starts it
 	 * there. Otherwise its start time stands, owing only from there. Mirrors the Rust `Model::place`.
 	 */
@@ -923,7 +949,7 @@ class Model {
 	#place(reader: Reader): void {
 		if (reader.spec.ordered || reader.ranges === undefined || reader.holding !== undefined) return;
 		if (hooks.servingResolved(reader.sub)[0] === undefined) return;
-		const publisher = this.instances[reader.instance];
+		const publisher = this.identities[reader.identity];
 		const start = reader.ranges[0];
 		let holding = start;
 		for (let group = start; group >= 0; group--) {
@@ -941,11 +967,11 @@ class Model {
 	 */
 	async conclude(finish: boolean): Promise<void> {
 		const before = this.readers.map((reader) => reader && max(reader.handed));
-		for (let instance = 0; instance < INSTANCES.length; instance++) {
+		for (let identity = 0; identity < IDENTITIES.length; identity++) {
 			for (let slot = 0; slot < SLOTS; slot++) {
 				for (let group = 0; group < GROUPS; group++)
-					this.write(instance, slot, group, Number.POSITIVE_INFINITY);
-				if (finish) this.end(instance, slot);
+					this.write(identity, slot, group, Number.POSITIVE_INFINITY);
+				if (finish) this.end(identity, slot);
 			}
 		}
 		await this.settle();
@@ -956,7 +982,7 @@ class Model {
 			if (!reader) continue;
 			this.poll(index);
 			// A frame read still waiting with a frame or its end ready was never woken.
-			for (const [key, reading] of reader.reading) {
+			for (const [key, reading] of readings(reader)) {
 				if (reading.end !== undefined) continue;
 				const ready = reading.group.done ? "its end" : reading.group.tryReadFrame() ? "a frame" : undefined;
 				if (ready) throw fail(index, `group ${key} has ${ready} ready that never woke its read`);
@@ -972,18 +998,18 @@ class Model {
 	}
 
 	owed(index: number, reader: Reader, before: number | undefined, finish: boolean): void {
-		const instance = this.instances[reader.instance];
+		const identity = this.identities[reader.identity];
 		const ended = reader.end === null || reader.parked;
 		if (reader.doomed) {
-			if (reader.end instanceof Error || ((ended || capped(reader)) && instance.ended)) return;
+			if (reader.end instanceof Error || ((ended || capped(reader)) && identity.ended)) return;
 			if (reader.end === null && reader.ranges !== undefined) return;
-			throw fail(index, `outlived its instance's routes: ${reader.end}`);
+			throw fail(index, `outlived its identity's routes: ${reader.end}`);
 		}
 		// What every live route carries in full.
-		const carried = (group: number) => instance.live().every((copy) => complete(copy, group));
+		const carried = (group: number) => identity.live().every((copy) => complete(copy, group));
 		// A read that ended its range owed every group in it, whatever its cap, but an ordered one
 		// passes what its floor keeps out once it reads past it.
-		const readRange = reader.end === null && !instance.ended;
+		const readRange = reader.end === null && !identity.ended;
 		const owes = (group: number) =>
 			readRange
 				? within(owedRange(reader), group) &&
@@ -1002,21 +1028,21 @@ class Model {
 		let problems = "";
 		if (missing.length > 0) problems += `missing groups ${missing}; `;
 		if (!reader.expires) {
-			for (const [key, reading] of reader.reading) {
-				if (reading.end === null || !carried(key) || instance.givenUp.has(key)) continue;
+			for (const [key, reading] of readings(reader)) {
+				if (reading.end === null || !carried(key) || identity.givenUp.has(key)) continue;
 				// Like a group under the floor, one older than an expiry may be gone from its own copy
 				// or from the route it would continue from.
 				const gone = reading.end instanceof TooFarBehind || reading.end instanceof NotFound;
-				if (gone && instance.expired !== undefined && key <= instance.expired) continue;
+				if (gone && identity.expired !== undefined && key <= identity.expired) continue;
 				problems += `group ${key} stopped at frame ${reading.frames} (${reading.end}); `;
 			}
 		}
-		const live = finish && instance.live().length > 0;
+		const live = finish && identity.live().length > 0;
 		const end = reader.end;
 		const ends =
 			(end === undefined && (!live || capped(reader))) ||
 			(end === null && live) ||
-			(end === null && !live && (instance.ended || reader.ranges !== undefined));
+			(end === null && !live && (identity.ended || reader.ranges !== undefined));
 		if (!ends) problems += `track end ${end}; `;
 		if (problems === "") return;
 		throw fail(
@@ -1028,8 +1054,8 @@ class Model {
 	/** Let go of everything, so nothing outlives the case. */
 	async close(): Promise<void> {
 		for (let index = 0; index < READERS; index++) this.leave(index);
-		for (const instance of this.instances) {
-			for (const copy of instance.live()) {
+		for (const identity of this.identities) {
+			for (const copy of identity.live()) {
 				copy.serving.close();
 				copy.track.abort(routeFailure());
 				copy.broadcast.close();
@@ -1086,9 +1112,9 @@ test("unchanged routes keep groups owed", async () => {
 		model.up(0, 0);
 		const ops: Op[] = [
 			{ kind: "join", reader: 0, spec: { ordered: false, budget: "hour", range: undefined, drops: false } },
-			{ kind: "write", instance: 0, slot: 0, group: 8, frames: 1 },
-			{ kind: "up", instance: 0, slot: 0 },
-			{ kind: "down", instance: 0, slot: 1 },
+			{ kind: "write", identity: 0, slot: 0, group: 8, frames: 1 },
+			{ kind: "up", identity: 0, slot: 0 },
+			{ kind: "down", identity: 0, slot: 1 },
 		];
 		for (const op of ops) {
 			await model.apply(op);
@@ -1116,12 +1142,12 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [8, 12], false) },
-				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 3 },
-				{ kind: "write", instance: 0, slot: 0, group: 6, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 6, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 8, frames: 3 },
-				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 8, frames: 3 },
+				{ kind: "write", identity: 0, slot: 0, group: 6, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 6, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 8, frames: 3 },
+				{ kind: "down", identity: 0, slot: 0 },
 				{ kind: "ranges", reader: 0, range: [7, 12] },
 			],
 			finish: false,
@@ -1130,11 +1156,11 @@ test("regressions", async () => {
 		// placed them, as any other resume point: the group holding a time start reads on through it.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [2, 3], false) },
-				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
-				{ kind: "up", instance: 1, slot: 0 },
-				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "down", identity: 1, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1142,10 +1168,10 @@ test("regressions", async () => {
 		// replaces it, which holds the rest. Mirrors the Rust case.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 7, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 7, frames: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "close", instance: 0, slot: 1, group: 7, down: true },
+				{ kind: "close", identity: 0, slot: 1, group: 7, down: true },
 			],
 			finish: false,
 		},
@@ -1154,9 +1180,9 @@ test("regressions", async () => {
 		// An ordered reader ends once the rest of its range was given up.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 8], false) },
-				{ kind: "giveUp", instance: 1, slot: 2, group: 7 },
+				{ kind: "giveUp", identity: 1, slot: 2, group: 7 },
 			],
 			finish: true,
 		},
@@ -1165,8 +1191,8 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 0, group: 6, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 6, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "ranges", reader: 1, range: [0, 8] },
 				{ kind: "bounds", reader: 1, range: [3, 8] },
 			],
@@ -1176,7 +1202,7 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [11, 12], true) },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 				{ kind: "bounds", reader: 0, range: [0, 1] },
 			],
 			finish: false,
@@ -1185,20 +1211,20 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "short", undefined, true) },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 2, group: 6, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 2, group: 6, frames: 1 },
 			],
 			finish: false,
 		},
 		// A group whose route failed continues on the next route once it lands there.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 2, frames: 1 },
-				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "down", identity: 0, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1206,22 +1232,22 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 2, group: 4, frames: 1 },
-				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 2, group: 4, frames: 1 },
+				{ kind: "down", identity: 0, slot: 2 },
 				{ kind: "expire" },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
 		// A group a route gave up and the next route carries is handed out after its drop.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 0 },
-				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, true) },
-				{ kind: "giveUp", instance: 1, slot: 2, group: 0 },
-				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "giveUp", identity: 1, slot: 2, group: 0 },
+				{ kind: "down", identity: 1, slot: 2 },
 			],
 			finish: false,
 		},
@@ -1229,10 +1255,10 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 1 },
-				{ kind: "giveUp", instance: 0, slot: 0, group: 8 },
-				{ kind: "write", instance: 0, slot: 1, group: 0, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 8, frames: 1 },
+				{ kind: "giveUp", identity: 0, slot: 0, group: 8 },
+				{ kind: "write", identity: 0, slot: 1, group: 0, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1240,20 +1266,20 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
-				{ kind: "up", instance: 1, slot: 0 },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "bounds", reader: 0, range: undefined },
-				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
-				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "down", identity: 0, slot: 0 },
 			],
 			finish: false,
 		},
 		// A read right after a fully read range is replaced by none follows live, not the old range's end.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [0, 1], false) },
-				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: undefined, frames: 1 },
 				{ kind: "ranges", reader: 0, range: undefined },
 			],
 			finish: false,
@@ -1261,11 +1287,11 @@ test("regressions", async () => {
 		// A read right after the ranges narrow hands out no buffered group they left out.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 1, spec: spec(false, "hour", [0, 1], false) },
-				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 0, frames: 1 },
-				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 0, frames: 1 },
+				{ kind: "down", identity: 0, slot: 1 },
 				{ kind: "ranges", reader: 1, range: [1, 2] },
 			],
 			finish: false,
@@ -1273,10 +1299,10 @@ test("regressions", async () => {
 		// A read right after the ranges widen below a group the copy passed waits for it.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(true, "hour", undefined, false) },
 				{ kind: "ranges", reader: 0, range: [1, 2] },
-				{ kind: "write", instance: 1, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", identity: 1, slot: 0, group: 0, frames: 1 },
 				{ kind: "ranges", reader: 0, range: [0, 1] },
 			],
 			finish: false,
@@ -1284,13 +1310,13 @@ test("regressions", async () => {
 		// A switch's backfill of a group the finished route never had lets the track end.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 1, slot: 1, group: 11, frames: 1 },
-				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
-				{ kind: "down", instance: 1, slot: 2 },
-				{ kind: "end", instance: 1, slot: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: 11, frames: 1 },
+				{ kind: "write", identity: 1, slot: 2, group: 1, frames: 1 },
+				{ kind: "down", identity: 1, slot: 2 },
+				{ kind: "end", identity: 1, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1300,12 +1326,12 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [6, 8], false) },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
-				{ kind: "end", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "end", identity: 0, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1314,12 +1340,12 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
-				{ kind: "end", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "end", identity: 0, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1328,10 +1354,10 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 3], false) },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 2 },
-				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 2 },
+				{ kind: "write", identity: 0, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1340,11 +1366,11 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 2, group: 2, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 2, group: 2, frames: 1 },
 				{ kind: "ranges", reader: 2, range: [2, 3] },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1352,11 +1378,11 @@ test("regressions", async () => {
 		// against the groups it holds, so the read hands out no buffered group they leave out.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "write", instance: 1, slot: 1, group: 3, frames: 1 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: 3, frames: 1 },
 				{ kind: "join", reader: 1, spec: spec(false, "hour", [1, 3], false) },
-				{ kind: "write", instance: 1, slot: 1, group: 2, frames: 1 },
-				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: 2, frames: 1 },
+				{ kind: "down", identity: 1, slot: 1 },
 				{ kind: "ranges", reader: 1, range: [1, 2] },
 			],
 			finish: false,
@@ -1366,11 +1392,11 @@ test("regressions", async () => {
 		// Rust case.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 1, group: 7, frames: 2 },
-				{ kind: "up", instance: 0, slot: 0 },
-				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 7, frames: 2 },
+				{ kind: "up", identity: 0, slot: 0 },
+				{ kind: "down", identity: 0, slot: 1 },
 				{ kind: "ranges", reader: 2, range: [1, 8] },
 			],
 			finish: false,
@@ -1379,12 +1405,12 @@ test("regressions", async () => {
 		// once the ranges widen to name it.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
-				{ kind: "up", instance: 1, slot: 2 },
-				{ kind: "write", instance: 1, slot: 0, group: 3, frames: 1 },
-				{ kind: "write", instance: 1, slot: 2, group: undefined, frames: 1 },
-				{ kind: "down", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 2 },
+				{ kind: "write", identity: 1, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", identity: 1, slot: 2, group: undefined, frames: 1 },
+				{ kind: "down", identity: 1, slot: 0 },
 				{ kind: "ranges", reader: 0, range: undefined },
 			],
 			finish: false,
@@ -1393,14 +1419,14 @@ test("regressions", async () => {
 		// newly cover, as a route change does.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 3, spec: spec(false, "hour", [1, 3], false) },
-				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
-				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", identity: 0, slot: 1 },
 				{ kind: "ranges", reader: 3, range: undefined },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1410,7 +1436,7 @@ test("regressions", async () => {
 			ops: [
 				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
 				{ kind: "bounds", reader: 3, range: [1, 2] },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 				{ kind: "bounds", reader: 3, range: undefined },
 				{ kind: "read", reader: 0 },
 			],
@@ -1421,9 +1447,9 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", [1, 4], false) },
-				{ kind: "write", instance: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
 				{ kind: "bounds", reader: 2, range: [2, 4] },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "short", undefined, false) },
 			],
 			finish: false,
@@ -1432,14 +1458,14 @@ test("regressions", async () => {
 		// there later still reaches the backfill asked for it.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "giveUp", instance: 1, slot: 1, group: 2 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "giveUp", identity: 1, slot: 1, group: 2 },
 				{ kind: "expire" },
-				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
-				{ kind: "write", instance: 1, slot: 2, group: 2, frames: 1 },
-				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "write", identity: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", identity: 1, slot: 2, group: 2, frames: 1 },
+				{ kind: "down", identity: 1, slot: 2 },
 				{ kind: "leave", reader: 1 },
 			],
 			finish: false,
@@ -1448,12 +1474,12 @@ test("regressions", async () => {
 		// still accounted and the read ends with the track.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [9, 12], false) },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "giveUp", instance: 0, slot: 1, group: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "giveUp", identity: 0, slot: 1, group: 1 },
 				{ kind: "expire" },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: true,
 			local: true,
@@ -1464,10 +1490,10 @@ test("regressions", async () => {
 			ops: [
 				{ kind: "join", reader: 1, spec: spec(false, "hour", [1, 2], false) },
 				{ kind: "bounds", reader: 1, range: [6, 12] },
-				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 3 },
-				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 11, frames: 3 },
+				{ kind: "end", identity: 0, slot: 0 },
 				{ kind: "ranges", reader: 1, range: undefined },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1476,10 +1502,10 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [10, 12], false) },
-				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "giveUp", identity: 0, slot: 0, group: 1 },
 				{ kind: "expire" },
-				{ kind: "write", instance: 0, slot: 0, group: 2, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 			],
 			finish: true,
 			local: true,
@@ -1488,11 +1514,11 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 0, group: 9, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 9, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "down", identity: 0, slot: 0 },
 				{ kind: "ranges", reader: 2, range: [1, 2] },
-				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 0, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1500,14 +1526,14 @@ test("regressions", async () => {
 		// judges it.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 3], false) },
-				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
-				{ kind: "write", instance: 1, slot: 1, group: 1, frames: 1 },
-				{ kind: "write", instance: 1, slot: 0, group: 11, frames: 1 },
-				{ kind: "down", instance: 1, slot: 1 },
-				{ kind: "end", instance: 1, slot: 0 },
+				{ kind: "write", identity: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", identity: 1, slot: 0, group: 11, frames: 1 },
+				{ kind: "down", identity: 1, slot: 1 },
+				{ kind: "end", identity: 1, slot: 0 },
 				{ kind: "ranges", reader: 0, range: undefined },
 				{ kind: "advance", ms: 1 },
 			],
@@ -1518,9 +1544,9 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 3 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 8, frames: 3 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "down", identity: 0, slot: 0 },
 				{ kind: "bounds", reader: 2, range: [8, 9] },
 				{ kind: "ranges", reader: 2, range: [7, 9] },
 				{ kind: "read", reader: 0 },
@@ -1531,12 +1557,12 @@ test("regressions", async () => {
 		// where they name and keep their own end. Mirrors the Rust case.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 1, spec: spec(false, "hour", [3, 7], false) },
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "write", instance: 1, slot: 1, group: 3, frames: 1 },
-				{ kind: "write", instance: 1, slot: 1, group: 5, frames: 3 },
-				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: 3, frames: 1 },
+				{ kind: "write", identity: 1, slot: 1, group: 5, frames: 3 },
+				{ kind: "down", identity: 1, slot: 1 },
 				{ kind: "ranges", reader: 1, range: [1, 7] },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
 			],
@@ -1549,8 +1575,8 @@ test("regressions", async () => {
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
 				{ kind: "bounds", reader: 2, range: [1, 9] },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 			],
 			finish: false,
 		},
@@ -1559,8 +1585,8 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
-				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 				{ kind: "ranges", reader: 3, range: [0, 1] },
 				{ kind: "advance", ms: 1 },
 			],
@@ -1570,9 +1596,9 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(true, "hour", [0, 1], false) },
-				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "close", identity: 0, slot: 0, group: undefined, down: true },
 				{ kind: "ranges", reader: 2, range: undefined },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
 			],
@@ -1581,12 +1607,12 @@ test("regressions", async () => {
 		// The same once the route it waits on fails, with the group below landing on the next route.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 2 },
 				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
-				{ kind: "write", instance: 0, slot: 2, group: 1, frames: 1 },
-				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 2, group: 1, frames: 1 },
+				{ kind: "down", identity: 0, slot: 2 },
 				{ kind: "ranges", reader: 3, range: undefined },
-				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 0, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1595,11 +1621,11 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 0, group: 5, frames: 2 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: 5, frames: 1 },
-				{ kind: "down", instance: 0, slot: 0 },
-				{ kind: "close", instance: 0, slot: 1, group: undefined, down: false },
+				{ kind: "write", identity: 0, slot: 0, group: 5, frames: 2 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 5, frames: 1 },
+				{ kind: "down", identity: 0, slot: 0 },
+				{ kind: "close", identity: 0, slot: 1, group: undefined, down: false },
 			],
 			finish: false,
 		},
@@ -1607,15 +1633,15 @@ test("regressions", async () => {
 		// copy cannot continue the group, so the group fails instead of ending at its close.
 		{
 			ops: [
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 3, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 2 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 2 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "close", instance: 0, slot: 1, group: undefined, down: true },
-				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "close", identity: 0, slot: 1, group: undefined, down: true },
+				{ kind: "down", identity: 0, slot: 0 },
 				{ kind: "ranges", reader: 0, range: undefined },
 			],
 			finish: false,
@@ -1624,12 +1650,12 @@ test("regressions", async () => {
 		// so nothing continues it. Mirrors the Rust case.
 		{
 			ops: [
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "giveUp", instance: 0, slot: 1, group: 5 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "giveUp", identity: 0, slot: 1, group: 5 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", instance: 0, slot: 2, group: 5, frames: 1 },
-				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
+				{ kind: "write", identity: 0, slot: 2, group: 5, frames: 1 },
+				{ kind: "close", identity: 0, slot: 2, group: undefined, down: true },
 			],
 			finish: false,
 		},
@@ -1639,22 +1665,22 @@ test("regressions", async () => {
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
 				{ kind: "ranges", reader: 0, range: [1, 2] },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "down", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "down", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
 		// The same with the switch's route closing the group as it fails.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
-				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "close", instance: 1, slot: 1, group: 0, down: true },
-				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "write", identity: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "close", identity: 1, slot: 1, group: 0, down: true },
+				{ kind: "up", identity: 0, slot: 0 },
 			],
 			finish: false,
 		},
@@ -1663,7 +1689,7 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "short", [2, 3], false) },
-				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "giveUp", identity: 0, slot: 0, group: 1 },
 				{ kind: "expire" },
 				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
 				{ kind: "advance", ms: 1 },
@@ -1674,11 +1700,11 @@ test("regressions", async () => {
 		// group from the failed copy, still buffered for it, and reads on from the next route.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
-				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
-				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
+				{ kind: "write", identity: 1, slot: 1, group: 4, frames: 1 },
+				{ kind: "close", identity: 1, slot: 1, group: undefined, down: true },
 			],
 			finish: false,
 		},
@@ -1686,25 +1712,25 @@ test("regressions", async () => {
 		// continues from the copy the front serves next, as the Rust front's reader does.
 		{
 			ops: [
-				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
-				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", identity: 0, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
-				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "close", identity: 0, slot: 0, group: undefined, down: true },
+				{ kind: "up", identity: 0, slot: 0 },
 			],
 			finish: false,
 		},
 		// The same once a route that closed the group short ends the track and then fails.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 2 },
-				{ kind: "up", instance: 1, slot: 0 },
-				{ kind: "write", instance: 1, slot: 2, group: 11, frames: 1 },
+				{ kind: "up", identity: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "write", identity: 1, slot: 2, group: 11, frames: 1 },
 				{ kind: "join", reader: 0, spec: spec(true, "hour", [5, 12], false) },
-				{ kind: "close", instance: 1, slot: 2, group: undefined, down: false },
-				{ kind: "end", instance: 1, slot: 2 },
-				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "close", identity: 1, slot: 2, group: undefined, down: false },
+				{ kind: "end", identity: 1, slot: 2 },
+				{ kind: "down", identity: 1, slot: 2 },
 			],
 			finish: false,
 		},
@@ -1714,14 +1740,14 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 3, spec: spec(false, "hour", [0, 1], false) },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 8, frames: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: undefined, frames: 1 },
 				{ kind: "ranges", reader: 3, range: [0, 6] },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
-				{ kind: "write", instance: 0, slot: 2, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "write", identity: 0, slot: 2, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1729,14 +1755,14 @@ test("regressions", async () => {
 		// lower group. Mirrors the Rust case.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [6, 7], false) },
-				{ kind: "up", instance: 1, slot: 0 },
-				{ kind: "write", instance: 1, slot: 2, group: 7, frames: 1 },
-				{ kind: "down", instance: 1, slot: 2 },
-				{ kind: "up", instance: 1, slot: 2 },
-				{ kind: "write", instance: 1, slot: 0, group: 1, frames: 1 },
-				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "write", identity: 1, slot: 2, group: 7, frames: 1 },
+				{ kind: "down", identity: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 2 },
+				{ kind: "write", identity: 1, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", identity: 1, slot: 2, group: 1, frames: 1 },
 			],
 			finish: false,
 		},
@@ -1745,11 +1771,11 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
-				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 4, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
-				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 4, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", identity: 0, slot: 0 },
 				{ kind: "ranges", reader: 0, range: undefined },
 			],
 			finish: false,
@@ -1760,22 +1786,22 @@ test("regressions", async () => {
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
 				{ kind: "ranges", reader: 0, range: [1, 2] },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "down", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "down", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
 		// The same with the switch's route closing the group as it fails.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
-				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "close", instance: 1, slot: 1, group: 0, down: true },
-				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "write", identity: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "close", identity: 1, slot: 1, group: 0, down: true },
+				{ kind: "up", identity: 0, slot: 0 },
 			],
 			finish: false,
 		},
@@ -1784,7 +1810,7 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "short", [2, 3], false) },
-				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "giveUp", identity: 0, slot: 0, group: 1 },
 				{ kind: "expire" },
 				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
 				{ kind: "advance", ms: 1 },
@@ -1795,11 +1821,11 @@ test("regressions", async () => {
 		// group from the failed copy, still buffered for it, and reads on from the next route.
 		{
 			ops: [
-				{ kind: "up", instance: 1, slot: 1 },
-				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
 				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
-				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
-				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
+				{ kind: "write", identity: 1, slot: 1, group: 4, frames: 1 },
+				{ kind: "close", identity: 1, slot: 1, group: undefined, down: true },
 			],
 			finish: false,
 		},
@@ -1810,24 +1836,24 @@ test("regressions", async () => {
 			ops: [
 				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
 				{ kind: "ranges", reader: 1, range: [3, 8] },
-				{ kind: "up", instance: 0, slot: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: 7, frames: 1 },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "down", instance: 0, slot: 0 },
-				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 7, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "down", identity: 0, slot: 0 },
+				{ kind: "close", identity: 0, slot: 2, group: undefined, down: true },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
 		// A group a history read holds stays owed once its ranges move off it. Mirrors the Rust case.
 		{
 			ops: [
-				{ kind: "write", instance: 0, slot: 0, group: 2, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 				{ kind: "join", reader: 3, spec: spec(false, "hour", undefined, false) },
 				{ kind: "ranges", reader: 3, range: [2, 3] },
-				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "up", identity: 0, slot: 0 },
 			],
 			finish: false,
 		},
@@ -1837,10 +1863,40 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", instance: 0, slot: 2 },
-				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
-				{ kind: "end", instance: 0, slot: 2 },
-				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", identity: 0, slot: 2 },
+				{ kind: "close", identity: 0, slot: 2, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Ranges moved off groups 0 and 2 forget them, so ranges holding them again may hand group 2
+		// out a second time: only a range holding a group throughout keeps it once. Mirrors the Rust
+		// case.
+		{
+			ops: [
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 2, group: 4, frames: 1 },
+				{ kind: "ranges", reader: 1, range: [4, 5] },
+				{ kind: "ranges", reader: 1, range: undefined },
+			],
+			finish: false,
+		},
+		// The serving copy finished the track at its last group while that group was open, then
+		// closed it short and failed: the reader's group reads on from the route replacing it.
+		// Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "end", identity: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "close", identity: 0, slot: 1, group: undefined, down: true },
+				{ kind: "write", identity: 0, slot: 0, group: 0, frames: 1 },
 			],
 			finish: false,
 		},

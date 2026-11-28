@@ -49,17 +49,16 @@ the group whole through the ordered reader; `test/stream-credit` drops the
 tab's fetch and asserts the top two tiers read every group whole. Run
 `just test interop --all`.
 
-This also gives [takeover](/quest/m3/group-takeover.md)'s "Measure first"
+This also gives [takeover](/quest/m4/group-takeover.md)'s "Measure first"
 the drop plus bounded SUBSCRIBE baseline it compares a continuation against.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Remove FETCH from lite-07 and unify into SUBSCRIBE](/quest/m2/lite07-subscribe/remove-fetch.md) - re-requesting a preempted group on lite-07 uses one-shot bounded SUBSCRIBE
 - [Per-range priority, order, and judged OLD drops on lite-07](/quest/m2/lite07-subscribe/per-range-policy.md) - judged Max Age on SUBSCRIBE_DROP(OLD) replaces stale_budget
 
 ## Related
 
-- [Takeover](/quest/m3/group-takeover.md) - measures this against a continuation before lite-08 brings one back
-- [Browser reset reports](/quest/m4/browser-reset-reports.md) - why a browser reader learns of the reset from the drop, not the stream
+- [Takeover](/quest/m4/group-takeover.md) - measures this against a continuation before lite-08 brings one back
+- [Chromium reset fix](/quest/m4/browser-fixes/chromium-reset-before-accept.md) - why a browser reader learns of the reset from the drop, not the stream

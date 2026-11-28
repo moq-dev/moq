@@ -320,6 +320,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-opus" = rec {
+      packageId = "moq-opus";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-opus";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-pattern" = rec {
       packageId = "moq-pattern";
       build = internal.buildRustCrateWithFeatures {
@@ -16191,6 +16201,8 @@ rec {
             name = "futures";
             packageId = "futures";
             optional = true;
+            usesDefaultFeatures = false;
+            features = [ "std" ];
           }
           {
             name = "kio-macros";
@@ -16301,6 +16313,7 @@ rec {
           "default"
           "macros"
           "manual"
+          "model"
           "runtime"
           "serde"
           "sim"
@@ -16330,7 +16343,7 @@ rec {
           }
           {
             name = "syn";
-            packageId = "syn 2.0.119";
+            packageId = "syn 3.0.6";
             features = [
               "full"
               "visit-mut"
@@ -18024,6 +18037,10 @@ rec {
             packageId = "moq-net";
           }
           {
+            name = "moq-opus";
+            packageId = "moq-opus";
+          }
+          {
             name = "objc2";
             packageId = "objc2 0.6.5";
             optional = true;
@@ -18114,10 +18131,6 @@ rec {
             name = "tracing";
             packageId = "tracing";
             optional = true;
-          }
-          {
-            name = "unsafe-libopus";
-            packageId = "unsafe-libopus";
           }
         ];
         devDependencies = [
@@ -20601,6 +20614,49 @@ rec {
         ];
 
       };
+      "moq-opus" = rec {
+        crateName = "moq-opus";
+        version = "0.1.0";
+        edition = "2021";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-opus;
+        };
+        libName = "moq_opus";
+        dependencies = [
+          {
+            name = "arrayref";
+            packageId = "arrayref";
+          }
+          {
+            name = "hex";
+            packageId = "hex";
+            optional = true;
+          }
+          {
+            name = "num-complex";
+            packageId = "num-complex";
+          }
+          {
+            name = "num-traits";
+            packageId = "num-traits";
+          }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.21";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+        features = {
+          "ent-dump" = [ "dep:hex" ];
+        };
+        resolvedDefaultFeatures = [ "ent-dump" ];
+      };
       "moq-pattern" = rec {
         crateName = "moq-pattern";
         version = "0.1.2";
@@ -22364,6 +22420,10 @@ rec {
             name = "kio";
             packageId = "kio";
             features = [ "async" ];
+          }
+          {
+            name = "moq-json";
+            packageId = "moq-json";
           }
           {
             name = "moq-mux";
@@ -40021,8 +40081,8 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "rustls-native-certs";
-            packageId = "rustls-native-certs";
+            name = "rustls-platform-verifier";
+            packageId = "rustls-platform-verifier";
           }
           {
             name = "thiserror";
@@ -40045,7 +40105,7 @@ rec {
             features = [
               "connect"
               "handshake"
-              "rustls-tls-native-roots"
+              "__rustls-tls"
             ];
           }
           {
@@ -49796,11 +49856,6 @@ rec {
             usesDefaultFeatures = false;
           }
           {
-            name = "rustls-native-certs";
-            packageId = "rustls-native-certs";
-            optional = true;
-          }
-          {
             name = "rustls-pki-types";
             packageId = "rustls-pki-types";
             optional = true;
@@ -49891,9 +49946,7 @@ rec {
           "default"
           "handshake"
           "rustls"
-          "rustls-native-certs"
           "rustls-pki-types"
-          "rustls-tls-native-roots"
           "stream"
           "tokio-rustls"
         ];
@@ -51709,9 +51762,9 @@ rec {
       };
       "trybuild" = rec {
         crateName = "trybuild";
-        version = "1.0.122";
+        version = "1.0.125";
         edition = "2024";
-        sha256 = "1f0i7hi6dj1abh0j31gjsgr8kdl0rhh1f11j46zkyf84sy99rnv2";
+        sha256 = "0ic282cy8pb39f3vrm3isdnzlj02y7sfi454xqg8zlhlxsab8f4q";
         authors = [
           "David Tolnay <dtolnay@gmail.com>"
         ];
@@ -52058,34 +52111,6 @@ rec {
           "cli" = [ "dep:uniffi" ];
         };
         resolvedDefaultFeatures = [ "cli" ];
-      };
-      "unsafe-libopus" = rec {
-        crateName = "unsafe-libopus";
-        version = "0.2.0";
-        edition = "2021";
-        sha256 = "0wzbfqirg86cmfx79izc1rili2c7if65q8bv7hs11janfa740my7";
-        libName = "unsafe_libopus";
-        authors = [
-          "DCNick3"
-        ];
-        dependencies = [
-          {
-            name = "arrayref";
-            packageId = "arrayref";
-          }
-          {
-            name = "num-complex";
-            packageId = "num-complex";
-          }
-          {
-            name = "num-traits";
-            packageId = "num-traits";
-          }
-        ];
-        features = {
-          "ent-dump" = [ "hex" ];
-          "hex" = [ "dep:hex" ];
-        };
       };
       "untrusted" = rec {
         crateName = "untrusted";
@@ -59665,6 +59690,10 @@ rec {
             features = [ "tokio" ];
           }
           {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
             name = "futures-channel";
             packageId = "futures-channel";
             features = [ "sink" ];
@@ -60303,11 +60332,6 @@ rec {
             ];
           }
           {
-            name = "security-framework-sys";
-            packageId = "security-framework-sys";
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-          }
-          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -60466,7 +60490,7 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            features = [ "rustls-tls-native-roots" ];
+            features = [ "__rustls-tls" ];
           }
           {
             name = "tokio-util";
@@ -60769,13 +60793,10 @@ rec {
               "Win32_NetworkManagement_IpHelper"
               "Win32_NetworkManagement_Ndis"
               "Win32_Networking_WinSock"
-              "Win32_Security_Authentication_Identity"
-              "Win32_Security_Credentials"
               "Win32_Security_Cryptography"
               "Win32_Storage_FileSystem"
               "Win32_System_Console"
               "Win32_System_IO"
-              "Win32_System_LibraryLoader"
               "Win32_System_Memory"
               "Win32_System_Pipes"
               "Win32_System_SystemInformation"
@@ -61137,6 +61158,10 @@ rec {
             features = [ "tokio" ];
           }
           {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
             name = "futures-channel";
             packageId = "futures-channel";
             features = [ "sink" ];
@@ -61763,11 +61788,6 @@ rec {
             ];
           }
           {
-            name = "security-framework-sys";
-            packageId = "security-framework-sys";
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-          }
-          {
             name = "semver";
             packageId = "semver";
             features = [ "serde" ];
@@ -61924,7 +61944,7 @@ rec {
           {
             name = "tokio-tungstenite";
             packageId = "tokio-tungstenite";
-            features = [ "rustls-tls-native-roots" ];
+            features = [ "__rustls-tls" ];
           }
           {
             name = "tokio-util";
@@ -62227,13 +62247,10 @@ rec {
               "Win32_NetworkManagement_IpHelper"
               "Win32_NetworkManagement_Ndis"
               "Win32_Networking_WinSock"
-              "Win32_Security_Authentication_Identity"
-              "Win32_Security_Credentials"
               "Win32_Security_Cryptography"
               "Win32_Storage_FileSystem"
               "Win32_System_Console"
               "Win32_System_IO"
-              "Win32_System_LibraryLoader"
               "Win32_System_Memory"
               "Win32_System_Pipes"
               "Win32_System_SystemInformation"

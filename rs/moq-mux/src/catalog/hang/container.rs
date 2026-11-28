@@ -1,4 +1,4 @@
-use crate::container::{Container as ContainerTrait, Frame, Kind, fmp4, legacy, loc};
+use crate::container::{Container as ContainerTrait, Frame, Kind, cts, fmp4, legacy, loc, raw};
 
 /// Runtime-dispatched wire format for a track described by a hang catalog.
 ///
@@ -16,6 +16,14 @@ pub enum Container {
 	Cmaf(fmp4::Wire),
 	/// Low Overhead Container. One LOC frame per moq frame.
 	Loc(Kind),
+	/// Zero-byte header: raw codec bitstream timed by the MoQ transport timestamp (DTS == PTS).
+	Raw(Kind),
+	/// [`Raw`](Self::Raw) audio whose codec states each packet's duration.
+	RawAudio(legacy::Audio),
+	/// QUIC varint composition time offset (in track timescale) + raw codec bitstream.
+	Cts(Kind),
+	/// [`Cts`](Self::Cts) audio whose codec states each packet's duration.
+	CtsAudio(legacy::Audio),
 }
 
 impl Container {
@@ -25,6 +33,8 @@ impl Container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy(kind)),
 			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(fmp4::Wire::from_init(init)?)),
 			hang::catalog::Container::Loc => Ok(Self::Loc(kind)),
+			hang::catalog::Container::Raw => Ok(Self::Raw(kind)),
+			hang::catalog::Container::Cts => Ok(Self::Cts(kind)),
 			hang::catalog::Container::Unknown(unknown) => Err(crate::Error::unsupported_container(unknown)),
 		}
 	}
@@ -42,6 +52,8 @@ impl TryFrom<&hang::catalog::AudioConfig> for Container {
 	fn try_from(config: &hang::catalog::AudioConfig) -> crate::Result<Self> {
 		match (&config.container, legacy::Audio::new(config)) {
 			(hang::catalog::Container::Legacy, Some(audio)) => Ok(Self::LegacyAudio(audio)),
+			(hang::catalog::Container::Raw, Some(audio)) => Ok(Self::RawAudio(audio)),
+			(hang::catalog::Container::Cts, Some(audio)) => Ok(Self::CtsAudio(audio)),
 			(container, _) => Self::new(container, Kind::Audio),
 		}
 	}
@@ -56,13 +68,15 @@ impl TryFrom<&crate::catalog::VideoHint> for Container {
 
 impl Container {
 	/// The bytes preceding a frame's payload, when they depend on nothing but its timestamp, so the
-	/// payload can stream in after them. `None` for CMAF, whose `moof` describes the payload.
+	/// payload can stream in after them. `None` for CMAF and CTS.
 	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<Option<bytes::Bytes>> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).prefix(timestamp).map(Some),
 			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).prefix(timestamp).map(Some),
 			Self::Loc(kind) => loc::Wire(*kind).prefix(timestamp).map(Some),
-			Self::Cmaf(_) => Ok(None),
+			Self::Raw(kind) => Ok(Some(raw::Wire(*kind).prefix())),
+			Self::RawAudio(_) => Ok(Some(raw::Wire(Kind::Audio).prefix())),
+			Self::Cmaf(_) | Self::Cts(_) | Self::CtsAudio(_) => Ok(None),
 		}
 	}
 }
@@ -90,14 +104,35 @@ impl ContainerTrait for Container {
 			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).end(frame),
 			Self::Cmaf(cmaf) => cmaf.end(frame),
 			Self::Loc(kind) => loc::Wire(*kind).end(frame),
+			Self::Raw(kind) => raw::Wire(*kind).end(frame),
+			Self::RawAudio(_) => raw::Wire(Kind::Audio).end(frame),
+			Self::Cts(kind) => cts::Wire(*kind).end(frame),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).end(frame),
 		}
 	}
 
 	fn kind(&self) -> Kind {
 		match self {
-			Self::Legacy(kind) | Self::Loc(kind) => *kind,
-			Self::LegacyAudio(_) => Kind::Audio,
+			Self::Legacy(kind) | Self::Loc(kind) | Self::Raw(kind) | Self::Cts(kind) => *kind,
+			Self::LegacyAudio(_) | Self::RawAudio(_) | Self::CtsAudio(_) => Kind::Audio,
 			Self::Cmaf(wire) => <fmp4::Wire as ContainerTrait>::kind(wire),
+		}
+	}
+
+	fn writable(&self) -> Result<(), Self::Error> {
+		match self {
+			Self::Cts(kind) => cts::Wire(*kind).writable(),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).writable(),
+			_ => Ok(()),
+		}
+	}
+
+	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
+		match self {
+			Self::Raw(kind) => raw::Wire(*kind).check(frame),
+			Self::Cts(kind) => cts::Wire(*kind).check(frame),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).check(frame),
+			_ => Ok(()),
 		}
 	}
 
@@ -111,6 +146,10 @@ impl ContainerTrait for Container {
 			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).finish_group(group, end),
 			Self::Cmaf(wire) => wire.finish_group(group, end).map_err(Into::into),
 			Self::Loc(kind) => loc::Wire(*kind).finish_group(group, end),
+			Self::Raw(kind) => raw::Wire(*kind).finish_group(group, end),
+			Self::RawAudio(_) => raw::Wire(Kind::Audio).finish_group(group, end),
+			Self::Cts(kind) => cts::Wire(*kind).finish_group(group, end),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).finish_group(group, end),
 		}
 	}
 
@@ -120,6 +159,10 @@ impl ContainerTrait for Container {
 			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).write(group, frames),
 			Self::Cmaf(cmaf) => cmaf.write(group, frames).map_err(Into::into),
 			Self::Loc(kind) => loc::Wire(*kind).write(group, frames),
+			Self::Raw(kind) => raw::Wire(*kind).write(group, frames),
+			Self::RawAudio(_) => raw::Wire(Kind::Audio).write(group, frames),
+			Self::Cts(kind) => cts::Wire(*kind).write(group, frames),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).write(group, frames),
 		}
 	}
 
@@ -129,6 +172,10 @@ impl ContainerTrait for Container {
 			Self::LegacyAudio(audio) => audio.decode(frame),
 			Self::Cmaf(cmaf) => Ok(cmaf.decode(frame)?),
 			Self::Loc(kind) => loc::Wire(*kind).decode(frame),
+			Self::Raw(kind) => raw::Wire(*kind).decode(frame),
+			Self::RawAudio(audio) => raw::decode_audio(audio, frame),
+			Self::Cts(kind) => cts::Wire(*kind).decode(frame),
+			Self::CtsAudio(audio) => cts::decode_audio(audio, frame),
 		}
 	}
 }

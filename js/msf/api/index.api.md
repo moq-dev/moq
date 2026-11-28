@@ -38,10 +38,12 @@ export const CatalogSchema: ZodMiniObject<{
 		namespace: ZodMiniOptional<ZodMiniString<string>>;
 		packaging: ZodMiniUnion<readonly [ZodMiniEnum<{
 			cmaf: "cmaf";
+			cts: "cts";
 			eventtimeline: "eventtimeline";
 			legacy: "legacy";
 			loc: "loc";
 			mediatimeline: "mediatimeline";
+			raw: "raw";
 		}>, ZodMiniString<string>]>;
 		renderGroup: ZodMiniOptional<ZodMiniNumber<number>>;
 		role: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniEnum<{
@@ -61,10 +63,12 @@ export type Packaging = infer<typeof PackagingSchema>;
 
 export const PackagingSchema: ZodMiniUnion<readonly [ZodMiniEnum<{
 	cmaf: "cmaf";
+	cts: "cts";
 	eventtimeline: "eventtimeline";
 	legacy: "legacy";
 	loc: "loc";
 	mediatimeline: "mediatimeline";
+	raw: "raw";
 }>, ZodMiniString<string>]>;
 
 export type Role = infer<typeof RoleSchema>;
@@ -99,10 +103,12 @@ export const TrackSchema: ZodMiniObject<{
 	namespace: ZodMiniOptional<ZodMiniString<string>>;
 	packaging: ZodMiniUnion<readonly [ZodMiniEnum<{
 		cmaf: "cmaf";
+		cts: "cts";
 		eventtimeline: "eventtimeline";
 		legacy: "legacy";
 		loc: "loc";
 		mediatimeline: "mediatimeline";
+		raw: "raw";
 	}>, ZodMiniString<string>]>;
 	renderGroup: ZodMiniOptional<ZodMiniNumber<number>>;
 	role: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniEnum<{

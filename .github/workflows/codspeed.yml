@@ -43,8 +43,8 @@ jobs:
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
 
       - name: Count
         env:
@@ -56,7 +56,8 @@ jobs:
           args=(run --jobs 1 --out kixel-metrics/metrics.json)
           if [ -n "$BENCHMARKS" ]; then
             printf '%s\n' "$BENCHMARKS" > "$RUNNER_TEMP/benchmarks"
-            args+=(--benchmarks "$RUNNER_TEMP/benchmarks")
+            # A suspect this commit lacks is named in the job summary, not a failure.
+            args+=(--benchmarks "$RUNNER_TEMP/benchmarks" --allow-missing)
           fi
           nix develop --command just rs instructions "${args[@]}"
 
