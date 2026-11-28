@@ -497,24 +497,16 @@ fn datagram_roundtrip() {
 #[test]
 fn group_starts_only_rise() {
 	let mut pair = pair("video");
-	assert_eq!(
-		pair.producer
-			.append_group(ms(0), b"")
-			.unwrap()
-			.start(),
-		0
-	);
+	assert_eq!(pair.producer.append_group(ms(0), b"").unwrap().start(), 0);
 	assert_eq!(pair.producer.create_group(ms(5), b"").unwrap().start(), 5);
-	assert_eq!(
-		pair.producer
-			.append_group(ms(6), b"")
-			.unwrap()
-			.start(),
-		6
-	);
+	assert_eq!(pair.producer.append_group(ms(6), b"").unwrap().start(), 6);
 	for start in [6, 3] {
 		assert_eq!(
-			pair.producer.create_group(ms(start), b"").map(|_| ()).unwrap_err().to_string(),
+			pair.producer
+				.create_group(ms(start), b"")
+				.map(|_| ())
+				.unwrap_err()
+				.to_string(),
 			"reuse"
 		);
 	}
@@ -673,32 +665,21 @@ fn reproduced_track_resumes_above_its_marks() {
 	// A clone of the generation reopening the name, on any output, resumes above its marks.
 	let mut again = generation.clone().produce(net_track(&name), "video").unwrap();
 	for start in [0, 4] {
-		assert_eq!(again.create_group(ms(start), b"").map(|_| ()).unwrap_err().to_string(), "reuse");
+		assert_eq!(
+			again.create_group(ms(start), b"").map(|_| ()).unwrap_err().to_string(),
+			"reuse"
+		);
 	}
-	assert_eq!(
-		again.append_group(ms(5), b"").unwrap().start(),
-		5
-	);
+	assert_eq!(again.append_group(ms(5), b"").unwrap().start(), 5);
 	// Two live producers of the name share one start namespace.
 	let mut other = generation.produce(net_track(&name), "video").unwrap();
 	assert_eq!(
-		other
-			.append_group(ms(5), b"")
-			.map(|_| ())
-			.unwrap_err()
-			.to_string(),
+		other.append_group(ms(5), b"").map(|_| ()).unwrap_err().to_string(),
 		"reuse"
 	);
+	assert_eq!(other.append_group(ms(6), b"").unwrap().start(), 6);
 	assert_eq!(
-		other.append_group(ms(6), b"").unwrap().start(),
-		6
-	);
-	assert_eq!(
-		again
-			.append_group(ms(6), b"")
-			.map(|_| ())
-			.unwrap_err()
-			.to_string(),
+		again.append_group(ms(6), b"").map(|_| ()).unwrap_err().to_string(),
 		"reuse"
 	);
 
@@ -720,10 +701,7 @@ fn reproduced_track_resumes_above_its_marks() {
 	let mut fresh = fresh
 		.produce(net_track(&fresh.name("video").unwrap()), "video")
 		.unwrap();
-	assert_eq!(
-		fresh.append_group(ms(0), b"").unwrap().start(),
-		0
-	);
+	assert_eq!(fresh.append_group(ms(0), b"").unwrap().start(), 0);
 	// Consuming never claims.
 	consume(&generation)
 		.consume(net.subscribe(subscribe_all()), "video")
@@ -840,32 +818,18 @@ fn broadcast_claims_span_outputs() {
 	let second = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation);
 	let mut video = second.create_track("video", timed()).unwrap().expect("a free name");
 	assert_eq!(
-		video
-			.append_group(ms(2), b"")
-			.map(|_| ())
-			.unwrap_err()
-			.to_string(),
+		video.append_group(ms(2), b"").map(|_| ()).unwrap_err().to_string(),
 		"reuse"
 	);
-	assert_eq!(
-		video.append_group(ms(3), b"").unwrap().start(),
-		3
-	);
+	assert_eq!(video.append_group(ms(3), b"").unwrap().start(), 3);
 	let request = second.reserve_track("audio").unwrap().expect("a free name");
 	assert_eq!(request.name(), "audio");
 	let mut audio = request.accept(timed());
 	assert_eq!(
-		audio
-			.append_group(ms(0), b"")
-			.map(|_| ())
-			.unwrap_err()
-			.to_string(),
+		audio.append_group(ms(0), b"").map(|_| ()).unwrap_err().to_string(),
 		"reuse"
 	);
-	assert_eq!(
-		audio.append_group(ms(1), b"").unwrap().start(),
-		1
-	);
+	assert_eq!(audio.append_group(ms(1), b"").unwrap().start(), 1);
 	let mut voice = second
 		.create_datagrams("voice", timed_datagrams())
 		.unwrap()
@@ -1006,17 +970,10 @@ fn requests_claim_only_accepted_names() {
 	let mut video = request.accept(timed());
 	assert_eq!(generation.claims(), 1);
 	assert_eq!(
-		video
-			.append_group(ms(5), b"")
-			.map(|_| ())
-			.unwrap_err()
-			.to_string(),
+		video.append_group(ms(5), b"").map(|_| ()).unwrap_err().to_string(),
 		"reuse"
 	);
-	assert_eq!(
-		video.append_group(ms(6), b"").unwrap().start(),
-		6
-	);
+	assert_eq!(video.append_group(ms(6), b"").unwrap().start(), 6);
 }
 
 #[test]
@@ -1039,11 +996,11 @@ fn requests_serve_a_dropped_name_above_its_marks() {
 	let request = requested(&mut requests);
 	assert_eq!(request.name(), "presence");
 	let mut track = request.accept(timed());
-	assert_eq!(track.create_group(ms(3), b"").map(|_| ()).unwrap_err().to_string(), "reuse");
 	assert_eq!(
-		track.append_group(ms(4), b"").unwrap().start(),
-		4
+		track.create_group(ms(3), b"").map(|_| ()).unwrap_err().to_string(),
+		"reuse"
 	);
+	assert_eq!(track.append_group(ms(4), b"").unwrap().start(), 4);
 	let mut reader = resolve(&subscribing).unwrap();
 	assert_eq!(recv_group(&mut reader).start(), 4);
 }
@@ -1526,11 +1483,19 @@ fn failed_group_write_does_not_burn_nonce() {
 	let big = vec![0u8; MAX_GROUPED_PLAINTEXT + 1];
 	assert!(pair.producer.append_group(huge, b"bad").is_err());
 	assert_eq!(
-		pair.producer.append_group(ms(1), &big).map(|_| ()).unwrap_err().to_string(),
+		pair.producer
+			.append_group(ms(1), &big)
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
 		"oversize"
 	);
 	let mut group = pair.producer.append_group(ms(1), b"zero").unwrap();
-	assert_eq!(group.invocations(), 1, "only the frame that opened the group spent an identity");
+	assert_eq!(
+		group.invocations(),
+		1,
+		"only the frame that opened the group spent an identity"
+	);
 	assert!(group.write_frame(huge, b"bad").is_err());
 	assert_eq!(group.write_frame(ms(1), &big).unwrap_err().to_string(), "oversize");
 	assert_eq!(group.invocations(), 1);

@@ -2719,7 +2719,10 @@ mod tests {
 				.unwrap();
 			import.decode(&sample).unwrap();
 			let _finished = import.finish().unwrap();
-			assert_eq!(groups(&mut consumer), [(100, Some(1))], "passthrough: {passthrough}");
+			// The rejoined group is keyed by its own fragment: 512 ticks of the 22.05 kHz track
+			// passed through, or that in the unwrapped track's microseconds.
+			let start = if passthrough { 512 } else { 23_219 };
+			assert_eq!(groups(&mut consumer), [(start, Some(1))], "passthrough: {passthrough}");
 		}
 	}
 

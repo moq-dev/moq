@@ -317,7 +317,10 @@ mod test {
 			.create_track("test", timed())
 			.unwrap();
 		track
-			.append_group(moq_net::Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"{}"))
+			.append_group(
+				moq_net::Timestamp::from_millis(10_000).unwrap(),
+				bytes::Bytes::from_static(b"{}"),
+			)
 			.unwrap()
 			.finish()
 			.unwrap();

@@ -76,14 +76,17 @@ async fn import(data: &[u8]) -> Imported {
 				objects.push(Object {
 					group: group.start,
 					micros,
+					transport: frame.timestamp,
 					payload: Bytes::new(),
 				});
 				continue;
 			}
+			let transport = frame.timestamp;
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
 				group: group.start,
 				micros: frame.timestamp.as_micros().unwrap() as u64,
+				transport,
 				payload: frame.payload,
 			});
 		}
@@ -200,7 +203,7 @@ fn publish(
 			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
 			let group = &mut group.as_mut().unwrap().1;
 			if object.payload.is_empty() {
-				group.write_frame(timestamp, Bytes::new()).unwrap();
+				group.write_frame(object.transport, Bytes::new()).unwrap();
 				continue;
 			}
 			let mut buf = bytes::BytesMut::new();
@@ -210,10 +213,7 @@ fn publish(
 			}
 			.encode(&mut buf)
 			.unwrap();
-			// The prefix keeps the presentation time, and the transport the newest so far.
-			let mut writer = group.writer();
-			let transport = writer.latest().filter(|latest| timestamp < *latest).unwrap_or(timestamp);
-			writer.write_frame(transport, buf.freeze()).unwrap();
+			group.write_frame(object.transport, buf.freeze()).unwrap();
 			// The importer keyed each group by its first frame, which recreates it at the same start.
 			assert_eq!(group.start, object.group);
 		}
@@ -793,8 +793,9 @@ async fn a_backlog_stays_in_the_source_until_due() {
 	let mut objects = import(KYRION).await.objects;
 	// Keep the capture in one retained group: joining newer groups is a separate
 	// live-edge policy, while this regression bounds an unread group itself.
+	let first = objects[0].group;
 	for object in &mut objects {
-		object.group = 0;
+		object.group = first;
 	}
 	let origin = objects[0].micros;
 	for delay in [Duration::ZERO, Duration::from_millis(100)] {
@@ -891,6 +892,12 @@ async fn follow(
 		let rewind = tail[0].micros - head.last().unwrap().micros + back.as_micros() as u64;
 		for object in &mut tail {
 			object.micros -= rewind;
+			// The track counts microseconds, so its keys and transport times rewind with it.
+			object.group -= rewind;
+			object.transport = object
+				.transport
+				.checked_sub(moq_net::Timestamp::from_micros(rewind).unwrap())
+				.unwrap();
 		}
 	}
 

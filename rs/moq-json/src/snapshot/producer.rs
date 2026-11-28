@@ -603,7 +603,9 @@ mod tests {
 			.produce()
 			.create_track("other", moq_net::track::Info::default())
 			.unwrap();
-		let aborted = other.append_group(moq_net::Timestamp::unscaled(1), b"{}".as_slice()).unwrap();
+		let aborted = other
+			.append_group(moq_net::Timestamp::unscaled(1), b"{}".as_slice())
+			.unwrap();
 		other.abort(moq_net::Error::GroupTooLarge).unwrap();
 		let open = inner.track.group.replace(aborted).expect("an open group");
 		let _finished = open.finish().unwrap();

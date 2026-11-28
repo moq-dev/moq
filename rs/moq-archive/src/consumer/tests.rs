@@ -351,7 +351,11 @@ async fn a_live_group_with_a_pruned_head_is_dropped() {
 		// moves on past it.
 		let (broadcast, _run) = serve(&archive.store).await;
 		let mut reader = subscribe(&broadcast, "video").await;
-		assert_eq!(next(&mut reader).await, Some((6, expected(timed, 6, 0..2))), "timed {timed}");
+		assert_eq!(
+			next(&mut reader).await,
+			Some((6, expected(timed, 6, 0..2))),
+			"timed {timed}"
+		);
 		assert!(next(&mut reader).await.is_none(), "timed {timed}");
 		assert_eq!(reader.finished().await.unwrap(), Position::group(7));
 	}

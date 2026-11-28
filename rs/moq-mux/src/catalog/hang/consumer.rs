@@ -457,7 +457,9 @@ mod test {
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
-		latest_frame.write(latest_payload).expect("latest catalog frame should write");
+		latest_frame
+			.write(latest_payload)
+			.expect("latest catalog frame should write");
 		latest_frame
 			.finish()
 			.unwrap()
@@ -490,7 +492,11 @@ mod test {
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 
 		old_frame.write(old_payload).expect("old catalog frame should write");
-		old_frame.finish().unwrap().finish().expect("old catalog group should finish");
+		old_frame
+			.finish()
+			.unwrap()
+			.finish()
+			.expect("old catalog group should finish");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
 	}

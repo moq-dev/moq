@@ -539,7 +539,11 @@ impl Container for Wire {
 
 	type Error = Error;
 
-	fn write(&self, group: &mut crate::container::Writer<'_>, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
+	fn write(
+		&self,
+		group: &mut crate::container::Writer<'_>,
+		frames: &[Frame],
+	) -> std::result::Result<(), Self::Error> {
 		let timescale = self.timescale()?;
 		if group.timescale() != Some(timescale) {
 			return Err(Error::TimescaleMismatch {

@@ -1706,7 +1706,8 @@ mod tests {
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		let group = |timestamp: u64| {
 			let mut group = Lazy::new(&track);
-			wire.write(&mut group.writer(), &[raw_frame(timestamp, b"audio", true)]).unwrap();
+			wire.write(&mut group.writer(), &[raw_frame(timestamp, b"audio", true)])
+				.unwrap();
 			group
 		};
 		// A group ending where the next starts leaves nothing between them. The group after the
@@ -1765,7 +1766,8 @@ mod tests {
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		for (timestamp, payload) in [(0, b"audio".as_slice()), (1_000_000, b"".as_slice())] {
 			let mut group = Lazy::new(&track);
-			wire.write(&mut group.writer(), &[raw_frame(timestamp, payload, true)]).unwrap();
+			wire.write(&mut group.writer(), &[raw_frame(timestamp, payload, true)])
+				.unwrap();
 			group.finish().unwrap();
 		}
 		let _track = track.finish().unwrap();

@@ -649,7 +649,7 @@ pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
 pub(crate) struct Lazy {
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
-	append: bool,
+	open: crate::container::writer::Open,
 }
 
 impl Lazy {
@@ -658,24 +658,29 @@ impl Lazy {
 		Self {
 			track: track.clone(),
 			group: None,
-			append: false,
+			open: crate::container::writer::Open::Create,
 		}
 	}
 
 	/// A group on `track` that `append_group` makes with its first frame.
 	pub(crate) fn appending(track: &moq_net::track::Producer) -> Self {
 		Self {
-			append: true,
+			open: crate::container::writer::Open::Append,
+			..Self::new(track)
+		}
+	}
+
+	/// A group on `track` that follows the newest group with nothing between, created out of order.
+	pub(crate) fn following(track: &moq_net::track::Producer) -> Self {
+		Self {
+			open: crate::container::writer::Open::Follow,
 			..Self::new(track)
 		}
 	}
 
 	/// Where a container writes this group's frames.
 	pub(crate) fn writer(&mut self) -> crate::container::Writer<'_> {
-		match self.append {
-			true => crate::container::Writer::new(&self.track, &mut self.group),
-			false => crate::container::Writer::creating(&self.track, &mut self.group),
-		}
+		crate::container::Writer::opening(&self.track, &mut self.group, self.open)
 	}
 
 	/// Write a frame, creating the group with it when it is the first.

@@ -812,7 +812,10 @@ where
 			let open = self.group.as_mut().unwrap();
 			let (duration, bytes) = (frame.duration, frame.payload.len());
 			let keyframe = frame.keyframe;
-			if let Err(err) = self.container.write(&mut Writer::new(&self.inner, &mut open.created), &[frame]) {
+			if let Err(err) = self
+				.container
+				.write(&mut Writer::new(&self.inner, &mut open.created), &[frame])
+			{
 				// A refused first frame leaves no group, so the next write has to open one.
 				if open.created.is_none() {
 					self.group = None;

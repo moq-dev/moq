@@ -89,8 +89,8 @@ pub(crate) fn decode_audio(audio: &legacy::Audio, frame: moq_net::frame::Frame) 
 
 #[cfg(test)]
 mod tests {
-	use crate::container::test_util::Lazy;
 	use super::*;
+	use crate::container::test_util::Lazy;
 	use bytes::{Bytes, BytesMut};
 	use moq_net::{Timescale, Timestamp};
 

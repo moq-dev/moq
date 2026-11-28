@@ -1053,7 +1053,10 @@ mod test {
 			.create_track("test", timed())
 			.unwrap();
 		track
-			.append_group(moq_net::Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"{}"))
+			.append_group(
+				moq_net::Timestamp::from_millis(10_000).unwrap(),
+				bytes::Bytes::from_static(b"{}"),
+			)
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -1082,7 +1085,10 @@ mod test {
 			panic!("the track's own group is there");
 		};
 		assert_eq!(group.start, 10_000);
-		assert!(subscriber.poll_next_group(&waiter).is_pending(), "the refused snapshot published nothing");
+		assert!(
+			subscriber.poll_next_group(&waiter).is_pending(),
+			"the refused snapshot published nothing"
+		);
 	}
 
 	#[test]

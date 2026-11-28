@@ -3,9 +3,9 @@
 pub struct Writer<'a> {
 	track: &'a moq_net::track::Producer,
 	group: &'a mut Option<moq_net::group::Producer>,
-	/// The first frame creates the group out of order, rather than appending it, for tests.
+	/// How the first frame creates the group, for tests.
 	#[cfg(test)]
-	create: bool,
+	open: Open,
 }
 
 impl<'a> Writer<'a> {
@@ -15,25 +15,45 @@ impl<'a> Writer<'a> {
 			track,
 			group,
 			#[cfg(test)]
-			create: false,
+			open: Open::Append,
 		}
 	}
 
-	/// [`Self::new`], creating the group with `create_group` so a test can write groups out of order.
+	/// [`Self::new`], opening the group as `open` says so a test can write groups out of order.
 	#[cfg(test)]
-	pub(crate) fn creating(track: &'a moq_net::track::Producer, group: &'a mut Option<moq_net::group::Producer>) -> Self {
-		Self { track, group, create: true }
+	pub(crate) fn opening(
+		track: &'a moq_net::track::Producer,
+		group: &'a mut Option<moq_net::group::Producer>,
+		open: Open,
+	) -> Self {
+		Self { track, group, open }
 	}
 
 	/// Write a frame, appending the group to the track with it when it is the first.
-	pub fn write_frame<B: moq_net::IntoBytes>(&mut self, timestamp: moq_net::Timestamp, data: B) -> moq_net::Result<()> {
+	pub fn write_frame<B: moq_net::IntoBytes>(
+		&mut self,
+		timestamp: moq_net::Timestamp,
+		data: B,
+	) -> moq_net::Result<()> {
 		match self.group {
 			Some(group) => group.write_frame(timestamp, data),
 			None => {
 				#[cfg(test)]
-				if self.create {
-					*self.group = Some(self.track.create_group(timestamp, data)?);
-					return Ok(());
+				match self.open {
+					Open::Append => {}
+					Open::Create => {
+						*self.group = Some(self.track.create_group(timestamp, data)?);
+						return Ok(());
+					}
+					Open::Follow => {
+						let key = self.track.info().rescale(timestamp)?.value();
+						let from = self.track.largest().map_or(0, |largest| largest.group + 1);
+						if from < key {
+							self.track.skip_groups(from..key);
+						}
+						*self.group = Some(self.track.create_group(timestamp, data)?);
+						return Ok(());
+					}
 				}
 				*self.group = Some(self.track.append_group(timestamp, data)?);
 				Ok(())
@@ -55,4 +75,16 @@ impl<'a> Writer<'a> {
 	pub fn timescale(&self) -> Option<moq_net::Timescale> {
 		self.track.info().timescale
 	}
+}
+
+/// How a test's first frame creates its group.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum Open {
+	/// `append_group`, skipping every start it passes.
+	Append,
+	/// `create_group`, leaving the starts around it unproduced.
+	Create,
+	/// `create_group`, skipping the starts between the newest group and it.
+	Follow,
 }

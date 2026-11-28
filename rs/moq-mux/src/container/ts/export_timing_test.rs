@@ -359,7 +359,7 @@ impl Live {
 				self.tick += 1;
 			}
 		}
-		let boundary = boundary.expect("the stall crosses one group boundary");
+		assert!(boundary.is_some(), "the stall crosses one group boundary");
 		assert!(!tail.is_empty(), "the stall starts within a group");
 		self.advance(resume, legs);
 
@@ -1104,7 +1104,10 @@ async fn a_successor_settles_held_video_across_a_skip_or_restart() {
 				let at = live.tick * VIDEO_US - 1;
 				let mut marker = Lazy::appending(&live.video);
 				HangContainer::Legacy(crate::container::Kind::Video)
-					.write(&mut marker.writer(), &[crate::container::test_util::raw_frame(at, b"", true)])
+					.write(
+						&mut marker.writer(),
+						&[crate::container::test_util::raw_frame(at, b"", true)],
+					)
 					.unwrap();
 				marker.finish().unwrap();
 			} else {

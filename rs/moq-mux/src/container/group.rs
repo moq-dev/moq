@@ -117,9 +117,9 @@ impl<F: Container> GroupConsumer<F> {
 
 #[cfg(test)]
 mod tests {
-	use crate::container::test_util::Lazy;
 	use super::*;
 	use crate::catalog::hang::Container as Hang;
+	use crate::container::test_util::Lazy;
 
 	/// A millisecond track: the frames written here carry timestamps. It sets no max age, so a
 	/// group finished whole stays readable after its span has passed.
@@ -257,7 +257,9 @@ mod tests {
 		assert_eq!(first.payload, b"keyframe".as_slice());
 		assert_eq!(first.duration, None);
 
-		format.write(&mut group.writer(), &[frame(1_020_000, b"delta", false)]).unwrap();
+		format
+			.write(&mut group.writer(), &[frame(1_020_000, b"delta", false)])
+			.unwrap();
 		let second = live.read().now_or_never().expect("held the frame").unwrap().unwrap();
 		assert_eq!(second.payload, b"delta".as_slice());
 		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
@@ -285,7 +287,9 @@ mod tests {
 			)
 			.unwrap();
 		// Frames past the malformed object are never returned.
-		format.write(&mut group.writer(), &[frame(1_040_000, b"after", false)]).unwrap();
+		format
+			.write(&mut group.writer(), &[frame(1_040_000, b"after", false)])
+			.unwrap();
 		group.finish().unwrap();
 
 		let first = live.read().await.unwrap().unwrap();

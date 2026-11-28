@@ -1254,7 +1254,7 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	while let Some(group) = track.recv_group().await.unwrap() {
 		starts.push(group.start);
 	}
-	assert_eq!(starts, [200]);
+	assert_eq!(starts, [200_000]);
 }
 
 /// An audio-only FLV of raw AAC frames at `timestamps` (ms).

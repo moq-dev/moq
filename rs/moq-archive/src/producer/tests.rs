@@ -181,7 +181,10 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	);
 	let info = Info::decode(&get(&store, "video/.info").await.unwrap()).unwrap();
 	assert_eq!(info.timescale, Some(1000));
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 4001, frame: 0 })));
+	assert_eq!(
+		end(&store, "video").await,
+		Some(End::Finish(At { group: 4001, frame: 0 }))
+	);
 	assert!(complete(&store).await);
 }
 
@@ -216,7 +219,10 @@ async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	finished(task).await;
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(stored.len(), 2);
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 3001, frame: 0 })));
+	assert_eq!(
+		end(&store, "video").await,
+		Some(End::Finish(At { group: 3001, frame: 0 }))
+	);
 }
 
 #[tokio::test(start_paused = true)]
@@ -650,7 +656,10 @@ async fn markers_wait_for_the_listing_to_end() {
 
 	broadcast.close();
 	finished(task).await;
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 1000, frame: 2 })));
+	assert_eq!(
+		end(&store, "video").await,
+		Some(End::Finish(At { group: 1000, frame: 2 }))
+	);
 	// An error end is recorded, and the broadcast still completes.
 	assert_eq!(end(&store, "audio").await, Some(End::Error(64 + 7)));
 	assert!(complete(&store).await);
