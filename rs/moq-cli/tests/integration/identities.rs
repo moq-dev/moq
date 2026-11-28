@@ -296,9 +296,15 @@ async fn replacement(version: &str) {
 	changed(&mut media_follow).await;
 	let returned = viewer.request("live/media", None).await.unwrap();
 	let mut returned = returned.track("audio").unwrap().subscribe(None).await.unwrap();
+	// A latest-group subscription drops a group the moment a newer one arrives, even with its
+	// frame read off but not yet its end. Write the next group only once the first is whole.
+	assert_eq!(
+		read(&mut returned).await,
+		"A:2",
+		"the fallback starts at A's newest group"
+	);
 	write(&first.media, "A:3");
-	let returned_frame = read(&mut returned).await;
-	assert!(returned_frame.starts_with("A:"), "fallback read {returned_frame}");
+	assert_eq!(read(&mut returned).await, "A:3");
 	assert_eq!(read(&mut subscription).await, "A:3");
 }
 
