@@ -228,8 +228,9 @@ Answering(u) ==
 Routable(w) == IF w = "O" THEN TRUE ELSE alive[w] = "up" /\ front[w].end # "err"
 \* A route still in the table: a dead relay's route stays until its session's close is
 \* seen (a claim's debounce). Its copies have failed and nothing new is asked through
-\* it, but a front holds a track rather than end it while it shows: a session fails the
-\* copies it carries before it closes their sources, and that loss judges no track.
+\* it, but a front holds a track rather than end it while it shows: a session closes the
+\* sources of the copies it carries before it fails the copies (`SubscriberDriver::abort`),
+\* so each failure reads as its route's loss, which judges no track.
 Shows(w) == Routable(w) \/ (w # "O" /\ alive[w] = "shown")
 
 \* A complete copy (`TrackState::is_complete` once every group below the end
