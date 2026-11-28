@@ -5372,6 +5372,42 @@ test("draft-23: a group stream numbers tied frames past each other with TIMESTAM
 	}
 });
 
+// A lite-05/06 copy may hold a timestamp below its predecessor, which draft-23 can't carry: the
+// stream resets at that frame (TimestampMismatch, which moq-transport carries as INTERNAL_ERROR),
+// as lite-07 egress refuses it. Mirrors the Rust `TimedIds::next`.
+test("draft-23: a group stream refuses a decreasing timestamp", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(
+		fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null, unchecked: true }),
+	);
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 7n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const group = track.createGroup(1000n);
+		for (const ms of [1000, 1040, 1020])
+			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(ms) });
+		group.finish();
+
+		const reader = new Reader(await nextUni(fx.uni), undefined, version);
+		expect((await GroupMessage.decode(reader, version)).groupId).toBe(1000n);
+		// The reset may discard the objects before it, but the stream never ends cleanly.
+		const drain = async () => {
+			while (!(await reader.done())) {
+				await reader.u53(); // Object ID delta
+				await reader.read(await reader.u53()); // empty properties
+				await reader.read(await reader.u53()); // payload
+			}
+		};
+		await expect(drain()).rejects.toMatchObject({ code: StreamCode.Internal });
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
 // A copy that never held frame 0 can't prove the Object IDs its frames take, so it serves none
 // rather than guessing. Mirrors the Rust `TimedIds::at` refusing with Unsupported.
 test("draft-23: a group without its first frame is not served", async () => {

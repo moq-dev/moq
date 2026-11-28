@@ -1039,13 +1039,14 @@ impl GroupState {
 		self.log.get(index)
 	}
 
-	/// Each frame's moq-timestamp Object ID in order, from frame 0 through any in flight, for
-	/// the group starting at `start`; `None` once this copy no longer holds frame 0.
+	/// Each frame's moq-timestamp Object ID and timestamp value in order, from frame 0 through
+	/// any in flight, for the group starting at `start`; `None` once this copy no longer holds
+	/// frame 0.
 	///
 	/// Derived from timestamps alone, so every copy holding frame 0 agrees on them, while a
 	/// copy without it cannot know where a run of tied timestamps pushed the IDs.
 	#[cfg(feature = "async")]
-	fn timed_ids(&self, start: u64) -> Option<impl Iterator<Item = u64> + '_> {
+	fn timed_ids(&self, start: u64) -> Option<impl Iterator<Item = (u64, u64)> + '_> {
 		// A relayed copy from a stream missing the group's head, or whose IDs already strayed
 		// from the derived ones, can't vouch for where its IDs fall.
 		if self.held() != 0 || self.wire().is_some_and(|wire| !wire.first_object || wire.sparse) {
@@ -1057,7 +1058,7 @@ impl GroupState {
 		Some(stamps.chain(partial).map(move |timestamp| {
 			let (id, _) = crate::ietf::object::timestamp_object_id(start, prior, timestamp.value());
 			prior = Some(id);
-			id
+			(id, timestamp.value())
 		}))
 	}
 
@@ -4592,6 +4593,12 @@ impl Consumer {
 	/// when it is not written yet or this copy no longer holds frame 0.
 	#[cfg(feature = "async")]
 	pub(crate) fn timed_id(&self, index: u64) -> Option<u64> {
+		self.timed_entry(index).map(|(id, _)| id)
+	}
+
+	/// Frame `index`'s moq-timestamp Object ID and timestamp value, as [`Self::timed_id`].
+	#[cfg(feature = "async")]
+	pub(crate) fn timed_entry(&self, index: u64) -> Option<(u64, u64)> {
 		let index = usize::try_from(index).ok()?;
 		self.cursor.state.read().timed_ids(self.start)?.nth(index)
 	}
@@ -4602,7 +4609,7 @@ impl Consumer {
 	pub(crate) fn last_timed_id(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
 		let last = state.next_index.checked_sub(1)?;
-		if let Some(id) = state.timed_ids(self.start).and_then(|mut ids| ids.nth(last)) {
+		if let Some((id, _)) = state.timed_ids(self.start).and_then(|mut ids| ids.nth(last)) {
 			return Some(id);
 		}
 		match state.timeline {
@@ -4617,7 +4624,7 @@ impl Consumer {
 	pub(crate) fn timed_frame(&self, id: u64) -> Option<u64> {
 		let state = self.cursor.state.read();
 		let mut ids = state.timed_ids(self.start)?;
-		Some(match ids.position(|timed| timed >= id) {
+		Some(match ids.position(|(timed, _)| timed >= id) {
 			Some(index) => index as u64,
 			None => state.next_index as u64,
 		})

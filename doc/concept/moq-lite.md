@@ -432,8 +432,8 @@ moq-lite 07 sends each after a stream's first as an unsigned delta. A receiver p
 gets over moq-lite 05 and 06 without checking them, since an older publisher
 stamps an untimed track there with send times, which look like media time, and an
 older group fetched later would look like a rewind. A relay serves them on to
-moq-lite 05 and 06, while a moq-lite 07 subscriber gets an error for a group whose
-timestamps decrease. On moq-transport draft-23 and later, a timed frame's
+moq-lite 05 and 06, while a moq-lite 07 or moq-transport draft-23 subscriber gets
+an error for a group whose timestamps decrease. On moq-transport draft-23 and later, a timed frame's
 timestamp is `Group ID + Object ID - TIMESTAMP_TIE` in the track's `ID_TIMESCALE`;
 earlier drafts use `TIMESCALE`, with every frame at its Group ID.
 

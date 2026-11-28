@@ -7670,16 +7670,16 @@ impl FetchGroupWrite {
 		&mut self,
 		fields: Option<&crate::model::object::Fields>,
 		timestamp: crate::Timestamp,
-	) -> (u64, Option<Option<u64>>) {
-		if self.same_mode {
+	) -> Result<(u64, Option<Option<u64>>), Error> {
+		Ok(if self.same_mode {
 			// A plain relayed object elides `fields` when its wire Object ID equals its ordinal.
 			(fields.map_or(self.index, |fields| fields.id), None)
 		} else if self.timed {
-			let (id, tie) = self.ids.next(timestamp);
+			let (id, tie) = self.ids.next(timestamp)?;
 			(id, Some(tie))
 		} else {
 			(self.index, Some(None))
-		}
+		})
 	}
 
 	fn object<'a>(&self, frame: &'a frame::Object, tie: Option<Option<u64>>) -> Result<FetchObjectInfo<'a>, Error> {
@@ -7787,7 +7787,7 @@ impl FetchGroupWrite {
 					match step {
 						FillStep::Batch => self.state = FetchGroupState::Batch { next: 0, payload: None },
 						FillStep::Partial(frame) => {
-							let (id, tie) = self.next_id(frame.fields.as_deref(), frame.timestamp);
+							let (id, tie) = self.next_id(frame.fields.as_deref(), frame.timestamp)?;
 							self.index = id;
 							if Self::capped(self.slice, self.index) {
 								return Poll::Ready(self.finish());
@@ -7837,7 +7837,7 @@ impl FetchGroupWrite {
 						return Poll::Ready(self.finish());
 					}
 					let frame = frame.clone();
-					let (id, tie) = self.next_id(frame.fields.as_deref(), frame.frame.timestamp);
+					let (id, tie) = self.next_id(frame.fields.as_deref(), frame.frame.timestamp)?;
 					self.index = id;
 					if Self::capped(self.slice, self.index) {
 						return Poll::Ready(self.finish());
@@ -8515,7 +8515,10 @@ impl GroupServe {
 									// A plain relayed object elides `fields` when its wire Object ID equals its ordinal.
 									(batched.fields.as_ref().map_or(ordinal, |fields| fields.id), None)
 								} else if self.timed {
-									let (id, tie) = self.ids.next(batched.frame.timestamp);
+									let (id, tie) = match self.ids.next(batched.frame.timestamp) {
+										Ok(next) => next,
+										Err(err) => break 'serve Err(err),
+									};
 									(id, Some(tie))
 								} else {
 									(ordinal, Some(None))
@@ -8572,7 +8575,10 @@ impl GroupServe {
 											// A plain relayed object elides `fields` when its wire Object ID equals its ordinal.
 											(next.fields.as_ref().map_or(ordinal, |fields| fields.id), None)
 										} else if self.timed {
-											let (id, tie) = self.ids.next(next.timestamp);
+											let (id, tie) = match self.ids.next(next.timestamp) {
+												Ok(next) => next,
+												Err(err) => break 'serve Err(err),
+											};
 											(id, Some(tie))
 										} else {
 											(ordinal, Some(None))
@@ -22402,7 +22408,8 @@ fn timed_end(group: &group::Consumer, frame: u64) -> Option<u64> {
 #[derive(Clone, Copy, Debug)]
 struct TimedIds {
 	start: u64,
-	prior: Option<u64>,
+	/// The previous frame's ID and timestamp value.
+	prior: Option<(u64, u64)>,
 }
 
 impl TimedIds {
@@ -22415,7 +22422,7 @@ impl TimedIds {
 	fn at(group: &group::Consumer) -> Result<Self, Error> {
 		let prior = match group.index() {
 			0 => None,
-			index => Some(group.timed_id(index - 1).ok_or(Error::Unsupported)?),
+			index => Some(group.timed_entry(index - 1).ok_or(Error::Unsupported)?),
 		};
 		Ok(Self {
 			start: group.start,
@@ -22425,15 +22432,21 @@ impl TimedIds {
 
 	/// The lowest ID the next frame can take.
 	fn next_min(&self) -> u64 {
-		self.prior.map_or(0, |prior| prior.saturating_add(1))
+		self.prior.map_or(0, |(prior, _)| prior.saturating_add(1))
 	}
 
 	/// The next frame's ID and its `TIMESTAMP_TIE`, `None` when zero. Its `timestamp` is in
-	/// the track's timescale, which every frame a group holds is.
-	fn next(&mut self, timestamp: crate::Timestamp) -> (u64, Option<u64>) {
-		let (id, tie) = super::object::timestamp_object_id(self.start, self.prior, timestamp.value());
-		self.prior = Some(id);
-		(id, (tie > 0).then_some(tie))
+	/// the track's timescale, which every frame a group holds is. A timestamp below the
+	/// previous one is [`Error::TimestampMismatch`], as on lite-07: the draft forbids it, and
+	/// a lite-05/06 copy can still hold one.
+	fn next(&mut self, timestamp: crate::Timestamp) -> Result<(u64, Option<u64>), Error> {
+		let dts = timestamp.value();
+		if self.prior.is_some_and(|(_, prior)| dts < prior) {
+			return Err(Error::TimestampMismatch);
+		}
+		let (id, tie) = super::object::timestamp_object_id(self.start, self.prior.map(|(id, _)| id), dts);
+		self.prior = Some((id, dts));
+		Ok((id, (tie > 0).then_some(tie)))
 	}
 }
 
@@ -23587,6 +23600,37 @@ mod compression_tests {
 			assert_eq!(group_last_id_exact(&consumer, true), !headless, "headless={headless}");
 			assert!(group_last_id_exact(&consumer, false), "headless={headless}");
 		}
+	}
+
+	/// A lite-05/06 copy may hold a timestamp below its predecessor, which draft-23 can't carry:
+	/// the ID assignment refuses it, whether it reads from frame 0 or resumes past frame 0.
+	#[test]
+	fn timed_ids_refuse_a_decreasing_timestamp() {
+		let ms = |ms| Timestamp::from_millis(ms).unwrap();
+		let track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info {
+				unchecked: true,
+				..track::Info::timed().with_timescale(Timescale::MILLI)
+			},
+		);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		for at in [5, 40, 20] {
+			group.write_frame(ms(at), b"x".as_slice()).unwrap();
+		}
+		let mut consumer = group.consume();
+
+		let mut ids = TimedIds::new(0);
+		assert_eq!(ids.next(ms(5)).unwrap(), (5, None));
+		assert_eq!(ids.next(ms(40)).unwrap(), (40, None));
+		assert!(matches!(ids.next(ms(20)), Err(Error::TimestampMismatch)));
+
+		consumer.skip_to(2);
+		let mut ids = TimedIds::at(&consumer).unwrap();
+		assert!(matches!(ids.next(ms(20)), Err(Error::TimestampMismatch)));
+		// A tie is not a decrease.
+		assert_eq!(ids.next(ms(40)).unwrap(), (41, Some(1)));
 	}
 
 	/// A draft-23 copy relayed in the same scheme ends one past its last relayed Object ID, which

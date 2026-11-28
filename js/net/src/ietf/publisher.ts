@@ -18,6 +18,7 @@ import {
 	SessionError,
 	StreamCode,
 	StreamError,
+	TimestampMismatch,
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
@@ -2703,6 +2704,8 @@ class TimedIds {
 	readonly #start: bigint;
 	readonly #timescale: Timescale;
 	#prior?: bigint;
+	// The previous frame's timestamp, in the timescale.
+	#priorDts?: bigint;
 	// The frame `next` reads, which follows the last.
 	#index = 0;
 
@@ -2718,17 +2721,21 @@ class TimedIds {
 
 	/**
 	 * The ID of `read`, the next frame, and its `TIMESTAMP_TIE` when non-zero. A copy that no longer
-	 * holds the frames before it cannot prove its ID, so the read fails.
+	 * holds the frames before it cannot prove its ID, so the read fails. A timestamp below the previous
+	 * one throws {@link TimestampMismatch}, as on lite-07: the draft forbids it, and a lite-05/06 copy
+	 * can still hold one.
 	 */
 	next(read: ReadGroupFrame): { id: bigint; tie?: bigint } {
 		if (read.index !== this.#index)
 			throw new StreamError(StreamCode.Internal, {
 				message: "the group's head is gone, so its Object IDs are unknown",
 			});
-		this.#index++;
 		const dts = BigInt(floorAt(read.frame.timestamp, this.#timescale));
+		if (this.#priorDts !== undefined && dts < this.#priorDts) throw new TimestampMismatch();
+		this.#index++;
 		const { id, tie } = timestampObjectId(this.#start, this.#prior, dts);
 		this.#prior = id;
+		this.#priorDts = dts;
 		return { id, tie: tie > 0n ? tie : undefined };
 	}
 }
