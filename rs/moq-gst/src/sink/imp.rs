@@ -2472,7 +2472,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
 		track
-			.append_group(moq_net::Timestamp::unscaled(0))
+			.append_group(moq_net::Timestamp::unscaled(0), bytes::Bytes::new())
 			.unwrap()
 			.finish()
 			.unwrap();

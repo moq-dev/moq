@@ -37,6 +37,8 @@ mod error;
 mod feed;
 mod pipeline;
 mod rung;
+#[cfg(test)]
+mod testing;
 
 pub use config::{Config, Sessions};
 pub use ladder::{Ladder, Rung};
@@ -299,6 +301,7 @@ impl Drop for Transcoder {
 mod tests {
 
 	use super::*;
+	use crate::testing::{self, *};
 
 	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
 	/// run future owns published state that must end deliberately when abandoned. The
@@ -434,7 +437,7 @@ mod tests {
 
 			self.updates += 1;
 			let at = Self::stamp(self.updates);
-			let mut group = self.catalog.append_group(at, catalog.to_json().unwrap()).unwrap();
+			let group = self.catalog.append_group(at, catalog.to_json().unwrap()).unwrap();
 			group.finish().unwrap();
 		}
 
@@ -630,17 +633,11 @@ mod tests {
 	/// `groups` groups of `frames` gray frames each, encoded with openh264.
 	fn source_broadcast(groups: u64, frames: u64) -> Source {
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
-		source_broadcast_keyed(groups, frames, info, |sequence, _| sequence)
+		source_broadcast_on(groups, frames, info)
 	}
 
-	/// [`source_broadcast`] on a track described by `info`, each group keyed by `key` from its
-	/// sequence and its first frame's microseconds.
-	fn source_broadcast_keyed(
-		groups: u64,
-		frames: u64,
-		info: moq_net::track::Info,
-		key: impl Fn(u64, u64) -> u64,
-	) -> Source {
+	/// [`source_broadcast`] on a track described by `info`.
+	fn source_broadcast_on(groups: u64, frames: u64, info: moq_net::track::Info) -> Source {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
@@ -662,32 +659,8 @@ mod tests {
 			.unwrap();
 
 		let track = broadcast.create_track("video", info).unwrap();
-
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-
 		for sequence in 0..groups {
-			let start = key(sequence, sequence * frames * 33_333);
-			let mut group = track.create_group(start.into()).unwrap();
-			for index in 0..frames {
-				let timestamp = (sequence * frames + index) * 33_333;
-				if index == 0 {
-					encoder.cut().unwrap();
-				}
-				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
-				while let Some(encoded) = encoder.receive().unwrap() {
-					let frame = hang::container::Frame {
-						timestamp: encoded.timestamp,
-						payload: encoded.payload,
-					};
-					frame.write_to(&mut group).unwrap();
-				}
-			}
+			let group = media_group(&track, Open::Create, testing::frames(sequence * frames, frames));
 			group.finish().unwrap();
 		}
 
@@ -738,33 +711,14 @@ mod tests {
 			tasks.spawn(serving);
 		}
 
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
 		for sequence in 0..3 {
-			let mut group = source._track.create_group(sequence.into()).unwrap();
-			encoder.cut().unwrap();
-			let timestamps: Vec<_> = (0..5).map(|index| (sequence * 5 + index) * 33_333).collect();
-			for &timestamp in &timestamps {
-				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
-				while let Some(encoded) = encoder.receive().unwrap() {
-					hang::container::Frame {
-						timestamp: encoded.timestamp,
-						payload: encoded.payload,
-					}
-					.write_to(&mut group)
-					.unwrap();
-				}
-			}
+			let group = media_group(&source._track, Open::Create, frames(sequence * 5, 5));
+			let timestamps: Vec<_> = (0..5).map(|index| (sequence * 5 + index) * FRAME).collect();
 			group.finish().unwrap();
 
 			for (name, subscriber) in &mut subscribers {
 				let mut group = subscriber.next_group().await.unwrap().unwrap();
-				assert_eq!(group.start, sequence, "{name} changed the group start");
+				assert_eq!(group.start, timestamps[0], "{name} changed the group start");
 				let mut received = Vec::new();
 				while let Some(payload) = group.read_frame().await.unwrap() {
 					let frame = hang::container::Frame::decode(payload.payload).unwrap();
@@ -1146,8 +1100,7 @@ mod tests {
 		let source_fetches = source._track.requests();
 		// The live edge, left open: a live encode that opened its copy would hold the session
 		// until it ends, which it never does here.
-		let mut live = source._track.create_group(9u64.into()).unwrap();
-		write_keyframe(&mut live);
+		let live = media_group(&source._track, Open::Create, frames(9, 1));
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1299,8 +1252,7 @@ mod tests {
 		let mut rung = subscribe(&consumer, "video/120p").await;
 		let mut catalogs =
 			moq_mux::catalog::hang::Consumer::<()>::new(consumer.track(hang::Catalog::DEFAULT_NAME).unwrap());
-		let mut group = source._track.create_group(0u64.into()).unwrap();
-		write_keyframe(&mut group);
+		let group = media_group(&source._track, Open::Create, frames(0, 1));
 		let mut output = rung.recv_group().await.unwrap().expect("the rung's first group");
 
 		// The source ends its catalog while its media is still mid-group.
@@ -1379,7 +1331,7 @@ mod tests {
 		assert_eq!(passthrough.broadcast.as_ref().map(|b| b.as_ref()), Some("."));
 
 		// Subscribing to the rung starts the live loop, which mirrors source
-		// group sequences 1:1.
+		// group keys 1:1.
 		let mut subscriber = consumer
 			.track("video/120p")
 			.unwrap()
@@ -1388,7 +1340,7 @@ mod tests {
 			.unwrap()
 			.ordered();
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
-		assert!(group.start <= 1, "unexpected sequence {}", group.start);
+		assert!(group.start <= 5 * FRAME, "unexpected key {}", group.start);
 		let payload = group.read_frame().await.unwrap().unwrap();
 		let frame = hang::container::Frame::decode(payload.payload).unwrap();
 		assert!(
@@ -1750,8 +1702,7 @@ mod tests {
 	#[tokio::test]
 	async fn retirement_rides_out_an_open_live_group() {
 		let mut source = source_catalog(320, 240);
-		let mut group = source._track.create_group(0u64.into()).unwrap();
-		write_keyframe(&mut group);
+		let group = media_group(&source._track, Open::Create, frames(0, 1));
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -2069,26 +2020,7 @@ mod tests {
 		let _source_fetches = source._track.requests();
 
 		// Two frames, so the output's largest moves once both are encoded.
-		let mut group = source._track.create_group(0u64.into()).unwrap();
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		encoder.cut().unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-		for timestamp in [0, 33_333] {
-			encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
-			while let Some(encoded) = encoder.receive().unwrap() {
-				hang::container::Frame {
-					timestamp: encoded.timestamp,
-					payload: encoded.payload,
-				}
-				.write_to(&mut group)
-				.unwrap();
-			}
-		}
+		let group = media_group(&source._track, Open::Create, frames(0, 2));
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -2158,29 +2090,7 @@ mod tests {
 			// demand for as long as the caller holds it and nothing else serves it.
 			let _source_fetches = source._track.requests();
 
-			let mut encoder = moq_video::encode::Encoder::new(&{
-				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-				config.kind = moq_video::encode::Kind::Software;
-				config
-			})
-			.unwrap();
-			let gray = vec![0x80u8; 320 * 240 * 4];
-			let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
-				encoder.cut().unwrap();
-				for &timestamp in timestamps {
-					encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
-					while let Some(encoded) = encoder.receive().unwrap() {
-						hang::container::Frame {
-							timestamp: encoded.timestamp,
-							payload: encoded.payload,
-						}
-						.write_to(group)
-						.unwrap();
-					}
-				}
-			};
-			let mut group = source._track.create_group(0u64.into()).unwrap();
-			write(&mut group, &[0, 33_333]);
+			let group = media_group(&source._track, Open::Create, frames(0, 2));
 
 			let config = Config {
 				ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -2218,8 +2128,7 @@ mod tests {
 
 			// Queue the next source group first, so it is waiting for the live
 			// path by the time it sees the demand go.
-			let mut next = source._track.create_group(1u64.into()).unwrap();
-			write(&mut next, &[66_666]);
+			let _next = media_group(&source._track, Open::Create, frames(2, 1));
 			drop(fetching);
 
 			// Race the two outcomes rather than bound the wait: the decoder and
@@ -2257,27 +2166,6 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_lost_source_group_costs_only_that_group() {
 		let source = source_catalog(320, 240);
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-		let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
-			encoder.cut().unwrap();
-			for &timestamp in timestamps {
-				encoder.encode(&gray_frame(&gray, timestamp)).unwrap();
-				while let Some(encoded) = encoder.receive().unwrap() {
-					hang::container::Frame {
-						timestamp: encoded.timestamp,
-						payload: encoded.payload,
-					}
-					.write_to(group)
-					.unwrap();
-				}
-			}
-		};
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -2333,8 +2221,7 @@ mod tests {
 		assert!(max.is_some(), "the feed asks for its publisher's history");
 
 		// The live path opens output group 0 on the source's first frame.
-		let mut lost = source._track.create_group(0u64.into()).unwrap();
-		write(&mut lost, &[0, 33_333]);
+		let lost = media_group(&source._track, Open::Create, frames(0, 2));
 		let rung = consumer.track("video/120p").unwrap();
 		let mut edge = rung.clone();
 		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
@@ -2351,23 +2238,22 @@ mod tests {
 		assert!(partial.await.is_err(), "the lost group was finished short");
 
 		// The next group arrives whole.
-		let mut next = source._track.create_group(1u64.into()).unwrap();
-		write(&mut next, &[66_666, 99_999]);
+		let next = media_group(&source._track, Open::Create, frames(2, 2));
 		next.finish().unwrap();
 
 		loop {
 			match edge.largest().await {
-				Some(position) if (position.group, position.frame) >= (1, 1) => break,
+				Some(position) if (position.group, position.frame) >= (2 * FRAME, 1) => break,
 				Some(_) => {}
 				None => panic!("the rung ended with its lost source group"),
 			}
 		}
-		let mut fetched = rung.fetch_group(1, None).await.unwrap();
+		let mut fetched = rung.fetch_group(2 * FRAME, None).await.unwrap();
 		let mut frames = 0;
-		while fetched.read_frame().await.expect("group 1 failed").is_some() {
+		while fetched.read_frame().await.expect("the next group failed").is_some() {
 			frames += 1;
 		}
-		assert_eq!(frames, 2, "group 1 lost frames");
+		assert_eq!(frames, 2, "the next group lost frames");
 
 		transcoder.abort();
 	}
@@ -2379,28 +2265,6 @@ mod tests {
 	async fn a_rung_skips_what_its_source_skips() {
 		const FRAME: u64 = 33_333;
 		let source = source_catalog(320, 240);
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-		let mut write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
-			encoder.cut().unwrap();
-			for index in frames {
-				encoder.encode(&gray_frame(&gray, index * FRAME)).unwrap();
-				while let Some(encoded) = encoder.receive().unwrap() {
-					hang::container::Frame {
-						timestamp: encoded.timestamp,
-						payload: encoded.payload,
-					}
-					.write_to(group)
-					.unwrap();
-				}
-			}
-		};
-		let at = |index: u64| moq_net::Timestamp::from_micros(index * FRAME).unwrap();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -2435,16 +2299,13 @@ mod tests {
 		};
 
 		// Two frames, then a pause: the group ends whole two seconds before the next one starts.
-		let mut first = source._track.append_group(at(0)).unwrap();
-		write(&mut first, 0..2);
+		let first = media_group(&source._track, Open::Append, frames(0, 2));
 		first.finish_at(2 * FRAME).unwrap();
 		reach(0).await;
-		let mut lost = source._track.append_group(at(60)).unwrap();
-		write(&mut lost, 60..62);
+		let lost = media_group(&source._track, Open::Append, frames(60, 2));
 		reach(60 * FRAME).await;
 		lost.abort(moq_net::Error::Old).unwrap();
-		let mut last = source._track.append_group(at(150)).unwrap();
-		write(&mut last, 150..152);
+		let last = media_group(&source._track, Open::Append, frames(150, 2));
 		last.finish().unwrap();
 		reach(150 * FRAME).await;
 
@@ -2467,7 +2328,7 @@ mod tests {
 	}
 
 	/// Two transcoders fed the same source publish groups that mirror the
-	/// source's sequences and timestamps rather than anything numbered per
+	/// source's keys and timestamps rather than anything numbered per
 	/// instance.
 	#[tokio::test]
 	async fn two_instances_mirror_source_groups() {
@@ -2484,7 +2345,7 @@ mod tests {
 		let expected: Vec<_> = (0..2u64)
 			.map(|sequence| {
 				(
-					sequence,
+					sequence * 5 * FRAME,
 					(0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect::<Vec<_>>(),
 				)
 			})
@@ -2511,7 +2372,7 @@ mod tests {
 			let rung = consumer.track("video/120p").unwrap();
 			let mut groups = Vec::new();
 			for sequence in 0..2 {
-				let mut fetched = rung.fetch_group(sequence, None).await.unwrap();
+				let mut fetched = rung.fetch_group(sequence * 5 * FRAME, None).await.unwrap();
 				let mut timestamps = Vec::new();
 				while let Some(payload) = fetched.read_frame().await.unwrap() {
 					let frame = hang::container::Frame::decode(payload.payload).unwrap();
@@ -2525,14 +2386,12 @@ mod tests {
 		}
 	}
 
-	/// A source keyed finer than microseconds keeps its keys on every rung, so a cold fetch of an
-	/// output group transcodes the source group live serves there, rather than a group whose key
-	/// lost the source's precision.
+	/// A source on a nanosecond track keeps its timescale on every rung, so a cold fetch of an
+	/// output group transcodes the source group live serves at the same key.
 	#[tokio::test]
 	async fn a_finer_source_fetches_the_group_live_serves() {
-		// Each group starts a nanosecond past its first frame, which microseconds can't name.
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::NANO);
-		let source = source_broadcast_keyed(2, 5, info, |_, first| first * 1_000 + 1);
+		let source = source_broadcast_on(2, 5, info);
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
@@ -2587,15 +2446,15 @@ mod tests {
 			.ordered();
 		let group = subscriber.next_group().await.unwrap().unwrap();
 		let served = timestamps(group).await;
-		assert_eq!(served, (166_665_001, expected(1)));
+		assert_eq!(served, (166_665_000, expected(1)));
 		live.abort();
 
 		// A fresh instance has neither group cached, so each fetch fills from the source.
 		let (rung, cold) = instance().await;
-		let fetched = timestamps(rung.fetch_group(166_665_001, None).await.unwrap()).await;
+		let fetched = timestamps(rung.fetch_group(166_665_000, None).await.unwrap()).await;
 		assert_eq!(fetched, served, "a cold fetch serves what live served at the same key");
-		let first = timestamps(rung.fetch_group(1, None).await.unwrap()).await;
-		assert_eq!(first, (1, expected(0)));
+		let first = timestamps(rung.fetch_group(0, None).await.unwrap()).await;
+		assert_eq!(first, (0, expected(0)));
 		cold.abort();
 	}
 
@@ -2985,8 +2844,7 @@ mod tests {
 			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
 
 			let mut rung = subscribe(&consumer, "video/120p").await;
-			let mut group = source._track.create_group(0u64.into()).unwrap();
-			write_keyframe(&mut group);
+			let group = media_group(&source._track, Open::Create, frames(0, 1));
 			group.finish().unwrap();
 			match finish {
 				true => drop(source._track.clone().finish().unwrap()),

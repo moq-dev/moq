@@ -366,6 +366,7 @@ async fn decode_group(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::testing::*;
 
 	/// A feed of a 320x240 avc3 source track named `video`, decoded in software.
 	fn feed(source: &moq_net::broadcast::Producer) -> Feed {
@@ -383,40 +384,6 @@ mod tests {
 		}
 		.decoder();
 		Feed::new(source.consume(), "video".into(), config, decoder)
-	}
-
-	/// Write `count` gray frames at 30 fps from `first` (a frame index) into `group`, opening on
-	/// a keyframe.
-	fn write(group: &mut moq_net::group::Producer, first: u64, count: u64) {
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-		for index in first..first + count {
-			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
-			let timestamp = moq_net::Timestamp::from_micros(index * 33_333).unwrap();
-			encoder.encode(&moq_video::Frame::new(surface, timestamp)).unwrap();
-			while let Some(encoded) = encoder.receive().unwrap() {
-				hang::container::Frame {
-					timestamp: encoded.timestamp,
-					payload: encoded.payload,
-				}
-				.write_to(group)
-				.unwrap();
-			}
-		}
-		encoder.flush().unwrap();
-		while let Some(encoded) = encoder.receive().unwrap() {
-			hang::container::Frame {
-				timestamp: encoded.timestamp,
-				payload: encoded.payload,
-			}
-			.write_to(group)
-			.unwrap();
-		}
 	}
 
 	/// Read one group off `listener`: its key, how many frames it carried, and whether it
@@ -452,8 +419,7 @@ mod tests {
 		let mut eager = feed.listen();
 
 		// Two seconds at 30 fps, cached whole by the time the feed reads it.
-		let mut group = track.create_group(0u64.into()).unwrap();
-		write(&mut group, 0, 60);
+		let group = media_group(&track, Open::Create, frames(0, 60));
 		group.finish().unwrap();
 
 		assert_eq!(read_group(&mut eager).await, (0, 60, true));
@@ -487,7 +453,6 @@ mod tests {
 	/// group above them, across a pause past a whole group's End and past a lost group too.
 	#[tokio::test]
 	async fn the_source_skips_reach_the_listeners() {
-		const FRAME: u64 = 33_333;
 		let source = moq_net::broadcast::Info::default().produce();
 		let track = source
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
@@ -496,33 +461,28 @@ mod tests {
 		let mut listener = feed.listen();
 		let mut demand = track.demand();
 		while !demand.wanted_changed().await.unwrap() {}
-		let at = |index: u64| moq_net::Timestamp::from_micros(index * FRAME).unwrap();
 
 		// Two frames, then a pause: the group ends whole well before the next one starts.
-		let mut first = track.append_group(at(0)).unwrap();
-		write(&mut first, 0, 2);
+		let first = media_group(&track, Open::Append, frames(0, 2));
 		first.finish_at(2 * FRAME).unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(0));
 		assert_eq!(next_seen(&mut listener).await, Seen::End(Some(2 * FRAME)));
 
 		// Appending says nothing starts since the previous group, which the feed names in full.
-		let mut lost = track.append_group(at(60)).unwrap();
-		write(&mut lost, 60, 2);
+		let lost = media_group(&track, Open::Append, frames(60, 2));
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(1..60 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(60 * FRAME));
 		lost.abort(moq_net::Error::Cancel).unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::Lost);
 
-		let mut last = track.append_group(at(150)).unwrap();
-		write(&mut last, 150, 2);
+		let last = media_group(&track, Open::Append, frames(150, 2));
 		last.finish().unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(60 * FRAME + 1..150 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(150 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
 
 		// A group the source created without skipping below it may still have neighbors there.
-		let mut unproven = track.create_group((200 * FRAME).into()).unwrap();
-		write(&mut unproven, 200, 2);
+		let unproven = media_group(&track, Open::Create, frames(200, 2));
 		unproven.finish().unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(200 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
@@ -530,8 +490,7 @@ mod tests {
 		// A skip landing after the group above it, while the source pauses, is named at once.
 		track.skip_groups(150 * FRAME + 1..200 * FRAME);
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(150 * FRAME + 1..200 * FRAME));
-		let mut next = track.append_group(at(250)).unwrap();
-		write(&mut next, 250, 2);
+		let next = media_group(&track, Open::Append, frames(250, 2));
 		next.finish().unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(200 * FRAME + 1..250 * FRAME));
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(250 * FRAME));
@@ -539,11 +498,10 @@ mod tests {
 
 		// One landing while the group above it is still arriving is named with its next frame,
 		// not held until a group that may never come.
-		let mut open = track.create_group((300 * FRAME).into()).unwrap();
-		write(&mut open, 300, 2);
+		let mut open = media_group(&track, Open::Create, frames(300, 2));
 		assert_eq!(next_seen(&mut listener).await, Seen::Group(300 * FRAME));
 		track.skip_groups(250 * FRAME + 1..300 * FRAME);
-		write(&mut open, 302, 2);
+		extend(&mut open, frames(302, 2));
 		assert_eq!(next_seen(&mut listener).await, Seen::Skip(250 * FRAME + 1..300 * FRAME));
 		open.finish().unwrap();
 		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
@@ -560,20 +518,18 @@ mod tests {
 		let feed = feed(&source);
 		let mut listener = feed.listen();
 
-		let mut corrupt = track.create_group(0u64.into()).unwrap();
-		write(&mut corrupt, 0, 2);
+		let mut corrupt = media_group(&track, Open::Create, frames(0, 2));
 		// A truncated container timestamp: no hang frame at all.
 		corrupt
 			.write_frame(moq_net::Timestamp::from_micros(66_666).unwrap(), &[0xffu8][..])
 			.unwrap();
-		write(&mut corrupt, 3, 2);
+		extend(&mut corrupt, frames(3, 2));
 		corrupt.finish().unwrap();
 		let (key, _, whole) = read_group(&mut listener).await;
 		assert_eq!((key, whole), (0, false), "the corrupt group ended whole");
 
-		let mut clean = track.create_group(1u64.into()).unwrap();
-		write(&mut clean, 5, 2);
+		let clean = media_group(&track, Open::Create, frames(5, 2));
 		clean.finish().unwrap();
-		assert_eq!(read_group(&mut listener).await, (1, 2, true));
+		assert_eq!(read_group(&mut listener).await, (5 * FRAME, 2, true));
 	}
 }

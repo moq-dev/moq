@@ -1342,6 +1342,7 @@ fn scale_hint(size: moq_video::Size, output: moq_video::Output) -> Option<moq_vi
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::testing::*;
 	use moq_video::Output;
 
 	/// A 160x120 software rung of an idle source, with the source and the
@@ -1416,7 +1417,7 @@ mod tests {
 		};
 		let mut reader = track.subscribe(ascending(7));
 		track.start_at(10).unwrap();
-		let mut live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
+		let live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
@@ -1538,38 +1539,6 @@ mod tests {
 		drop(video);
 	}
 
-	/// Write `count` gray 320x240 frames at 30 fps from frame `first` into `group`, opening on a
-	/// keyframe, each stamped at its index in microseconds.
-	fn write_frames(group: &mut moq_net::group::Producer, first: u64, count: u64) {
-		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
-			config.kind = moq_video::encode::Kind::Software;
-			config
-		})
-		.unwrap();
-		let gray = vec![0x80u8; 320 * 240 * 4];
-		let mut write = |encoder: &mut moq_video::encode::Encoder| {
-			while let Some(encoded) = encoder.receive().unwrap() {
-				hang::container::Frame {
-					timestamp: encoded.timestamp,
-					payload: encoded.payload,
-				}
-				.write_to(group)
-				.unwrap();
-			}
-		};
-		for index in first..first + count {
-			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
-			let timestamp = moq_net::Timestamp::from_micros(index * FRAME).unwrap();
-			encoder.encode(&moq_video::Frame::new(surface, timestamp)).unwrap();
-			write(&mut encoder);
-		}
-		encoder.flush().unwrap();
-		write(&mut encoder);
-	}
-
-	/// One frame at 30 fps, in the source's microseconds.
-	const FRAME: u64 = 33_333;
 
 	/// A reader's time start inside a source group gets that whole group, from its start, rather
 	/// than a drop because no group starts at the time itself, which would start it past the group.
@@ -1580,13 +1549,9 @@ mod tests {
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let video = source.create_track("video", info.clone()).unwrap();
 		// Media-timed groups: three frames at 0, then the live group two seconds on.
-		let mut first = video.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
-		write_frames(&mut first, 0, 3);
+		let first = media_group(&video, Open::Append, frames(0, 3));
 		first.finish().unwrap();
-		let mut live = video
-			.append_group(moq_net::Timestamp::from_micros(60 * FRAME).unwrap())
-			.unwrap();
-		write_frames(&mut live, 60, 1);
+		let live = media_group(&video, Open::Append, frames(60, 1));
 		live.finish().unwrap();
 
 		let output = moq_net::broadcast::Info::default().produce();
@@ -1603,9 +1568,7 @@ mod tests {
 				.with_order(Order::Ascending),
 		);
 		track.start_at(60 * FRAME).unwrap();
-		track
-			.create_group(moq_net::group::Info { start: 60 * FRAME })
-			.unwrap()
+		stand_in(&track, 60 * FRAME)
 			.finish()
 			.unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1646,26 +1609,20 @@ mod tests {
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let video = source.create_track("video", info.clone()).unwrap();
 		// A group a second in, ending whole two frames later, then the live group at two seconds.
-		let mut paused = video.create_group(moq_net::group::Info { start: 30 * FRAME }).unwrap();
-		write_frames(&mut paused, 30, 2);
+		let paused = media_group(&video, Open::Create, frames(30, 2));
 		paused.finish_at(32 * FRAME).unwrap();
-		let mut live = video.create_group(moq_net::group::Info { start: 60 * FRAME }).unwrap();
-		write_frames(&mut live, 60, 1);
+		let live = media_group(&video, Open::Create, frames(60, 1));
 		live.finish().unwrap();
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let track = output.create_track("video/120p", info).unwrap();
 		let fills = track.requests();
 		// The reader's cache already holds an older group at 0.
-		track
-			.create_group(moq_net::group::Info { start: 0 })
-			.unwrap()
+		stand_in(&track, 0)
 			.finish()
 			.unwrap();
 		let time = 40 * FRAME;
-		track
-			.create_group(moq_net::group::Info { start: 60 * FRAME })
-			.unwrap()
+		stand_in(&track, 60 * FRAME)
 			.finish()
 			.unwrap();
 		let mut reader = track
@@ -1709,12 +1666,9 @@ mod tests {
 		let video = source.create_track("video", info.clone()).unwrap();
 		let source_fills = video.requests();
 		// Media-timed groups at two seconds and an hour, with nothing below two seconds held.
-		let mut held = video.create_group(moq_net::group::Info { start: 60 * FRAME }).unwrap();
-		write_frames(&mut held, 60, 1);
+		let held = media_group(&video, Open::Create, frames(60, 1));
 		held.finish().unwrap();
-		video
-			.create_group(moq_net::group::Info { start: HOUR })
-			.unwrap()
+		stand_in(&video, HOUR)
 			.finish()
 			.unwrap();
 
@@ -1730,9 +1684,7 @@ mod tests {
 				.with_order(Order::Descending),
 		);
 		track.start_at(HOUR).unwrap();
-		track
-			.create_group(moq_net::group::Info { start: HOUR })
-			.unwrap()
+		stand_in(&track, HOUR)
 			.finish()
 			.unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1781,13 +1733,13 @@ mod tests {
 			.unwrap();
 		let empty = held == Held::Empty;
 		if !empty {
-			let first = video.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+			let first = video.append_group(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new()).unwrap();
 			match held {
 				Held::Paused => drop(first.finish_at(1_000_000).unwrap()),
 				_ => drop(first.finish().unwrap()),
 			}
 			video
-				.append_group(moq_net::Timestamp::from_micros(HOUR).unwrap())
+				.append_group(moq_net::Timestamp::from_micros(HOUR).unwrap(), bytes::Bytes::new())
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -1807,9 +1759,7 @@ mod tests {
 				.with_order(order),
 		);
 		track.start_at(HOUR).unwrap();
-		track
-			.create_group(moq_net::group::Info { start: HOUR })
-			.unwrap()
+		stand_in(&track, HOUR)
 			.finish()
 			.unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1839,7 +1789,7 @@ mod tests {
 			// As a media producer's first group does, saying nothing came before it.
 			video.skip_groups(0..HOUR + 1);
 			video
-				.append_group(moq_net::Timestamp::from_micros(HOUR + 1).unwrap())
+				.append_group(moq_net::Timestamp::from_micros(HOUR + 1).unwrap(), bytes::Bytes::new())
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -1889,7 +1839,7 @@ mod tests {
 				.with_order(moq_net::track::Order::Ascending),
 		);
 		track.start_at(10).unwrap();
-		let mut live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
+		let live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
@@ -1901,7 +1851,7 @@ mod tests {
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 
 		// The live path delivers group 7, and the reader never reads again to pick it up.
-		let mut seven = track.create_group(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..]).unwrap();
+		let seven = track.create_group(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..]).unwrap();
 		seven.finish().unwrap();
 
 		let (finished, mut finishing) = tokio::sync::watch::channel(false);
@@ -2165,7 +2115,7 @@ mod tests {
 		let track = broadcast
 			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = stand_in(&track, 0);
 		let guard = active.attach(&active.rendition(&rung));
 
 		// The second frame cannot be expressed in the container's timescale, so it
