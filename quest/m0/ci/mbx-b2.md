@@ -117,11 +117,13 @@ Steps:
   fix merges shows no job loading a manifest that matches none of its build.
   Find the first run started after the fix's merge commit with `gh run list
   --workflow nightly.yml --branch main --event schedule`, list its jobs with
-  `gh api --paginate repos/moq-dev/moq/actions/runs/<id>/jobs`, and fetch
-  each job's log with `gh api repos/moq-dev/moq/actions/jobs/<job>/logs`.
-  It clears only when every log was fetched, every job that ran the Rust
-  cache logged an `mbx[cache]: object cache` line, and no log has "loaded,
-  but none matched"; steps 2 to 4 follow. A failed fetch leaves it
+  `gh api --paginate repos/moq-dev/moq/actions/runs/<id>/jobs`, fetch each
+  job's log with `gh api repos/moq-dev/moq/actions/jobs/<job>/logs`, and
+  download the mutants shards' `mutants.out` logs with `gh run download`,
+  since `cargo mutants` captures Cargo's output there. It clears only when
+  every job whose workflow uses `./.github/actions/rust-cache` concluded
+  `success`, every log and artifact was fetched, and none contains "loaded,
+  but none matched"; steps 2 to 4 follow. A failed job or fetch leaves it
   unchecked. A match means another cause: bring it to the maintainer before
   deleting anything.
 
