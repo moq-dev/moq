@@ -102,10 +102,11 @@ class Scope {
 
 	/**
 	 * The absolute subtrees a reader of `prefix`, relative to the root, lists within this scope.
-	 * Throws {@link Path.InvalidPrefix} for a prefix holding a `*`, which no grant can name.
+	 * Throws {@link Path.InvalidPrefix} for a prefix holding a `*`, which no grant can name, and
+	 * an error for one past the wire limits, which no session could ask its peer about.
 	 */
 	listed(prefix: Path.Valid): Path.Prefixes {
-		const rooted = new Path.Prefixes([Path.Prefix.parse(Path.join(this.root, prefix))]);
+		const rooted = new Path.Prefixes([Path.Prefix.parse(Path.encode(Path.join(this.root, prefix)))]);
 		return this.allowed?.intersect(rooted) ?? rooted;
 	}
 

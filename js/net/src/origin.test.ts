@@ -3800,6 +3800,11 @@ test("a `*` is refused everywhere a path is named", async () => {
 			expect(wireOf(origin).accepts(path)).toBe(false);
 			expect(() => origin.consume().follow(path)).toThrow("`*`");
 		}
+		// Nor is a listing registered for a prefix past the wire limits, which no session could ask about.
+		const long = Path.from("a".repeat(Path.MAX_BYTES + 1));
+		expect(() => origin.consume().announced(long)).toThrow("bytes");
+		const rooted = origin.scope(Path.from("a".repeat(Path.MAX_BYTES - 1)), new Path.Prefixes([Path.Prefix.all()]));
+		expect(() => rooted.consume().announced(Path.from("b"))).toThrow("bytes");
 		// A peer's request for one never reaches a claim covering it.
 		const claim = origin.claim(Path.from("room"));
 		expect(await wireOf(origin.consume()).demand(Path.from("room/cam*1"))).toBeUndefined();

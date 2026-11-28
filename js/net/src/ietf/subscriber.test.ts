@@ -230,6 +230,13 @@ test("announced lists routes beneath the prefix unless covering asks for those a
 	covering.close();
 });
 
+test("a prefix no request can carry is refused before anything is asked", () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	expect(() => subscriber.routes(Path.from("room/*"))).toThrow(Path.InvalidPrefix);
+	expect(() => subscriber.routes(Path.from("a".repeat(Path.MAX_BYTES + 1)))).toThrow("bytes");
+});
+
 /**
  * The mirror of the above, and the reason the count exists rather than a flag: once the
  * last source goes, the path really is gone and consumers have to hear it.

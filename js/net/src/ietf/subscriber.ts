@@ -379,6 +379,9 @@ export class Subscriber {
 	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
 	routes(prefix: Path.Valid = Path.empty(), options?: announce.Options): announce.Routes {
+		// Refuse a prefix no request can carry before any reader registers for it.
+		Path.Prefix.parse(prefix);
+		Path.encode(prefix);
 		const filter: Asking = {
 			prefix,
 			hidden: options?.hidden ?? false,

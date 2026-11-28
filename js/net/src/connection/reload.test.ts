@@ -1171,6 +1171,7 @@ test("announced refuses a starred prefix up front, before any session exists", (
 	try {
 		expect(() => connection.announced(Path.from("room/*"))).toThrow();
 		expect(() => connection.routes(Path.from(Array(33).fill("a").join("/")))).toThrow();
+		expect(() => connection.announced(Path.from("a".repeat(Path.MAX_BYTES + 1)))).toThrow("bytes");
 	} finally {
 		connection.close();
 	}

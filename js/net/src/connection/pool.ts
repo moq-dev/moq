@@ -425,6 +425,7 @@ export class Connection {
 	routes(prefix: Path.Valid = Path.empty(), options?: Announce.Options): Routes {
 		// Throw here: inside the effect below, a refused prefix would leave the listing open and empty.
 		Path.Prefix.parse(prefix);
+		Path.encode(prefix);
 		const producer = new AnnounceProducer();
 		const consumer = producer.consume();
 
