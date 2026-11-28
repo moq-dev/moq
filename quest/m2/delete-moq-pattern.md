@@ -63,8 +63,6 @@ Scope:
 
 ## Related
 
-- [Remove identity from hang::catalog](/quest/m2/remove-catalog-identity.md) -
-  companion pre-0.22 cleanup
 - [Grants stop spelling prefixes as subtree patterns](/quest/m4/grant-alias-delete.md) -
   removes the temporary `foo/**` grant alias after 0.22
 - [Bound peer grant processing by design](/quest/m5/peer-grant-bound.md) -

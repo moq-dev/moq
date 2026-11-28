@@ -13,7 +13,7 @@ main into release.
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
 - ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
-  and [remove `identity` from `hang::catalog`](/quest/m2/remove-catalog-identity.md)
+  and removing `identity` from `hang::catalog` (landed)
   to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
   keep `moq-pattern` or catalog `identity`). Wildcards never transit the wire,
   grants already moved to `Prefixes`, and wire announcements already carry
