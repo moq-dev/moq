@@ -13359,6 +13359,31 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether an ordered read here still waits for a group in `groups`: one a fill it asked
+	/// has yet to answer, or one this received copy's live feed owes within its arrival grace
+	/// (see `TrackState::owed`). Parks `waiter` until that grace folds. A front's logical track
+	/// asks the route copies it keeps.
+	pub(super) fn owes(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> bool {
+		let cursor = match &self.inner {
+			Inner::Plain(cursor) => cursor,
+			Inner::Resume(resume, _) => return resume.owes(groups, waiter),
+		};
+		if groups.is_empty() {
+			return false;
+		}
+		if cursor.misses.as_ref().is_some_and(|misses| misses.wants(&groups)) {
+			return true;
+		}
+		let state = cursor.state.read();
+		let Some(owed) = state.owed(groups, &cursor.filter.window) else {
+			return false;
+		};
+		if let Some(folds) = state.arrivals.folds_at(owed, state.arrival_grace()) {
+			state.cache.watch_wall(folds, waiter);
+		}
+		true
+	}
+
 	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
 	/// front's logical track counts every route it holds.
 	/// Parks `waiter` until a change while some of `groups` is not.
