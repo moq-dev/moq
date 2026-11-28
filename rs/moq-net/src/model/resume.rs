@@ -6637,6 +6637,37 @@ mod test {
 		assert_eq!(read(&mut reading), None);
 	}
 
+	/// A group closed short on a copy whose session then fails waits for a route even while
+	/// none serves: the parked route may still be replaced.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_waits_for_a_route_after_its_parked_copy_fails() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, HOUR);
+		let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+		short.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		routes.park();
+		let finished = a.finish().unwrap();
+		short.finish().unwrap();
+		finished.abort(SessionError::Internal.into()).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none(), "waits for a route");
+
+		let b = copy();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		for (ms, frame) in [(0, b"a"), (1, b"b")] {
+			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		whole.finish_at(2).unwrap();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
+	}
+
 	/// A replacement that holds none of a short group is asked for the rest, which continues
 	/// the group; a refusal leaves it to the replacement's subscription.
 	#[test]
@@ -14568,6 +14599,19 @@ mod test {
 		assert!(sub.places_as_upstream(&noop));
 	}
 
+	/// A placed live join with no `max` is asked as a time start from where it was placed,
+	/// and keeps that time; one the copy's end leaves empty keeps none.
+	#[test]
+	fn a_placed_join_without_a_max_keeps_its_placed_time() {
+		let join = track::Range::from(track::Start::Live { min: None, max: None });
+		let (range, keep) = asked(&join, Some(5), None, None, None);
+		assert_eq!(range.start, track::Start::Time(5));
+		assert_eq!(keep, Some(5));
+		let (range, keep) = asked(&join, Some(5), None, Some(3), None);
+		assert!(range.is_empty());
+		assert_eq!(keep, None);
+	}
+
 	/// Every live reader counts toward the demand on a new copy however many readers came
 	/// and went, and the readers list tracks the live count rather than every reader there
 	/// ever was.
@@ -14609,6 +14653,8 @@ mod test {
 		assert_eq!(routes.subscription(demand.clone(), 2).start(), None);
 		assert_eq!(recv(&mut second).start, 5);
 		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
+		// A third subscription not yet polled has no reader, so it still needs the oldest range.
+		assert_eq!(routes.subscription(demand.clone(), 3).start(), None);
 		write(&a, 10);
 		assert_eq!(recv(&mut first).start, 10);
 		// From the boundary, the largest group held: what the second reader lacks below it is
