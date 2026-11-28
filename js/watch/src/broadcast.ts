@@ -54,8 +54,9 @@ function watchCovered(
 	path: Moq.Path.Valid,
 ): { covered: Getter<boolean>; synced: Getter<boolean>; close: () => void } {
 	// Only the path and its ancestors can cover it, so routes beneath it (a viewer's echo, say)
-	// are neither listed nor waited on.
-	const announced = origin.announced(path, { hidden: true, exact: true });
+	// are neither listed nor waited on. `covering` and the check below keep a `Reader` that
+	// ignores the internal `exact` correct, if slower.
+	const announced = origin.announced(path, { hidden: true, covering: true, exact: true });
 	const covered = new Signal(false);
 	const active = new Set<Moq.Path.Valid>();
 	void (async () => {
@@ -63,6 +64,7 @@ function watchCovered(
 			for (;;) {
 				const entry = await announced.next();
 				if (!entry) break;
+				if (!Path.hasPrefix(entry.prefix, path)) continue;
 				if (entry.kind === "absent") active.delete(entry.prefix);
 				else active.add(entry.prefix);
 				covered.set(active.size > 0);

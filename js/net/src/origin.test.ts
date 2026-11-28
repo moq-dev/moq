@@ -3771,6 +3771,19 @@ test("an exact listing reports only what could serve its path, and waits only on
 	announced.close();
 	await rest;
 	expect(more).toBe(false);
+
+	// A reader scoped beneath the path can never request it, so nothing there counts.
+	const narrow = origin.scope(Path.empty(), Path.Prefixes.parse(["room/cam/viewer.echo"]));
+	const none = narrow.announced(Path.from("room/cam"), { exact: true });
+	let listed = false;
+	const first = none.next().then((entry) => {
+		listed = entry !== undefined;
+	});
+	await settle();
+	expect(none.synced.peek()).toBe(true);
+	none.close();
+	await first;
+	expect(listed).toBe(false);
 	for (const route of held) route.broadcast.close();
 	origin.close();
 });

@@ -2746,9 +2746,12 @@ export class Consumer implements Reader {
 	 */
 	routes(prefix: Path.Valid = Path.empty(), options?: Announce.Options): announce.Routes {
 		const producer = new announce.Producer();
-		const listed = this.#scope.listed(prefix);
-		void producer.closed.then(this.#state.watch(listed.toArray().map((member) => member.text as Path.Valid)));
 		const reach: Reach = options?.exact ? "above" : options?.covering ? "both" : "beneath";
+		let listed = this.#scope.listed(prefix);
+		// An exact listing asks what could serve the path itself, which a scope reaching only
+		// beneath it never lets this handle request: nothing to list or wait on.
+		if (reach === "above" && !this.#scope.covers(prefix)) listed = new Path.Prefixes();
+		void producer.closed.then(this.#state.watch(listed.toArray().map((member) => member.text as Path.Valid)));
 		void this.#runAnnounced(producer, listed, options?.hidden ?? false, reach);
 		const consumer = producer.consume();
 		// The last reader leaving ends the stream and its watch.
