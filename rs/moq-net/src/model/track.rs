@@ -7027,6 +7027,7 @@ impl Finished {
 
 	/// Create an empty older group below the end, for tests; see [`Producer::create_empty`].
 	#[cfg(test)]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn create_empty(&self, group: group::Info) -> Result<group::Producer> {
 		self.producer.create_empty(group)
 	}
