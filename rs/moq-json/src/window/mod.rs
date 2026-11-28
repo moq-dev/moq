@@ -793,41 +793,14 @@ mod test {
 		assert_eq!(header.timestamp, ms(200));
 	}
 
-	/// An op may carry a timestamp older than its group's first frame, but a new group must start
-	/// past that frame, so a refresh whose newest timestamp is still the group's own start waits for
-	/// a later edit, then restates the window there.
+	/// A group's timestamps never decrease, so an edit below the newest one is refused.
 	#[test]
-	fn a_refresh_after_older_edits_waits_for_a_later_one() {
-		let (waiter, woken) = crate::refresh::flagged();
+	fn an_edit_below_the_newest_is_refused() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(
-			Config::default(),
-			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
-		);
-		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
-			producer.push(&rec(n as u64), ms(at)).unwrap();
-		}
-
-		let mut late = producer.consume();
-		assert!(
-			producer.poll_refresh(&waiter).is_pending(),
-			"no group may share the open group's start"
-		);
-		woken.take();
-		producer.push(&rec(4), ms(140)).unwrap();
-		assert!(woken.take(), "the later edit wakes the parked refresh");
-		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
-		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
-			Poll::Ready(Ok(Some(group))) => Some(group),
-			_ => None,
-		})
-		.last()
-		.expect("the fresh group");
-		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
-			panic!("expected the restating header");
-		};
-		assert_eq!(fresh.start, 140);
-		assert_eq!(header.timestamp, ms(140));
+		let (mut producer, _track) = producer_on(Config::default(), timed());
+		producer.push(&rec(0), ms(130)).unwrap();
+		assert!(producer.push(&rec(1), ms(110)).is_err());
+		producer.push(&rec(2), ms(140)).unwrap();
 	}
 
 	/// Without a ratio no join asks for a group, and a finished producer stops refreshing.
@@ -1091,8 +1064,7 @@ mod test {
 			.create_track("test", moq_net::track::Info::default().with_max_age(None))
 			.unwrap();
 		let replay = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::ALL])
-			.with_order(moq_net::track::Order::Ascending);
+			.with_ranges([moq_net::track::Range::ALL.with_order(moq_net::track::Order::Ascending)]);
 		let mut groups = track.subscribe(replay);
 		let mut producer = Producer::<Value>::new(track, Config::default());
 

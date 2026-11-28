@@ -99,6 +99,7 @@ async fn one_packet_opus_groups_read_on_without_a_gap() {
 			producer
 				.write(Frame {
 					timestamp: start,
+					decode: None,
 					payload: Bytes::from_static(&PACKET),
 					keyframe: true,
 					duration: None,
@@ -161,6 +162,7 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 			assert!(early.is_err(), "{version}: read {early:?} before packet {n} landed");
 			let packet = Frame {
 				timestamp: moq_net::Timestamp::from_micros(start).unwrap(),
+				decode: None,
 				payload: Bytes::from_static(&PACKET),
 				keyframe: true,
 				duration: None,
@@ -217,6 +219,7 @@ async fn an_old_publishers_marker_group_reads_as_an_end() {
 			let mut group = track.append_group(timestamp).unwrap();
 			let frame = Frame {
 				timestamp,
+				decode: None,
 				payload: Bytes::copy_from_slice(payload),
 				keyframe: true,
 				duration: None,

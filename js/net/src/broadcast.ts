@@ -13,6 +13,7 @@ import { hooks } from "./internal.ts";
 import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Meta from "./meta.ts";
 import * as Path from "./path.ts";
+import type { Timescale } from "./time.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
 import { checkName } from "./util/utf8.ts";
@@ -322,9 +323,9 @@ async function resolveTrackInfo(
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string, meta = false): track.Position | undefined {
+function largest(state: BroadcastState, name: string, meta = false, timescale?: Timescale): track.Position | undefined {
 	const producer = lookup(state, name, meta && state.meta);
-	return producer && hooks.cachedLargest(producer);
+	return producer && hooks.cachedLargest(producer, timescale);
 }
 
 // Fetch one group as a one-range subscription: the cached group at once, or else one the track's
@@ -341,17 +342,9 @@ async function fetchGroup(
 	meta = false,
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(
-		state,
-		name,
-		{
-			...track.Subscription.default(),
-			priority: options.priority,
-			ranges: [{ start: key, end: key }],
-			placed: new Map([[0, key]]),
-		},
-		meta,
-	);
+	const range: track.Range = { start: key, end: key };
+	if (options.priority !== undefined) range.priority = options.priority;
+	const subscriber = subscribe(state, name, { ranges: [range], placed: new Map([[0, key]]) }, meta);
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);
 	try {
@@ -469,7 +462,7 @@ export class Producer {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
-			largest: (name) => largest(this.#state, name),
+			largest: (name, timescale) => largest(this.#state, name, false, timescale),
 			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
@@ -637,7 +630,7 @@ export class Consumer {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
-			largest: (name) => largest(this.#state, name),
+			largest: (name, timescale) => largest(this.#state, name, false, timescale),
 			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),

@@ -406,7 +406,7 @@ test.each(VIA)("a metadata history fill carries no payload via the relay's %s", 
 		chained.write(0n, 0);
 		chained.write(1n, 10);
 		chained.write(2n, 20);
-		const reader = chained.remote.meta("video").subscribe({ ranges: [{}], order: "ascending" });
+		const reader = chained.remote.meta("video").subscribe({ ranges: [{ order: "ascending" }] });
 		for (const [key, at] of [
 			[0n, 0],
 			[1n, 10],
@@ -465,7 +465,7 @@ test("a metadata subscription updates and finishes like a payload one", async ()
 		group.finish();
 	}
 	track.finishAt({ group: 2n, frame: 0 });
-	reader.update({ ranges: [{}], order: "ascending" });
+	reader.update({ ranges: [{ order: "ascending" }] });
 	for (const key of [0n, 1n]) {
 		const group = defined(await reader.recvGroup());
 		expect([group.start, defined(await group.nextHeader()).size]).toEqual([key, 3]);

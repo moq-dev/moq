@@ -206,7 +206,7 @@ pub struct moq_audio_hint {
 
 	/// The time between join points, the longest span between two group starts
 	/// on this track, in microseconds, when `has_join` is true: a video GOP, or
-	/// the span between the audio cuts you make. An upper bound, so a broadcast
+	/// about 100 ms for audio. An upper bound, so a broadcast
 	/// may take the largest across its tracks. Must be at least 1 and at most
 	/// 2^53 - 1 milliseconds.
 	pub join_us: u64,
@@ -315,7 +315,7 @@ pub struct moq_video_hint {
 
 	/// The time between join points, the longest span between two group starts
 	/// on this track, in microseconds, when `has_join` is true: a video GOP, or
-	/// the span between the audio cuts you make. An upper bound, so a broadcast
+	/// about 100 ms for audio. An upper bound, so a broadcast
 	/// may take the largest across its tracks. Must be at least 1 and at most
 	/// 2^53 - 1 milliseconds.
 	pub join_us: u64,
@@ -899,10 +899,6 @@ pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_mux::container:
 /// [moq_subscription_defaults] returns to change.
 #[repr(C)]
 pub struct moq_subscription {
-	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
-	/// the midpoint.
-	pub priority: i8,
-
 	/// How far behind the live edge this subscriber plays: where a range with no start begins,
 	/// and how late a non-latest group may fall before it is skipped.
 	pub delay: moq_delay,
@@ -915,10 +911,6 @@ pub struct moq_subscription {
 	pub ranges: *const moq_range,
 	/// The number of entries in `ranges`.
 	pub ranges_len: usize,
-
-	/// `moq_order` discriminant: which group comes first, as the publisher sends them and a read
-	/// in arrival order returns those held.
-	pub order: u32,
 }
 
 /// A span of a track to deliver: from the group containing `start` through the group containing
@@ -948,11 +940,20 @@ pub struct moq_range {
 	pub end: moq_timestamp,
 	/// Whether `end` is present. When false, the range follows the live edge.
 	pub end_present: bool,
+
+	/// Delivery priority of this range's groups. Higher values preempt lower ones under
+	/// contention; the default 0 is the midpoint. Before moq-lite-07 the publisher sends every
+	/// range at the highest priority any range asks.
+	pub priority: i8,
+
+	/// `moq_order` discriminant: which of this range's groups comes first, as the publisher
+	/// sends them and a read in arrival order returns those held.
+	pub order: u32,
 }
 
-/// Which of a subscription's groups comes first, as the publisher sends them and a read in
-/// arrival order returns those held. Zero is the default. Before moq-lite-07 the publisher
-/// sends newest first whatever this asks.
+/// Which of a range's groups comes first, as the publisher sends them and a read in arrival
+/// order returns those held. Zero is the default. Before moq-lite-07 the publisher sends newest
+/// first whatever this asks.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
@@ -980,15 +981,7 @@ fn parse_range_time(timestamp: &moq_timestamp) -> Result<u64, Error> {
 pub(crate) unsafe fn parse_subscription(
 	subscription: &moq_subscription,
 ) -> Result<(moq_net::track::Subscription, moq_mux::container::Delay), Error> {
-	let order = match subscription.order {
-		v if v == moq_order::MOQ_ORDER_DESCENDING as u32 => moq_net::track::Order::Descending,
-		v if v == moq_order::MOQ_ORDER_ASCENDING as u32 => moq_net::track::Order::Ascending,
-		_ => return Err(Error::InvalidCode),
-	};
-	let mut out = moq_net::track::Subscription::default()
-		.with_priority(subscription.priority)
-		.with_order(order)
-		.with_ranges([moq_net::track::Range::ALL]);
+	let mut out = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges
@@ -1000,6 +993,12 @@ pub(crate) unsafe fn parse_subscription(
 						false => moq_net::track::Start::Oldest,
 					},
 					end: range.end_present.then(|| parse_range_time(&range.end)).transpose()?,
+					priority: range.priority,
+					order: match range.order {
+						v if v == moq_order::MOQ_ORDER_DESCENDING as u32 => moq_net::track::Order::Descending,
+						v if v == moq_order::MOQ_ORDER_ASCENDING as u32 => moq_net::track::Order::Ascending,
+						_ => return Err(Error::InvalidCode),
+					},
 				})
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
@@ -1482,17 +1481,10 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 /// Returned by value because there is nothing to fail.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_subscription_defaults() -> moq_subscription {
-	let defaults = moq_net::track::Subscription::default();
-	let order = match defaults.order {
-		moq_net::track::Order::Descending => moq_order::MOQ_ORDER_DESCENDING,
-		moq_net::track::Order::Ascending => moq_order::MOQ_ORDER_ASCENDING,
-	};
 	moq_subscription {
-		priority: defaults.priority,
 		delay: moq_mux::container::Delay::default().into(),
 		ranges: std::ptr::null(),
 		ranges_len: 0,
-		order: order as u32,
 	}
 }
 
@@ -3138,12 +3130,9 @@ pub extern "C" fn moq_publish_timebase_free(timebase: u32) -> i32 {
 
 /// Draw a group boundary on a media importer.
 ///
-/// For a codec track this ends the open group; the next frame written starts a new one. Audio has
-/// no boundary of its own (every packet is independently decodable), so this is the only thing
-/// that gives it groups (one QUIC stream each): call it after the frame that brings a group to
-/// about 100 ms, so the relay sees the group finish at once. Frames forward as they are written
-/// either way; a cut per frame costs a stream per packet. Video
-/// groups at its own keyframes and needs this only to override that.
+/// For a codec track this ends the open group; the next frame written starts a new one. Audio
+/// closes a group on its own once it holds about 100 ms, and video at its keyframes, so this only
+/// closes one early, such as at a segment boundary.
 ///
 /// A container has its own [moq_publish_container_cut], since it rolls a group on every track it
 /// publishes rather than ending one group.
@@ -4198,8 +4187,10 @@ pub extern "C" fn moq_group_request_free(request: u32) -> i32 {
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
 /// The timestamp is converted to the track's timescale. A scale-less track has no
-/// time, so there it is the group's unscaled key (`has_scale` false). NULL fails with
-/// `MOQ_ERROR_INVALID_POINTER`.
+/// time, so there it is the group's unscaled key (`has_scale` false). A group's
+/// timestamps never decrease, so one below the previous frame's fails; a reordered
+/// (B-frame) stream publishes through a media container whose payload carries its
+/// presentation time. NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

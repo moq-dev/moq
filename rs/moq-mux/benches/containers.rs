@@ -137,6 +137,7 @@ async fn prepare(video: Video, payload: &Bytes) -> Prepared {
 			publisher
 				.write(Frame {
 					timestamp: timestamp(index),
+					decode: None,
 					duration: Some(Timestamp::from_millis(20).unwrap()),
 					payload: payload.clone(),
 					keyframe: index % frames_per_group == 0,

@@ -284,6 +284,7 @@ fn replay() -> track::Subscription {
 	track::Subscription::default().with_ranges([track::Range {
 		start: track::Start::Time(0),
 		end: None,
+		..Default::default()
 	}])
 }
 

@@ -1655,6 +1655,7 @@ pub(crate) mod tests {
 		section_producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1450).unwrap(),
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from_static(CUE),
 				keyframe: true,
@@ -1680,6 +1681,7 @@ pub(crate) mod tests {
 		pes_producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1450).unwrap(),
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from_static(PES),
 				keyframe: true,
@@ -1889,12 +1891,13 @@ pub(crate) mod tests {
 			.track(&passthrough.track)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
 						min: Some(RECORDING_MAX_AGE),
 						max: Some(RECORDING_MAX_AGE),
-					})])
-					.with_order(moq_net::track::Order::Ascending),
+					},
+				)
+				.with_order(moq_net::track::Order::Ascending)]),
 			)
 			.await
 			.unwrap();

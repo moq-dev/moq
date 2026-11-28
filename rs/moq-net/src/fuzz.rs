@@ -1215,8 +1215,17 @@ impl LiteSample {
 		match self {
 			Self::Video | Self::Audio => {
 				for (delta, size) in self.frames() {
-					w.varint(varint::zigzag(delta)).unwrap();
-					w.varint(size).unwrap();
+					let wire = match version.has_group_end() {
+						true => delta as u64,
+						false => varint::zigzag(delta),
+					};
+					if version.has_length_first() {
+						w.varint(size + 1).unwrap();
+						w.varint(wire).unwrap();
+					} else {
+						w.varint(wire).unwrap();
+						w.varint(size).unwrap();
+					}
 				}
 			}
 			Self::Group => lite::Group {
@@ -1437,6 +1446,7 @@ impl Default for Messages {
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
+					..lite::Range::OPEN
 				}],
 				meta: false,
 			},
@@ -1449,6 +1459,7 @@ impl Default for Messages {
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
+					..lite::Range::OPEN
 				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {

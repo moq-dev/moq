@@ -47,6 +47,7 @@ fn frames(case: Case) -> (Vec<Frame>, Duration) {
 	let frames = (0..FRAMES as u64)
 		.map(|index| Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 33).unwrap(),
+			decode: None,
 			duration: None,
 			payload: bytes::Bytes::from(vec![128; case.payload_bytes]),
 			keyframe: index % 30 == 0,

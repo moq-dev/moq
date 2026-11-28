@@ -46854,7 +46854,7 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/kixel-ai/swole";
-          rev = "b031d30e870b4925e5dd44deece539e0ebad8f75";
+          rev = "d955b3ffaaeb0859165e1dffbfa6f13dabcf52cc";
           sha256 = "1j9fh9xg090ybh75ip6wvah9h0l7z3pkhn0ws6f5qshlg853wld9";
         };
         dependencies = [
@@ -46876,7 +46876,7 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/kixel-ai/swole";
-          rev = "b031d30e870b4925e5dd44deece539e0ebad8f75";
+          rev = "d955b3ffaaeb0859165e1dffbfa6f13dabcf52cc";
           sha256 = "1j9fh9xg090ybh75ip6wvah9h0l7z3pkhn0ws6f5qshlg853wld9";
         };
         procMacro = true;

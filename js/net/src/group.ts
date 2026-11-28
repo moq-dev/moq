@@ -23,6 +23,7 @@ import {
 	pollChunk,
 	WAIT,
 } from "./frame.ts";
+import { timestampObjectId } from "./ietf/object.ts";
 import {
 	type Expiry,
 	type GroupRecover,
@@ -33,7 +34,7 @@ import {
 } from "./internal.ts";
 import { Queue } from "./queue.ts";
 import { rescaleIn } from "./rescale.ts";
-import { floorAt, type Timestamp } from "./time.ts";
+import { floorAt, type Timescale, type Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { checkKey, RESERVED } from "./util/key.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
@@ -125,7 +126,7 @@ class GroupState {
 	// The first frame's timestamp, retained after reads. Media time only: a scale-less group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
-	// The highest frame PTS, including when the decode-order tail presents earlier.
+	// The highest frame timestamp: the last one, unless an unchecked track's rewound.
 	latest?: Timestamp;
 	// Accepted below the track's eviction watermark, where nothing proves where it starts,
 	// so this mirror drives no media-time expiry.
@@ -186,6 +187,23 @@ class Header implements Frame {
 // Refuse a frame whose timestamp the track's timeline refuses, or that names another group's key.
 function checkTimed(track: TrackInfo | undefined, start: bigint, frame: Frame) {
 	if (track) rescaleIn(track, frame.timestamp, start);
+}
+
+/**
+ * The moq-timestamp Object IDs (draft-lcurley-moq-timestamp) of the frames `state` holds, in order
+ * from frame 0, with each timestamp in `timescale`: undefined when it no longer holds frame 0, so
+ * nothing proves them. Mirrors the Rust `GroupState::timed_ids`.
+ */
+function timedIds(state: GroupState, timescale: Timescale): bigint[] | undefined {
+	if (state.index !== 0) return undefined;
+	const ids: bigint[] = [];
+	let prior: bigint | undefined;
+	for (const frame of state.frames.peek()) {
+		if (frame.timestamp.scale === undefined) return undefined;
+		prior = timestampObjectId(state.start, prior, BigInt(floorAt(frame.timestamp, timescale))).id;
+		ids.push(prior);
+	}
+	return ids;
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
@@ -415,6 +433,24 @@ export class Producer {
 		hooks.writeGroupHeader = (group, timestamp, size) => group.#writeHeader(timestamp, size);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
+		hooks.groupLastTimedId = (group, timescale) => {
+			const state = group.#state;
+			const last = state.total.peek() - 1;
+			if (last < 0) return undefined;
+			const id = timedIds(state, timescale)?.[last];
+			if (id !== undefined) return id;
+			// A copy without frame 0 answers its last timestamp's offset, which the ID is never below.
+			if (state.latest === undefined) return undefined;
+			const offset = BigInt(floorAt(state.latest, timescale)) - state.start;
+			return offset > 0n ? offset : 0n;
+		};
+		hooks.groupTimedFrame = (group, id, timescale) => {
+			const state = group.#state;
+			const ids = timedIds(state, timescale);
+			if (!ids) return undefined;
+			const index = ids.findIndex((timed) => timed >= id);
+			return index === -1 ? state.total.peek() : index;
+		};
 		hooks.groupProgress = (group, fn) => {
 			const state = group.#state;
 			fn(state.total.peek());
@@ -685,6 +721,19 @@ export class Producer {
 		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
 			throw new ProtocolViolation("group frame index exceeds the safe integer range");
 		checkTimed(this.#state.track, this.#state.start, frame);
+		// A group's timestamps never decrease, so lite-07 carries them as unsigned deltas and a
+		// moq-transport Object ID as their offset from the start. An unchecked copy is exempt: a
+		// lite-05/06 publisher may stamp decreasing presentation times, and lite-07 egress refuses
+		// that group instead.
+		const { latest, track } = this.#state;
+		if (latest !== undefined && frame.timestamp.scale !== undefined && !track?.unchecked) {
+			// Compared as the wire carries them, at the track's timescale rounded down.
+			const below =
+				track?.timescale == null
+					? frame.timestamp.isBefore(latest)
+					: floorAt(frame.timestamp, track.timescale) < floorAt(latest, track.timescale);
+			if (below) throw new TimestampMismatch();
+		}
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}
@@ -1091,6 +1140,8 @@ export class Consumer {
 	// The copy it was mirrored from, which that copy's cache evicts.
 	readonly #mirrored: GroupState;
 	#expiry?: Expiry;
+	// The budget in milliseconds the group was judged stale under, once it was.
+	#staleUnder?: number;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
 	// Judges a short close the recovery left open again once its route changes, which may leave
@@ -1214,6 +1265,16 @@ export class Consumer {
 		return this.#expired;
 	}
 
+	/**
+	 * The budget in milliseconds this group was judged stale under, `NO_MAX_DELAY` for the
+	 * publisher's max age, or undefined while it was not, or by a budget it does not know.
+	 *
+	 * @internal Wire publishers only.
+	 */
+	get staleUnder(): number | undefined {
+		return this.#staleUnder;
+	}
+
 	// The failure that ends this reader, as `closed` would settle with it, without building that
 	// handle: a track's scans read this, so none latches a failure before a reader attaches the
 	// recovery that continues past it.
@@ -1318,6 +1379,7 @@ export class Consumer {
 			while (!group.#verdict.peek() && group.#readBufferedFrame(false, "stream")) {}
 		};
 		hooks.groupIndex = (group) => group.#index();
+		hooks.groupTimedId = (group, index, timescale) => timedIds(group.#state, timescale)?.[index];
 		hooks.groupSettledFrames = (group) =>
 			group.#state.closed.peek() === null ? group.#state.total.peek() : undefined;
 		hooks.groupFirstFrame = (group) => group.#state.offset;
@@ -1368,6 +1430,7 @@ export class Consumer {
 		if (this.#state.closed.peek() instanceof Error) return false;
 		if (!this.#expiry?.expired()) return false;
 
+		this.#staleUnder = this.#expiry.budget?.();
 		this.#fail(
 			new StreamError(StreamCode.Old, {
 				message: "group exceeded the subscription max delay budget",

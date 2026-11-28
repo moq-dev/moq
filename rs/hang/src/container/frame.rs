@@ -102,9 +102,14 @@ impl Frame {
 		self.encode_header(&mut buf)?;
 		buf.extend_from_slice(&self.payload);
 
-		// `write_frame` converts the timestamp into the track's timescale; older drafts
-		// simply don't put it on the wire.
-		group.write_frame(self.timestamp, buf.freeze())?;
+		// The prefix keeps the presentation time, while the transport time never decreases within
+		// a group: a B-frame rides at the newest time so far. `write_frame` converts it into the
+		// track's timescale.
+		let transport = match group.latest() {
+			Some(latest) if self.timestamp < latest => latest,
+			_ => self.timestamp,
+		};
+		group.write_frame(transport, buf.freeze())?;
 		Ok(())
 	}
 

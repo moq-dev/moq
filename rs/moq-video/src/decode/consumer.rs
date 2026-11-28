@@ -220,10 +220,13 @@ impl Consumer {
 		let Some(control) = &self.control else {
 			return;
 		};
-		let subscription = control.subscription();
-		if subscription.priority != priority {
+		let mut subscription = control.subscription();
+		if subscription.ranges.iter().any(|range| range.priority != priority) {
+			for range in &mut subscription.ranges {
+				range.priority = priority;
+			}
 			// Closed only once the track ended, when there is nothing left to prioritize.
-			let _ = control.update(subscription.with_priority(priority));
+			let _ = control.update(subscription);
 		}
 	}
 
@@ -349,8 +352,7 @@ impl Reader {
 		// never sees a stated zero min before the container's update.
 		let subscription = playout.subscription(
 			moq_net::track::Subscription::default()
-				.with_priority(options.priority)
-				.with_ranges([moq_net::track::Range::ALL]),
+				.with_ranges([moq_net::track::Range::ALL.with_priority(options.priority)]),
 		);
 		let mut subscriber = track.subscribe(subscription).await?;
 		// The live edge is known only once the feed is live: a warm copy still waiting on its
@@ -633,6 +635,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: true,
@@ -688,10 +691,13 @@ mod tests {
 		// resends the broadcast from them. The live join starts from each hop's live edge.
 		assert_eq!(
 			published.subscription().map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Some(std::time::Duration::ZERO),
-				max: Some(std::time::Duration::from_secs(10)),
-			})]),
+			Some(vec![
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(std::time::Duration::ZERO),
+					max: Some(std::time::Duration::from_secs(10)),
+				})
+				.with_priority(hang::catalog::PRIORITY.video)
+			]),
 			"the publisher was asked to rewind the track",
 		);
 	}
@@ -718,6 +724,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: true,
@@ -800,12 +807,12 @@ mod tests {
 		};
 		let mut consumer = Consumer::new(&subscriber, &catalog, "video", options).await.unwrap();
 		assert_eq!(
-			published.subscription().map(|sub| sub.priority),
+			published.subscription().map(|sub| sub.ranges[0].priority),
 			Some(hang::catalog::PRIORITY.video)
 		);
 
 		consumer.set_priority(10);
-		assert_eq!(published.subscription().map(|sub| sub.priority), Some(10));
+		assert_eq!(published.subscription().map(|sub| sub.ranges[0].priority), Some(10));
 
 		// Park a read on the empty track, so the reader is held by the read in flight.
 		{
@@ -814,11 +821,12 @@ mod tests {
 			assert!(futures::poll!(read.as_mut()).is_pending());
 		}
 		consumer.set_priority(-20);
-		assert_eq!(published.subscription().map(|sub| sub.priority), Some(-20));
+		assert_eq!(published.subscription().map(|sub| sub.ranges[0].priority), Some(-20));
 
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"access unit"),
 				keyframe: true,
@@ -891,6 +899,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"access unit"),
 				keyframe: true,
@@ -990,6 +999,7 @@ mod tests {
 				.enumerate()
 				.map(|(index, stamp)| moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(*stamp).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1054,6 +1064,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1151,6 +1162,7 @@ mod tests {
 				&mut group,
 				&[moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(frame * 33_333).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1200,6 +1212,7 @@ mod tests {
 		let frames: Vec<_> = (0..FRAMES)
 			.map(|index| moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"access unit"),
 				keyframe: index == 0,
@@ -1235,6 +1248,7 @@ mod tests {
 		);
 		let picture = |micros: u64, payload: &'static [u8]| moq_mux::container::Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			duration: Some(Timestamp::from_micros(33_333).unwrap()),
 			payload: Bytes::from_static(payload),
 			keyframe: true,
@@ -1324,6 +1338,7 @@ mod tests {
 		);
 		let picture = |micros: u64| moq_mux::container::Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			duration: Some(Timestamp::from_micros(33_333).unwrap()),
 			payload: Bytes::from_static(b"access unit"),
 			keyframe: true,
@@ -1405,6 +1420,7 @@ mod tests {
 				.enumerate()
 				.map(|(index, stamp)| moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(*stamp).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1423,7 +1439,7 @@ mod tests {
 		assert!(consumer.read().await.is_err(), "the drain did not fail");
 		// A codec error leaves the subscription reading, and its priority adjustable.
 		consumer.set_priority(-20);
-		assert_eq!(track.subscription().map(|sub| sub.priority), Some(-20));
+		assert_eq!(track.subscription().map(|sub| sub.ranges[0].priority), Some(-20));
 		let _track = track.finish().unwrap();
 		let reads = read_all(&mut consumer).await;
 		assert_eq!(
@@ -1537,6 +1553,7 @@ mod tests {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
+						decode: None,
 						duration: None,
 						payload: encoded.payload,
 						keyframe: index == 0,
@@ -1633,10 +1650,13 @@ mod tests {
 		};
 		assert_eq!(
 			first.map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Some(std::time::Duration::from_millis(300)),
-				max: delay.max,
-			})])
+			Some(vec![
+				moq_net::track::Range::from(moq_net::track::Start::Live {
+					min: Some(std::time::Duration::from_millis(300)),
+					max: delay.max,
+				})
+				.with_priority(hang::catalog::PRIORITY.video)
+			])
 		);
 	}
 
@@ -1701,6 +1721,7 @@ mod tests {
 			wire.write(
 				&mut group,
 				&[moq_mux::container::Frame {
+					decode: None,
 					// Group starts strictly increase, so each access unit presents a second later.
 					timestamp: Timestamp::from_micros(sequence as u64 * SECOND).unwrap(),
 					duration: None,
@@ -1758,6 +1779,7 @@ mod tests {
 				&mut group,
 				&[moq_mux::container::Frame {
 					timestamp: Timestamp::ZERO,
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe,

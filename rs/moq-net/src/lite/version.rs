@@ -269,9 +269,9 @@ impl Version {
 	}
 
 	/// Whether a Group or Fetch Stream ends a finished group with GROUP_END, its end counted
-	/// from the stream's highest timestamp, and a closed one with a bare FIN, and counts its
-	/// first FRAME's timestamp from the group's start. Added in lite-07; earlier versions end
-	/// every group with a bare FIN and count the first timestamp from 0.
+	/// from the stream's last timestamp, and a closed one with a bare FIN, and counts its
+	/// first FRAME's unsigned timestamp delta from the group's start. Added in lite-07; earlier
+	/// versions end every group with a bare FIN and zigzag-encode signed deltas from 0.
 	pub(crate) fn has_group_end(self) -> bool {
 		!matches!(
 			self,
@@ -305,6 +305,16 @@ impl Version {
 	/// Whether SUBSCRIBE_DROP carries `Group Start` and an exclusive
 	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
 	pub(crate) fn has_group_span(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether an `OLD` SUBSCRIBE_DROP carries the `Max Age` its groups were judged stale
+	/// under. Added in lite-07; before it a subscriber can't tell which reader a stale drop
+	/// settles.
+	pub(crate) fn has_judged_drop(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

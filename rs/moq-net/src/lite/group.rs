@@ -26,65 +26,74 @@ impl Group {
 /// from, and what GROUP_END's `End` counts from, as raw wire values.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Clock {
-	/// The group's start, which GROUP_END counts from on a stream that carried no timestamp.
-	start: u64,
-	/// The previous FRAME's timestamp, or what the first counts from.
+	/// The previous FRAME's timestamp, or what the first counts from. On lite-07 a group's
+	/// timestamps never decrease, so this is also what GROUP_END counts from.
 	prev: u64,
-	/// The highest timestamp a FRAME on this stream carried, which GROUP_END counts from.
-	highest: Option<u64>,
+	/// Whether later deltas are unsigned (lite-07) rather than zigzag-encoded signed values.
+	unsigned: bool,
+	/// Whether the next FRAME is the stream's first, whose delta is always zigzag-encoded.
+	first: bool,
 }
 
 impl Clock {
 	/// A stream of the group starting at `start`. Lite-07 counts the first FRAME's delta from
-	/// that start, so frame 0's is 0; earlier versions count it from 0.
+	/// that start, signed since a group's first frame may present before its key, and every later
+	/// one unsigned from the frame before; earlier versions zigzag-encode signed deltas from 0.
 	pub fn new(version: Version, start: u64) -> Self {
-		let prev = match version.has_group_end() {
+		let unsigned = version.has_group_end();
+		let prev = match unsigned {
 			true => start,
 			false => 0,
 		};
 		Self {
-			start,
 			prev,
-			highest: None,
+			unsigned,
+			first: true,
 		}
 	}
 
-	/// The `Timestamp Delta` of the next FRAME, at `timestamp`, which it advances to; `None`
-	/// when the delta doesn't fit.
-	pub fn delta(&mut self, timestamp: u64) -> Option<i64> {
-		let delta = (timestamp as i128 - self.prev as i128).try_into().ok()?;
-		self.advance(timestamp);
+	/// Whether the next delta is unsigned.
+	fn unsigned(&self) -> bool {
+		self.unsigned && !self.first
+	}
+
+	/// The wire `Timestamp Delta` of the next FRAME, at `timestamp`, advancing the clock; `None`
+	/// when it doesn't fit: below the previous timestamp after the first FRAME on lite-07, which a
+	/// group never holds (see [`crate::group::Producer::write_frame`]), or outside `i64`.
+	pub fn encode_delta(&mut self, timestamp: u64) -> Option<u64> {
+		let delta = match self.unsigned() {
+			true => timestamp.checked_sub(self.prev)?,
+			false => crate::coding::varint::zigzag((timestamp as i128 - self.prev as i128).try_into().ok()?),
+		};
+		self.prev = timestamp;
+		self.first = false;
 		Some(delta)
 	}
 
-	/// The timestamp of the next FRAME, which carries `delta`, and advances to it; `None` when
-	/// it falls outside 64 bits.
-	pub fn timestamp(&mut self, delta: i64) -> Option<u64> {
-		let timestamp = (self.prev as i128 + delta as i128).try_into().ok()?;
-		self.advance(timestamp);
+	/// The timestamp of the next FRAME, which carries wire `delta`, advancing the clock; `None`
+	/// when it falls outside 64 bits.
+	pub fn decode_delta(&mut self, delta: u64) -> Option<u64> {
+		let timestamp = match self.unsigned() {
+			true => self.prev.checked_add(delta)?,
+			false => {
+				let delta = crate::coding::varint::unzigzag(delta);
+				(self.prev as i128 + delta as i128).try_into().ok()?
+			}
+		};
+		self.prev = timestamp;
+		self.first = false;
 		Some(timestamp)
 	}
 
-	fn advance(&mut self, timestamp: u64) {
-		self.prev = timestamp;
-		self.highest = Some(self.highest.map_or(timestamp, |highest| highest.max(timestamp)));
-	}
-
-	/// What GROUP_END's `End` counts from: the highest timestamp on the stream, or the group's
-	/// start when none was carried, such as on a scale-less track.
-	fn base(&self) -> u64 {
-		self.highest.unwrap_or(self.start)
-	}
-
-	/// GROUP_END's delta for a group ending at `end`; `None` when `end` is below the base, which
-	/// a group never is (see [`crate::group::Producer::finish_at`]).
+	/// GROUP_END's delta for a group ending at `end`; `None` when `end` is below the last
+	/// timestamp, which a group never is (see [`crate::group::Producer::finish_at`]).
 	pub fn end_delta(&self, end: u64) -> Option<u64> {
-		end.checked_sub(self.base())
+		end.checked_sub(self.prev)
 	}
 
 	/// Where a group ends whose GROUP_END carries `delta`; `None` past 64 bits.
 	pub fn end(&self, delta: u64) -> Option<u64> {
-		self.base().checked_add(delta)
+		self.prev.checked_add(delta)
 	}
 }
 

@@ -1729,9 +1729,20 @@ impl Consumer {
 				}
 			};
 			// This copy was dense through its frame, so the replacement's must be the same
-			// Object ID: a copy that begins past a gap holds different content there.
-			if frame.fields.as_ref().is_some_and(|fields| fields.id != index) {
-				return Poll::Ready(Err(Error::Unsupported));
+			// Object ID: a copy that begins past a gap holds different content there. A timed
+			// copy's are moq-timestamp IDs instead, the same on every copy aligned from frame 0
+			// (see `group::GroupState::relayed`), whichever draft each route spoke.
+			if let Some(fields) = frame.fields.as_ref()
+				&& fields.id != index
+				&& self.fields.as_ref().is_none_or(|own| own.id != fields.id)
+			{
+				let aligned = frame.info.timestamp.scale().is_some() && {
+					let state = frame.state.read();
+					state.offset == 0 && !state.sparse()
+				};
+				if !aligned {
+					return Poll::Ready(Err(Error::Unsupported));
+				}
 			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {
@@ -1797,7 +1808,7 @@ impl Consumer {
 			Resume::Route(routed) => Some(&routed.recover),
 			_ => None,
 		};
-		if !expiry.policy.is_expired(recover, waiter) {
+		if expiry.policy.is_expired(recover, waiter).is_none() {
 			return false;
 		}
 

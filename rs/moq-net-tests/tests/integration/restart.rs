@@ -879,11 +879,14 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	// Demoted, promoted, then back to the default, each reaching the publisher before the
 	// viewer reads again: nothing waits for its next read to forward it.
 	for (group, priority) in [-2, 1, 0].into_iter().enumerate() {
-		subscription
-			.update(subscription.subscription().with_priority(priority))
-			.unwrap();
+		let mut preferences = subscription.subscription();
+		for range in &mut preferences.ranges {
+			range.priority = priority;
+		}
+		subscription.update(preferences).unwrap();
 		settle().await;
-		let seen = old_track.subscription().map(|subscription| subscription.priority);
+		let seen = (old_track.subscription())
+			.and_then(|subscription| subscription.ranges.iter().map(|range| range.priority).max());
 		assert_eq!(seen, Some(priority), "{case}: the publisher saw {seen:?}");
 		let tag = format!("old:{}", group + 1);
 		write(&old_track, &tag);

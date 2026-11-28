@@ -45,10 +45,11 @@ export class Consumer<T> {
 	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track
 			.subscribe({
-				...Moq.Track.Subscription.default(),
-				priority: config.priority ?? 0,
 				ranges: [
-					{ start: { live: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO } } },
+					{
+						start: { live: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO } },
+						priority: config.priority ?? 0,
+					},
 				],
 			})
 			.ordered();

@@ -11,6 +11,7 @@
 //! paths, so each test reads its datagrams before ending the track.
 
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -369,7 +370,7 @@ async fn legacy_versions_carry_both_kinds_of_a_name() {
 			"{hops:?}"
 		);
 
-		let subscription = subscriber.subscription().with_priority(6);
+		let subscription = subscriber.subscription().prioritized(6);
 		subscriber.update(subscription).unwrap();
 		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(6)))
 			.await
@@ -422,7 +423,7 @@ async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expect
 			.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 		// Only the SUBSCRIBE carries an update, so the publisher seeing it serves the
 		// subscription from the datagram track.
-		let subscription = subscriber.subscription().with_priority(5);
+		let subscription = subscriber.subscription().prioritized(5);
 		subscriber.update(subscription).unwrap();
 		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(5)))
 			.await

@@ -1772,6 +1772,7 @@ mod tests {
 	fn frame(timestamp_us: u64, duration_us: Option<u64>) -> Frame {
 		Frame {
 			timestamp: ts(timestamp_us),
+			decode: None,
 			duration: duration_us.map(ts),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
 			keyframe: false,

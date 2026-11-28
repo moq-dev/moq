@@ -1,6 +1,7 @@
 use super::Config;
 use crate::catalog::hang::CatalogExt;
 use crate::container::Frame;
+use crate::import::track::Written;
 
 /// FLAC importer.
 ///
@@ -13,10 +14,11 @@ use crate::container::Frame;
 /// independently decodable, so [`decode`](Self::decode) marks only the first frame of each group a
 /// keyframe (the rest extend it): frames accumulate into the current group until the caller
 /// [`cut`](Self::cut)s or [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade
-/// passes that through, so boundaries are the caller's either way: cut per frame for one group per
-/// frame, or less often to batch frames into fewer groups.
+/// cuts once a group holds 100 ms.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
+	/// The STREAMINFO sample rate, which times each frame's block of samples.
+	sample_rate: u32,
 }
 
 impl Import {
@@ -36,8 +38,9 @@ impl Import {
 		// Build the writer before advertising the rendition: it is fallible (enrolling the track in
 		// the broadcast timeline can collide), and a rendition published for a track we then fail to
 		// produce would be advertised to consumers but never served.
+		let sample_rate = config.sample_rate;
 		let track = reserved.audio(track, wire, config)?;
-		Ok(Self { track })
+		Ok(Self { track, sample_rate })
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
@@ -59,6 +62,15 @@ impl Import {
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
+	}
+
+	/// Close the current group at `end`, or without declaring an end when none is known, so the
+	/// producer doesn't extrapolate one from the gap before the last frame.
+	pub(crate) fn close(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		match end {
+			Some(end) => self.track.cut(Some(end)),
+			None => self.track.cut_unended(),
+		}
 	}
 
 	/// Cut the current group at `end` without finishing the track.
@@ -84,17 +96,25 @@ impl Import {
 	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
 	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
+		self.write(frame.into_bytes(), pts).map(|_| ())
+	}
+
+	/// [`decode`](Self::decode), returning the frame's timestamp and how long it plays, if known.
+	pub(crate) fn write(&mut self, payload: bytes::Bytes, pts: Option<moq_net::Timestamp>) -> crate::Result<Written> {
 		let timestamp = self.track.timestamp(pts)?;
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
+		let duration = super::block_samples(&payload)
+			.and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), self.sample_rate.into()).ok());
 		self.track.write(Frame {
 			timestamp,
-			payload: frame.into_bytes(),
+			decode: None,
+			payload,
 			keyframe,
 			duration: None,
 		})?;
-		Ok(())
+		Ok(Written { timestamp, duration })
 	}
 }
 

@@ -91,7 +91,14 @@ class SelectTest(unittest.TestCase):
             scratch = Path(directory)
             calls = scratch / "calls"
             just = scratch / "just"
-            just.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SELECT_CALLS"\n')
+            # One write per call: select.sh runs recipes concurrently, and a shell's printf can
+            # split a long line across writes that another call's line lands between.
+            just.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, sys\n"
+                "fd = os.open(os.environ['SELECT_CALLS'], os.O_WRONLY | os.O_APPEND | os.O_CREAT)\n"
+                "os.write(fd, (' '.join(sys.argv[1:]) + '\\n').encode())\n"
+            )
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")

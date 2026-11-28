@@ -22,6 +22,6 @@ Public API: none (`moq-bench` JSONL adds new additive fields). Wire: none.
 
 ## Related
 
-- [Fewer ACKs, tail-room piggybacking, and PTO STREAM duplication](/quest/m1/quic-ack-packing-and-pto-duplication.md) - directly lowers ACK and total packet counts
+- [Fewer ACKs, tail-room piggybacking, and PTO STREAM duplication](/quest/m3/quic-ack-packing-and-pto-duplication.md) - directly lowers ACK and total packet counts
 - [Audience-scale simulation](/quest/m4/scale-sim/README.md) - consumes per-viewer packet counts
 - [Cross-connection `sendmmsg` batching in `moq-tokio`](/quest/m4/tokio-sendmmsg-batch.md) - directly raises `datagrams / ios`

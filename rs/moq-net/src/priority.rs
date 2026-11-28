@@ -460,7 +460,7 @@ impl PriorityHandle {
 
 	/// A queue rank as a transport send order, where HIGHER values are transmitted
 	/// first (the W3C `sendOrder` / quinn convention, and the model's
-	/// `Subscription::priority` semantics). The queue rank is the opposite
+	/// `Range::priority` semantics). The queue rank is the opposite
 	/// (0 = most urgent), so this is the one place the two conventions meet; every
 	/// other rank this handle hands out stays in the queue's own direction.
 	pub fn send_order_of(rank: u8) -> u8 {

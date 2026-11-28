@@ -183,6 +183,7 @@ fn span(start: u64, end: u64) -> track::Range {
 	track::Range {
 		start: track::Start::Time(start),
 		end: Some(end),
+		..Default::default()
 	}
 }
 
@@ -191,6 +192,7 @@ fn from(start: u64) -> track::Range {
 	track::Range {
 		start: track::Start::Time(start),
 		end: None,
+		..Default::default()
 	}
 }
 
@@ -613,12 +615,11 @@ impl Aged {
 					.unwrap();
 				// Ascending, so the first read is the held group under the finished ones.
 				let mut sub = track.subscribe(
-					track::Subscription::default()
-						.with_ranges([track::Range::from(track::Start::Live {
-							min: Some(AGED_BUDGET),
-							max: Some(AGED_BUDGET),
-						})])
-						.with_order(track::Order::Ascending),
+					track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+						min: Some(AGED_BUDGET),
+						max: Some(AGED_BUDGET),
+					})
+					.with_order(track::Order::Ascending)]),
 				);
 				let mut held = track.append_group(Timestamp::unscaled(0)).unwrap();
 				held.write_frame(moq_net::Timestamp::unscaled(held.start), Bytes::from_static(b"x"))
@@ -1137,26 +1138,22 @@ mod track_subscriber_preferences {
 	use super::{CHURN, Case, Churn, STEADY, case, span};
 
 	fn ordinary() -> track::Subscription {
-		track::Subscription::default()
-			.with_ranges([span(100, 199)])
-			.with_order(track::Order::Ascending)
+		track::Subscription::default().with_ranges([span(100, 199).with_order(track::Order::Ascending)])
 	}
 
 	fn held(i: usize) -> track::Subscription {
 		let i = i as u64;
-		track::Subscription::default()
+		track::Subscription::default().with_ranges([span(100 + i, 199 + i)
 			.with_priority(((i % 255) as i16 - 128) as i8)
-			.with_ranges([span(100 + i, 199 + i)])
-			.with_order(track::Order::Ascending)
+			.with_order(track::Order::Ascending)])
 	}
 
 	fn extreme() -> track::Subscription {
-		track::Subscription::default()
-			.with_priority(i8::MAX)
-			.with_ranges([track::Range::from(track::Start::Live {
-				min: Some(Duration::from_secs(10)),
-				max: Some(Duration::from_secs(10)),
-			})])
+		track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Some(Duration::from_secs(10)),
+			max: Some(Duration::from_secs(10)),
+		})
+		.with_priority(i8::MAX)])
 	}
 
 	/// The steady audience, each holding its own distinct preferences, caught up.
@@ -2229,7 +2226,11 @@ impl Fills {
 			}
 		}
 		for reader in &mut self.readers {
-			reader.update(reader.subscription().with_priority(1)).unwrap();
+			let mut subscription = reader.subscription();
+			for range in &mut subscription.ranges {
+				range.priority = 1;
+			}
+			reader.update(subscription).unwrap();
 			assert!(reader.poll_recv_group(&waiter).is_pending());
 		}
 		let (mut lookups, mut fills) = (0, 0);

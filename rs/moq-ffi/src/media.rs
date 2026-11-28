@@ -1351,11 +1351,8 @@ impl MoqMediaTrackProducer {
 
 	/// Draw a group boundary here.
 	///
-	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
-	/// only thing that gives it groups (one QUIC stream each): call it after the frame that brings
-	/// a group to about 100 ms, so the relay sees the group finish at once. Frames forward as they
-	/// are written either way; a cut per frame costs a stream per packet. Video
-	/// groups at its own keyframes and needs this only to override that.
+	/// Audio closes a group (one QUIC stream) on its own once it holds about 100 ms, and video at
+	/// its keyframes, so this only closes one early, such as at a segment boundary.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
@@ -1771,6 +1768,7 @@ mod read_tests {
 					&mut group,
 					&[moq_mux::container::Frame {
 						timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+						decode: None,
 						payload: bytes::Bytes::from_static(b"media"),
 						keyframe: true,
 						duration: None,
@@ -1838,6 +1836,7 @@ mod read_tests {
 				&mut first,
 				&[moq_mux::container::Frame {
 					timestamp: timestamp(10_000),
+					decode: None,
 					payload: bytes::Bytes::from_static(b"encoded"),
 					keyframe: true,
 					duration: None,
@@ -1857,6 +1856,7 @@ mod read_tests {
 				&mut marker,
 				&[moq_mux::container::Frame {
 					timestamp: timestamp(20_000),
+					decode: None,
 					payload: bytes::Bytes::new(),
 					keyframe: false,
 					duration: None,
@@ -1877,6 +1877,7 @@ mod read_tests {
 				&mut resumed,
 				&[moq_mux::container::Frame {
 					timestamp: timestamp(20_001),
+					decode: None,
 					payload: bytes::Bytes::from_static(b"resumed"),
 					keyframe: true,
 					duration: None,
@@ -2225,6 +2226,7 @@ mod timebase_tests {
 				0,
 				&[moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_scale(seconds, 1).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from(vec![tag]),
 					keyframe: true,
 					duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
