@@ -198,13 +198,20 @@ fn aggregate(case: Case) -> Aggregate {
 		let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
 		let mut traffic = agg.bucket(moq_net::Path::from_static("acme"));
 
-		let mut total = 0;
-		for index in 0..case.departed {
-			let mut node = Node::new(&origin, &format!("gone-{index}"));
-			node.publish(1);
-			total += 1;
+		// Every departed node publishes before any leaves, so one read covers them all
+		// instead of one merge per node, which grows with every node seen.
+		let departed: Vec<Node> = (0..case.departed)
+			.map(|index| {
+				let mut node = Node::new(&origin, &format!("gone-{index}"));
+				node.publish(1);
+				node
+			})
+			.collect();
+		let mut total = case.departed as u64;
+		if total > 0 {
 			read_until(&mut traffic, total).await;
 		}
+		drop(departed);
 
 		let mut nodes: Vec<Node> = (0..live)
 			.map(|index| Node::new(&origin, &format!("live-{index}")))
