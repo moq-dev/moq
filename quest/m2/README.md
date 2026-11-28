@@ -12,6 +12,14 @@ main into release.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
+- ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
+  to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
+  [timestamp-ids](/quest/m2/timestamp-ids.md) (rejected: folding into
+  [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).
+  Creates groups eagerly from frame 0 across Rust, JS, `moq-ffi`, `libmoq`, and
+  bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits
+  lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag from
+  lite-07, and keeps `GROUP_END` as the last frame's exclusive end.
 - ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
   and removing `identity` from `hang::catalog` (landed)
   to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
