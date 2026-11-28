@@ -88,28 +88,23 @@ function run(device: Device, seconds: number): Run {
 
 describe("Drift", () => {
 	// Over a simulated hour, every clock within the bound stays within a frame of its capture time.
-	// Uncorrected, 1000 ppm drifts 3.6 s.
-	test("follows every clock within the bound", () => {
-		const failures: string[] = [];
-		for (const ppm of [-1000, -300, -50, 0, 12, 100, 1000]) {
-			// Quanta delivered on time, or each late by up to a busy page's 50 ms. The first quantum
-			// anchors the timeline late by its own delay, which the loop then removes, so a late source
-			// is judged once that has settled.
-			for (const [jitter, settled] of [
-				[0, 0],
-				[0.05, 60],
-			]) {
+	// Uncorrected, 1000 ppm drifts 3.6 s. Each clock is its own test: an hour of quanta is the cost of
+	// the whole suite, and one test holding all of them has to finish inside a single timeout.
+	// Quanta delivered on time, or each late by up to a busy page's 50 ms. The first quantum anchors
+	// the timeline late by its own delay, which the loop then removes, so a late source is judged once
+	// that has settled.
+	for (const ppm of [-1000, -300, -50, 0, 12, 100, 1000]) {
+		for (const [jitter, settled] of [
+			[0, 0],
+			[0.05, 60],
+		]) {
+			test(`follows a ${ppm} ppm clock, ${jitter} s late`, () => {
 				const result = run({ ppm, jitter }, 3600);
-				const error = worst(result, settled);
-				if (result.resyncs.length || result.drops || error >= FRAME) {
-					failures.push(
-						`${ppm} ppm, ${jitter} s late: ${result.resyncs.length} resyncs, ${result.drops} drops, ${error} ms`,
-					);
-				}
-			}
+				expect([result.resyncs.length, result.drops]).toEqual([0, 0]);
+				expect(worst(result, settled)).toBeLessThan(FRAME);
+			});
 		}
-		expect(failures).toEqual([]);
-	});
+	}
 
 	// A host whose monotonic clock counted a five second sleep the context did not, which no
 	// suspend jump reports, re-anchors once rather than slewing for hours.
