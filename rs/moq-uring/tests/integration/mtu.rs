@@ -285,11 +285,15 @@ fn discovery_stays_off_by_default() {
 }
 
 /// Transfer until discovery has raised the MTU past the floor, so a train
-/// staged after it packs the larger datagrams.
+/// staged after it packs the larger datagrams. A probe crossing the hop only
+/// proves the path carries more; the sender has adopted the size once most of
+/// a transfer rides above the floor.
 async fn discover(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &mut quic::Connection, path: &Path) {
+	const LEN: usize = PAYLOAD / 16;
 	for _ in 0..50 {
-		transfer(handle, from, to, PAYLOAD / 16).await;
-		if path.large_up() > 0 {
+		let before = path.large_up();
+		transfer(handle, from, to, LEN).await;
+		if (path.large_up() - before) as usize > LEN / ETHERNET / 2 {
 			return;
 		}
 	}
