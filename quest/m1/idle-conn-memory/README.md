@@ -26,7 +26,7 @@ allocation is filed under the leaf-most frame naming a layer:
 | Layer | KiB/conn | Largest sites | Owner |
 |---|---|---|---|
 | moq session tasks and state | 34.6 | `moq_relay::connection::Connection::start` future 7 KiB + task 3 KiB, `lite::session::Driver` 7 KiB, `lite::publisher::Shared` 1 KiB, bandwidth `Registry` 1.8 KiB | [session-futures](/quest/m1/idle-conn-memory/session-futures.md) |
-| QUIC driver (`moq-tokio`) | 25.6 | `ConnectionInner` 10 KiB (holds moq-quic's `Connection`), the connection's event channel 12.6 KiB | [event-channel](/quest/m1/idle-conn-memory/event-channel.md), [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
+| QUIC driver (`moq-tokio`) | 25.6 | `ConnectionInner` 10 KiB (holds moq-quic's `Connection`), the connection's event channel 12.6 KiB | [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
 | QUIC connection (`moq-quic`, `moq-congestion`) | 14.3 | sent-packet slot chunk 4.2 KiB, BBRv3 1.5 KiB, datagram schedule 1.4 KiB | [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
 | TLS (rustls) | 13.5 | packet keys 5 KiB, handshake buffer 2.6 KiB, `TlsSession` 1.4 KiB | [quic-state](/quest/m1/idle-conn-memory/quic-state.md) |
 | Auth (`moq-net`, `moq-relay`, `moq-auth`) | 9.9 | one-entry `BTreeMap` leaves: `auth::State::links` 3.5 KiB, `Refresh::credentials` 3.1 KiB | [auth-state](/quest/m1/idle-conn-memory/auth-state.md) |

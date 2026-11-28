@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
-	ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv, runtime::Slot, send, udp_transmit,
+	ConnectionEvent, Duration, Instant, VarInt, events, mutex::Mutex, recv, runtime::Slot, send, udp_transmit,
 };
 use moq_congestion::Controller;
 pub use moq_quic::connection::{Error, Stats};
@@ -48,7 +48,7 @@ impl Connecting {
 		handle: ConnectionHandle,
 		conn: moq_quic::connection::Connection,
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
+		conn_events: events::Receiver,
 		slot: Arc<Slot>,
 		runtime: &crate::runtime::Spawner,
 	) -> Self {
@@ -677,7 +677,7 @@ pub(crate) struct State {
 	handle: ConnectionHandle,
 	timer: Option<kio::clock::Sleep>,
 	timer_deadline: Option<Instant>,
-	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
+	conn_events: events::Receiver,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 	/// The terminal error [`Connection::poll_closed`] reports, set once by the driver: moq-quic's
 	/// reason, once any CONNECTION_CLOSE it owes is on the socket, or why the driver stopped,
@@ -700,7 +700,7 @@ impl State {
 		inner: moq_quic::connection::Connection,
 		handle: ConnectionHandle,
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
+		conn_events: events::Receiver,
 		slot: Arc<Slot>,
 	) -> Self {
 		Self {

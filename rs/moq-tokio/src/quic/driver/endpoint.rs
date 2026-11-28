@@ -30,6 +30,7 @@ pub use crate::quic::driver::runtime::AsyncUdpSocket;
 use crate::quic::driver::{
 	ConnectionEvent, IO_LOOP_BOUND, Instant, RECV_TIME_BOUND, VarInt,
 	connection::Connecting,
+	events,
 	forward::Forward,
 	runtime::{Slot, wrap_udp_socket},
 	udp_transmit,
@@ -724,7 +725,7 @@ fn proto_ecn(ecn: moq_sock::udp::EcnCodepoint) -> moq_quic::EcnCodepoint {
 #[derive(Debug)]
 struct ConnectionSet {
 	/// Senders for communicating with the endpoint's connections
-	senders: FxHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
+	senders: FxHashMap<ConnectionHandle, events::Sender>,
 	/// The connections in `senders` that are no longer active: closed by the peer, or past
 	/// their closing period
 	draining: FxHashSet<ConnectionHandle>,
@@ -760,7 +761,7 @@ impl ConnectionSet {
 		slot: Arc<Slot>,
 		runtime: &crate::runtime::Spawner,
 	) -> Connecting {
-		let (send, recv) = mpsc::unbounded_channel();
+		let (send, recv) = events::channel();
 		match &self.lifecycle {
 			Lifecycle::Running => {
 				self.senders.insert(handle, send);
