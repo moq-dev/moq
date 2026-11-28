@@ -18,7 +18,6 @@ import {
 	Skipped,
 	StreamCode,
 	StreamError,
-	TimestampMismatch,
 	toTransport,
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
@@ -1610,12 +1609,11 @@ test("a group that beats its track info waits for it", async () => {
 	}
 });
 
-// A lite-07 FRAME: the payload size plus one, the unsigned timestamp delta, then the first `sent`
-// bytes of the payload.
-function liteFrame(delta: number, payload: Uint8Array, sent = payload.byteLength): Promise<Uint8Array> {
+// A group's first lite-07 FRAME: the payload size plus one, then the first `sent` bytes of the
+// payload. Its timestamp is the group's start, so it carries no delta.
+function liteFrame(payload: Uint8Array, sent = payload.byteLength): Promise<Uint8Array> {
 	return Writer.collect(Version.DRAFT_07, async (w) => {
 		await w.u53(payload.byteLength + 1);
-		await w.u62(BigInt(delta));
 		if (sent > 0) await w.write(payload.subarray(0, sent));
 	});
 }
@@ -1659,7 +1657,7 @@ test.each([
 
 		const first = handStream(version);
 		const frame = hasLengthFirst(version)
-			? await liteFrame(300, new Uint8Array([1]))
+			? await liteFrame(new Uint8Array([1]))
 			: await Writer.collect(version, async (w) => {
 					await w.u62(600n);
 					await w.u53(1);
@@ -1703,7 +1701,7 @@ test("lite-07: a group reset after its header settles the end without a drop", a
 		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const reset = handStream(version);
-		reset.write(await liteFrame(0, new Uint8Array([1])));
+		reset.write(await liteFrame(new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), reset.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
@@ -1747,7 +1745,7 @@ test("a reset without its code ends the group", async () => {
 		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const first = handStream(version);
-		first.write(await liteFrame(300, new Uint8Array([1])));
+		first.write(await liteFrame(new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 3n }), first.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
@@ -1783,14 +1781,14 @@ test.each(["before", "after", "without", "overtaking"] as const)(
 				await respond(request, version, [drop]);
 				await drainReactions();
 				const late = handStream(version);
-				late.write(await liteFrame(300, new Uint8Array([1])));
+				late.write(await liteFrame(new Uint8Array([1])));
 				await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), late.reader);
 				request.inbound.close();
 				await expect(fetch).rejects.toMatchObject({ code: StreamCode.TooFarBehind });
 				return;
 			}
 			const stream = handStream(version);
-			stream.write(await liteFrame(300, new Uint8Array([1])));
+			stream.write(await liteFrame(new Uint8Array([1])));
 			const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), stream.reader);
 			const group = await fetch;
 			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([1]));
@@ -1840,7 +1838,7 @@ test.each([
 			await drainReactions();
 		}
 		const lost = handStream(version);
-		lost.write(await liteFrame(0, new Uint8Array([1])));
+		lost.write(await liteFrame(new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		let group: GroupConsumer | undefined;
 		if (order === "after") {
@@ -1892,12 +1890,12 @@ test("a drop during a duplicate wait lets go of a stream whose reset was lost", 
 
 		// The copy still arriving, then a stream of the same group that waits on it.
 		const first = handStream(version);
-		first.write(await liteFrame(0, new Uint8Array([1])));
+		first.write(await liteFrame(new Uint8Array([1])));
 		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), first.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		const lost = handStream(version);
-		lost.write(await liteFrame(0, new Uint8Array([1])));
+		lost.write(await liteFrame(new Uint8Array([1])));
 		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		await drainReactions();
 
@@ -1950,7 +1948,7 @@ test("a stream a drop overtook holds no end after it takes a failed copy's group
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
 		await drainReactions();
 		const lost = handStream(version);
-		lost.write(await liteFrame(0, new Uint8Array([1])));
+		lost.write(await liteFrame(new Uint8Array([1])));
 		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		await drainReactions();
 
@@ -2002,7 +2000,7 @@ test("a duplicate wait does not hold the end", async () => {
 		// A copy of group 0 this subscription's tail does not count, still arriving.
 		const other = hooks.receiveGroup(entry.track, { start: 0n, offset: 0 });
 		const duplicate = handStream(version);
-		duplicate.write(await liteFrame(0, new Uint8Array([1])));
+		duplicate.write(await liteFrame(new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), duplicate.reader);
 		await drainReactions();
 		expect(entry.tail.reading).toBe(false);
@@ -2044,7 +2042,7 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		}
 
 		const late = handStream(version);
-		late.write(await liteFrame(0, new Uint8Array([1])));
+		late.write(await liteFrame(new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 1n }), late.reader);
 		await drainReactions();
 		await respond(request, version, [{ end: new SubscribeEnd(4n) }]);
@@ -2084,7 +2082,7 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 
 		const zero = new TextEncoder().encode("zero");
 		const first = handStream(version);
-		first.write(await liteFrame(300, zero));
+		first.write(await liteFrame(zero));
 		// A zero Payload Length, the End, then a byte where only the FIN may follow.
 		first.write(
 			await Writer.collect(version, async (w) => {
@@ -2133,8 +2131,8 @@ test("a lite-07 GROUP_END accounts for the starts inside its group's span", asyn
 		await (await opened(1)).reading;
 
 		const stream = handStream(version);
-		// Frame 0 at the group's start, delta 0, then the End 500 past it.
-		stream.write(await liteFrame(0, new Uint8Array([1])));
+		// Frame 0 at the group's start, then the End 500 past it.
+		stream.write(await liteFrame(new Uint8Array([1])));
 		stream.write(
 			await Writer.collect(version, async (w) => {
 				await w.u53(0);

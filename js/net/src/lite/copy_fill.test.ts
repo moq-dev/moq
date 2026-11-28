@@ -89,7 +89,7 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 function write(group: ReturnType<Producer["createGroup"]>, key: bigint, kind: string): void {
 	group.writeFrame({
 		payload: enc.encode(`${kind} ${key}`),
-		timestamp: Timestamp.fromMillis(Number(key) * 1000),
+		timestamp: Timestamp.fromMillis(Number(key)),
 	});
 	group.finish();
 }
@@ -816,7 +816,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 					}
 					const group = defined(fill.accept(key));
 					for (let frame = 0; frame < 5; frame++)
-						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2) });
 					group.finish();
 				}
 				fill.close();
@@ -830,7 +830,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			if (!copy) throw new Error("no copy");
 			const tail = hooks.receiveGroup(copy, { start: 2n, offset: 3 });
 			for (const frame of [3, 4])
-				tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+				tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2) });
 			tail.finish();
 			archived = true;
 			const before = fetched.length;
@@ -916,7 +916,7 @@ test.each([
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const tail = hooks.receiveGroup(track, { start: 2n, offset: 3 });
 		for (const frame of [3, 4])
-			tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+			tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2) });
 		tail.finish();
 		write(hooks.createEmpty(track, 3n), 3n, "live");
 		const requests = track.requests();
@@ -929,7 +929,7 @@ test.each([
 					}
 					const group = defined(fill.accept(key));
 					for (let frame = 0; frame < 5; frame++)
-						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2) });
 					group.finish();
 				}
 				fill.close();

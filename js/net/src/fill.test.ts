@@ -1245,10 +1245,8 @@ async function session(alpn: string) {
 	const publication = origin.route(Path.from("archive"));
 	const broadcast = publication.broadcast;
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	// Groups 0 to 2 were published before this producer existed.
-	const live = hooks.createEmpty(track, 3n);
-	live.writeFrame({ payload: enc.encode("live 3"), timestamp: Timestamp.fromMillis(3000) });
-	live.finish();
+	// Groups 0 to 2, a millisecond apart, were published before this producer existed.
+	track.createGroup({ payload: enc.encode("live 3"), timestamp: Timestamp.fromMillis(3) }).finish();
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
 	void (async () => {
@@ -1260,10 +1258,7 @@ async function session(alpn: string) {
 					continue;
 				}
 				const group = defined(fill.accept(key));
-				group.writeFrame({
-					payload: enc.encode(`old ${key}`),
-					timestamp: Timestamp.fromMillis(Number(key) * 1000),
-				});
+				group.writeFrame({ payload: enc.encode(`old ${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			}
 			fill.close();
@@ -1292,7 +1287,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const group = await peer.remote.track("video").fetchGroup(2n);
 			const frame = await group.readFrame();
 			expect(dec.decode(frame?.payload)).toBe("old 2");
-			expect(frame?.timestamp?.asMillis()).toBe(2000);
+			expect(frame?.timestamp?.asMillis()).toBe(2);
 			expect(await group.readFrame()).toBeUndefined();
 
 			const missing = await peer.remote

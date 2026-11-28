@@ -1518,13 +1518,12 @@ for (const compression of [undefined, "deflate"] as const) {
 	test(`lite-07 serves a metadata subscription each frame's header alone (${compression ?? "plain"})`, async () => {
 		const sub = await servedSubscription({ version: Version.DRAFT_07, ranges: [{}], meta: true, compression });
 		try {
-			const group = hooks.createEmpty(sub.track, 0n);
-			group.writeFrame(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
+			const group = sub.track.createGroup(textFrame("a".repeat(300), Timestamp.fromMillis(2)));
 			group.writeFrame(textFrame("", Timestamp.fromMillis(3)));
 			group.writeFrame(textFrame("hello", Timestamp.fromMillis(4)));
 			group.finishAt(5n);
 			expect(await sub.servedGroup()).toMatchObject({
-				key: 0n,
+				key: 2n,
 				payloads: [],
 				sizes: [300, 0, 5],
 				times: [2n, 3n, 4n],
@@ -1554,19 +1553,22 @@ test("lite-07 GROUP_END counts from the last frame", async () => {
 	}
 });
 
-// A group may end at its last frame (delta 0), and one with no frame at its start.
-test("lite-07 GROUP_END may end a group at its last frame or its start", async () => {
+// A group may end at its last frame (delta 0), and a stream resumed past its last frame carries
+// GROUP_END alone, counting from the group's start.
+test("lite-07 GROUP_END may end a group at its last frame or a stream at its start", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		const group = hooks.createEmpty(sub.track, 1000n);
-		group.writeFrame(textFrame("x", Timestamp.fromMillis(1040)));
-		group.finishAt(1040n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 1000n, times: [1040n], endDelta: 0n, end: 1040n });
-		const empty = hooks.createEmpty(sub.track, 2000n);
-		empty.finishAt(2000n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 2000n, times: [], endDelta: 0n, end: 2000n });
+		sub.track.createGroup(textFrame("x", Timestamp.fromMillis(1040))).finishAt(1040n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 1040n, times: [1040n], endDelta: 0n, end: 1040n });
 	} finally {
 		await sub.close();
+	}
+	const later = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2000n, startFrame: 1 });
+	try {
+		later.track.createGroup(textFrame("x", Timestamp.fromMillis(2000))).finishAt(2000n);
+		expect(await later.servedGroup()).toMatchObject({ key: 2000n, frameStart: 1, times: [], endDelta: 0n, end: 2000n });
+	} finally {
+		await later.close();
 	}
 });
 
@@ -3368,9 +3370,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 	);
 
 	try {
-		const group = hooks.createEmpty(track, 0n);
-		group.writeFrame(textFrame("hello"));
-		group.finish();
+		track.createGroup(textFrame("hello", Timestamp.fromMillis(0))).finish();
 		track.finish();
 		track.close();
 
@@ -4489,9 +4489,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 	const broadcast = publish(source, Path.from("live"));
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
-	const whole = hooks.createEmpty(track, 0n);
-	whole.writeFrame(frame(0));
-	whole.finish();
+	track.createGroup(frame(0)).finish();
 	const url = new URL("https://localhost:4443/test");
 	const [session, upstreamServer] = await Promise.all([
 		connectSession({ url, transport: upstream.client }),
@@ -4543,11 +4541,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 		expect(reset).toBeUndefined();
 
 		// Then the track runs a second past its successor upstream, with the FIN still unacknowledged.
-		for (const ms of [1000, 2000]) {
-			const group = hooks.createEmpty(track, BigInt(ms / 1000));
-			group.writeFrame(frame(ms));
-			group.finish();
-		}
+		for (const ms of [1000, 2000]) track.createGroup(frame(ms)).finish();
 		await serving;
 		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 	} finally {
