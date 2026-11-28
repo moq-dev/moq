@@ -51,7 +51,10 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// The log is read oldest first whatever order the subscription asked, so a second group a
 	/// broken publisher opens is caught as `Rolled` rather than read ahead of the first.
 	pub fn new(mut track: moq_net::track::Subscriber, config: Config) -> Self {
-		let subscription = track.subscription().with_order(moq_net::track::Order::Ascending);
+		let mut subscription = track.subscription();
+		for range in &mut subscription.ranges {
+			range.order = moq_net::track::Order::Ascending;
+		}
 		// A track that already ended holds no group to read out of order.
 		let _ = track.update(subscription);
 		Self {

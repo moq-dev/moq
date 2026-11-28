@@ -214,7 +214,10 @@ typealias RouteOptions = uniffi.moq.MoqRouteOptions
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
-/** Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering. */
+/**
+ * Tunes how a track subscription is delivered: delay, and ranges, each with its own priority and
+ * group ordering.
+ */
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
@@ -242,13 +245,16 @@ fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
  * includes its whole group. A null `start` is no start, which the subscription's [Delay] places: a
  * stated `min` is a live join that far behind the live edge (zero is the latest group), and an
  * unstated one reaches back as far as `max` allows. A null `end` keeps following the live edge.
+ * `priority` is how urgently its groups go out, higher first, and `order` which of them comes
+ * first, null for newest first. Before moq-lite-07 the publisher sends every range at the highest
+ * priority any asks, newest first.
  */
 typealias Range = uniffi.moq.MoqRange
 
 /**
- * Which group comes first, as the publisher sends them and `recvGroup` returns those held:
- * `ASCENDING` or `DESCENDING`. Before moq-lite-07 the publisher sends newest first whatever this
- * asks.
+ * Which of a range's groups comes first, as the publisher sends them and `recvGroup` returns those
+ * held: `ASCENDING` or `DESCENDING`. Before moq-lite-07 the publisher sends newest first whatever
+ * this asks.
  */
 typealias Order = uniffi.moq.MoqOrder
 

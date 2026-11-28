@@ -61,6 +61,15 @@ impl Join {
 		}
 	}
 
+	/// Whether media from `start` starts a whole span past the open group's start: a gap, not a
+	/// rewind, which [`opens`](Self::opens) also counts.
+	pub(crate) fn gaps(&self, start: moq_net::Timestamp) -> bool {
+		match (self.start, Duration::try_from(start)) {
+			(Some(opened), Ok(start)) => start >= opened && self.spans(opened, start),
+			_ => false,
+		}
+	}
+
 	/// Whether a group from `start` to `end` is full, for a caller that tracks its own group.
 	///
 	/// Ending before it starts is full, since the timeline broke, and so is an unscaled timestamp.
@@ -138,6 +147,10 @@ mod tests {
 		assert!(!join.opens(micros(1_020_000)));
 		assert!(join.opens(micros(1_100_000)));
 		assert!(join.opens(micros(999_999)));
+		// Only the gap is one.
+		assert!(join.gaps(micros(1_100_000)));
+		assert!(!join.gaps(micros(1_099_999)));
+		assert!(!join.gaps(micros(999_999)));
 	}
 
 	#[test]

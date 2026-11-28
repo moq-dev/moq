@@ -19,7 +19,10 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Timestamp, frame, origin, track::Subscription};
+use moq_net::{
+	Timestamp, frame, origin,
+	track::{Range, Subscription},
+};
 use moq_uring::{Config, Error, Worker, quic, udp};
 
 const ALPN: &str = "moq-lite-06";
@@ -157,7 +160,7 @@ fn partial_frame_gives_way() {
 				let track = remote.track(name).expect("track");
 				async move {
 					track
-						.subscribe(Subscription::default().with_priority(priority))
+						.subscribe(Subscription::default().with_ranges([Range::default().with_priority(priority)]))
 						.await
 						.expect("subscribe")
 				}
@@ -322,7 +325,7 @@ fn javascript_partial_frame_gives_way() {
 				let track = remote.track(name).expect("track");
 				async move {
 					track
-						.subscribe(Subscription::default().with_priority(priority))
+						.subscribe(Subscription::default().with_ranges([Range::default().with_priority(priority)]))
 						.await
 						.expect("subscribe")
 				}

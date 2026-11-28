@@ -177,15 +177,24 @@ class Range:
     unstated one reaches back as far as ``max`` allows. A range with a ``start`` is history:
     every group it covers is delivered, bounded only by the publisher's max age, since ``max``
     applies only to ranges with no start. ``end`` is ``None`` to keep following the live edge.
+
+    ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint. ``order`` is
+    which of its groups comes first, as the publisher sends them and :meth:`recv_group` returns
+    those held, ``None`` for newest first. Before moq-lite-07 the publisher sends every range at
+    the highest priority any asks, newest first.
     """
 
     start: Timestamp | None = None
     end: Timestamp | None = None
+    priority: int = 0
+    order: MoqOrder | None = None
 
     def _ffi(self) -> MoqRange:
         return MoqRange(
             start=None if self.start is None else self.start._ffi(),
             end=None if self.end is None else self.end._ffi(),
+            priority=self.priority,
+            order=self.order,
         )
 
 
@@ -221,20 +230,15 @@ class Delay:
 class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
-    ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``delay`` is where a range with no start begins and how far a non-latest group may fall
-    behind before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
-    one :class:`Range` with no start. ``order`` is which group comes first, as the
-    publisher sends them and :meth:`recv_group` returns those held, ``None`` for newest first.
-    Before moq-lite-07 the publisher sends newest first whatever ``order`` asks.
+    behind before it is skipped. ``ranges`` are the spans of the track to deliver, each with its
+    own priority and order, ``None`` for one :class:`Range` with no start.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
-    priority: int = 0
     delay: Delay = Delay()
     ranges: Sequence[Range] | None = None
-    order: MoqOrder | None = None
 
     @classmethod
     def default(cls) -> Subscription:
@@ -245,19 +249,15 @@ class Subscription:
         """
         defaults = moq_subscription_defaults()
         return cls(
-            priority=defaults.priority,
             delay=Delay._from_ffi(defaults.delay),
             # The FFI defaults never restrict ranges, so there is no record to convert.
             ranges=None,
-            order=defaults.order,
         )
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
-            priority=self.priority,
             delay=self.delay._ffi(),
             ranges=None if self.ranges is None else [r._ffi() for r in self.ranges],
-            order=self.order,
         )
 
 

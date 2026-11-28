@@ -38,16 +38,9 @@ pub struct Stats {
 	/// Completed group deliveries across all subscriptions (the displayed total).
 	/// A group the relay failed part-way is omitted and counted as lost.
 	pub groups_recv: AtomicU64,
-	/// Completed deliveries older than their subscription's first group, such as
-	/// cached history filled in after the subscribe. Included in `groups_recv`,
-	/// excluded from `groups_expected`, and never counted as loss.
-	pub groups_history: AtomicU64,
-	/// Settled sequence spans plus any failed live-frontier groups.
+	/// Groups the ordered reads reached or skipped past, from each subscription's first group.
 	pub groups_expected: AtomicU64,
-	/// Completed deliveries within `groups_expected`. The shortfall is the gaps
-	/// still outstanding, which a late arrival shrinks.
-	pub groups_present: AtomicU64,
-	/// Groups skipped past or failed. A late arrival never decrements it.
+	/// The part of `groups_expected` skipped past or failed part-way.
 	pub groups_lost: AtomicU64,
 	latency: Latency,
 }
@@ -73,9 +66,7 @@ impl Stats {
 			frames_recv: AtomicU64::new(0),
 			bytes_recv: AtomicU64::new(0),
 			groups_recv: AtomicU64::new(0),
-			groups_history: AtomicU64::new(0),
 			groups_expected: AtomicU64::new(0),
-			groups_present: AtomicU64::new(0),
 			groups_lost: AtomicU64::new(0),
 			latency: Latency::default(),
 		}
@@ -173,7 +164,6 @@ impl Stats {
 				recv_mbps = format_args!("{recv_mbps:.1}"),
 				recv_fps = format_args!("{recv_fps:.0}"),
 				recv_groups = now.groups_recv,
-				history_groups = now.groups_history,
 				lost_groups = now.groups_lost,
 				loss = format_args!("{loss:.2}%"),
 				latency_samples = now.latency_samples,
@@ -262,9 +252,7 @@ struct Snapshot {
 	frames_recv: u64,
 	bytes_recv: u64,
 	groups_recv: u64,
-	groups_history: u64,
 	groups_expected: u64,
-	groups_present: u64,
 	groups_lost: u64,
 	latency_samples: u64,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -343,10 +331,9 @@ impl IntervalLatency {
 impl Snapshot {
 	fn take(stats: &Stats) -> Self {
 		let latency = stats.latency.snapshot();
-		// Acquire the counters bounded by `groups_expected` before reading it, pairing
-		// with the release in `GapTracker::record`, so neither exceeds it.
+		// Acquire `groups_lost` before reading `groups_expected`, pairing with the release in
+		// `Sequence::reached`, so it never exceeds it.
 		let groups_lost = stats.groups_lost.load(Ordering::Acquire);
-		let groups_present = stats.groups_present.load(Ordering::Acquire);
 		Self {
 			ready: stats.ready(),
 			captured_at: latency.captured_at,
@@ -369,9 +356,7 @@ impl Snapshot {
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
-			groups_history: stats.groups_history.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
-			groups_present,
 			groups_lost,
 			latency_samples: latency.samples,
 			latency_p50_ms: latency.p50_ms,

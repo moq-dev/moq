@@ -172,7 +172,7 @@ type SnapshotConsumer struct {
 // SnapshotConsumerOptions configures a snapshot consumer's subscription.
 type SnapshotConsumerOptions struct {
 	// Priority is the subscription's delivery priority, higher first, as
-	// moq.Subscription.Priority.
+	// moq.Range.Priority.
 	Priority int8
 	// Delay is the reader's playout delay behind the live edge, the subscription's
 	// Delay.Min and Delay.Max. Zero skips a snapshot the moment a newer one arrives. A

@@ -19,7 +19,9 @@ pub(super) struct Refresh {
 	admitted: Token,
 	stats: moq_net::stats::Session,
 	role: Option<Role>,
-	credentials: BTreeMap<u64, Credential>,
+	/// Boxed because a connection holds one almost always, and a B-tree leaf reserves
+	/// eleven inline slots.
+	credentials: BTreeMap<u64, Box<Credential>>,
 	/// One armed watch per credential for a change to its grant, its expiry, or its end,
 	/// each handing its consumer back to be watched again. Polling only wakes the watch
 	/// that has news, so a connection's cost per event does not grow with its credentials.
@@ -175,7 +177,7 @@ impl Refresh {
 		let consumer = credential.consumer.clone();
 		self.arm_changes(id, &mut credential, consumer);
 		self.arm_withdrawal(id, &mut credential);
-		self.credentials.insert(id, credential);
+		self.credentials.insert(id, Box::new(credential));
 	}
 
 	/// Watch `credential`'s grant through `consumer` until it changes, expires, or ends.
@@ -532,9 +534,11 @@ impl Refresh {
 
 /// A credential's grant changed, expired, or was revoked by the decider.
 async fn changed(consumer: &mut lease::Consumer, expires: Option<kio::clock::Instant>) -> Change {
+	// Boxed so a credential that never expires does not reserve room for the timer.
+	let mut sleep = expires.map(|at| Box::pin(kio::clock::sleep_until(at)));
 	let expire = async {
-		match expires {
-			Some(at) => kio::clock::sleep_until(at).await,
+		match &mut sleep {
+			Some(sleep) => sleep.await,
 			None => std::future::pending().await,
 		}
 	};

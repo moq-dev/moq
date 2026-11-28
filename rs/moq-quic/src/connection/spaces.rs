@@ -102,6 +102,22 @@ impl PacketSpace {
 		}
 	}
 
+	/// Drop the keys and the buffers only sending and receiving here used, returning the packets
+	/// still in flight. What later checks read, such as whether the peer acknowledged anything
+	/// here, stays.
+	pub(super) fn discard(&mut self) -> SentPackets {
+		self.crypto = None;
+		self.time_of_last_ack_eliciting_packet = None;
+		self.loss_time = None;
+		// Its probes can never be sent, and one left owed would read as a probe in flight
+		self.loss_probes = 0;
+		self.pending = Retransmits::default();
+		self.pending_acks = PendingAcks::new();
+		self.lost_packets = Slots::default();
+		self.crypto_stream = Assembler::new();
+		mem::take(&mut self.sent_packets)
+	}
+
 	/// Queue data for a tail loss probe (or anti-amplification deadlock prevention) packet
 	///
 	/// Probes are sent similarly to normal packets when an expected ACK has not arrived. We never

@@ -16,7 +16,10 @@ complete` for all four and served group 39 on 300 streams while finishing 270, s
 the rest, most likely by resetting them. Lite-07 copes because its publisher names every reset
 group in a drop over WebTransport ([moq-dev/moq#9743](https://github.com/moq-dev/moq/pull/9743));
 lite-06 has no drop. 72 other lite-06 cells on hosted runners and every scheduled run from
-2026-11-22 to 2026-11-27 passed it.
+2026-11-22 to 2026-11-27 passed it. It recurred in scheduled Interop
+[46166329015](https://github.com/moq-dev/moq/actions/runs/46166329015) (2026-11-28, `9a20cdf5bc`):
+`3 subscriptions still open 10000 ms after the publisher finished`, `low-50` to `low-52` with last
+groups `38:2`; its run directory is uploaded. The lost reset is still unconfirmed there.
 
 ## Plan
 

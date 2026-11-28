@@ -10752,7 +10752,7 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 	let unanswered = replacement.broadcast().requests();
 	pump(&mut follower).await;
 	assert_eq!(
-		old_audio.track().subscription().unwrap().priority,
+		old_audio.track().subscription().unwrap().ranges[0].priority,
 		-1,
 		"the old program yields while acquiring"
 	);
@@ -10768,7 +10768,7 @@ async fn a_return_after_an_abandoned_switch_restores_priority() {
 	write_aac(&mut back_audio, 1000);
 	pump(&mut follower).await;
 	assert_eq!(
-		back_audio.track().subscription().unwrap().priority,
+		back_audio.track().subscription().unwrap().ranges[0].priority,
 		0,
 		"the resumed program keeps normal priority"
 	);
@@ -12569,10 +12569,13 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 		}
 		if let Some((_, _, audio)) = &replacement {
 			if let Some(subscription) = old_audio.track().subscription() {
-				demoted |= subscription.priority == -1;
+				demoted |= subscription.ranges[0].priority == -1;
 			}
 			if let Some(subscription) = audio.track().subscription() {
-				assert_eq!(subscription.priority, 0, "the replacement keeps normal priority");
+				assert_eq!(
+					subscription.ranges[0].priority, 0,
+					"the replacement keeps normal priority"
+				);
 			}
 		}
 		tokio::time::advance(step).await;
@@ -12899,7 +12902,7 @@ async fn a_replacement_leaving_before_it_commits_keeps_the_old_program() {
 		tokio::time::advance(Duration::from_millis(20)).await;
 	}
 	assert_eq!(
-		old_audio.track().subscription().unwrap().priority,
+		old_audio.track().subscription().unwrap().ranges[0].priority,
 		0,
 		"a cancelled switch restores priority"
 	);

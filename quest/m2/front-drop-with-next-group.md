@@ -8,6 +8,8 @@ of a plain track does. Today it hands out the group and never reports the gap.
 
 ## Plan
 
+Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit): ✅ pulled back from `m3` to `m2` (reversing [moq-dev/moq#9842](https://github.com/moq-dev/moq/pull/9842)) because [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529)'s newest-first default makes a drop and higher group landing in the same poll the common case on fronts. Its blocker [relayed-refused-fill-gap](/quest/m1/relayed-refused-fill-gap.md) stays in `m1` only while claimed by [moq-dev/moq#9830](https://github.com/moq-dev/moq/pull/9830) (`quest mv` refuses claimed quests, per `/quest/README.md`), and this quest's `Required` link keeps it a transitive `0.22.0` cut blocker; if `#9830`'s claim ends unfinished, move it to `m2`.
+
 Kept by the maintainer on 2026-11-24 ([pick round](https://github.com/moq-dev/moq/pull/9529#issuecomment-7140096782)).
 
 Found while building [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529): on lite-06,

@@ -179,23 +179,13 @@ extension type Delay._(MoqDelay _delay) implements MoqDelay {
     : this._(MoqDelay(min: min, max: max));
 }
 
-/// Tunes how a track subscription is delivered: priority, delay, ranges, and group ordering.
+/// Tunes how a track subscription is delivered: delay, and ranges, each with its own priority
+/// and group ordering.
 extension type Subscription._(MoqSubscription _subscription)
     implements MoqSubscription {
   /// An omitted `delay` is a bare [Delay], so a bare `Subscription()` is moq-net's defaults.
-  Subscription({
-    int priority = 0,
-    MoqDelay? delay,
-    List<MoqRange>? ranges,
-    MoqOrder? order,
-  }) : this._(
-         MoqSubscription(
-           priority: priority,
-           delay: delay ?? Delay(),
-           ranges: ranges,
-           order: order,
-         ),
-       );
+  Subscription({MoqDelay? delay, List<MoqRange>? ranges})
+    : this._(MoqSubscription(delay: delay ?? Delay(), ranges: ranges));
 }
 
 /// moq-net's defaults, whose `delay` (no `min`, a zero `max`) starts at the newest group and skips a superseded one at once.
@@ -208,11 +198,13 @@ Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 /// Every end includes its whole group. A null `start` is no start, which the subscription's
 /// [Delay] places: a stated `min` is a live join that far behind the live edge (zero is the
 /// latest group), and an unstated one reaches back as far as `max` allows. A null `end` keeps
-/// following the live edge.
+/// following the live edge. `priority` is how urgently its groups go out, higher first, and
+/// `order` which of them comes first, null for newest first. Before moq-lite-07 the publisher
+/// sends every range at the highest priority any asks, newest first.
 typedef Range = MoqRange;
 
-/// Which group comes first, as the publisher sends them and `recvGroup` returns those held.
-/// Before moq-lite-07 the publisher sends newest first whatever this asks.
+/// Which of a range's groups comes first, as the publisher sends them and `recvGroup` returns
+/// those held. Before moq-lite-07 the publisher sends newest first whatever this asks.
 typedef Order = MoqOrder;
 
 /// A location within a track: a group start and a frame index in it.

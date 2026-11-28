@@ -5,6 +5,7 @@
 
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -391,7 +392,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		let initial = Subscription::default()
 			.with_ranges([support::keys(2..4), support::keys(5..6)])
 			.with_max(None)
-			.with_order(moq_net::track::Order::Ascending);
+			.ordered(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
 		for _ in 0..3 {
@@ -420,11 +421,9 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 					"the narrowed reader read its range"
 				);
 				loop {
-					if fixture
-						.track
-						.subscription()
-						.is_some_and(|subscription| subscription.ranges == [support::keys(4..5)])
-					{
+					if fixture.track.subscription().is_some_and(|subscription| {
+						subscription.ranges == [support::keys(4..5).with_order(moq_net::track::Order::Ascending)]
+					}) {
 						return std::task::Poll::Ready(());
 					}
 					if fixture.track.poll_subscription_changed(waiter).is_pending() {
@@ -455,7 +454,7 @@ async fn draft22_carries_time_ends_as_group_ids() {
 		let initial = Subscription::default()
 			.with_ranges([support::keys(2..4), support::keys(5..6)])
 			.with_max(None)
-			.with_order(moq_net::track::Order::Ascending);
+			.ordered(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
 		for _ in 0..3 {
@@ -467,6 +466,7 @@ async fn draft22_carries_time_ends_as_group_ids() {
 			.update(initial.with_ranges([Range {
 				start: moq_net::track::Start::Time(0),
 				end: Some(2),
+				..Default::default()
 			}]))
 			.unwrap();
 		let mut got = vec![next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
@@ -474,11 +474,9 @@ async fn draft22_carries_time_ends_as_group_ids() {
 		assert_eq!(got, [0, 1], "relay={relay}");
 		kio::clock::timeout(TIMEOUT, async {
 			loop {
-				if fixture
-					.track
-					.subscription()
-					.is_some_and(|subscription| subscription.ranges == [support::keys(0..3)])
-				{
+				if fixture.track.subscription().is_some_and(|subscription| {
+					subscription.ranges == [support::keys(0..3).with_order(moq_net::track::Order::Ascending)]
+				}) {
 					break;
 				}
 				fixture.track.subscription_changed().await.unwrap();
@@ -493,6 +491,7 @@ async fn draft22_carries_time_ends_as_group_ids() {
 		.with_ranges([Range {
 			start: moq_net::track::Start::Time(0),
 			end: Some(2),
+			..Default::default()
 		}])
 		.with_max(None);
 	let mut reader = subscribe(&fixture.remote, requested).await;
@@ -571,6 +570,7 @@ async fn draft18_updates_narrow_then_widen() {
 		let narrowed = Range {
 			start: moq_net::track::Start::Time(5),
 			end: Some(6),
+			..Default::default()
 		};
 		kio::clock::timeout(
 			TIMEOUT,
@@ -806,8 +806,8 @@ async fn a_covered_bounded_subscription_stays_open() {
 		let bounded = |range: std::ops::Range<u64>| {
 			Subscription::default()
 				.with_max(Duration::from_secs(60))
-				.with_order(moq_net::track::Order::Ascending)
 				.with_ranges([support::keys(range)])
+				.ordered(moq_net::track::Order::Ascending)
 		};
 		let mut reader = subscribe(&remote, bounded(1..3)).await;
 		assert_eq!(next(&mut reader).await, Some(1), "{version}");
@@ -901,13 +901,16 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 
 		let mut reader = subscribe(
 			&fixture.remote,
-			Subscription::default().with_max(budget).with_order(order).with_ranges([
-				keys(0..8),
-				Range::from(Start::Live {
-					min: Some(Duration::ZERO),
-					max: Some(std::time::Duration::ZERO),
-				}),
-			]),
+			Subscription::default()
+				.with_max(budget)
+				.with_ranges([
+					keys(0..8),
+					Range::from(Start::Live {
+						min: Some(Duration::ZERO),
+						max: Some(std::time::Duration::ZERO),
+					}),
+				])
+				.ordered(order),
 		)
 		.await;
 		// Everything in range that exists now, before the live edge moves.
@@ -953,5 +956,6 @@ fn keys(range: std::ops::Range<u64>) -> Range {
 	Range {
 		start: moq_net::track::Start::Time(range.start),
 		end: Some(range.end - 1),
+		..Default::default()
 	}
 }

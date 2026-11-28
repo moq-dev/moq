@@ -20,7 +20,7 @@ Moved to m1 2026-11-12 (maintainer, /quest-audit): a docs page breaks nothing, s
 
 Decided 2026-10-25 (maintainer): a separate page, not only inline doc
 updates. Write it against the finalized lite-07 design (incorporating
-[lite-07 subscribe redesign](/quest/m2/lite07-subscribe/README.md):
+the lite-07 subscribe redesign, finished with [moq-dev/moq#9719](https://github.com/moq-dev/moq/pull/9719):
 `GROUP_END` and `SUBSCRIBE_DROP(SKIP)` gap accounting, `FETCH` removal in
 favor of bounded `SUBSCRIBE` with `Anchor::Position`, and per-range priority
 and order, on top of [the model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md)

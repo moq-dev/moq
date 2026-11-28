@@ -54,9 +54,12 @@ type (
 	// refused). Every start is the first frame of its group, and every end includes its whole
 	// group. A nil Start is no start, which the subscription's Delay places: a stated Min is a
 	// live join that far behind the live edge (zero is the latest group), and an unstated one
-	// reaches back as far as Max allows. A nil End keeps following the live edge.
+	// reaches back as far as Max allows. A nil End keeps following the live edge. Priority is
+	// how urgently its groups go out, higher first, and Order which of them comes first, nil for
+	// newest first. Before moq-lite-07 the publisher sends every range at the highest priority
+	// any asks, newest first.
 	Range = ffi.MoqRange
-	// Order is which of a subscription's groups comes first, as the publisher sends them and
+	// Order is which of a range's groups comes first, as the publisher sends them and
 	// RecvGroup returns those held. Before moq-lite-07 the publisher sends newest first whatever
 	// this asks.
 	Order = ffi.MoqOrder

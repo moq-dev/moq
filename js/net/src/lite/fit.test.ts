@@ -3,7 +3,15 @@ import { insertRun, type Run, removeRun, runGaps } from "../internal.ts";
 import { Writer } from "../stream.ts";
 import { type Budget, budget as budgetOf, fit, fitAfter, UPDATE_FIELDS } from "./fit.ts";
 import { MAX_MESSAGE_SIZE } from "./message.ts";
-import { LiveRanges, rangeSize, SubscribeUpdate, type WireAnchor, type WireRange } from "./subscribe.ts";
+import {
+	LiveRanges,
+	type Retune,
+	rangeSize,
+	SubscribeUpdate,
+	type WireAnchor,
+	type WireRange,
+	withPolicy,
+} from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 const version = Version.DRAFT_07;
@@ -150,6 +158,86 @@ test("fit leaves any edit between fitted ranges one message", async () => {
 		const next = wide(live.next(), [50, 14][round % 2]);
 		await encode(widest(live.edit(next)));
 	}
+});
+
+// An update retuning live ranges in place, each at another policy and a live join under a far
+// larger max, still fits one message beside what it retires and adds: a retune costs no more than
+// the range it retunes as the update asks for it, which the budget already counts. Mirrors the
+// Rust `an_edit_retuning_every_live_range_fits_one_message`.
+test("fit leaves an edit retuning live ranges one message", async () => {
+	const widest = (edit: { remove: bigint[]; add: WireRange[]; retune: [bigint, Retune][] }) =>
+		new SubscribeUpdate({
+			wantedGroup: (1n << 64n) - 2n,
+			priority: -128,
+			maxDelay: Number.MAX_SAFE_INTEGER,
+			order: "ascending",
+			remove: edit.remove,
+			ranges: edit.add,
+			retune: edit.retune,
+		});
+	const encode = (update: SubscribeUpdate) => Writer.collect(version, (w) => update.encode(w, version));
+	const rng = seeded(0x72657475);
+	// Live joins as small as one can be, so a retune to a far larger max outgrows each the most,
+	// beside enough time ranges that the fitted set fills its budget.
+	const fresh = (count: number): WireRange[] =>
+		Array.from({ length: count }, (): WireRange => {
+			if (rng.chance(0.05)) return { start: { live: { min: rng.int(0, 64), max: 0 } } };
+			const start = rng.bits(40);
+			return { start: { time: start }, end: { time: start } };
+		});
+	const live = new LiveRanges(version, [...fit(fresh(10_000), [], [], budgetOf(0, 0n, 10_000)).ranges]);
+	let retuned = 0;
+	for (let round = 0; round < 6; round++) {
+		// Every live range retuned, or a random share of them beside new ones.
+		const share = round % 2 === 0 ? 1 : 0.5;
+		const kept = live.ranges().filter(() => rng.chance(share));
+		const tuned = kept.map((range) => {
+			const policy = {
+				priority: rng.int(-128, 128),
+				order: rng.chance(0.5) ? "ascending" : "descending",
+			} as const;
+			const join = range.start?.live;
+			const out: WireRange = join ? { ...range, start: { live: { min: join.min, max: 2 ** 52 } } } : range;
+			return withPolicy(out, policy);
+		});
+		const next = [...tuned, ...fresh(share === 1 ? 0 : 5_000)];
+		const fitted = [...fit(next, [], [], budgetOf(0, live.next(), next.length)).ranges];
+		const edit = live.edit(fitted);
+		retuned += edit.retune.length;
+		expect((await encode(widest(edit))).byteLength).toBeLessThanOrEqual(MAX_MESSAGE_SIZE);
+	}
+	// The rounds retuned ranges rather than retiring every one.
+	expect(retuned).toBeGreaterThan(1_000);
+});
+
+// A range widened over others asks at the most urgent policy among them, so no group it covers goes
+// out later than one of them asked; one left alone keeps its own.
+test("a widened range asks at the most urgent policy it covers", () => {
+	const at = (start: bigint, priority: number, order: "ascending" | "descending"): WireRange =>
+		withPolicy({ start: { time: start }, end: { time: start } }, { priority, order });
+	const demand = [at(0n, 1, "ascending"), at(2n, 5, "ascending"), at(3n, 5, "descending"), at(100n, -3, "ascending")];
+	const want = [
+		withPolicy({ start: { time: 0n }, end: { time: 3n } }, { priority: 5, order: "descending" }),
+		at(100n, -3, "ascending"),
+	];
+	// Room for two spans as fit measures them, by their groups.
+	const room = total(
+		budget(0),
+		[],
+		[
+			{ start: 0n, end: 4n },
+			{ start: 100n, end: 101n },
+		],
+	);
+	expect(fit(demand, [], [], budget(room)).ranges).toEqual(want);
+	// The ranges with no start collapse the same way.
+	const unstarted = [
+		withPolicy({ end: { absolute: 5n } }, { priority: 2, order: "ascending" }),
+		withPolicy({ end: { absolute: 9n } }, { priority: 2, order: "descending" }),
+	];
+	expect(fit(unstarted, [], [], budget(10)).ranges).toEqual([
+		withPolicy({ end: { absolute: 9n } }, { priority: 2, order: "descending" }),
+	]);
 });
 
 // The range fitAfter takes past a full budget still fits the message beside the fields a SUBSCRIBE

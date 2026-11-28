@@ -591,7 +591,7 @@ package-gst *args:
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
 
-# Count the deterministic Criterion benches' instructions under stock Valgrind with rust2-bench
+# Count the deterministic Criterion benches' instructions under stock Valgrind with swole
 # (x86-64 Linux), as CI's nightly count does: `just rs instructions run --out metrics.json`,
 # `just rs instructions compare <base>` for each bench's change since a commit, or `just rs
 # instructions fingerprint`. `--benchmarks <file>` counts, and builds the targets of, only the
