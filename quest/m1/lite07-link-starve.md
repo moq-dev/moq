@@ -45,12 +45,25 @@ alternative.
 
 Update 2026-11-28 (`/quest-start`): [`half-roll-hold.toml`](/test/mesh-replay/half-roll-hold.toml)
 (relays `a` and `b` rolled so `a-b` is the only lite-07 link, then a 10-minute `hold` that fails on
-any reader pause past `stall`, `--broadcasts 4,32`, all readers following every other relay's
-broadcasts) ran clean on `main` at `f24ac5065e`, on a loaded host: no reader paused past 0.5s in
-either hold. [#9564](https://github.com/moq-dev/moq/pull/9564) (its S5) merged on 2026-11-25, after
-all three reproducing commits, and Nightly's mesh replays passed at `5d86f05321` too, so the
-original runs' shape is still unknown and the stall may already be fixed. Before deleting this
-quest, reproduce it at a pre-#9564 build with the hold, or find the original runs' logs.
+any reader pause past `stall`) reproduces it deterministically on one loaded macOS host, and
+[`half-roll.toml`](/test/mesh-replay/half-roll.toml) alone does at its first roll. Readers on `a`
+(then `b`) of other relays' broadcasts read nothing from the roll on, and never recovered within
+the 13-minute run (no 1 to 3 minute recovery). With the relay built at each commit and this
+checkout's `moq-bench`, 4 broadcasts per relay, one run each:
+
+| Relay build | Result |
+| --- | --- |
+| `5d86f05321` | starved, 791s pause in the hold |
+| `a1c13dd38d` (parent of #9564) | starved |
+| `64c69c2548` ([#9564](https://github.com/moq-dev/moq/pull/9564), its S5 merged) | starved (`half-roll.toml`) |
+| `f24ac5065e` (`main`) | clean: `half-roll.toml` once, `half-roll-hold.toml` at 4 and 32 broadcasts |
+
+So #9564 is not the fix, and something in the 42 net, relay, and quic commits between
+`64c69c2548` and `f24ac5065e` is. Next: bisect them with `half-roll.toml` (about 3 minutes a
+run, 6 builds), name the commit, check it has a test at the lowest layer that fails without it,
+and add one if not. If that commit is a quic or cc change (#9709 to #9716, #9745) the stall may
+be a send-window starvation the lite code only exposed. Not yet checked: that these starved
+readers are the quest's 1 to 3 minute stall rather than another mid-roll strand.
 
 If the fix needs a change to the lite-07-wip wire, that part joins m2 under
 [lite-07 subscribe](/quest/m2/lite07-subscribe/README.md), per the milestone
