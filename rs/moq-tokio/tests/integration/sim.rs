@@ -457,7 +457,11 @@ fn stale_routes_drain() {
 			assert_eq!(stale, Ok(Some(Liveness::Stale)), "{version}");
 			let drained = next().await;
 			assert!(drained.draining(), "{version}");
-			assert_eq!(drained.cost(), live.cost(), "{version}: a draining route keeps its cost");
+			assert_eq!(
+				drained.cost(),
+				live.cost(),
+				"{version}: a draining route keeps its cost"
+			);
 
 			heal(&network);
 			let live = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;

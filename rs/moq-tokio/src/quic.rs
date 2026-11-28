@@ -235,8 +235,8 @@ pub struct Config {
 
 	/// Report a session's peer stale once it goes unheard this long, probing it once half of
 	/// this passes. A stale peer's routes rank below every other's until it is heard again.
-	/// Set it with [`keep_alive_hard`](Self::keep_alive_hard); unset (the default) probes
-	/// nothing and never reports staleness.
+	/// Set it with `keep_alive_hard`; unset (the default) probes nothing and never reports
+	/// staleness.
 	///
 	/// Every session built from this section probes, so a relay sets it on its peer links
 	/// (`[limits.peer.quic]`) rather than here, which would probe every local client too.
@@ -250,8 +250,7 @@ pub struct Config {
 	pub keep_alive_soft: Option<crate::cli::Duration>,
 
 	/// Close a session whose peer goes unheard this long, as an idle timeout. Set with
-	/// [`keep_alive_soft`](Self::keep_alive_soft), longer than it and no longer than the
-	/// idle timeout.
+	/// `keep_alive_soft`, longer than it and no longer than the idle timeout.
 	#[usage(
 		name = "quic-keep-alive-hard",
 		long = "quic-keep-alive-hard",
@@ -1002,7 +1001,10 @@ mod tests {
 		fits.validate().unwrap();
 		assert_eq!(
 			fits.resolve().liveness,
-			Some(moq_net::transport::KeepAlive::new(Duration::from_secs(2), Duration::from_secs(10)))
+			Some(moq_net::transport::KeepAlive::new(
+				Duration::from_secs(2),
+				Duration::from_secs(10)
+			))
 		);
 		assert!(matches!(keep_alive(2, 11).validate(), Err(crate::Error::KeepAlive(_))));
 		let longer = Config {
