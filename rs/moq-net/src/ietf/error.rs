@@ -64,6 +64,10 @@ pub fn to_stream_code(err: &StreamError) -> u32 {
 		// our own delivery deadline. That is what the code describes, and the same claim
 		// moq-lite makes with it, so a relay can carry a peer's timeout across either wire.
 		StreamError::DeliveryTimeout => DELIVERY_TIMEOUT,
+		// The registry has no OLD, and a group given up for a newer one is late content its
+		// reader skips, as one past its delivery deadline is. Read back as DELIVERY_TIMEOUT,
+		// which `Error::superseded` counts the same.
+		StreamError::Old => DELIVERY_TIMEOUT,
 		// Flattened, as on the moq-lite wire: the session registry is disjoint, so the
 		// specific reason travels on the session close instead.
 		StreamError::Session(_) => SESSION_CLOSED,
@@ -672,7 +676,6 @@ mod tests {
 		for err in [
 			StreamError::NotFound,
 			StreamError::Unroutable,
-			StreamError::Old,
 			StreamError::Evicted,
 			StreamError::WrongSize,
 			StreamError::FrameTooLarge,

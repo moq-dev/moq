@@ -84,16 +84,16 @@ impl<T: DeserializeOwned> Consumer<T> {
 			};
 
 			match group.poll_read_frame(waiter) {
-				// Judged by stream code, so a group the publisher reset as old is the same loss as
+				// Judged by stream code, so a group the publisher reset as lost is the same loss as
 				// one this side dropped.
 				Poll::Ready(Err(err))
-					if matches!(
-						moq_net::StreamError::from(&err),
-						moq_net::StreamError::Old
-							| moq_net::StreamError::TooFarBehind
-							| moq_net::StreamError::Evicted
-							| moq_net::StreamError::GroupTooLarge
-					) =>
+					if err.superseded()
+						|| matches!(
+							moq_net::StreamError::from(&err),
+							moq_net::StreamError::TooFarBehind
+								| moq_net::StreamError::Evicted
+								| moq_net::StreamError::GroupTooLarge
+						) =>
 				{
 					// This group is no longer complete, but the next one starts with a checkpoint
 					// that can account for everything this reader missed.

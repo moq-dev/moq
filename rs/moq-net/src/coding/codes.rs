@@ -100,7 +100,7 @@ mod tests {
 	use super::*;
 
 	/// The registry follows the negotiated protocol, not the other way around: a group
-	/// dropped for being old is a moq-lite code and an INTERNAL_ERROR on the IETF
+	/// dropped for being old is a moq-lite code and a DELIVERY_TIMEOUT on the IETF
 	/// wire, and the same number read back on each wire has to mean what that wire said.
 	#[test]
 	fn the_version_picks_the_registry() {
@@ -108,7 +108,10 @@ mod tests {
 		let ietf = crate::Version::ietf(ietf::Version::Draft22);
 
 		assert_eq!(lite.encode_stream_code(&StreamError::Old), StreamError::Old.to_code());
-		assert_eq!(ietf.encode_stream_code(&StreamError::Old), ietf::error::INTERNAL_ERROR);
+		assert_eq!(
+			ietf.encode_stream_code(&StreamError::Old),
+			ietf.encode_stream_code(&StreamError::DeliveryTimeout)
+		);
 
 		// Both agree on a cancellation, which is the one code that has to be right.
 		assert_eq!(lite.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
@@ -131,6 +134,28 @@ mod tests {
 				StreamError::Cancel.to_code(),
 				"{version:?} cancels with a different code than the Writer's Drop sends"
 			);
+		}
+	}
+
+	/// A group given up as superseded still reads as one once its reset crosses any wire, so
+	/// its reader moves on, while a publisher's own abort of it never does.
+	#[test]
+	fn a_superseded_group_reads_as_one_across_every_wire() {
+		for version in crate::Versions::all().iter() {
+			let across = |err: &Error| {
+				Error::Stream(version.decode_stream_code(version.encode_stream_code(&StreamError::from(err))))
+			};
+			assert!(across(&Error::Old).superseded(), "{version:?}");
+			for err in [
+				Error::App(7),
+				Error::Cancel,
+				Error::Evicted,
+				Error::Lagged,
+				Error::MalformedTrack,
+				Error::NotFound,
+			] {
+				assert!(!across(&err).superseded(), "{version:?}: {err:?}");
+			}
 		}
 	}
 

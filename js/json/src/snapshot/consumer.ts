@@ -5,12 +5,12 @@ import * as Moq from "@moq/net";
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
 
-const GAPS: Moq.StreamCode[] = [
-	Moq.StreamCode.TooFarBehind,
-	Moq.StreamCode.Old,
-	Moq.StreamCode.Evicted,
-	Moq.StreamCode.GroupTooLarge,
-];
+// Beside a superseded group, how a group is lost rather than failed.
+const GAPS: Moq.StreamCode[] = [Moq.StreamCode.TooFarBehind, Moq.StreamCode.Evicted, Moq.StreamCode.GroupTooLarge];
+
+function gap(err: unknown): boolean {
+	return Moq.Error.superseded(err) || (err instanceof Moq.Error.Stream && GAPS.includes(err.code));
+}
 
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -129,7 +129,7 @@ export class Consumer<T> {
 				frame = await group.readFrame();
 			} catch (err) {
 				if (this.#closed) return undefined;
-				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
+				if (!gap(err)) throw err;
 				// The group was reset or we fell behind its eviction window. Resync from the next
 				// group, which begins with a fresh snapshot (frame 0), so no partial state is presented.
 				this.#group = undefined;

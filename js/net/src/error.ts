@@ -383,6 +383,9 @@ interface TransportErrorOptions {
 export function toStreamCode(err: unknown, options?: TransportErrorOptions): StreamCode {
 	const code = localStreamCode(err);
 	if (options?.version === undefined) return code;
+	// The registry has no OLD, and a group given up for a newer one is late content its reader
+	// skips, as one past its delivery deadline is: {@link superseded} counts the two the same.
+	if (code === StreamCode.Old) return StreamCode.DeliveryTimeout;
 	return sharedStreamCode(code) ? code : StreamCode.Internal;
 }
 
@@ -450,6 +453,21 @@ export function retry(err: unknown): Retry {
 		return DELIVERY_FAILURES.has(err.code) ? Retry.Same : Retry.Never;
 	}
 	return err instanceof Session || sessionClosed(err) ? Retry.Same : Retry.Never;
+}
+
+/**
+ * Whether a group read failed because a newer group superseded the group before it finished,
+ * so the reader moves on to the next group rather than ending the track. Mirrors the Rust
+ * `Error::superseded`.
+ *
+ * True whoever gave the group up: this reader's own budget, this side's track, or a publisher
+ * upstream, whose reset says `Old` on moq-lite and `DeliveryTimeout` on moq-transport. A
+ * publisher aborting the group itself is a failure, not this.
+ *
+ * @public
+ */
+export function superseded(err: unknown): boolean {
+	return err instanceof Stream && (err.code === StreamCode.Old || err.code === StreamCode.DeliveryTimeout);
 }
 
 /**

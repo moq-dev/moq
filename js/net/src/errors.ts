@@ -16,6 +16,7 @@ export {
 	Skipped,
 	Stream,
 	type StreamOptions,
+	superseded,
 	TimestampMismatch,
 	TooFarBehind,
 } from "./error.ts";

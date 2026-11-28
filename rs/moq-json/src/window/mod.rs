@@ -670,6 +670,8 @@ mod test {
 			moq_net::Error::Evicted,
 			moq_net::Error::GroupTooLarge,
 			moq_net::Error::Stream(moq_net::StreamError::Old),
+			// A superseded group as moq-transport resets it.
+			moq_net::Error::Stream(moq_net::StreamError::DeliveryTimeout),
 			moq_net::Error::Stream(moq_net::StreamError::TooFarBehind),
 			moq_net::Error::Stream(moq_net::StreamError::Evicted),
 			moq_net::Error::Stream(moq_net::StreamError::GroupTooLarge),

@@ -962,12 +962,11 @@ impl Consume {
 				}
 				match ready!(group.poll_read_frame(waiter)) {
 					Ok(Some(frame)) => Poll::Ready(Ok(RawStep::Item(frame))),
+					Ok(None) => Poll::Ready(Ok(RawStep::End)),
 					// A group superseded, as one a dropped producer left open while read, is passed
 					// as the UniFFI raw reader passes it. Any other failure, such as a publisher's
 					// abort, ends the track with it, so a truncated group is never silent.
-					Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
-						Poll::Ready(Ok(RawStep::End))
-					}
+					Err(err) if err.superseded() => Poll::Ready(Ok(RawStep::End)),
 					Err(err) => Poll::Ready(Err(err.into())),
 				}
 			})
@@ -1163,10 +1162,9 @@ impl Consume {
 					}
 					match ready!(group.poll_next_header(waiter)) {
 						Ok(Some(header)) => Poll::Ready(Ok(RawStep::Item(header))),
+						Ok(None) => Poll::Ready(Ok(RawStep::End)),
 						// A superseded group is passed as the raw reader passes it.
-						Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
-							Poll::Ready(Ok(RawStep::End))
-						}
+						Err(err) if err.superseded() => Poll::Ready(Ok(RawStep::End)),
 						Err(err) => Poll::Ready(Err(err.into())),
 					}
 				})

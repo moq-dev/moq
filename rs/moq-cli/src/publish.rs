@@ -2048,7 +2048,7 @@ pub(crate) mod tests {
 									.push(hang::container::Frame::decode(frame.payload).unwrap()),
 								Ok(None) => break,
 								// Cut here, or by the relay.
-								Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
+								Err(err) if err.superseded() => {
 									frames = None;
 									break;
 								}

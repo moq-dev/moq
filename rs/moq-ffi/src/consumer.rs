@@ -544,8 +544,9 @@ impl TrackInner {
 			ordered.pending = None;
 			match result {
 				Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
-				// An empty group, or one that expired here or at a hop that reset it.
-				Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => continue,
+				Ok(None) => continue,
+				// Superseded here or at a hop that reset it.
+				Err(err) if err.superseded() => continue,
 				Err(err) => return Poll::Ready(Err(err.into())),
 			}
 		}

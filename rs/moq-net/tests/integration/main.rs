@@ -101,6 +101,7 @@ mod subscribe_tracks;
 mod subscribe_with_track;
 mod subscriber_max_age;
 mod subscription_end_integrity;
+mod superseded_group;
 #[cfg(feature = "async")]
 mod support;
 mod switch_frame_cap;

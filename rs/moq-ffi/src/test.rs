@@ -6085,10 +6085,17 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	assert_eq!(micros(frame.timestamp), 2_000);
 }
 
-/// A group a hop reset as expired is skipped like an empty one, as a locally expired
-/// group is (`test_a_pending_timer_waits_for_advance` in py covers that).
+/// A group a hop reset as superseded, as moq-lite and moq-transport each say it, is skipped
+/// like an empty one, as a locally expired group is (`test_a_pending_timer_waits_for_advance`
+/// in py covers that).
 #[tokio::test]
 async fn raw_read_frame_skips_a_group_reset_as_old() {
+	for reset in [moq_net::StreamError::Old, moq_net::StreamError::DeliveryTimeout] {
+		skips_a_group_reset_as(reset).await;
+	}
+}
+
+async fn skips_a_group_reset_as(reset: moq_net::StreamError) {
 	let broadcast = moq_net::broadcast::Info::default().produce();
 	let track = broadcast
 		.create_track(
@@ -6101,9 +6108,7 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 	let expired = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.
 	let read = spawn_parked(async move { consumer.read_frame().await }).await;
-	expired
-		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
-		.unwrap();
+	expired.abort(moq_net::Error::Stream(reset)).unwrap();
 	let mut later = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 	later
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())

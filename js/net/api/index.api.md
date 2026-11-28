@@ -399,6 +399,7 @@ export namespace Error {
 		});
 	}
 	export function retry(err: unknown): Error.Retry;
+	export function superseded(err: unknown): boolean;
 }
 
 export namespace Frame {

@@ -16,6 +16,7 @@ import {
 	SessionError,
 	StreamCode,
 	StreamError,
+	superseded,
 	TimestampMismatch,
 	toStreamCode,
 	toTransport,
@@ -454,7 +455,6 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 	for (const code of [
 		StreamCode.ControlTimeout,
 		StreamCode.NotFound,
-		StreamCode.Old,
 		StreamCode.Evicted,
 		StreamCode.GroupTooLarge,
 		StreamCode.Unroutable,
@@ -462,4 +462,21 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}
+	// moq-transport registers no OLD, so a superseded group says DELIVERY_TIMEOUT, as Rust's does.
+	expect(toStreamCode(new StreamError(StreamCode.Old), { version: Version.DRAFT_22 })).toBe(
+		StreamCode.DeliveryTimeout,
+	);
+});
+
+test("superseded: a superseded group reads as one across either wire, and an abort never does", () => {
+	for (const version of [undefined, Version.DRAFT_22]) {
+		const across = (err: unknown) =>
+			fromTransport(toTransport(toStreamCode(err, { version }), "reset"), { version });
+		expect(superseded(across(new StreamError(StreamCode.Old)))).toBe(true);
+		for (const code of [StreamCode.Cancel, StreamCode.Evicted, StreamCode.NotFound, StreamCode(71)]) {
+			expect(superseded(across(new StreamError(code)))).toBe(false);
+		}
+	}
+	expect(superseded(new StreamError(StreamCode.Old))).toBe(true);
+	expect(superseded(new Error("boom"))).toBe(false);
 });

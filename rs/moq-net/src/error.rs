@@ -621,6 +621,20 @@ impl Error {
 		)
 	}
 
+	/// Whether a group read failed because a newer group superseded the group before it
+	/// finished, so the reader moves on to the next group rather than ending the track.
+	/// Mirrors `superseded` in `js/net/src/error.ts`.
+	///
+	/// True whoever gave the group up: this reader's own budget, this side's track, or a
+	/// publisher upstream, whose reset says `OLD` on moq-lite and `DELIVERY_TIMEOUT` on
+	/// moq-transport. A publisher aborting the group itself is a failure, not this.
+	pub fn superseded(&self) -> bool {
+		matches!(
+			self,
+			Self::Old | Self::Stream(StreamError::Old | StreamError::DeliveryTimeout)
+		)
+	}
+
 	/// Whether a source lost its route to the content: only another route continues it.
 	pub(crate) fn unroutable(&self) -> bool {
 		self.retry() == Retry::Reroute

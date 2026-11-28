@@ -9088,6 +9088,109 @@ fn a_minted_identity_pins_request_and_follow() {
 	}
 }
 
+/// A group an on-demand track's dropped producer left open while a raw reader across a session
+/// held it reads as superseded on moq-lite and moq-transport alike, so the reader reads on to
+/// the next producer's group instead of ending the track.
+#[test]
+fn raw_track_reads_past_a_group_a_drop_left_open() {
+	let info = || moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+	let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+	let payload = |frame_id: u32| {
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp: std::ptr::null(),
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		let payload = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		payload
+	};
+
+	for version in ["moq-lite-06", "moq-transport-22"] {
+		let source = id(moq_origin_create());
+		let sink = id(moq_origin_create());
+		let server_cb = Callback::new();
+		let (server, addr, fingerprint) = listen(&server_cb);
+		let url = format!("https://{addr}/");
+		let fingerprints = [moq_str(&fingerprint)];
+		let versions = [moq_str(version)];
+		let mut config = client_config();
+		config.tls_fingerprints = fingerprints.as_ptr();
+		config.tls_fingerprints_len = fingerprints.len();
+		config.tls_host_name = "localhost".as_ptr() as *const c_char;
+		config.tls_host_name_len = "localhost".len();
+		config.versions = versions.as_ptr();
+		config.versions_len = versions.len();
+		let client_cb = States::new();
+		let client = id(unsafe {
+			moq_session_connect(
+				url.as_ptr() as *const c_char,
+				url.len(),
+				&config,
+				source,
+				0,
+				Some(state_callback),
+				client_cb.ptr,
+			)
+		});
+		let session_cb = States::new();
+		let session = id(unsafe {
+			moq_session_request_accept(id(server_cb.recv()), 0, sink, Some(state_callback), session_cb.ptr)
+		});
+		for cb in [&client_cb, &session_cb] {
+			assert_eq!(cb.recv().phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
+		}
+
+		let route = publish(source, "live", moq_net::origin::RouteOptions::default());
+		let mut requests = route.broadcast().requests();
+		let consume = request_broadcast(sink, b"live");
+		let frame_cb = Callback::new();
+		let reader = consume_track(consume, b"video", &frame_cb);
+
+		let first = crate::ffi::RUNTIME
+			.block_on(requests.requested_track())
+			.unwrap()
+			.accept(info());
+		let mut open = first.append_group(at(0)).unwrap();
+		open.write_frame(at(0), b"held".as_slice()).unwrap();
+		assert_eq!(payload(id(frame_cb.recv())), b"held", "{version}");
+		{
+			let _runtime = crate::ffi::RUNTIME.enter();
+			drop((first, open));
+		}
+
+		let next = crate::ffi::RUNTIME
+			.block_on(requests.requested_track())
+			.unwrap()
+			.accept(info());
+		let mut group = next.append_group(at(100)).unwrap();
+		group.write_frame(at(100), b"next".as_slice()).unwrap();
+		group.finish().unwrap();
+		let code = frame_cb.recv();
+		assert!(code > 0, "{version}: the superseded group ended the track with {code}");
+		assert_eq!(payload(code as u32), b"next", "{version}");
+
+		assert_eq!(moq_consume_track_cancel(reader), 0);
+		assert_eq!(frame_cb.recv_terminal(), 0);
+		assert_eq!(moq_consume_close(consume), 0);
+		assert_eq!(moq_session_close(client), 0);
+		client_cb.recv_terminal();
+		session_cb.recv_terminal();
+		assert!(moq_session_close(session) < 0);
+		assert_eq!(moq_server_close(server), 0);
+		assert_eq!(server_cb.recv_terminal(), 0);
+		{
+			let _runtime = crate::ffi::RUNTIME.enter();
+			drop((next, requests, route));
+		}
+		for origin in [source, sink] {
+			assert_eq!(moq_origin_close(origin), 0);
+		}
+	}
+}
+
 #[test]
 fn server_accepts_a_session() {
 	let served = id(moq_origin_create());

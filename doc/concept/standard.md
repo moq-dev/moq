@@ -131,6 +131,11 @@ choices. They follow the product model.
   `SUBGROUP_DELIVERY_TIMEOUT` are accepted and ignored: their per-object and
   post-FIN deadlines would also cut the newest group, so neither is a max-age budget.
 
+- **A superseded group resets with `DELIVERY_TIMEOUT`.** The registry has no
+  equivalent of moq-lite's `OLD`, so a group given up because a newer one replaced
+  it resets its stream with `DELIVERY_TIMEOUT`, and a received one reads as
+  superseded: the reader moves on to the next group.
+
 - **A relay judges `NEW_GROUP_REQUEST` instead of forwarding it.**
   [Draft 22 §9.20.19](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.19)
   says a relay forwards it toward the publisher. Here every hop treats it as a

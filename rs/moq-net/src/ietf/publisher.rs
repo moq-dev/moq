@@ -7958,8 +7958,7 @@ impl kio::Task for GroupServe {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// Errors just drop the writer, whose Drop resets the stream, exactly like
-		// the old future being discarded.
+		// A failure already reset the stream, or drops the writer, whose Drop resets it.
 		ready!(self.poll_serve(waiter)).map(|()| ()).unwrap_or(());
 		Poll::Ready(())
 	}
@@ -8150,6 +8149,17 @@ impl GroupServe {
 		Poll::Ready(Ok(()))
 	}
 
+	/// Reset the stream of a group given up with `err`. A superseded group says so, so its
+	/// reader moves on to the next group; any other failure resets as dropping the writer
+	/// does, and a lapsed token says EXPIRED_AUTH_TOKEN whatever the failure.
+	fn reset(&self, writer: Writer<crate::transport::boxed::SendStream, Version>, err: &Error) {
+		match &self.lapse {
+			Some(lapse) if lapse.lapsed() => writer.reset(super::error::EXPIRED_AUTH_TOKEN),
+			_ if err.superseded() => writer.abort(err),
+			_ => drop(writer),
+		}
+	}
+
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = self.poll_serving(waiter);
 		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
@@ -8191,7 +8201,11 @@ impl GroupServe {
 					let wire = match ready!(self.group.poll_wire(waiter)) {
 						Ok(wire) => wire,
 						Err(err) => {
-							self.state = GroupState::Done;
+							let GroupState::Describe { writer } = std::mem::replace(&mut self.state, GroupState::Done)
+							else {
+								unreachable!("matched above");
+							};
+							self.reset(writer, &err);
 							return Poll::Ready(Err(err));
 						}
 					};
@@ -8426,7 +8440,10 @@ impl GroupServe {
 								Err(err) => return Poll::Ready(Err(err)),
 							}
 						}
-						Err(err) => return Poll::Ready(Err(err)),
+						Err(err) => {
+							self.reset(writer, &err);
+							return Poll::Ready(Err(err));
+						}
 					}
 				}
 				GroupState::Closed { writer } => {
@@ -8439,10 +8456,14 @@ impl GroupServe {
 					let res = match writer.poll_close(waiter) {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a
-						// group gone stale meanwhile releases them like one still serving:
-						// dropping the writer resets the stream.
+						// group gone stale meanwhile releases them like one still serving,
+						// resetting the stream as superseded.
 						Poll::Pending if self.group.poll_expired(waiter) => {
-							self.state = GroupState::Done;
+							let GroupState::Closed { writer } = std::mem::replace(&mut self.state, GroupState::Done)
+							else {
+								unreachable!("matched above");
+							};
+							self.reset(writer, &Error::Old);
 							return Poll::Ready(Err(Error::Old));
 						}
 						Poll::Pending => return Poll::Pending,
