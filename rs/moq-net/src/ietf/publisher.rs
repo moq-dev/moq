@@ -5212,10 +5212,11 @@ impl FetchOpen {
 		// or the Group ends, after the last object (section 3.2.2).
 		let tail = (ietf::FetchObject::has_group_end(version) && complete)
 			.then_some(ietf::FetchObject::EndOfGroup { track: end_of_track });
-		let write = match FetchGroupWrite::new(group, key, slice, version, priority).and_then(|write| write.timed(timed)) {
-			Ok(write) => write.ending(tail),
-			Err(err) => return self.reject(&err, &err.to_string()),
-		};
+		let write =
+			match FetchGroupWrite::new(group, key, slice, version, priority).and_then(|write| write.timed(timed)) {
+				Ok(write) => write.ending(tail),
+				Err(err) => return self.reject(&err, &err.to_string()),
+			};
 
 		// FETCH_OK through draft-22, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK
 		// or REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the
@@ -13838,7 +13839,10 @@ mod serve_tests {
 				"subscription replayed the prefix"
 			);
 			group
-				.write_frame(crate::Timestamp::from_millis(LATEST + 3).unwrap(), b"new-object".as_slice())
+				.write_frame(
+					crate::Timestamp::from_millis(LATEST + 3).unwrap(),
+					b"new-object".as_slice(),
+				)
 				.unwrap();
 			let mark = h.log.writes.lock().unwrap().len();
 

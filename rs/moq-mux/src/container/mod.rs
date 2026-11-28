@@ -108,10 +108,11 @@ pub struct Frame {
 	/// Decode timestamp, when it differs from [`timestamp`](Self::timestamp), or `None` when the
 	/// frame decodes at its presentation time.
 	///
-	/// A track's frames are written to the transport at their decode time, which never decreases
-	/// within a group: a group starts at its keyframe's decode time, and a stream with B-frames
-	/// carries each presentation time in its payload. A reordering source must set this, since a
-	/// presentation time below its predecessor's is refused as a decode time.
+	/// A [decode-order](Container::decode_order) container (`cts`, `raw`) writes each frame to the
+	/// transport at its decode time and groups by it, so a reordering source must set this there.
+	/// Other containers ignore it: they carry the presentation time in the payload and stamp the
+	/// transport with the newest one so far in the group, since a group's timestamps never
+	/// decrease.
 	pub decode: Option<moq_net::Timestamp>,
 
 	/// Sample duration in the frame's own scale, when the container reports it.
@@ -276,6 +277,13 @@ pub trait Container {
 	/// The media role, when this format represents an audio or video track.
 	fn kind(&self) -> Kind {
 		Kind::Data
+	}
+
+	/// Whether the transport carries each frame's [`decode`](Frame::decode) time, so a
+	/// [`Producer`] groups frames by it. Otherwise the producer ignores decode times and the
+	/// payload carries each frame's presentation time.
+	fn decode_order(&self) -> bool {
+		false
 	}
 
 	/// Refuse a format this build can read but not write, before a producer is built for it.

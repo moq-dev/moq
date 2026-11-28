@@ -239,7 +239,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 impl<E: catalog::Catalog> Import<E> {
 	/// Import a byte stream into the broadcast using its reserved catalog producer.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let container = hang::catalog::Container::Cts;
+		let container = hang::catalog::Container::default();
 		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed
 		// reservation gates the initial publish and is dropped once the first PES anchors.
 		let catalog = reserved.producer();
@@ -334,9 +334,8 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Select the container this importer wraps decoded media renditions in.
 	///
-	/// [`Cts`](hang::catalog::Container::Cts) unless selected, which carries each picture's
-	/// presentation time after its decode time. It applies to every rendition this input demuxes,
-	/// since the tracks are discovered rather than named by the caller.
+	/// [`Legacy`](hang::catalog::Container::Legacy) unless selected. It applies to every rendition
+	/// this input demuxes, since the tracks are discovered rather than named by the caller.
 	pub fn with_container(mut self, container: hang::catalog::Container) -> Self {
 		self.container = container;
 		self
@@ -6283,7 +6282,10 @@ pub(super) mod test {
 			)
 			.await
 			.unwrap();
-		let mut reader = crate::container::Consumer::new(track, imported(crate::container::Kind::Audio));
+		let mut reader = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
+		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = kio::clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			frames.push(frame);
@@ -8194,24 +8196,6 @@ pub(super) mod test {
 	/// Read every retained frame of `name`, with the count of declared timeline breaks the consumer
 	/// crossed reading them. Gaps are not counted: these streams carry a PES of two frames a second
 	/// apart, and the hole after each reads as a gap.
-	/// A published video frame as its CTS container presents it.
-	fn presented(timestamp: Timestamp, payload: bytes::Bytes) -> crate::container::Frame {
-		let frame = moq_net::frame::Frame::new(timestamp, payload);
-		use crate::container::Container as _;
-		let mut frames = crate::container::cts::Wire(crate::container::Kind::Video)
-			.decode(frame)
-			.unwrap();
-		frames.remove(0)
-	}
-
-	/// The container this importer publishes a `kind` track in.
-	fn imported(kind: crate::container::Kind) -> crate::catalog::hang::Container {
-		match kind {
-			crate::container::Kind::Data => crate::catalog::hang::Container::Legacy(kind),
-			_ => crate::catalog::hang::Container::Cts(kind),
-		}
-	}
-
 	async fn read_breaks(
 		consumer: &moq_net::broadcast::Consumer,
 		name: &str,
@@ -8227,7 +8211,7 @@ pub(super) mod test {
 			},
 		)]);
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
-		let mut reader = crate::container::Consumer::new(track, imported(kind));
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
 		let mut breaks = 0;
 		while let Ok(Ok(Some(read))) = kio::clock::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -9548,7 +9532,7 @@ pub(super) mod test {
 			},
 		)]);
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
-		let mut reader = crate::container::Consumer::new(track, imported(kind));
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = kio::clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			if !frame.payload.is_empty() {
@@ -10375,8 +10359,7 @@ pub(super) mod test {
 		while let Some(mut group) = track.recv_group().await.unwrap() {
 			let mut frames = Vec::new();
 			while let Some(mut frame) = group.next_frame().await.unwrap() {
-				let timestamp = frame.timestamp;
-				let frame = presented(timestamp, frame.read_all().await.unwrap());
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
 				frames.push((frame.timestamp.as_micros().unwrap(), frame.payload.is_empty()));
 			}
 			groups.push(frames);
@@ -10623,8 +10606,7 @@ pub(super) mod test {
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
 			let mut fills = Vec::new();
 			while let Some(mut frame) = group.next_frame().await.unwrap() {
-				let timestamp = frame.timestamp;
-				let frame = presented(timestamp, frame.read_all().await.unwrap());
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
 				fills.extend(frame.payload.first().copied());
 			}
 			groups.push(fills);
@@ -10677,8 +10659,7 @@ pub(super) mod test {
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
 			let mut fills = Vec::new();
 			while let Some(mut frame) = group.next_frame().await.unwrap() {
-				let timestamp = frame.timestamp;
-				let frame = presented(timestamp, frame.read_all().await.unwrap());
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
 				fills.extend(frame.payload.first().copied());
 			}
 			groups.push(fills);
@@ -10730,8 +10711,7 @@ pub(super) mod test {
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
 			let mut fills = Vec::new();
 			while let Some(mut frame) = group.next_frame().await.unwrap() {
-				let timestamp = frame.timestamp;
-				let frame = presented(timestamp, frame.read_all().await.unwrap());
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
 				fills.extend(frame.payload.first().copied());
 			}
 			groups.push(fills);

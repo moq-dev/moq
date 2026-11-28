@@ -1593,8 +1593,10 @@ async fn video_continuing_a_seeked_group_keeps_its_leading_pictures() {
 }
 
 /// A sync-led fragment that continues the open group keeps a leading picture below the group's
-/// start but past the groups before it, passthrough or unwrapped: only a fragment that opens a
-/// group is a restart when it dips below the latest group's start.
+/// start but past the groups before it when unwrapped: only a fragment that opens a group is a
+/// restart when it dips below the latest group's start. Passed through, the fragment is stamped at
+/// its earliest presentation time, which would take its group's timestamps backwards, so it is
+/// refused.
 #[tokio::test]
 async fn video_continuing_keeps_a_leading_picture_below_its_start() {
 	let (_, (video_id, video_scale), _) = bbb_init();
@@ -1614,10 +1616,16 @@ async fn video_continuing_keeps_a_leading_picture_below_its_start() {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 		fmp4.decode(&init).unwrap();
-		for (dts, samples) in fragments {
+		for (index, (dts, samples)) in fragments.into_iter().enumerate() {
 			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
-			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
-				.unwrap();
+			let result = fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries));
+			match passthrough && index == 2 {
+				true => assert!(result.is_err(), "a passed-through fragment below its group's latest"),
+				false => result.unwrap(),
+			}
+		}
+		if passthrough {
+			continue;
 		}
 		let _finished = fmp4.finish().unwrap();
 		let [video, _] = published(&consumer, &catalog).await;

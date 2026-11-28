@@ -2601,7 +2601,8 @@ mod tests {
 			let mut reader = copy
 				.reader(Delay::default().with_min(Duration::from_millis(100)).with_max(budget))
 				.await;
-			write_group(&mut copy.track, 150, &[ts(0)]);
+			// Frame 0 sits at its key: a lite-07 hop carries no frame below its group's start.
+			write_group(&mut copy.track, 150, &[ts(150)]);
 			carried().await;
 			assert!(matches!(
 				reader.read().await.unwrap(),
@@ -5558,8 +5559,13 @@ mod tests {
 			Some(micros) => Bytes::from(micros.to_le_bytes().to_vec()),
 			None => Bytes::from_static(b"FAIL"),
 		};
-		let stamp = micros.unwrap_or(group.start * 1_000_000 + 1);
-		group.write_frame(ts(stamp), payload).unwrap();
+		let stamp = ts(micros.unwrap_or(group.start * 1_000_000 + 1));
+		// A group's timestamps never decrease; the payload keeps the frame's own.
+		let transport = match group.latest() {
+			Some(latest) if stamp < latest => latest,
+			_ => stamp,
+		};
+		group.write_frame(transport, payload).unwrap();
 	}
 
 	/// Read until something other than a frame, failing if the reader stalls.

@@ -29,6 +29,10 @@ impl Container for Wire {
 		self.0
 	}
 
+	fn decode_order(&self) -> bool {
+		true
+	}
+
 	fn finish_group(
 		&self,
 		group: &mut moq_net::group::Producer,

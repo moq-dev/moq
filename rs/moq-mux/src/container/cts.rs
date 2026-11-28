@@ -24,6 +24,10 @@ impl Container for Wire {
 		self.0
 	}
 
+	fn decode_order(&self) -> bool {
+		true
+	}
+
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		// The offset is unsigned: a frame never presents before it decodes.
 		match frame.decode.is_some_and(|decode| frame.timestamp < decode) {

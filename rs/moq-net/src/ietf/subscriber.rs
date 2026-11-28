@@ -5731,7 +5731,8 @@ impl TrackStatus {
 				StatusStep::Learn(learn) => {
 					match ready!(learn.poll(waiter, this, broadcast_path, track_name, group_fetches, gate)) {
 						Ok(idle) => {
-							self.timing.resolve(Ok(ObjectTiming::from_properties(&idle.properties, this.version)));
+							self.timing
+								.resolve(Ok(ObjectTiming::from_properties(&idle.properties, this.version)));
 							return Poll::Ready(Some(idle));
 						}
 						Err(err) => {

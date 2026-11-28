@@ -128,6 +128,13 @@ impl ContainerTrait for Container {
 		}
 	}
 
+	fn decode_order(&self) -> bool {
+		matches!(
+			self,
+			Self::Raw(_) | Self::RawAudio(_) | Self::Cts(_) | Self::CtsAudio(_)
+		)
+	}
+
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		match self {
 			Self::Raw(kind) => raw::Wire(*kind).check(frame),

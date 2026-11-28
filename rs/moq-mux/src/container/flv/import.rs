@@ -200,7 +200,7 @@ impl AudioStream {
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let container = hang::catalog::Container::Cts;
+		let container = hang::catalog::Container::default();
 		Self {
 			broadcast,
 			catalog: reserved.producer(),
@@ -233,9 +233,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Select the container this importer wraps decoded media renditions in.
 	///
-	/// [`Cts`](hang::catalog::Container::Cts) unless selected, which carries each picture's
-	/// presentation time after its decode time. It applies to every rendition this input demuxes,
-	/// since the tracks are discovered rather than named by the caller.
+	/// [`Legacy`](hang::catalog::Container::Legacy) unless selected. It applies to every rendition
+	/// this input demuxes, since the tracks are discovered rather than named by the caller.
 	pub fn with_container(mut self, container: hang::catalog::Container) -> Self {
 		self.container = container;
 		self
@@ -607,9 +606,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				timestamp,
 				Timestamp::from_millis(offset as u64)?,
 			)?),
-			offset => Some(timestamp.checked_add(Timestamp::from_millis(offset.unsigned_abs() as u64)?.convert(
-				timestamp.scale().ok_or(moq_net::Error::TimestampMismatch)?,
-			)?)?),
+			offset => Some(
+				timestamp.checked_add(
+					Timestamp::from_millis(offset.unsigned_abs() as u64)?
+						.convert(timestamp.scale().ok_or(moq_net::Error::TimestampMismatch)?)?,
+				)?,
+			),
 		};
 		let stream = self.video.get_mut(&track_id).expect("checked above");
 		let result = match stream.write(Frame {

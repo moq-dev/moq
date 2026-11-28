@@ -1849,12 +1849,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		placement: Placement,
 		land: Land,
 	) -> Result<(moq_net::frame::Producer, bool)> {
-		// Carry the fragment's first decode time as the frame timestamp, in the track's native
-		// timescale and shifted onto the catalog clock: a group's timestamps never decrease.
-		// Consumers decode the fragment's `tfdt` at it; `tfdt` and `trun` only place the samples
-		// relative to each other.
-		let first = run.samples.first().ok_or(Error::NoKeyframe)?;
-		let timestamp = placement.offset.apply(first.decode().unwrap_or(first.timestamp))?;
+		// Carry the fragment's earliest presentation time as the frame timestamp, in the
+		// track's native timescale and shifted onto the catalog clock. Consumers present the
+		// fragment at it; `tfdt` only places the samples relative to each other.
+		let timestamp = placement.offset.apply(run.earliest)?;
 		let group = match land {
 			Land::Opens { start } => {
 				if let Some(prev) = self.group.take() {
@@ -1925,6 +1923,10 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 			Kind::Video => sample.sync,
 			Kind::Audio => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
 		};
+		// A decode-order container learns the delay from `decode`; the others need it told.
+		if sample.pts > sample.dts {
+			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
+		}
 		let timestamp = placement.offset.apply(sample.timestamp)?;
 		let decode = sample.decode().map(|decode| placement.offset.apply(decode)).transpose()?;
 		let duration = sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?;

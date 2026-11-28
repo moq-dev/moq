@@ -246,6 +246,9 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 		}
 		let (keyframe, duration) = (frame.keyframe, frame.duration);
 		timed(frame.timestamp, duration)?;
+		if !self.container.decode_order() {
+			frame.decode = None;
+		}
 		if let Some(decode) = frame.decode {
 			timed(decode, None)?;
 		}
@@ -274,8 +277,14 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 			.ok_or_else(|| crate::Error::UnsupportedContainer("a streamed frame".into()))?;
 		let group = self.group.take().expect("prepare opens a group");
 		let total = prefix.len().checked_add(size).ok_or(moq_net::Error::FrameTooLarge)?;
+		// The prefix carries the presentation time, and the transport the newest so far, as
+		// [`hang::container::Frame::write_to`] stamps it.
+		let transport = match group.latest() {
+			Some(latest) if timestamp < latest => latest,
+			_ => timestamp,
+		};
 		let mut writer = group.create_frame(moq_net::frame::Info {
-			timestamp,
+			timestamp: transport,
 			size: total as u64,
 		})?;
 		writer.write(prefix)?;
@@ -608,7 +617,8 @@ where
 	/// Record a frame's reorder delay (`PTS - DTS`), raising the measured jitter to the decode
 	/// buffer a B-frame stream needs.
 	///
-	/// Frames carry no decode time, so a caller that demuxed one (a container importer) supplies it.
+	/// A [decode-order](super::Container::decode_order) container measures it from each frame's
+	/// [`decode`](Frame::decode) time; for the others, a caller that demuxed one supplies it.
 	pub fn reorder(&mut self, delay: moq_net::Timestamp) {
 		self.estimator.reorder(delay);
 	}
@@ -762,14 +772,18 @@ where
 	/// without writing, the way an oversized frame is refused. That is a restart, which is a new
 	/// broadcast.
 	///
-	/// A frame with a [`decode`](Frame::decode) time is judged by it instead, and groups by decode
-	/// time: those never decrease within a group, so one decoding below the newest frame closes
-	/// the open group and is dropped, with the frames after it until a keyframe past the newest.
-	/// The transport carries each frame's decode time. Without one, the transport carries the
-	/// latest presentation time so far in the group, which never decreases either, and a container
-	/// that can't carry the frame's own presentation time beside it, as CTS can't, refuses it.
+	/// In a [decode-order](super::Container::decode_order) container, a frame with a
+	/// [`decode`](Frame::decode) time is judged by it instead, and groups by decode time: those
+	/// never decrease within a group, so one decoding below the newest frame closes the open group
+	/// and is dropped, with the frames after it until a keyframe past the newest. The transport
+	/// carries each frame's decode time. Elsewhere decode times are ignored and the transport
+	/// carries the latest presentation time so far in the group, which never decreases either,
+	/// while the payload keeps the frame's own.
 	pub fn write(&mut self, mut frame: Frame) -> crate::Result<()> {
 		timed(frame.timestamp, frame.duration)?;
+		if !self.container.decode_order() {
+			frame.decode = None;
+		}
 		if let Some(decode) = frame.decode {
 			timed(decode, None)?;
 		}
@@ -958,17 +972,9 @@ where
 		Ok(Some(timestamp))
 	}
 
-	/// Stamp `frame`, which [`prepare`](Self::prepare) placed `at`, with the time the transport
-	/// carries: its decode time, else the latest presentation time so far in its group.
+	/// Move `frame`, which [`prepare`](Self::prepare) placed `at`.
 	fn place(&mut self, frame: &mut Frame, source: moq_net::Timestamp, at: moq_net::Timestamp) -> crate::Result<()> {
-		moved(frame, source, at)?;
-		if frame.decode.is_none()
-			&& let Some(newest) = self.newest
-			&& timestamp_before(frame.timestamp, newest)
-		{
-			frame.decode = Some(newest);
-		}
-		Ok(())
+		Ok(moved(frame, source, at)?)
 	}
 
 	/// Note a frame's presentation time, marking the group reordered when it presents below its
@@ -1419,7 +1425,9 @@ where
 			}
 			// A sample lasts until the next one decodes.
 			let decode = self.buffer[i].decode.unwrap_or(self.buffer[i].timestamp);
-			let boundary = (self.buffer.get(i + 1)).map(|f| f.decode.unwrap_or(f.timestamp)).or(next);
+			let boundary = (self.buffer.get(i + 1))
+				.map(|f| f.decode.unwrap_or(f.timestamp))
+				.or(next);
 			if let Some(boundary) = boundary
 				&& let Some(scale) = decode.scale()
 				&& let Ok(boundary) = boundary.convert(scale)
@@ -2585,7 +2593,12 @@ mod tests {
 
 		fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 			for frame in frames {
-				group.write_frame(frame.timestamp, frame.payload.clone())?;
+				// A group's timestamps never decrease, as every real container stamps them.
+				let transport = match group.latest() {
+					Some(latest) if frame.timestamp < latest => latest,
+					_ => frame.timestamp,
+				};
+				group.write_frame(transport, frame.payload.clone())?;
 			}
 			Ok(())
 		}
@@ -3315,8 +3328,8 @@ mod tests {
 		producer.write(at(1_000_000, true)).unwrap();
 		producer.write(at(1_500_000, false)).unwrap();
 		producer.cut(Some(Timestamp::new(2_000_002, nanos).unwrap())).unwrap();
-		// Below the End the cut set, so moved to it, while the frame after it stays a nanosecond
-		// below.
+		// Below the End the cut set, so moved to it, while the frame after it presents a nanosecond
+		// below and rides at the keyframe's time, since a group's timestamps never decrease.
 		producer.write(at(1_900_000, true)).unwrap();
 		producer.write(at(2_000_001, false)).unwrap();
 		producer.cut(None).unwrap();
@@ -3324,7 +3337,7 @@ mod tests {
 
 		let groups = collect_published(consumer).await;
 		let timestamps: Vec<_> = groups[1].1.iter().map(|frame| frame.timestamp.value()).collect();
-		assert_eq!(timestamps, [2_000_002, 2_000_001]);
+		assert_eq!(timestamps, [2_000_002, 2_000_002]);
 		assert_eq!(groups[1].2, None, "a reordered group ends without an estimated End");
 	}
 
@@ -3416,11 +3429,15 @@ mod tests {
 				"[{start}, {end}) holds another start: {starts:?}"
 			);
 		}
+		// The prefix keeps each presentation time; the transport keeps the newest so far.
 		let presented: Vec<Vec<u128>> = (groups.iter())
 			.map(|(_, frames, _)| {
 				frames
 					.iter()
-					.map(|frame| frame.timestamp.as_micros().unwrap())
+					.map(|frame| {
+						let decoded = hang::container::Frame::decode(frame.payload.clone()).unwrap();
+						decoded.timestamp.as_micros().unwrap()
+					})
 					.collect()
 			})
 			.collect();

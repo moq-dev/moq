@@ -1842,16 +1842,13 @@ fn unpublishable_catalog_containers_are_rejected() {
 		"cmaf without an init segment should return InvalidPointer (-6)"
 	);
 
-	// CTS is decode-only: nothing this library writes produces it, so it is never advertised.
+	// CTS is writable, so it publishes like any other container.
 	let cts = config(moq_container {
 		kind: moq_container_kind::MOQ_CONTAINER_KIND_CTS as u32,
 		init: std::ptr::null(),
 		init_len: 0,
 	});
-	assert_eq!(
-		unsafe { moq_publish_video_config(broadcast, &cts) },
-		crate::MOQ_ERROR_UNSUPPORTED_CONFIG
-	);
+	assert!(unsafe { moq_publish_video_config(broadcast, &cts) } >= 0);
 
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);

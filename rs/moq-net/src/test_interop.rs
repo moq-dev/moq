@@ -371,14 +371,7 @@ fn lite_varint_interop() {
 			[
 				(Some(0), 10),
 				(Some(33_333), 300),
-				(
-					Some(if version.has_group_end() {
-						1_000
-					} else {
-						-1_000
-					}),
-					20_000,
-				),
+				(Some(if version.has_group_end() { 1_000 } else { -1_000 }), 20_000),
 				(Some(1 << 40), 1),
 			],
 		);

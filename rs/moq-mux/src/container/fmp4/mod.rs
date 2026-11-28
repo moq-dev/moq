@@ -601,10 +601,10 @@ impl Track {
 /// so an audio sample decodes with the bit clear and the consumer marks the group start.
 ///
 /// `timestamp` is the moq-lite frame timestamp, which is the broadcast timeline: the fragment's
-/// first sample decodes at it, as `tfdt` says. `tfdt` and the `trun` durations and offsets only
-/// place the samples relative to it, since a publisher may move a passthrough track to another
-/// timeline without rewriting the payload. A scale-less track's frame (`None`) has no broadcast
-/// time, so its samples decode at the time `tfdt` gives them.
+/// earliest sample presents at it. `tfdt` and the `trun` offsets only place the samples relative
+/// to each other, since a publisher may move a passthrough track to another timeline without
+/// rewriting the payload. A scale-less track's frame (`None`) has no broadcast time, so its samples
+/// present at the time `tfdt` gives them.
 pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) -> Result<Vec<Frame>> {
 	metadata::check(&data)?;
 	use mp4_atom::DecodeMaybe;
@@ -647,11 +647,11 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 	let anchor = timestamp.map(|t| timestamp_ticks(t, timescale)).transpose()?;
 
 	let mut frames = Vec::new();
-	let mut times = Vec::new();
+	let mut ptss = Vec::new();
 	let mut dts = i128::from(base_dts);
 	for resolved in resolver.resolve(traf, defaults)? {
 		let sample::Resolved { sample, cts, range } = resolved?;
-		times.push((dts, dts + i128::from(cts)));
+		ptss.push(dts + i128::from(cts));
 		let payload = Bytes::copy_from_slice(&mdat_data[range]);
 		let keyframe = kind == Kind::Video && sample.is_sync();
 		let duration = sample
@@ -659,7 +659,7 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 			.map(|d| Timestamp::new(d as u64, timescale))
 			.transpose()?;
 		frames.push(Frame {
-			// Placeholders until the anchor places them.
+			// Placeholder until the earliest PTS is known.
 			timestamp: Timestamp::ZERO,
 			decode: None,
 			payload,
@@ -669,34 +669,34 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 		dts += i128::from(sample.duration.unwrap_or(0));
 	}
 
-	let (anchor, base) = match anchor {
-		Some(anchor) => (anchor, i128::from(base_dts)),
+	let (anchor, earliest) = match anchor {
+		Some(anchor) => (anchor, ptss.iter().copied().min().unwrap_or_default()),
 		None => (0, 0),
 	};
-	// Preserve the fmp4 track's native scale through the pipeline.
-	let at = |ticks: i128| -> Result<Timestamp> {
-		let ticks = u64::try_from(ticks - base)
+	for (frame, pts) in frames.iter_mut().zip(ptss) {
+		let ticks = u64::try_from(pts - earliest)
 			.ok()
 			.and_then(|offset| anchor.checked_add(offset))
 			.ok_or(Error::PtsOverflow)?;
-		Ok(Timestamp::new(ticks, timescale)?)
-	};
-	for (frame, (dts, pts)) in frames.iter_mut().zip(times) {
-		frame.timestamp = at(pts)?;
-		frame.decode = (dts != pts).then(|| at(dts)).transpose()?;
+		// Preserve the fmp4 track's native scale through the pipeline.
+		frame.timestamp = Timestamp::new(ticks, timescale)?;
 	}
 
 	Ok(frames)
 }
 
 fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: FragmentInfo) -> Result<()> {
-	// The fragment may carry several samples; the net frame's timestamp is the fragment's first
-	// decode time, its `tfdt`, which `decode` anchors its samples to. It is rounded to the
-	// track's ticks the same way the samples are, so the two agree.
-	let Some(first) = frames.first() else {
+	// The fragment may carry several samples; the net frame's timestamp is the
+	// fragment's earliest presentation time, which `decode` anchors its samples to.
+	// It is rounded to the track's ticks the same way the samples are, so the two agree.
+	let Some(earliest) = frames
+		.iter()
+		.map(|f| f.timestamp)
+		.reduce(|earliest, timestamp| if timestamp < earliest { timestamp } else { earliest })
+	else {
 		return Ok(());
 	};
-	let timestamp = Timestamp::new(base_ticks(first, info.timescale)?, info.timescale)?;
+	let timestamp = Timestamp::new(timestamp_ticks(earliest, info.timescale)?, info.timescale)?;
 
 	let bytes = encode_fragment(info, frames)?;
 	group.write_frame(timestamp, bytes)?;
@@ -723,8 +723,8 @@ pub(crate) struct FragmentInfo {
 
 /// Encode a single-traf moof+mdat fragment anchored at its own first frame.
 ///
-/// The fragment stands alone: its `tfdt` is `frames[0]`'s decode time, so it decodes without
-/// reference to whatever came before it.
+/// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time, so it decodes
+/// without reference to whatever came before it.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
 pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<Bytes> {
@@ -734,13 +734,13 @@ pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<By
 	Ok(encode_at(info, base_ticks(first, info.timescale)?, frames)?.0)
 }
 
-/// A frame's decode time as a tick count at the track's timescale.
+/// A frame's presentation time as a tick count at the track's timescale.
 ///
 /// When the importer preserved the source scale (the common passthrough case) this is a no-op;
 /// otherwise it's a single rescale rather than the legacy `micros * scale / 1_000_000`
 /// round-trip.
 fn base_ticks(frame: &Frame, timescale: moq_net::Timescale) -> Result<u64> {
-	timestamp_ticks(frame.decode.unwrap_or(frame.timestamp), timescale)
+	timestamp_ticks(frame.timestamp, timescale)
 }
 
 /// Round an absolute timestamp to its nearest tick at the output scale. Refuses an
@@ -2185,10 +2185,9 @@ mod tests {
 	}
 
 	/// A fragment can open on a sample that presents after a later one (open-GOP leading
-	/// pictures, or a cut mid-GOP). Its first decode time, its `tfdt`, is the anchor, on both
-	/// sides, so a group's timestamps never decrease.
+	/// pictures, or a cut mid-GOP). The earliest presentation time is the anchor, on both sides.
 	#[tokio::test]
-	async fn the_frame_timestamp_is_the_first_decode_time() {
+	async fn the_frame_timestamp_is_the_earliest_presentation_time() {
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
@@ -2199,15 +2198,11 @@ mod tests {
 		let info = moq_net::track::Info::default().with_timescale(timescale);
 		let track = broadcast.create_track("video", info).unwrap();
 		let mut group = track.append_group(Timestamp::from_micros(0).unwrap()).unwrap();
-		let mut input = [sample(100_000), sample(33_000), sample(66_000)];
-		for (frame, decode) in input.iter_mut().zip([0, 33_000, 66_000]) {
-			frame.decode = Some(ts(decode));
-			frame.duration = Some(ts(33_000));
-		}
+		let input = [sample(100_000), sample(33_000), sample(66_000)];
 		wire.write(&mut group, &input).unwrap();
 
 		let frame = group.consume().read_frame().await.unwrap().unwrap();
-		assert_eq!(frame.timestamp.as_micros().unwrap(), 0);
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 33_000);
 
 		let frames = decode(
 			frame.payload.clone(),
@@ -2216,11 +2211,9 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(micros(&frames), [100_000, 33_000, 66_000]);
-		let decodes: Vec<_> = frames.iter().map(|frame| frame.decode.map(|d| d.as_micros().unwrap())).collect();
-		assert_eq!(decodes, [Some(0), None, None]);
 
 		let shifted = decode(frame.payload, Some(ts(5_000_000)), Track::new(timescale, Kind::Video)).unwrap();
-		assert_eq!(micros(&shifted), [5_100_000, 5_033_000, 5_066_000]);
+		assert_eq!(micros(&shifted), [5_067_000, 5_000_000, 5_033_000]);
 	}
 
 	/// A scale-less track's frames carry no broadcast time, so their samples present at `tfdt`.

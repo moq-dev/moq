@@ -37,9 +37,13 @@ impl Container for Wire {
 			let timestamp = frame.timestamp.convert(DEFAULT_TIMESCALE).map_err(hang::Error::from)?;
 			let data = moq_loc::encode(timestamp.value(), &frame.payload)?;
 
-			// The property carries the presentation time, so the transport carries the decode
-			// time, which never decreases within a group.
-			group.write_frame(frame.decode.unwrap_or(frame.timestamp), data)?;
+			// The property carries the presentation time, and the transport the newest so far
+			// (converted to the track's timescale), which never decreases within a group.
+			let transport = match group.latest() {
+				Some(latest) if frame.timestamp < latest => latest,
+				_ => frame.timestamp,
+			};
+			group.write_frame(transport, data)?;
 		}
 		Ok(())
 	}

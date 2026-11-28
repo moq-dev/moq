@@ -1576,7 +1576,12 @@ impl GroupState {
 	/// Frame 0 is also checked against the track's `neighbors`. Anything but a timed frame 0
 	/// checked under an open local track is unchecked, including a relayed copy's first object
 	/// when it starts mid-group.
-	fn check_frame(&self, neighbors: Option<&track::Neighbors>, unchecked: bool, timestamp: Timestamp) -> Result<Origin> {
+	fn check_frame(
+		&self,
+		neighbors: Option<&track::Neighbors>,
+		unchecked: bool,
+		timestamp: Timestamp,
+	) -> Result<Origin> {
 		if let Timeline::Timed { latest, .. } = self.timeline
 			&& !unchecked
 			&& timestamp.value() < latest.value()
@@ -2840,6 +2845,16 @@ impl Producer {
 	/// logical length rather than the number of frames this handle holds.
 	pub fn frame_count(&self) -> usize {
 		self.handle.frame_count()
+	}
+
+	/// The highest timestamp written so far, or `None` before a timed frame.
+	///
+	/// A group's timestamps never decrease, so a timed frame below it is refused.
+	pub fn latest(&self) -> Option<Timestamp> {
+		match self.handle.state.read().timeline {
+			Timeline::Timed { latest, .. } => Some(latest),
+			_ => None,
+		}
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's

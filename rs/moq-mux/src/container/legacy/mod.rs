@@ -1,8 +1,8 @@
 //! The original hang wire format.
 //!
 //! Each moq frame holds one media frame: a varint-encoded presentation timestamp
-//! followed by the raw codec bitstream, written to the transport at a time that never decreases
-//! within its group.
+//! followed by the raw codec bitstream, written to the transport at the newest presentation time
+//! so far in its group, so a B-frame never takes it backwards.
 //! Simple but ad-hoc; new broadcasts should use [`crate::container::cts`] instead.
 
 use crate::container::{Container, Frame, Kind};
@@ -60,12 +60,8 @@ impl Container for Wire {
 				timestamp: frame.timestamp,
 				payload: frame.payload.clone(),
 			};
-			// The prefix carries the presentation time, so the transport carries a time that never
-			// decreases within a group: the decode time, which a producer sets to the latest
-			// presentation time so far when the source has none.
-			let mut buf = bytes::BytesMut::with_capacity(8 + frame.payload.len());
-			hang_frame.encode(&mut buf)?;
-			group.write_frame(frame.decode.unwrap_or(frame.timestamp), buf.freeze())?;
+			// The prefix carries the presentation time, and the transport the newest so far.
+			hang_frame.write_to(group)?;
 		}
 		Ok(())
 	}
