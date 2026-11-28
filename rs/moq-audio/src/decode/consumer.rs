@@ -1148,7 +1148,7 @@ mod tests {
 	/// The first request already states the min and max delay, each plus the warmup: a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_first_subscription_states_the_min_delay() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
@@ -2240,7 +2240,7 @@ mod tests {
 		assert_eq!(stamps[2], 1_000_000, "the resumed span starts on its source timestamp");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn remixes_mono_stream_to_stereo_output() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -2294,7 +2294,7 @@ mod tests {
 	/// An imported 44.1 kHz Opus stream decodes on the 48 kHz clock: the pre-skip
 	/// is trimmed once as padding before the first packet, and every later frame
 	/// is stamped where its samples fall.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn opus_timestamps_follow_the_48k_clock() {
 		use crate::decode::decoder::tests::{opus_catalog, opus_packets};
 
@@ -2462,7 +2462,7 @@ mod tests {
 	/// which is a sawtooth in A/V sync rather than a constant offset. Any codec
 	/// whose frame is not a whole number of chunks reaches it: a 1024-sample frame
 	/// at 44.1 kHz never fills the 882-frame chunk evenly.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn resampled_timestamps_follow_the_samples() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -2528,7 +2528,7 @@ mod tests {
 	/// The resampler only converts whole chunks, so the last partial one has to be
 	/// flushed at end of track or its audio is simply gone. A 1024-sample frame at
 	/// 44.1 kHz guarantees a remainder, never filling the 882-frame chunk evenly.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn resampled_tail_survives_the_end_of_the_track() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -2595,7 +2595,7 @@ mod tests {
 		assert!(next_frame(&mut consumer).await.unwrap().is_none());
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn resampling_keeps_the_activity_boundary_on_its_source() {
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: Some(crate::encode::Kind::Voice),
@@ -2908,7 +2908,7 @@ mod tests {
 	/// packet. A packet that jumps forward then still moves whatever the resampler
 	/// is holding, and the activity that lands with it: those samples came from
 	/// before the jump and are labelled by the packet they came from.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_terminal_jump_leaves_the_held_samples_alone() {
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: Some(crate::encode::Kind::Voice),
@@ -3029,7 +3029,7 @@ mod tests {
 	/// The tolerance can't come from a frame duration. Opus packets run from 2.5 ms
 	/// to 60 ms with nothing in the catalog to say which, so a rule read off the
 	/// 20 ms packet before it would splice straight across a lost 2.5 ms one.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_lost_opus_packet_shorter_than_its_neighbour_is_a_gap() {
 		let input = Input {
 			format: Format::F32,
@@ -3648,7 +3648,7 @@ mod tests {
 	/// The frame term is the packet's full duration, pre-skip included: Opus trims
 	/// codec delay off the first packet, and reading the frame off what came out
 	/// would shrink the term by exactly that much.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn opus_states_its_own_frame_duration() {
 		let mut encoder = Encoder::new(&EncodeConfig::new(48_000, Layout::Mono)).unwrap();
 		let mut catalog = encoder.catalog();
@@ -3688,7 +3688,7 @@ mod tests {
 		assert_eq!(consumer.delay(), std::time::Duration::from_millis(120));
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_delay_beyond_max_age_is_refused() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
@@ -3717,7 +3717,7 @@ mod tests {
 		assert_eq!(consumer.delay(), std::time::Duration::from_millis(100));
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn max_delay_is_clamped_to_publisher_max_age() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
@@ -3747,7 +3747,7 @@ mod tests {
 	/// Opus pre-skip is padding before the decoded epoch, not missing media after
 	/// the first short frame. The second frame must meet the first or playback
 	/// fills the codec delay with silence and creates a startup glitch.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn opus_pre_skip_does_not_leave_a_timestamp_hole() {
 		let input = Input {
 			format: Format::F32,
@@ -3804,7 +3804,7 @@ mod tests {
 		assert_eq!(second.timestamp, expected);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_playhead_event_reapplies_opus_pre_skip() {
 		let input = Input {
 			format: Format::F32,
@@ -3884,7 +3884,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reads_the_container_the_catalog_declares() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -3940,7 +3940,7 @@ mod tests {
 	/// read a CMAF fragment as a varint timestamp plus a payload, which handed the
 	/// codec garbage instead of failing, so anything published by `moq import
 	/// fmp4` was undecodable.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn decodes_a_cmaf_framed_track() {
 		let input = Input {
 			format: Format::F32,

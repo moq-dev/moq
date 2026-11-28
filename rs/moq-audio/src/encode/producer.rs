@@ -1626,7 +1626,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_partial_frame_expires_with_the_history_before_it() {
 		let input = Input::default();
 		let options = Options {
@@ -1791,7 +1791,7 @@ mod tests {
 	}
 
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn finish_publishes_the_opus_lookahead_tail() {
 		for (group_ms, frames) in [(1, 960), (1, 860), (100, 2_880), (100, 2_780)] {
 			let input = Input {
@@ -1853,7 +1853,7 @@ mod tests {
 	/// Batching cannot change what is published: every packet, timestamp, group boundary
 	/// and the flushed tail match whether PCM arrives a frame at a time or in one burst,
 	/// with or without resampling.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn batch_size_does_not_change_the_published_track() {
 		for input_rate in [48_000u32, 44_100] {
 			let input = Input::new(input_rate, Layout::Stereo);
@@ -1933,7 +1933,7 @@ mod tests {
 	/// A resampled publisher used to end its track early: `finish` flushed the
 	/// encoder's own buffer but left the resampler holding its last partial chunk,
 	/// plus the audio its filter runs behind on.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn finish_publishes_the_resampled_tail() {
 		let input = Input {
 			format: Format::F32,
@@ -1988,7 +1988,7 @@ mod tests {
 	/// `reanchor` promises to drop buffered samples, and the resampler buffers
 	/// samples of its own. Leaving those behind let `finish` flush pre-reset audio
 	/// onto the track, stamped at an anchor that no longer exists.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reanchor_drops_the_resampler_buffer_too() {
 		let input = Input {
 			format: Format::F32,
@@ -2029,7 +2029,7 @@ mod tests {
 	}
 
 	/// Resetting after a full frame drops codec lookahead as well as producer buffers.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reanchor_drops_the_encoder_lookahead() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -2067,7 +2067,7 @@ mod tests {
 	}
 
 	/// A codec reset starts a new pre-skip interval at the receiver too.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reanchor_restarts_the_decoder() {
 		let input = Input {
 			format: Format::F32,
@@ -2295,7 +2295,7 @@ mod tests {
 	}
 
 	/// A mute while the talker is silent ends nothing new: the pause already declared its end.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_mute_in_a_voice_pause_adds_no_end() {
 		let options = Options {
 			track: Some("audio".to_string()),
@@ -2344,7 +2344,7 @@ mod tests {
 	}
 
 	/// A player hears a voice pause as declared silence and decodes the speech after it.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_voice_pause_decodes_as_an_end() {
 		let options = Options {
 			track: Some("audio".to_string()),
@@ -2453,7 +2453,7 @@ mod tests {
 
 	/// The packet that reaches the join closes its group, so a join that isn't a
 	/// whole number of packets rounds up, and one shorter than a packet groups each.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn join_packs_packets_per_group() {
 		for (group_ms, expected) in [(1, [1, 1]), (30, [2, 2]), (100, [5, 5])] {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2553,7 +2553,7 @@ mod tests {
 	}
 
 	/// Timeline breaks close a partial group and reset the resumed group's packet count.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn join_restarts_after_a_timeline_break() {
 		for deferred in [false, true] {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2607,7 +2607,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn anchors_to_first_frame_timestamp() {
 		// The first frame's timestamp becomes the anchor (regression guard: the
 		// old code derived PTS purely from the sample count, always near 0).
@@ -2617,7 +2617,7 @@ mod tests {
 
 	/// AAC can't signal its encoder delay, so each packet is stamped that much
 	/// earlier and the first input sample still decodes at the anchor.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn aac_folds_the_encoder_delay_into_timestamps() {
 		async fn pts(anchor_us: u64) -> Vec<u128> {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2676,7 +2676,7 @@ mod tests {
 	/// Group starts strictly increase, so a reanchor never stamps below where the packets before
 	/// it end: an AAC resume closer than its encoder delay stamps the priming there, and a resume
 	/// that rewinds starts there.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_reanchor_resumes_no_earlier_than_the_packets_before_it_end() {
 		async fn pts(resume_us: u64) -> Vec<u128> {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -2771,7 +2771,7 @@ mod tests {
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp
 	/// of the frame it encoded, including the one only `finish` flushes out ahead of the drain.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn held_packets_keep_their_frames_stamps() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -2832,7 +2832,7 @@ mod tests {
 	/// on, so the first sample published is the first sample written. Anything
 	/// that let that delay through would shift every PTS on a resampled track,
 	/// which no `reanchor` would ever correct.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn resampling_does_not_shift_the_first_pts() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -2875,7 +2875,7 @@ mod tests {
 		assert_eq!(first.timestamp.as_micros().unwrap(), 1_000_000);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn pts_advances_by_frame_duration_ignoring_later_timestamps() {
 		// Second frame's own timestamp (way ahead) is ignored; PTS advances by
 		// exactly one 20 ms frame from the anchor.
@@ -2883,7 +2883,7 @@ mod tests {
 		assert_eq!(pts, vec![1_000, 1_000 + 20_000]);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reanchor_lets_the_gap_land_in_pts() {
 		// Frame at t=0, then reanchor + a frame at t=5s: the 5 s idle gap must
 		// appear in the PTS (otherwise audio drifts behind a wall-clock video track).
@@ -3062,7 +3062,7 @@ mod tests {
 	/// A device clock at the 1000 ppm bound, either way, stays within a frame of its capture
 	/// stamps, slipping frames at the codec's rate and resampling onto another. Uncorrected, it
 	/// drifts 30 ms in these 30 s.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn capture_follows_the_device_clock_onto_the_host_clock() {
 		for (input_rate, ppm) in [(48_000, 1000.0), (48_000, -1000.0), (44_100, 1000.0), (44_100, -1000.0)] {
 			let offsets = capture_offsets(Capture {
@@ -3082,7 +3082,7 @@ mod tests {
 	/// Stamps that jump further than a ratio can slew put the PTS back on them within a second: a
 	/// suspended host re-anchors so the gap lands in the PTS, and audio queued past its time is
 	/// dropped until the stamps catch up, so the timeline never runs backwards.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn capture_recovers_from_a_jump_in_its_stamps() {
 		for jump in [2_000_000, -500_000] {
 			let offsets = capture_offsets(Capture {
