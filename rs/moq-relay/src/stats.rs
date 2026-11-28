@@ -176,11 +176,10 @@ impl Config {
 		origin: origin::Producer,
 	) -> anyhow::Result<(moq_stats::Producer, moq_stats::Publisher)> {
 		if !self.enabled {
-			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
+			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new())?);
 		}
 		let prefix = Path::new(&self.prefix).context("invalid stats.prefix")?;
 		let interval = self.interval();
-		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
 		let node = self
 			.node
 			.as_deref()
@@ -203,6 +202,6 @@ impl Config {
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}
-		Ok(moq_stats::Producer::new(config))
+		moq_stats::Producer::new(config).context("invalid stats config")
 	}
 }

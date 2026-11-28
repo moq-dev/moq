@@ -125,7 +125,7 @@ enum State {
 async fn measure(live: usize, departed: usize, grace: Duration, state: State) -> Duration {
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
+	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace)).unwrap();
 	let mut traffic = agg.bucket(moq_net::Path::from_static("acme"));
 
 	// Every node contributes 1 byte per path, so the total counts nodes seen.

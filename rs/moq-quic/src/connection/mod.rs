@@ -536,6 +536,10 @@ impl Connection {
 	/// others. Ready once none is left open, or with the reason the connection was lost first. A
 	/// peer that keeps opening streams keeps this waiting, so bound the wait, and call
 	/// [`Self::abandon_quiesce`] when it runs out.
+	///
+	/// Hidden and outside semver: a WebTransport close's workaround for a Chromium crash, removed
+	/// once a shipping Chrome carries the fix.
+	#[doc(hidden)]
 	pub fn poll_quiesce(&mut self, waiter: &kio::Waiter, code: VarInt, keep: &[StreamId]) -> Poll<Result<(), Error>> {
 		if let Some(err) = self.streams.waits.lost() {
 			return Poll::Ready(Err(err.clone()));
@@ -569,6 +573,9 @@ impl Connection {
 	/// now the streams it stopped, send the writers' resets it held, and ask the peer to end the
 	/// streams it sends on, without waiting for the peer to acknowledge what was written. Until
 	/// this or a ready poll, those resets and stops stay held.
+	///
+	/// Hidden and outside semver, like [`Self::poll_quiesce`].
+	#[doc(hidden)]
 	pub fn abandon_quiesce(&mut self, code: VarInt, keep: &[StreamId]) {
 		let quiesced = self.streams.quiesced();
 		self.reset_quiesced(quiesced);

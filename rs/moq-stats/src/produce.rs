@@ -182,11 +182,11 @@ impl Producer {
 	/// so the caller decides what a panic in it ends. With no origin the producer
 	/// is a no-op: its registry is disabled and the publisher returns at once.
 	///
-	/// # Panics
-	///
-	/// If `config.interval` is zero.
-	pub fn new(config: Config) -> (Self, Publisher) {
-		assert!(!config.interval.is_zero(), "publish interval must be non-zero");
+	/// Returns [`Error::ZeroInterval`](crate::Error::ZeroInterval) if `config.interval` is zero.
+	pub fn new(config: Config) -> crate::Result<(Self, Publisher)> {
+		if config.interval.is_zero() {
+			return Err(crate::Error::ZeroInterval);
+		}
 		let Config {
 			origin,
 			prefix,
@@ -206,7 +206,7 @@ impl Producer {
 				registry: Registry::disabled(),
 				_keepalive: None,
 			};
-			return (producer, Publisher(Run::Done));
+			return Ok((producer, Publisher(Run::Done)));
 		};
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
@@ -237,7 +237,7 @@ impl Producer {
 			registry,
 			_keepalive: Some(keepalive),
 		};
-		(producer, publisher)
+		Ok((producer, publisher))
 	}
 
 	/// The registry this producer drains. Hand sessions tier-scoped handles via
@@ -1612,7 +1612,8 @@ fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::
 
 /// Run a test producer's publisher on the ambient runtime.
 #[cfg(test)]
-pub(crate) fn spawned((producer, publisher): (Producer, Publisher)) -> Producer {
+pub(crate) fn spawned(built: crate::Result<(Producer, Publisher)>) -> Producer {
+	let (producer, publisher) = built.expect("a valid test config");
 	tokio::spawn(publisher.run());
 	producer
 }
@@ -1703,9 +1704,9 @@ mod tests {
 	}
 
 	#[test]
-	#[should_panic(expected = "interval must be non-zero")]
 	fn a_zero_interval_is_refused() {
-		let _ = Producer::new(Config::new().with_interval(Duration::ZERO));
+		let built = Producer::new(Config::new().with_interval(Duration::ZERO));
+		assert!(matches!(built, Err(crate::Error::ZeroInterval)));
 	}
 
 	/// A group closed because the next one starts ends where that one begins, so a
@@ -2424,7 +2425,8 @@ mod tests {
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		);
+		)
+		.unwrap();
 		drop(stale);
 
 		let _newer = node_producer(&origin);
@@ -2447,7 +2449,8 @@ mod tests {
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		);
+		)
+		.unwrap();
 		let task = tokio::spawn(publisher.run());
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;

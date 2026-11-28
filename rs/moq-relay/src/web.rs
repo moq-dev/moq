@@ -967,10 +967,10 @@ async fn admit_http(
 			.unwrap_or_else(|_| Err(auth::Error::Unavailable("the admission timed out".into()))),
 		None => admit.await,
 	}
-	.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
+	.inspect_err(|err| state.cluster.shared.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
-		state.cluster.refusals.record(crate::refusals::RefusalKind::Forbidden);
+		state.cluster.shared.refusals.record(crate::refusals::RefusalKind::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 	let stats = state
@@ -1398,7 +1398,7 @@ mod tests {
 					RefusalKind::Refused
 				};
 				assert_eq!(
-					state.cluster.refusals.count(reason),
+					state.cluster.shared.refusals.count(reason),
 					1,
 					"fetch={fetch}, publish_only={publish_only}"
 				);

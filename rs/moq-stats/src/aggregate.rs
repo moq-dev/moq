@@ -126,13 +126,13 @@ impl Consumer {
 	/// Wrap an origin consumer. `config`'s `prefix` must match the producing
 	/// side.
 	///
-	/// # Panics
-	///
-	/// If `config.grace` is zero: a returning node's counters would be folded
-	/// into the total and then added again.
-	pub fn new(origin: origin::Consumer, config: Config) -> Self {
-		assert!(!config.grace.is_zero(), "aggregate grace must be non-zero");
-		Self { origin, config }
+	/// Returns [`Error::ZeroGrace`](crate::Error::ZeroGrace) if `config.grace` is zero: a
+	/// returning node's counters would be folded into the total and then added again.
+	pub fn new(origin: origin::Consumer, config: Config) -> crate::Result<Self> {
+		if config.grace.is_zero() {
+			return Err(crate::Error::ZeroGrace);
+		}
+		Ok(Self { origin, config })
 	}
 
 	/// A merged reader over the node-wide totals track, folding every node
@@ -1547,7 +1547,7 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut traffic = traffic(&agg);
 
 		let frame = read_until_bytes(&mut traffic, "acme/room", 140).await;
@@ -1570,7 +1570,7 @@ mod tests {
 		let fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut traffic = traffic(&agg);
 		read_until_bytes(&mut traffic, "acme/room", 140).await;
 
@@ -1606,7 +1606,7 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		read_until_bytes(&mut traffic, "acme/room", 140).await;
 
@@ -1642,7 +1642,7 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		read_until_bytes(&mut traffic, "acme/room", 140).await;
 
@@ -1695,7 +1695,7 @@ mod tests {
 		node_a.publish("acme/room", 100);
 		node_b.publish("acme/room", 40);
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut traffic = traffic(&agg);
 		read_until_bytes(&mut traffic, "acme/room", 140).await;
 
@@ -1751,7 +1751,7 @@ mod tests {
 		// A node returning within the grace with its counters intact replaces
 		// its own kept contribution: no traffic counts twice.
 		let origin = produce_origin();
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		let (frame, _node_b) = depart_node_a(&origin, &mut traffic).await;
 
@@ -1772,7 +1772,7 @@ mod tests {
 		// intact, its pre-departure traffic counts twice: the accepted, bounded
 		// cost of forgetting it. The total still never regresses.
 		let origin = produce_origin();
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		let (frame, _node_b) = depart_node_a(&origin, &mut traffic).await;
 
@@ -1803,7 +1803,7 @@ mod tests {
 		// between the grace elapsing and the return, so the return itself must
 		// fold the expired entry.
 		let origin = produce_origin();
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		let (_frame, _node_b) = depart_node_a(&origin, &mut traffic).await;
 
@@ -1821,7 +1821,7 @@ mod tests {
 	/// identity, with its counters intact plus 20.
 	async fn reconnect_minted(after: Duration) -> (TrafficConsumer, NodeBroadcast) {
 		let origin = produce_origin();
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		let mut node_a = NodeBroadcast::with_identity(&origin, "acme", "a", moq_net::fuzz::minted_identity());
 		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
@@ -1885,7 +1885,7 @@ mod tests {
 		// fresh counters: its earlier per-path traffic stays counted, as for a
 		// restart under a named identity, instead of resetting under the new run.
 		let origin = produce_origin();
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		let mut node_a = NodeBroadcast::with_identity(&origin, "acme", "a", moq_net::fuzz::minted_identity());
 		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
@@ -1916,7 +1916,7 @@ mod tests {
 		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
 		node_a.publish("acme/room", 100);
 
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 		read_until_bytes(&mut traffic, "acme/room", 100).await;
 
@@ -1929,9 +1929,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[should_panic(expected = "grace must be non-zero")]
 	async fn a_zero_grace_is_refused() {
-		Consumer::new(produce_origin().consume(), Config::new().with_grace(Duration::ZERO));
+		let built = Consumer::new(produce_origin().consume(), Config::new().with_grace(Duration::ZERO));
+		assert!(matches!(built, Err(crate::Error::ZeroGrace)));
 	}
 
 	#[test]
@@ -1953,7 +1953,7 @@ mod tests {
 		const STEP: Duration = Duration::from_secs(15);
 
 		let origin = produce_origin();
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut traffic = traffic(&agg);
 
 		for i in 0..CHURN {
@@ -2003,7 +2003,7 @@ mod tests {
 		node_a.frame.insert("acme/room".to_string(), published);
 		node_a.publish("acme/room", 0);
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut traffic = traffic(&agg);
 		let frame = read_until_bytes(&mut traffic, "acme/room", 100).await;
 		let snap = frame.get("acme/room").expect("entry");
@@ -2044,7 +2044,7 @@ mod tests {
 			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut sessions = sessions(&agg);
 
 		loop {
@@ -2077,7 +2077,7 @@ mod tests {
 			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut sessions = sessions(&agg);
 
 		loop {
@@ -2135,7 +2135,7 @@ mod tests {
 		let fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut totals = agg.totals();
 		let grew = |before: &Totals, after: &Totals| !after.regressed(before);
 		let frame = read_until(&mut totals.inner, grew, |frame| {
@@ -2168,7 +2168,7 @@ mod tests {
 				.with_depth(1)
 				.with_linger(Duration::ZERO),
 		));
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut bucket = agg.bucket(moq_net::Path::from_static("acme"));
 
 		let session = node
@@ -2263,7 +2263,7 @@ mod tests {
 		node_a.publish(100);
 		node_b.publish(40);
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut totals = agg.totals();
 		let grew = |before: &Totals, after: &Totals| after.publisher.bytes >= before.publisher.bytes;
 		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 140).await;
@@ -2288,7 +2288,7 @@ mod tests {
 		let mut node_a = TotalsNode::with_identity(&origin, "a", moq_net::fuzz::minted_identity());
 		node_a.publish(100);
 
-		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE)).unwrap();
 		let mut totals = agg.totals();
 		let grew = |before: &Totals, after: &Totals| after.publisher.bytes >= before.publisher.bytes;
 		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 100).await;
@@ -2496,7 +2496,7 @@ mod tests {
 		node.frame.insert("acme/room".into(), raw);
 		node.publish("acme/room", 0);
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut traffic = traffic(&agg);
 		let grew = |before: &Traffic, after: &Traffic| !after.regressed(before);
 		read_until(&mut traffic, grew, |frame| frame.get("acme/room") == Some(&raw)).await;
@@ -2640,7 +2640,7 @@ mod tests {
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut presence = agg.presence(moq_net::Path::from_static("acme"));
 		let grew = |before: &Presence, after: &Presence| !after.regressed(before);
 		read_until(&mut presence.inner, grew, |frame| {
@@ -2677,7 +2677,7 @@ mod tests {
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new());
+		let agg = Consumer::new(origin.consume(), Config::new()).unwrap();
 		let mut prefix = agg.prefix(moq_net::Path::from_static("acme"));
 		let grew = |before: &Prefix, after: &Prefix| !after.regressed(before);
 		let live = |count| {

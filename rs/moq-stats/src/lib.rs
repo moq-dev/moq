@@ -332,6 +332,14 @@ pub enum Error {
 	/// An error decoding or encoding a stats frame.
 	#[error(transparent)]
 	Json(#[from] moq_json::Error),
+
+	/// A [`Producer`] was configured with a zero publish interval.
+	#[error("publish interval must be non-zero")]
+	ZeroInterval,
+
+	/// An [`aggregate::Consumer`] was configured with a zero grace.
+	#[error("aggregate grace must be non-zero")]
+	ZeroGrace,
 }
 
 /// A [`Result`](std::result::Result) using this crate's [`Error`].

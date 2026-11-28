@@ -494,7 +494,7 @@ impl Relay {
 	/// The cluster holds it, so publishing lasts as long as the cluster and its
 	/// driver do, whether or not this handle is cloned.
 	pub fn stats(&self) -> &moq_stats::Producer {
-		&self.cluster.stats_producer
+		&self.cluster.shared.stats_producer
 	}
 
 	/// Graceful-shutdown signal shared by every accepted session and web handler.
@@ -591,7 +591,7 @@ impl Relay {
 		// panic is reported like any critical task's, so the cluster's `run` returns
 		// it and `run_inner` still tears down on the way out.
 		let mut driver = self.driver.take().expect("only run takes the driver");
-		let critical = self.cluster.critical.clone();
+		let critical = self.cluster.shared.critical.clone();
 		let driving = kio::wait(move |waiter| {
 			if let Poll::Ready(Err(err)) = driver.poll(waiter) {
 				critical.fail(err);
@@ -1103,7 +1103,7 @@ mod tests {
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
 		let _admissions = relay.admissions().unwrap();
-		relay.cluster().critical.fail(anyhow::anyhow!("injected"));
+		relay.cluster().shared.critical.fail(anyhow::anyhow!("injected"));
 
 		let err = relay.run().await.expect_err("the relay kept running");
 		assert_eq!(err.root_cause().to_string(), "injected");
