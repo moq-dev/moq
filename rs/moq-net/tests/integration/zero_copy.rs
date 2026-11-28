@@ -7,7 +7,6 @@
 
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use std::time::Duration;
 
@@ -79,8 +78,7 @@ async fn frames_cross_without_a_copy() {
 		subscribed(&track).await;
 
 		let payload = Bytes::from(vec![7u8; 64 * 1024]);
-		let mut group = track.append_next().unwrap();
-		group.write_frame(group.at_start(), payload.clone()).unwrap();
+		let group = track.append_next(payload.clone()).unwrap();
 		group.finish().unwrap();
 
 		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())

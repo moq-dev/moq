@@ -50,11 +50,11 @@ async fn an_open_group_past_the_ceiling_reaches_an_oldest_reader() {
 	// closed group is gone and everything below the open one, the skips each append declared
 	// included, is stale under the ceiling, as a long-lived track's evicted history is.
 	let at = |ms: u64| Timestamp::from_millis(ms).unwrap();
-	let mut old = producer.append_group(at(10)).unwrap();
-	old.write_frame(at(10), &b"old"[..]).unwrap();
+	let old = producer.append_group(at(10), &b"old"[..]).unwrap();
 	old.finish().unwrap();
-	let mut group = producer.append_group(at(1_000)).unwrap();
-	for n in 0..60 {
+	let mut group = producer.append_group(at(1_000), &b"frame"[..]).unwrap();
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	for n in 1..60 {
 		group.write_frame(at(1_000 + n * 1_000), &b"frame"[..]).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}

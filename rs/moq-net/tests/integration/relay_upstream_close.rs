@@ -15,7 +15,6 @@
 
 use crate::WithMax as _;
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -150,10 +149,10 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
 		for key in 0..GROUPS {
-			let mut group = track.append_next().unwrap();
-			for index in 0..FRAMES {
-				let at = Timestamp::from_millis(key * FRAMES + index).unwrap();
-				group.write_frame(at, index.to_string().into_bytes()).unwrap();
+			let at = |index: u64| Timestamp::from_millis(key * FRAMES + index).unwrap();
+			let mut group = track.append_group(at(0), 0.to_string().into_bytes()).unwrap();
+			for index in 1..FRAMES {
+				group.write_frame(at(index), index.to_string().into_bytes()).unwrap();
 			}
 			group.finish().unwrap();
 		}
@@ -196,7 +195,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 #[kio::test]
 async fn relay_delivers_finished_tracks_after_upstream_closes() {
 	let want: Vec<(u64, u64)> = (0..GROUPS)
-		.flat_map(|group| (0..FRAMES).map(move |frame| (group, frame)))
+		.flat_map(|group| (0..FRAMES).map(move |frame| (group * FRAMES, frame)))
 		.collect();
 	for version in VERSIONS {
 		for end in [End::Close, End::Abort] {

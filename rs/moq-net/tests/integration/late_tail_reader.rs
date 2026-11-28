@@ -92,9 +92,9 @@ async fn each_late_reader_reads_the_finished_group() {
 				)
 				.unwrap();
 			let mut group = track
-				.append_group(moq_net::Timestamp::from_micros(START).unwrap())
+				.append_group(moq_net::Timestamp::from_micros(START).unwrap(), &b"frame"[..])
 				.unwrap();
-			for frame in 0..FRAMES {
+			for frame in 1..FRAMES {
 				group
 					.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 					.unwrap();
@@ -154,9 +154,9 @@ async fn concurrent_late_readers_read_the_finished_group() {
 			)
 			.unwrap();
 		let mut group = track
-			.append_group(moq_net::Timestamp::from_micros(START).unwrap())
+			.append_group(moq_net::Timestamp::from_micros(START).unwrap(), &b"frame"[..])
 			.unwrap();
-		for frame in 0..FRAMES {
+		for frame in 1..FRAMES {
 			group
 				.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 				.unwrap();
@@ -226,9 +226,9 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 				)
 				.unwrap();
 			let mut group = track
-				.append_group(moq_net::Timestamp::from_micros(START).unwrap())
+				.append_group(moq_net::Timestamp::from_micros(START).unwrap(), &b"frame"[..])
 				.unwrap();
-			for frame in 0..FRAMES {
+			for frame in 1..FRAMES {
 				group
 					.write_frame(moq_net::Timestamp::from_micros(START + frame).unwrap(), &b"frame"[..])
 					.unwrap();
@@ -299,8 +299,7 @@ async fn a_latest_reader_reads_a_finished_untimed_group() {
 			.create_track("video", moq_net::track::Info::default())
 			.unwrap();
 		let start = moq_net::Timestamp::unscaled(0);
-		let mut group = track.append_group(start).unwrap();
-		group.write_frame(start, &b"frame"[..]).unwrap();
+		let group = track.append_group(start, &b"frame"[..]).unwrap();
 		group.finish().unwrap();
 		let finished = track.finish().unwrap();
 		broadcast.announce().unwrap();
@@ -342,8 +341,8 @@ async fn late_readers_read_a_finished_track_in_any_order() {
 					true => moq_net::Timestamp::from_micros(START + frame * 33_000).unwrap(),
 					false => moq_net::Timestamp::unscaled(0),
 				};
-				let mut group = track.append_group(at(0)).unwrap();
-				for frame in 0..frames {
+				let mut group = track.append_group(at(0), &b"frame"[..]).unwrap();
+				for frame in 1..frames {
 					group
 						.write_frame(at(if timed { frame } else { 0 }), &b"frame"[..])
 						.unwrap();

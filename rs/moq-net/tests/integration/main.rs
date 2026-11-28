@@ -25,7 +25,6 @@ mod dial_split_horizon;
 mod drained_claim;
 mod drop_record;
 mod egress_stats;
-mod empty_group;
 mod errored_end;
 mod extensions;
 mod failover_chain;

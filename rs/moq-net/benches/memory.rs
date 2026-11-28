@@ -207,8 +207,8 @@ impl Link {
 		self.next += 1;
 		let timestamp = Timestamp::from_millis(key).unwrap();
 		for track in &self.tracks {
-			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
-			for _ in 0..FRAMES {
+			let mut group = track.append_group(timestamp, self.payload.clone()).unwrap();
+			for _ in 1..FRAMES {
 				group.write_frame(timestamp, self.payload.clone()).unwrap();
 			}
 			group.finish().unwrap();

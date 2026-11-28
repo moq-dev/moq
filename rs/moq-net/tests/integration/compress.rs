@@ -6,7 +6,6 @@
 //! signal compression receive the plain frames the relay inflates once for all of them.
 
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -151,8 +150,8 @@ async fn a_start_group_arrives_whole() {
 			let lite = hops.iter().all(|hop| *hop == "moq-lite-07-wip");
 			for compress in [true, false] {
 				// Frames of the group written before the subscription, which a joining FETCH
-				// or fill delivers.
-				for head in [0, 3] {
+				// or fill delivers: frame 0 at least, which opens the group.
+				for head in [1, 3] {
 					let case = format!("{upstream} -> {downstream}, compress {compress}, head {head}");
 					kio::clock::timeout(TIMEOUT, async {
 						let info = match compress {
@@ -160,8 +159,11 @@ async fn a_start_group_arrives_whole() {
 							false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 						};
 						let published = publish(info);
-						let mut group = published.track.create_group(moq_net::group::Info { start: 5 }).unwrap();
-						write(&mut group, 0..head);
+						let mut group = published
+							.track
+							.create_group(Timestamp::from_millis(5).unwrap(), payload(0))
+							.unwrap();
+						write(&mut group, 1..head);
 						let mut fixture = relay(
 							published,
 							hops,
@@ -209,10 +211,7 @@ async fn relay_serves_every_version() {
 				"{version}: compression declared"
 			);
 
-			let mut group = fixture.track.append_next().unwrap();
-			group
-				.write_frame(Timestamp::from_millis(0).unwrap(), payload(0))
-				.unwrap();
+			let mut group = fixture.track.append_group(Timestamp::from_millis(0).unwrap(), payload(0)).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(1).unwrap(), payload(1))
 				.unwrap();
@@ -257,8 +256,11 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 					fixture.subscriber.info().compression == moq_net::track::Compression::Deflate,
 					"{upstream} -> {downstream}"
 				);
-				let mut group = fixture.track.append_next().unwrap();
-				for index in 0..3 {
+				let mut group = fixture
+					.track
+					.append_group(Timestamp::from_millis(5).unwrap(), payload(0))
+					.unwrap();
+				for index in 1..3 {
 					group
 						.write_frame(Timestamp::from_millis(5 + index).unwrap(), payload(index))
 						.unwrap();
@@ -289,8 +291,8 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				.route("bcast", moq_net::origin::RouteOptions::hidden())
 				.unwrap();
 			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
-			let mut group = track.append_next().unwrap();
-			for index in 0..3 {
+			let mut group = track.append_group(Timestamp::from_millis(5).unwrap(), payload(0)).unwrap();
+			for index in 1..3 {
 				group
 					.write_frame(Timestamp::from_millis(5 + index).unwrap(), payload(index))
 					.unwrap();
@@ -317,7 +319,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				moq_net::track::Compression::Deflate,
 				"{version}"
 			);
-			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();
+			let mut fetched = consumer.fetch_group(5, moq_net::group::Fetch::default()).await.unwrap();
 			for index in 0..3 {
 				assert_eq!(
 					fetched.read_frame().await.unwrap().unwrap().payload.as_ref(),

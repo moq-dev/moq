@@ -9,7 +9,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::track::Subscription;
-use moq_net::{Timestamp, Version, group, origin, track};
+use moq_net::{Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,16 +41,13 @@ async fn read_back(version: Version, during_tail: bool) {
 		.create_track(
 			"video",
 			track::Info::default()
-				.with_timescale(moq_net::Timescale::MILLI)
+				.with_timescale(moq_net::Timescale::SECOND)
 				.with_max_age(None),
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
 	let write = |start: u64| {
-		let mut group = track.create_group(group::Info { start }).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(start * 1000).unwrap(), &b"x"[..])
-			.unwrap();
+		let group = track.create_group(Timestamp::new(start, moq_net::Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
 		group.finish().unwrap()
 	};
 
@@ -268,8 +265,7 @@ async fn place_time(ask: Ask) {
 	// Each group starts at its own media time, and appending skips the keys between.
 	let write = |seconds: u64| {
 		let start = Timestamp::from_millis(seconds * 1000).unwrap();
-		let mut group = track.append_group(start).unwrap();
-		group.write_frame(start, &b"x"[..]).unwrap();
+		let group = track.append_group(start, &b"x"[..]).unwrap();
 		group.finish().unwrap()
 	};
 

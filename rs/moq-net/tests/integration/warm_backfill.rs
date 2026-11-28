@@ -84,10 +84,7 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 			)
 			.unwrap();
 		for key in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
-				.unwrap();
+			let group = source.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
 			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
@@ -118,19 +115,15 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		for key in 0..GROUPS {
-			let mut group = source.create_group(key.into()).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
-				.unwrap();
+			let group = source.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
 			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, subscribe(&relay)).await.unwrap();
 		let got = kio::clock::timeout(TIMEOUT, received(&mut subscriber)).await.unwrap();
 		assert_eq!(got, BTreeSet::from([GROUPS - 1]), "{version}: only the live edge");
-		let mut group = source.create_group(GROUPS.into()).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(GROUPS * 1000).unwrap(), &b"live"[..])
+		let group = source
+			.create_group(Timestamp::from_millis(GROUPS).unwrap(), &b"live"[..])
 			.unwrap();
 		group.finish().unwrap();
 		let got = kio::clock::timeout(TIMEOUT, subscriber.recv_group())

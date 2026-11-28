@@ -41,7 +41,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 		.create_track(
 			"audio",
 			track::Info::default()
-				.with_timescale(Timescale::MILLI)
+				.with_timescale(Timescale::SECOND)
 				.with_max_age(None),
 		)
 		.unwrap();
@@ -72,10 +72,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 
 	*gate.write().ok().unwrap() = false;
 	for key in 0..GROUPS {
-		let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
-			.unwrap();
+		let group = source.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}

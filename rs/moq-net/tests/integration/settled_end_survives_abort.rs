@@ -8,7 +8,6 @@
 use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
-use support::AtStart;
 
 use moq_net::Error;
 
@@ -45,8 +44,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let mut consumer = track.subscribe(subscription);
 
 	for _ in 0..GROUPS {
-		let mut group = track.append_next().unwrap();
-		group.write_frame(group.at_start(), b"frame".as_slice()).unwrap();
+		let group = track.append_next(b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 	}
 	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();

@@ -10,7 +10,7 @@
 use std::{hint::black_box, task::Poll, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{broadcast, group, track};
+use moq_net::{broadcast, track};
 
 /// Tracks each holding a reader at the tail.
 const TRACKS: [usize; 3] = [1, 32, 1024];
@@ -49,7 +49,7 @@ impl Held {
 				// Group 0 never arrives: the hole that holds the reader.
 				for key in 1..=groups as u64 {
 					track
-						.create_group(group::Info { start: key })
+						.create_group(moq_net::Timestamp::unscaled(key), &b"x"[..])
 						.unwrap()
 						.finish()
 						.unwrap();

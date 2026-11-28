@@ -139,7 +139,9 @@ impl Fixture {
 
 	/// Write [`LIVE`] at the publisher.
 	fn write_live(&self) {
-		write(self.track.create_group(moq_net::group::Info { start: LIVE }).unwrap());
+		let live = Timestamp::unscaled(LIVE);
+		let group = self.track.create_group(live, LIVE.to_string().into_bytes()).unwrap();
+		group.finish().unwrap();
 	}
 }
 
@@ -251,7 +253,10 @@ async fn a_looked_up_time_start_reads_before_a_held_later_group() {
 			}
 		}
 	});
-	write(track.create_group(moq_net::group::Info { start: LIVE }).unwrap());
+	let group = track
+		.create_group(Timestamp::unscaled(LIVE), LIVE.to_string().into_bytes())
+		.unwrap();
+	group.finish().unwrap();
 	let subscription = Subscription::default()
 		.with_max(None)
 		.with_order(Order::Ascending)
@@ -284,8 +289,7 @@ async fn a_time_between_held_groups_starts_where_the_publisher_would() {
 	let track = route.broadcast().create_track("value", info).unwrap();
 	for start in [10, 15, 20] {
 		let start = Timestamp::from_millis(start).unwrap();
-		let mut group = track.append_group(start).unwrap();
-		group.write_frame(start, &b"x"[..]).unwrap();
+		let group = track.append_group(start, &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
 	route.announce().unwrap();

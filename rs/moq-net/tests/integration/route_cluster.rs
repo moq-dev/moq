@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
 use moq_net::stats::{Message, Registry, SessionInfo, Tier};
-use moq_net::{Error, Identity, Prefix, Prefixes, Timestamp, auth, origin, track};
+use moq_net::{Error, Identity, Prefix, Prefixes, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
@@ -237,10 +237,9 @@ impl Publisher {
 
 	/// Write group `key` in full.
 	fn group(&self, key: u64) {
-		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = crate::support::LazyGroup::create(&self.track, key);
 		for frame in 0..FRAMES {
-			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
-			group.write_frame(timestamp, tagged(self.name, key, frame)).unwrap();
+			group.write_frame(group.at_start(), tagged(self.name, key, frame)).unwrap();
 		}
 		group.finish().unwrap();
 	}

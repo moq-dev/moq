@@ -77,10 +77,7 @@ async fn acquisition(version: &str, carries_identity: bool) {
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
 	let track = request.accept(None);
-	let mut group = track.append_next().unwrap();
-	group
-		.write_frame(moq_net::Timestamp::unscaled(group.start), b"catalog".to_vec())
-		.unwrap();
+	let group = track.append_next(b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
 	if carries_identity {

@@ -146,11 +146,11 @@ async fn reset_groups(live: bool, join: u64, hops: u64) {
 		// Created rather than appended: like a publisher that cannot say, the track never
 		// declares the keys between its group starts skipped.
 		let start = index * GROUP;
-		let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
-		for frame in 0..FRAMES {
-			group
-				.write_frame(Timestamp::from_micros(start + frame * FRAME).unwrap(), &b"frame"[..])
-				.unwrap();
+		let at = |frame: u64| Timestamp::from_micros(start + frame * FRAME).unwrap();
+		let mut group = track.create_group(at(0), &b"frame"[..]).unwrap();
+		kio::clock::sleep(Duration::from_micros(FRAME)).await;
+		for frame in 1..FRAMES {
+			group.write_frame(at(frame), &b"frame"[..]).unwrap();
 			kio::clock::sleep(Duration::from_micros(FRAME)).await;
 		}
 		match index < RESET {
@@ -204,17 +204,14 @@ async fn a_recovery_outlives_the_finished_subscription() {
 		.create_track(
 			"video",
 			track::Info::default()
-				.with_timescale(moq_net::Timescale::MILLI)
+				.with_timescale(moq_net::Timescale::SECOND)
 				.with_max_age(None),
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
 	let mut finished = Vec::new();
 	for start in 0..6 {
-		let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
-		group
-			.write_frame(Timestamp::from_millis(start * 1000).unwrap(), &b"x"[..])
-			.unwrap();
+		let group = track.create_group(Timestamp::new(start, moq_net::Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
 		finished.push(group.finish().unwrap());
 	}
 
@@ -382,10 +379,9 @@ impl Chain {
 		}
 	}
 
-	/// A group at `key` holding one frame at `at`, finished.
-	fn write(&self, key: u64, at: Timestamp) -> group::Finished {
-		let mut group = self.track.create_group(group::Info { start: key }).unwrap();
-		group.write_frame(at, &b"x"[..]).unwrap();
+	/// A group holding one frame at `at`, keyed by it, finished.
+	fn write(&self, at: Timestamp) -> group::Finished {
+		let group = self.track.create_group(at, &b"x"[..]).unwrap();
 		group.finish().unwrap()
 	}
 
@@ -424,7 +420,7 @@ async fn a_relay_chain_settles_an_evicted_run_live() {
 	)
 	.await;
 	let _written: Vec<_> = (0..6)
-		.map(|index| chain.write(index * GROUP, Timestamp::from_micros(index * GROUP).unwrap()))
+		.map(|index| chain.write(Timestamp::from_micros(index * GROUP).unwrap()))
 		.collect();
 
 	// The live subscription delivers every group, which B then expires while a reader keeps it
@@ -468,7 +464,7 @@ async fn a_relay_chain_settles_a_small_undeclared_gap_live() {
 	let read = chain.read(support::keys(0..6)).await;
 	let _written: Vec<_> = [0, 1, 4, 5]
 		.into_iter()
-		.map(|key| chain.write(key, Timestamp::from_millis(key * 1000).unwrap()))
+		.map(|key| chain.write(Timestamp::from_millis(key).unwrap()))
 		.collect();
 	let keys = kio::clock::timeout(TIMEOUT, keys(read))
 		.await
@@ -492,7 +488,7 @@ async fn a_slow_relay_still_answering_is_not_walked() {
 	)
 	.await;
 	let _written: Vec<_> = (0..6)
-		.map(|index| chain.write(index * GROUP, Timestamp::from_micros(index * GROUP).unwrap()))
+		.map(|index| chain.write(Timestamp::from_micros(index * GROUP).unwrap()))
 		.collect();
 	let mut live = chain.read(track::Range::ALL).await;
 	for _ in 0..6 {

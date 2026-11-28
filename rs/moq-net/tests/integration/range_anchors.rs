@@ -83,11 +83,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in (0..5).map(|second| second * 1000) {
-		let mut group = match how.append {
-			true => track.append_group(millis(key)).unwrap(),
-			false => track.create_group(moq_net::group::Info { start: key }).unwrap(),
+		let group = match how.append {
+			true => track.append_group(millis(key), &b"x"[..]).unwrap(),
+			false => track.create_group(millis(key), &b"x"[..]).unwrap(),
 		};
-		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
 
@@ -155,8 +154,7 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	}
 	// A read that ended passed its range: a group the publisher creates there now is late.
 	if read.ended && !how.append {
-		let mut late = track.create_group(moq_net::group::Info { start: 1500 }).unwrap();
-		late.write_frame(millis(1500), &b"x"[..]).unwrap();
+		let late = track.create_group(millis(1500), &b"x"[..]).unwrap();
 		late.finish().unwrap();
 		let next = match (&mut ordered, &mut arrival) {
 			(Some(ordered), _) => kio::clock::timeout(TIMEOUT, ordered.next_group()).await,
@@ -262,64 +260,6 @@ async fn a_live_join_reaches_back_by_its_min_age_where_the_wire_carries_it() {
 	}
 }
 
-/// A publisher starts a live join at its newest group, which may hold no frame yet and so counts
-/// neither in the largest it reports nor where the copy would place the join. The copy keeps the
-/// publisher's start instead, so a reader waiting on each group in key starts there rather than
-/// waiting below it for groups that never arrive.
-#[kio::test]
-async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newest_group() {
-	let publisher = produce_origin(1);
-	let broadcast = publisher
-		.route("room", moq_net::origin::RouteOptions::hidden())
-		.unwrap();
-	let track = broadcast
-		.broadcast()
-		.create_track("data", Info::default().with_max_age(FOREVER))
-		.unwrap();
-	broadcast.announce().unwrap();
-	for key in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"x"[..])
-			.unwrap();
-		group.finish().unwrap();
-	}
-	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
-
-	let subscriber = produce_origin(2);
-	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
-	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
-		.await
-		.expect("resolve timeout")
-		.expect("broadcast resolves")
-		.unwrap();
-	let subscription = Subscription::default().with_ranges([Range::from(moq_net::track::Start::Live {
-		min: Some(Duration::ZERO),
-		max: Some(FOREVER),
-	})]);
-	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
-		.await
-		.expect("subscribe timeout")
-		.unwrap()
-		.ordered();
-
-	newest
-		.write_frame(moq_net::Timestamp::unscaled(newest.start), &b"x"[..])
-		.unwrap();
-	newest.finish().unwrap();
-	// Waiting on each group in key, the reader starts where the publisher resolved the start,
-	// counting its frameless newest group, with nothing below it owed or given up.
-	let item = kio::clock::timeout(TIMEOUT, reader.next_item())
-		.await
-		.expect("group timeout")
-		.unwrap();
-	let Some(moq_net::track::Item::Group(group)) = item else {
-		panic!("expected group 5 first")
-	};
-	assert_eq!(group.start, 5);
-	let _track = track.finish().unwrap();
-}
-
 /// A lite-07 copy holds only part of the track, so a live join starts where its publisher placed
 /// it rather than over the groups the copy holds: a sparse request mixing a time range and a
 /// live join ending at a time reads every group it names.
@@ -338,8 +278,7 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..10 {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
-		group.write_frame(millis(key), &b"x"[..]).unwrap();
+		let group = track.create_group(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
 

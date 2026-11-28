@@ -10,7 +10,6 @@
 //! shrunk to the ops it needs, which the report names.
 
 use crate::support;
-use support::AppendNext;
 
 use std::time::Duration;
 
@@ -305,34 +304,38 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		_upstream: upstream,
 	};
 
-	let mut group = track.append_next().unwrap();
 	// The open group as written so far, as `group:payload`.
 	let mut written: Vec<String> = Vec::new();
 	let mut readers: Vec<Reader> = Vec::new();
 	let mut joined = 0;
+	// Each frame is 10ms after the one before, and a group starts at its first.
 	let mut clock = 0;
-	let mut write =
-		|group: &mut moq_net::group::Producer, written: &mut Vec<String>, readers: &mut [Reader], payload: &str| {
-			clock += 10;
-			group
-				.write_frame(Timestamp::from_millis(clock).unwrap(), payload.as_bytes())
-				.unwrap();
-			let frame = format!("{}:{payload}", group.start);
-			for reader in readers {
-				reader.expected.push(frame.clone());
-			}
-			written.push(frame);
-		};
-	write(&mut group, &mut written, &mut readers, "snapshot");
+	let mut tick = || {
+		clock += 10;
+		Timestamp::from_millis(clock).unwrap()
+	};
+	let record = |group: &moq_net::group::Producer, written: &mut Vec<String>, readers: &mut [Reader], payload: &str| {
+		let frame = format!("{}:{payload}", group.start);
+		for reader in readers {
+			reader.expected.push(frame.clone());
+		}
+		written.push(frame);
+	};
+	let mut group = track.append_group(tick(), b"snapshot".as_slice()).unwrap();
+	record(&group, &mut written, &mut readers, "snapshot");
 
 	for (step, op) in ops.iter().enumerate() {
 		match *op {
-			Op::Write => write(&mut group, &mut written, &mut readers, &format!("d{step}")),
+			Op::Write => {
+				let payload = format!("d{step}");
+				group.write_frame(tick(), payload.as_bytes()).unwrap();
+				record(&group, &mut written, &mut readers, &payload);
+			}
 			Op::NewGroup => {
 				group.finish().unwrap();
-				group = track.append_next().unwrap();
+				group = track.append_group(tick(), b"snapshot".as_slice()).unwrap();
 				written.clear();
-				write(&mut group, &mut written, &mut readers, "snapshot");
+				record(&group, &mut written, &mut readers, "snapshot");
 				// Let it reach `R`, so the newest group at the next join is unambiguous.
 				kio::clock::sleep(Duration::from_millis(500)).await;
 			}

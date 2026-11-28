@@ -24,8 +24,7 @@ const SUBSCRIBERS: [usize; 3] = [1, 10, 100];
 /// Append group `key`, whose delta outweighs its first frame.
 fn refreshable(track: &track::Producer, key: u64) {
 	let start = moq_net::Timestamp::unscaled(key);
-	let mut group = track.append_group(start).unwrap();
-	group.write_frame(start, Bytes::from_static(b"key")).unwrap();
+	let mut group = track.append_group(start, Bytes::from_static(b"key")).unwrap();
 	group.write_frame(start, Bytes::from_static(b"delta")).unwrap();
 	group.finish().unwrap();
 }

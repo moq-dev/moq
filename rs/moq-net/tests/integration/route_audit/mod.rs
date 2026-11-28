@@ -28,7 +28,7 @@ use std::sync::{
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Identity, Timestamp, Version, group, origin, track};
+use moq_net::{Identity, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// How often a publisher writes a group.
@@ -287,11 +287,8 @@ impl Feed {
 			while !stopped.load(Ordering::Relaxed) {
 				let start = key * CADENCE.as_millis() as u64;
 				for track in &tracks {
-					let mut group = track.create_group(group::Info { start }).unwrap();
 					let frame = payload(tag, key, kio::clock::now());
-					group
-						.write_frame(Timestamp::from_millis(start).unwrap(), frame)
-						.unwrap();
+					let group = track.create_group(Timestamp::from_millis(start).unwrap(), frame).unwrap();
 					group.finish().unwrap();
 				}
 				key += 1;
