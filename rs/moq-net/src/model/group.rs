@@ -1046,7 +1046,9 @@ impl GroupState {
 	/// copy without it cannot know where a run of tied timestamps pushed the IDs.
 	#[cfg(feature = "async")]
 	fn timed_ids(&self, start: u64) -> Option<impl Iterator<Item = u64> + '_> {
-		if self.held() != 0 {
+		// A relayed copy from a stream missing the group's head, or whose IDs already strayed
+		// from the derived ones, can't vouch for where its IDs fall.
+		if self.held() != 0 || self.wire().is_some_and(|wire| !wire.first_object || wire.sparse) {
 			return None;
 		}
 		let partial = self.partial.as_ref().map(|partial| partial.timestamp);

@@ -22385,6 +22385,14 @@ fn timed_end(group: &group::Consumer, frame: u64) -> Option<u64> {
 		Some(frames) => frame.min(frames as u64),
 		None => frame,
 	};
+	// A relayed copy in this scheme serves its upstream's IDs verbatim, which need not be the
+	// ones its timestamps derive, so only its last relayed object places an end after it.
+	if group_relayed_same_mode(group, true) {
+		return match group.last_frame() {
+			Some(last) if frame == last + 1 => group.last_object().map(|id| id.saturating_add(1)),
+			_ => None,
+		};
+	}
 	group.timed_id(frame - 1).map(|id| id.saturating_add(1))
 }
 
@@ -23579,6 +23587,53 @@ mod compression_tests {
 			assert_eq!(group_last_id_exact(&consumer, true), !headless, "headless={headless}");
 			assert!(group_last_id_exact(&consumer, false), "headless={headless}");
 		}
+	}
+
+	/// A draft-23 copy relayed in the same scheme ends one past its last relayed Object ID, which
+	/// its timestamps alone may not derive: here a suffix whose upstream IDs 34 and 35 tie a frame
+	/// before it at 33 ms.
+	#[test]
+	fn a_relayed_timestamp_id_copy_ends_past_its_last_relayed_id() {
+		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+		info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			version: Version::Draft23,
+			values: Vec::new(),
+		}));
+		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 34,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for id in [34, 35] {
+			let mut frame = group
+				.create_object(crate::frame::Header {
+					info: crate::frame::Info {
+						size: 1,
+						timestamp: Timestamp::from_millis(33).unwrap(),
+					},
+					fields: Some(Arc::new(crate::model::object::Fields {
+						id,
+						properties: Default::default(),
+					})),
+					inflated: None,
+				})
+				.unwrap();
+			frame.write(bytes::Bytes::from_static(b"x")).unwrap();
+			group = frame.finish().unwrap();
+		}
+		let group = group.finish().unwrap();
+		let consumer = group.consume();
+		assert_eq!(timed_end(&consumer, 2), Some(36));
+		// Mid-group, its relayed IDs say nothing about where the end falls.
+		assert_eq!(timed_end(&consumer, 1), None);
 	}
 
 	/// A timestamp-ID copy relayed from a stream that started past the group's first object

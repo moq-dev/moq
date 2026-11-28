@@ -283,7 +283,6 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 			},
 			_ => timestamp,
 		};
-		self.present(presentation, source);
 		let prefix = (self.container.prefix(frame.timestamp)?)
 			.ok_or_else(|| crate::Error::UnsupportedContainer("a streamed frame".into()))?;
 		let group = self.group.take().expect("prepare opens a group");
@@ -314,6 +313,8 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 		};
 		let group = writer.finish()?;
 		self.group = Some(group);
+		// Only once the frame is in, so a refused one leaves the group's order as it was.
+		self.present(frame.presentation, frame.source);
 		self.written(
 			frame.source,
 			frame.presentation,
@@ -806,7 +807,6 @@ where
 			return Ok(());
 		};
 		self.place(&mut frame, source, timestamp)?;
-		self.present(presentation, source);
 
 		// Buffer or write the frame.
 		if self.buffer_duration.is_zero() {
@@ -814,6 +814,8 @@ where
 			let (duration, bytes) = (frame.duration, frame.payload.len());
 			let keyframe = frame.keyframe;
 			self.container.write(group, &[frame])?;
+			// Only once the frame is in, so a refused one leaves the group's order as it was.
+			self.present(presentation, source);
 			// Only what the container accepted is measured. A rejected frame (too large for the
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
 			// extrema never fall, so counting one would inflate the catalog for good.
@@ -822,6 +824,7 @@ where
 			// Buffered frames count toward the rates on the way in instead. The flush that eventually
 			// writes them takes the track down with it when it fails, so there is nothing to unwind.
 			// Their place in the write order waits for that flush, which is when the transport has them.
+			self.present(presentation, source);
 			self.estimator.rate(presentation, frame.payload.len());
 			self.observe_end(source, timestamp, frame.duration);
 			self.buffer.push(frame);
@@ -2071,6 +2074,58 @@ mod tests {
 		}
 
 		assert_eq!(producer.estimate().bitrate, Some(1_000_000));
+	}
+
+	/// Legacy video, except a frame at the given microsecond timestamp, which it turns away.
+	#[derive(Clone)]
+	struct LegacyRejectingAt(u64);
+
+	impl super::Container for LegacyRejectingAt {
+		type Error = crate::Error;
+
+		fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+			match frames
+				.iter()
+				.any(|f| f.timestamp.as_micros().unwrap() == self.0 as u128)
+			{
+				true => Err(moq_net::Error::FrameTooLarge.into()),
+				false => Container::Legacy(crate::container::Kind::Video).write(group, frames),
+			}
+		}
+
+		fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
+			Container::Legacy(crate::container::Kind::Video).decode(frame)
+		}
+
+		fn end(&self, frame: &Frame) -> Option<Timestamp> {
+			Container::Legacy(crate::container::Kind::Video).end(frame)
+		}
+
+		fn kind(&self) -> Kind {
+			Kind::Video
+		}
+
+		fn finish_group(
+			&self,
+			group: &mut moq_net::group::Producer,
+			end: Option<Timestamp>,
+		) -> Result<(), Self::Error> {
+			Container::Legacy(crate::container::Kind::Video).finish_group(group, end)
+		}
+	}
+
+	/// A B-frame the container turns away never marks its group reordered, so the frames it
+	/// did take still end with their duration marker.
+	#[tokio::test]
+	async fn a_rejected_reordered_frame_keeps_the_group_in_order() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, LegacyRejectingAt(33_000));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(66_000, false)).unwrap();
+		assert!(producer.write(frame(33_000, false)).is_err());
+		let _finished = producer.finish().unwrap();
+		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(132_000, 0)));
 	}
 
 	/// Reorder delay is the one input the writes can't reveal, since frames carry no decode time.

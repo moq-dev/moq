@@ -565,6 +565,8 @@ struct RangeWriter {
 	/// Leading objects in the current group to skip before writing into `producer`, used when
 	/// a `Draft23` timed FETCH starts at wire Object ID 0 for a non-zero model frame ordinal.
 	skip_frames: u64,
+	/// The current group skipped frames, so its first written object's ID is where its copy starts.
+	rebase: bool,
 	/// The first group not opened yet.
 	next: u64,
 }
@@ -577,6 +579,7 @@ impl RangeWriter {
 			slot,
 			current: None,
 			skip_frames: 0,
+			rebase: false,
 		}
 	}
 
@@ -618,6 +621,7 @@ impl RangeWriter {
 		};
 		let frame_start = fill.frame_start(key);
 		self.skip_frames = frame_start.saturating_sub(wire_start);
+		self.rebase = self.skip_frames > 0;
 		let producer = match datagram {
 			true => {
 				tracing::debug!(key, "dropping a datagram group from a fetch");
@@ -636,20 +640,39 @@ impl RangeWriter {
 			}
 		}
 		self.current = Some((key, producer));
+		let rebase = self.rebase;
 		if let Some(producer) = self.producer() {
 			// The objects keep the frame indices they have in the group rather than restarting at 0.
 			producer.start_at(frame_start)?;
-			producer.set_wire(group::Wire {
-				sparse: false,
-				first_object: frame_start == 0,
-				first_id: wire_start,
-				extensions: true,
-				has_end: true,
-				fetchable: true,
-				last: None,
-			})?;
+			// Until the first kept object names where the copy starts, it serves no FETCH.
+			producer.set_wire(Self::wire(frame_start == 0, wire_start, !rebase))?;
 		}
 		Ok(wire_start)
+	}
+
+	/// The wire state of a copy whose first object is at Object ID `id`.
+	fn wire(first_object: bool, id: u64, fetchable: bool) -> group::Wire {
+		group::Wire {
+			sparse: false,
+			first_object,
+			first_id: id,
+			extensions: true,
+			has_end: true,
+			fetchable,
+			last: None,
+		}
+	}
+
+	/// Record `id` as the first Object ID the current group keeps, once its skipped frames end.
+	fn retain(&mut self, id: u64) -> Result<(), Error> {
+		if !std::mem::take(&mut self.rebase) {
+			return Ok(());
+		}
+		match self.producer() {
+			// Frames were skipped, so the copy never starts at the group's head.
+			Some(producer) => producer.set_wire(Self::wire(false, id, true)),
+			None => Ok(()),
+		}
 	}
 
 	/// Finish the current group: its objects end where the next group's begin. The slot
@@ -8090,6 +8113,7 @@ impl GroupFetchObjects {
 				writer.skip_frames -= 1;
 				FetchPayloadRead::Skip(SkipPayload::new())
 			} else {
+				writer.retain(id)?;
 				match writer.producer() {
 					Some(_) => FetchPayloadRead::Write(FetchPayloadRecv::new(FetchPayload { decoded, timing, id })),
 					None => FetchPayloadRead::Skip(SkipPayload::new()),
@@ -17890,6 +17914,68 @@ mod stitch_tests {
 		let ended = [group_fetch_objects(KEY, 0, &[b"a"]), group_end(false)].concat();
 		let mut run = GroupFetchRun::new(VERSION, ended).await;
 		assert!(run.recv_objects().await.is_err(), "draft-22 has no End of Group");
+	}
+
+	/// A draft-23 timed group recovered from frame 2 asks from Object ID 0 and drops the
+	/// frames before it, so its copy starts at the first ID it kept, not at 0: a FETCH from
+	/// below that ID must not be served from it.
+	#[kio::test]
+	async fn a_timed_fetch_from_a_later_frame_starts_its_copy_at_the_first_kept_id() {
+		let version = Version::Draft23;
+		let mut objects = Vec::new();
+		// Each later object names its ID as a delta past the prior one, less draft-23's bias of 2.
+		for (prior, id, payload) in [(None, 0u64, b"a"), (Some(0), 33, b"b"), (Some(33), 66, b"c")] {
+			ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: prior.is_none().then_some(KEY),
+				object: Some(prior.map_or(id, |prior| id - prior - 2)),
+				priority: prior.is_none().then_some(0),
+				properties: None,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut objects, version.into()), version)
+			.unwrap();
+			crate::coding::Encoder::new(&mut objects, version.into())
+				.varint(1u64)
+				.unwrap();
+			objects.extend_from_slice(payload);
+		}
+		objects.extend(group_end(false));
+		let mut run = GroupFetchRun::new(version, objects).await;
+		let mut info = track::Info::timed().with_timescale(Timescale::MILLI).with_max_age(None);
+		info.properties = Some(std::sync::Arc::new(crate::model::object::TrackProperties {
+			version,
+			values: Vec::new(),
+		}));
+		run.track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
+
+		let dynamic = run.track.requests();
+		let mut fetch = Box::pin(run.track.consume().fetch_group(
+			KEY,
+			group::Fetch {
+				frame_start: 2,
+				..Default::default()
+			},
+		));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		let fill = dynamic.requested_fill().await.expect("group request");
+		let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
+			fill: std::sync::Arc::new(fill),
+			timing: ObjectTiming::timed(Some(Timescale::MILLI)),
+			first: KEY,
+			last: KEY,
+			start: 0,
+			end: None,
+		}));
+		run.subscriber
+			.recv_group_fetch(&mut run.stream, slot)
+			.await
+			.expect("recv");
+
+		let mut group = fetch.await.expect("the group is cached");
+		let wire = group.wire().expect("relayed");
+		assert_eq!((wire.first_object, wire.first_id, wire.fetchable), (false, 66, true));
+		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"c");
+		assert!(group.read_frame().await.unwrap().is_none());
 	}
 
 	/// End of Group finishes its group at once, so a stream that stalls after it leaves the
