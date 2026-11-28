@@ -278,7 +278,7 @@ player's lifecycle steps, which failed 6 of 15 runs at a different step almost e
 ([interop green](/quest/m0/interop-green/README.md); every failure predates
 [moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561)'s 100 ms audio groups, so
 [moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809) deleted it), and the MediaCodec
-keyframe test ([test flakes](/quest/m0/test-flakes-5/mediacodec-first-frame.md)). Fixed by
+keyframe test (fixed by [moq-dev/moq#9814](https://github.com/moq-dev/moq/pull/9814)). Fixed by
 [moq-dev/moq#9785](https://github.com/moq-dev/moq/pull/9785): `Features (rs features)`'s
 `concurrent_ephemeral_groups_all_bind`, where an ephemeral group failed with `Overlap` on a port
 another address's group had locked. Fixed on `main` since: the resume model's seed `478520378`
