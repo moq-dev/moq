@@ -1965,24 +1965,19 @@ export class Publisher {
 		// replaces the runs it covers, as a skip may go out over a drop, so they stay sorted and
 		// disjoint. Mirrors the Rust `Start::Unresolved::skipped`.
 		let skipped = new Runs<DropRun>(sameHole);
-		// The final runs given up below where delivery starts that the wire was never told of, though
-		// the record holds them told so no later scan gives them up again, one by one. Named once owed:
-		// those reaching up to a group served below the start, and those a lowered start reaches.
-		// Mirrors the Rust `TrackRun::unsent`.
-		const unsent = new Runs<DropRun>(sameHole);
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startKey: bigint | undefined;
-		// Move where delivery starts down to `start`, owing the subscriber what was given up from
-		// there: the runs `unsent` holds there are forgotten, so the reader gives them up again.
-		// Mirrors the Rust `TrackRun::lower_start`.
+		// Tell the track subscriber which keys' drops this wire currently owes.
+		// Mirrors the Rust `TrackRun::sync_drop_owed`.
+		const syncDropOwed = () => {
+			if (startKey !== undefined) hooks.setDropOwed(track, owed(startKey));
+		};
+		// Move where delivery starts down to `start`, widening the owed-drop filter so the next
+		// drop scan reports what was given up from there. Mirrors the Rust `TrackRun::lower_start`.
 		const lowerStart = (start: bigint) => {
 			if (startKey === undefined || start >= startKey) return;
-			for (const run of record ? unsent.overlapping(start, startKey) : [])
-				record?.untell(max(run.start, start), min(run.end, startKey));
-			// A front's copies forget all they reported there, so they give it up again.
-			hooks.untellCopies(track, start, startKey);
-			unsent.set(start, startKey);
 			startKey = start;
+			syncDropOwed();
 		};
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
@@ -2037,8 +2032,10 @@ export class Publisher {
 		const resolveStart = async (from: bigint, position: track.Position | undefined): Promise<boolean> => {
 			startSent = true;
 			startKey = from;
-			if (!hasRanges(this.version))
+			if (!hasRanges(this.version)) {
+				syncDropOwed();
 				return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
+			}
 			// Until a range's START goes out, which one following an edge this hop does not know yet
 			// may trail delivery resolving.
 			withheld = [];
@@ -2067,7 +2064,9 @@ export class Publisher {
 			}
 			// A range an update added before this start is answered with it, before the drops held
 			// for it, which a subscriber reads only once a range has started.
-			return reportStarted(false);
+			const started = await reportStarted(false);
+			syncDropOwed();
+			return started;
 		};
 
 		// While the source has yet to say where its whole feed starts, `position` the newest this hop
@@ -2342,14 +2341,14 @@ export class Publisher {
 					// Nothing below the start is owed. The final runs reaching up to it unbroken are named all
 					// the same, so a reader filling below the start (a relay whose reader reaches lower) learns
 					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
-					// gave up, go unnamed: naming them would send every gap in the track's history, as a lite-06
-					// track keyed by timestamp holds one per group. A stale one is forgotten by this
-					// subscription's record alone, so a wider budget may still serve it: a front's copies keep
-					// it, or each would give it up again on every scan an update widening the budget asks for,
-					// ahead of every group. A final one stays told for the same reason; an update that asks
-					// below the start names it then. On lite-07, a run stale under the track's own max age is
-					// final all the same (see `reversible`): a relay reading from the oldest group would
-					// otherwise wait on it forever. Mirrors the Rust `TrackRun::resolve`.
+					// gave up, stay untold: naming them would send every gap in the track's history, as a lite-06
+					// track keyed by timestamp holds one per group. The subscriber's drop filter is bounded to
+					// `owed(startKey)` so budget widenings never rescan or re-emit drops below the start, while
+					// cached groups newly inside the wider budget are still served and name their reaching gaps
+					// directly from the track. An update lowering the start widens the drop filter so untold runs
+					// below it are named then. On lite-07, a run stale under the track's own max age is final all
+					// the same (see `reversible`): a relay reading from the oldest group would otherwise wait on
+					// it forever. Mirrors the Rust `TrackRun::resolve`.
 					let reach = startKey;
 					for (let i = skipped.size - 1; i >= 0; i--) {
 						const range = skipped.all[i];
@@ -2359,16 +2358,15 @@ export class Publisher {
 					}
 					const send = owed(reach);
 					for (const range of skipped.all) {
-						for (const below of runGaps(send, range.start, range.end)) {
-							if (reversible(range.stale)) record?.untell(below.start, below.end);
-							else unsent.set(below.start, below.end, range);
-						}
+						for (const below of runGaps(send, range.start, range.end))
+							record?.untell(below.start, below.end);
 						for (const part of send) {
 							const from = max(part.start, range.start);
 							const to = min(part.end, range.end);
 							if (from < to && !(await forward(from, to, range))) return false;
 						}
 					}
+					syncDropOwed();
 					skipped = new Runs<DropRun>(sameHole);
 				}
 				for (const { start, end } of pendingCuts.splice(0)) {
@@ -2472,6 +2470,7 @@ export class Publisher {
 							const stops = bounds.stopsAfter.get(update);
 							if (stops && !sameStops(stops, bounds.stops.peek())) bounds.stops.set(stops);
 							moveCursor();
+							syncDropOwed();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary usually lets the decoder finish whatever the transport
@@ -2502,18 +2501,7 @@ export class Publisher {
 						throw recv.error;
 					case "drop":
 						if (!startSent) skipped.set(recv.start, recv.end, recv);
-						else if (startKey !== undefined && recv.start < startKey && reversible(recv.stale)) {
-							// A stale run below the start goes unnamed, as at the start, so a wider budget may
-							// still serve it: one widening the budget gives each up again otherwise.
-							const send = owed(startKey);
-							for (const below of runGaps(send, recv.start, recv.end))
-								record?.untell(below.start, below.end);
-							for (const part of send) {
-								const from = max(part.start, recv.start);
-								const to = min(part.end, recv.end);
-								if (from < to && !(await forward(from, to, recv))) return false;
-							}
-						} else if (!(await forward(recv.start, recv.end, recv))) return false;
+						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
 						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
@@ -2707,10 +2695,8 @@ export class Publisher {
 				// unbroken, as the start names those reaching up to it. Mirrors the Rust
 				// `TrackRun::name_reaching`.
 				if (startKey !== undefined && group.start < startKey) {
-					let reach = group.start;
-					for (let run = unsent.at(reach - 1n); run && run.end === reach; run = unsent.at(reach - 1n)) {
-						unsent.set(run.start, run.end);
-						reach = run.start;
+					const bound = hasRanges(this.version) ? (serving.maxAge ?? Number.POSITIVE_INFINITY) : undefined;
+					for (const run of hooks.reachingDrops(track, group.start, floor, bound)) {
 						if (!(await forward(run.start, run.end, run))) return false;
 					}
 				}

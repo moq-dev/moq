@@ -3574,10 +3574,7 @@ export interface WireRecord {
 	untold(start: bigint, end: bigint): Run[];
 	/** Record that the wire was told `report` of `[start, end)`. */
 	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
-	/**
-	 * Forget what was recorded of `[start, end)` without going out on the wire, keeping what a
-	 * front's copies reported; `hooks.untellCopies` forgets theirs. Mirrors the Rust `Record::untell`.
-	 */
+	/** Forget what was recorded of `[start, end)` without going out on the wire. */
 	untell(start: bigint, end: bigint): void;
 }
 
@@ -3679,9 +3676,14 @@ export class Subscriber {
 		start: bigint;
 		end?: bigint;
 		revision: number;
+		dropOwedRev: number;
 		budget: Budget;
 		coverage?: Coverage;
 	};
+	// Keys whose drops a wire publisher currently owes (`undefined` = all keys in range).
+	// Mirrors Rust `Cursor::drop_owed`.
+	#dropOwed?: Run[];
+	#dropOwedRev = 0;
 	#reported = new Runs<Reported>(sameReport);
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
@@ -4282,8 +4284,11 @@ export class Subscriber {
 			tell: (start, end, report) => {
 				if (start < end) reported.set(start, end, { ...report, start, end });
 			},
+			// A front's copies forget it too, so ranges that later ask for it report it again.
 			untell: (start, end) => {
-				if (start < end) reported.set(start, end);
+				if (start >= end) return;
+				reported.set(start, end);
+				this.#resume?.untell(start, end);
 			},
 		};
 	}
@@ -5519,9 +5524,9 @@ export class Subscriber {
 			// A copy that is itself a front has copies of its own that reported it.
 			subscriber.#resume?.untell(start, end);
 		};
-		hooks.untellCopies = (subscriber, start, end) => {
-			if (start < end) subscriber.#resume?.untell(start, end);
-		};
+		hooks.setDropOwed = (subscriber, owed) => subscriber.#setDropOwed(owed);
+		hooks.reachingDrops = (subscriber, key, floor, bound, untold) =>
+			subscriber.#reachingDrops(key, floor, bound, untold);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
@@ -6247,15 +6252,87 @@ export class Subscriber {
 	}
 
 	// Skip `group`, stale under `drift`, and report it as this read reports what it gives up.
+	#dropOwes(key: bigint): boolean {
+		if (!this.#dropOwed) return true;
+		return this.#dropOwed.some((run) => key >= run.start && key < run.end);
+	}
+
+	#owedSpans(from: bigint, to: bigint): Run[] {
+		if (from >= to) return [];
+		if (!this.#dropOwed) return [{ start: from, end: to }];
+		const spans: Run[] = [];
+		for (const run of this.#dropOwed) {
+			const start = max(from, run.start);
+			const end = min(to, run.end);
+			if (start < end) spans.push({ start, end });
+		}
+		return spans;
+	}
+
+	#setDropOwed(owed: Run[]): void {
+		if (this.#resume) {
+			this.#resume.setDropOwed(owed);
+			return;
+		}
+		if (
+			this.#dropOwed &&
+			this.#dropOwed.length === owed.length &&
+			this.#dropOwed.every((run, i) => run.start === owed[i].start && run.end === owed[i].end)
+		)
+			return;
+		this.#dropOwed = owed;
+		this.#dropOwedRev++;
+	}
+
+	#reachingDrops(
+		key: bigint,
+		floor: bigint,
+		bound: number | undefined,
+		untold?: (start: bigint, end: bigint) => Run[],
+	): DropRun[] {
+		const checkUntold =
+			untold ??
+			((start: bigint, end: bigint) =>
+				start < end ? runGaps(this.#reported.overlapping(start, end), start, end) : []);
+		if (this.#resume) return this.#resume.reachingDrops(key, floor, bound, checkUntold);
+		const minKey = max(floor, this.#cursor.peek().start);
+		const { drops, refused } = this.#state;
+		const refusedRuns = refused.peek();
+		const found: DropRun[] = [];
+		let reach = key;
+		while (reach > minKey) {
+			const prev = reach - 1n;
+			if (checkUntold(prev, reach).length === 0 || !this.#window.contains(prev)) break;
+			const drop = drops.at(prev) ?? refusedRuns.find((run) => prev >= run.start && prev < run.end);
+			if (!drop) break;
+			if (drop.stale !== undefined && (bound === undefined || drop.stale < bound)) break;
+			let start = max(drop.start, minKey);
+			const open = checkUntold(start, reach);
+			const lastOpen = open.at(-1);
+			if (!lastOpen || lastOpen.end < reach) break;
+			start = max(start, lastOpen.start);
+			const inWindow = this.#window.runs(start, reach);
+			const lastWindow = inWindow.at(-1);
+			if (!lastWindow || lastWindow.end < reach) break;
+			start = max(start, lastWindow.start);
+			found.push({ ...drop, start, end: reach });
+			reach = start;
+		}
+		found.reverse();
+		return found;
+	}
+
 	#writeOff(group: GroupConsumer, drift: Drift, dispositions: Dispositions): (Recv & { kind: "drop" }) | undefined {
 		group.close();
 		const budget = drift.budget.at(group.start);
 		let dropped: (Recv & { kind: "drop" }) | undefined;
-		if (dispositions) {
-			dropped = this.#report(group.start, group.start + 1n, staleHole(budget));
-		} else if (this.#dropsSeen) {
-			// A cursor #tryDrop reads reports it there.
-			this.#pending = insertDrop(this.#pending, group.start, group.start + 1n, staleHole(budget));
+		if (this.#dropOwes(group.start)) {
+			if (dispositions) {
+				dropped = this.#report(group.start, group.start + 1n, staleHole(budget));
+			} else if (this.#dropsSeen) {
+				// A cursor #tryDrop reads reports it there.
+				this.#pending = insertDrop(this.#pending, group.start, group.start + 1n, staleHole(budget));
+			}
 		}
 		// Stale at the bound is final: settled as handed out, compacted the same way, as the
 		// Rust `retire_written_off` does, so nothing counts on this reader to hand it out once
@@ -6265,13 +6342,15 @@ export class Subscriber {
 		return dropped;
 	}
 
-	// The first part of `[from, to)` this cursor has not reported yet within its window, now
-	// reported, with why.
+	// The first part of `[from, to)` this cursor has not reported yet within its window and owed
+	// drops, now reported, with why.
 	#report(from: bigint, to: bigint, hole: Hole & { own?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
-		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
-			const dropped = this.#reportRun(run.start, run.end, hole);
-			if (dropped) return dropped;
+		for (const span of this.#owedSpans(max(from, start), min(to, end ?? to))) {
+			for (const run of this.#window.runs(span.start, span.end)) {
+				const dropped = this.#reportRun(run.start, run.end, hole);
+				if (dropped) return dropped;
+			}
 		}
 		return undefined;
 	}
@@ -6317,9 +6396,12 @@ export class Subscriber {
 			seen.start !== start ||
 			seen.end !== end ||
 			seen.revision !== revision ||
+			seen.dropOwedRev !== this.#dropOwedRev ||
 			!budget.equals(seen.budget) ||
 			!sameCoverage(seen.coverage, coverage);
-		const changed: Run[] = full ? [{ start, end: end ?? UNBOUNDED }] : drops.since(seen.drops);
+		const changed: Run[] = full
+			? this.#owedSpans(start, end ?? UNBOUNDED)
+			: drops.since(seen.drops).flatMap((span) => this.#owedSpans(span.start, span.end));
 		if (full) this.#pending = this.#pending.filter((run) => !run.received);
 		this.#dropsSeen = {
 			drops: drops.revision,
@@ -6327,6 +6409,7 @@ export class Subscriber {
 			start,
 			end,
 			revision,
+			dropOwedRev: this.#dropOwedRev,
 			budget,
 			coverage,
 		};

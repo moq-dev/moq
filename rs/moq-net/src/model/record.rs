@@ -34,11 +34,6 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
-	/// The final runs reported that the reader's publisher has yet to tell its wire, with why:
-	/// given up below where delivery starts, and named once owed. Each is in `reported` too, so
-	/// no scan gives it up again. Billed, and forgotten under a debt (see [`Self::fold`]) or
-	/// a retirement as reported runs are.
-	unsent: RangeMap<u64, Hole>,
 	/// Everything below was settled for good and folded away under pool pressure: handed
 	/// out, or reported final, so none is handed out or reported again.
 	floor: u64,
@@ -156,35 +151,6 @@ impl Record {
 			self.reported.remove(range);
 		}
 	}
-
-	/// Hold `range`, reported final as `hole` says, as not told to the wire yet.
-	pub fn hold_unsent(&mut self, range: Range<u64>, hole: Hole) {
-		if !range.is_empty() {
-			self.unsent.insert(range, hole);
-		}
-	}
-
-	/// Take the run held unsent that reaches up to `end`, cut off there.
-	pub fn take_unsent_below(&mut self, end: u64) -> Option<(Range<u64>, Hole)> {
-		let (run, hole) = self.unsent.get_key_value(&end.checked_sub(1)?)?;
-		let (run, hole) = (run.start..end, hole.clone());
-		self.unsent.remove(run.clone());
-		Some((run, hole))
-	}
-
-	/// Forget every report of `range` held unsent, so the next scan gives it up again.
-	pub fn release_unsent(&mut self, range: Range<u64>) {
-		if range.is_empty() {
-			return;
-		}
-		let held: Vec<_> = (self.unsent.overlapping(&range))
-			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
-			.collect();
-		for run in held {
-			self.reported.remove(run);
-		}
-		self.unsent.remove(range);
-	}
 }
 
 impl Accounted for Record {
@@ -208,6 +174,10 @@ pub(super) struct Standing {
 	/// while a live join waits or a start is still being looked up, when no gap can be known
 	/// to lie outside them.
 	pub ranges: Option<Cover>,
+	/// Whether this reader reports drops (wire publisher or ordered reader), so only keys in
+	/// [`Record::reported`] were told to its consumer: debt must reopen unreported skips and
+	/// miss verdicts instead of settling them into [`Record::floor`].
+	pub drops: bool,
 }
 
 /// Runs a reader keeps beside its record, billed with it and settled by its fold: the
@@ -221,6 +191,13 @@ pub(super) trait Beside {
 	fn next_held(&self, key: u64) -> Option<u64>;
 	/// Forget every run within `folded`, which the record folded as settled or forgot.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
+	/// Reopen every given-up run within `untold`, which debt forgot without settling because
+	/// the wire was never told of it, so a later read judges it afresh. Returns whether any
+	/// run was reopened.
+	fn reopen(&mut self, untold: std::ops::Range<u64>) -> bool {
+		self.forget(untold);
+		false
+	}
 }
 
 impl Beside for () {
@@ -277,8 +254,7 @@ impl Record {
 			+ self.skipped.runs()
 			+ self.written_off.len()
 			+ self.pending.len()
-			+ self.reported.len()
-			+ self.unsent.len()) as u64
+			+ self.reported.len()) as u64
 	}
 
 	/// Whether the track left this reader a debt to pay: what its record holds back, such as
@@ -322,11 +298,19 @@ impl Record {
 			return;
 		}
 		let mut folded = Vec::new();
+		let mut reopened = Vec::new();
 		if moved {
 			folded.extend(self.retire(&reader, &*beside));
 		}
 		if owed {
-			folded.extend(self.fold(&reader, &*beside));
+			let (settled, untold) = self.fold(&reader, &*beside);
+			folded.extend(settled);
+			reopened.extend(untold);
+		}
+		for untold in reopened {
+			if beside.reopen(untold) {
+				self.rescan = true;
+			}
 		}
 		for folded in folded {
 			beside.forget(folded);
@@ -404,7 +388,6 @@ impl Record {
 		for run in &forgot {
 			self.delivered.remove(run.clone());
 			self.reported.remove(run.clone());
-			self.unsent.remove(run.clone());
 		}
 		forgot
 	}
@@ -415,15 +398,25 @@ impl Record {
 	/// again only while they were held. Not final are the runs given up and not reported yet,
 	/// and the keys nothing settled.
 	///
+	/// On a drop-tracking reader (`reader.drops`), only handed-out groups and [`Self::reported`]
+	/// were told to the consumer: unreported skips and `beside` verdicts are reopened instead of
+	/// settled, so debt never marks an untold key as reported.
+	///
 	/// A reader that started above its floor, as at a sparse-key track's live edge or its
 	/// oldest group, never settles the keys below its start, so each final stretch from its
 	/// start on folds too, into one handed-out and reported run: from where its ranges start,
 	/// or the lowest key it settled when they name none or less. The keys below stay owed,
 	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
 	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
-	/// ask allowance bounds in turn. Returns the runs it folded, below the floor and above.
-	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
+	/// ask allowance bounds in turn. Returns the runs it folded, and the unreported spans for
+	/// `beside` to reopen.
+	fn fold(
+		&mut self,
+		reader: &Standing,
+		beside: &dyn Beside,
+	) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
 		let mut folded = Vec::new();
+		let mut reopened = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -438,12 +431,25 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		// So do the runs held unsent, forgotten with their reports rather than settled, as their
-		// wire was never told: a scan that finds them again, from the track or its upstream,
-		// gives them up afresh, and a later start owing them names them.
-		if !self.unsent.is_empty() {
-			for (run, _) in std::mem::take(&mut self.unsent) {
-				self.reported.remove(run);
+		// On a drop-tracking reader, debt forgets unreported skips and miss verdicts instead of
+		// settling them into `floor` or `reported`: their wire was never told, so a later
+		// lowered start still scans the track or asks upstream for them.
+		if reader.drops {
+			let mut kept = RangeSet::new();
+			for (run, _) in self.reported.iter() {
+				if run.end > self.floor {
+					kept.insert(run.start.max(self.floor)..run.end);
+				}
+			}
+			for (run, _) in self.pending.iter() {
+				if run.end > self.floor {
+					kept.insert(run.start.max(self.floor)..run.end);
+				}
+			}
+			for gap in kept.gaps(&(self.floor..u64::MAX)) {
+				self.skipped.forget(gap.clone());
+				self.written_off.remove(gap.clone());
+				reopened.push(gap);
 			}
 		}
 		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
@@ -461,7 +467,7 @@ impl Record {
 			}
 			from = self.next_told(stretch.end.max(start + 1));
 		}
-		folded
+		(folded, reopened)
 	}
 
 	/// Settle everything below `floor` for good.
@@ -562,6 +568,7 @@ impl Record {
 				None if self.pending.contains_key(&end) => break,
 				None => {
 					let local = match fold {
+						Fold::Debt if reader.drops => [self.delivered.run_end(end), None, None, None],
 						Fold::Debt => [
 							self.delivered.run_end(end),
 							self.written_off.get(&end).map(|run| run.end),
@@ -649,32 +656,83 @@ mod test {
 		assert_eq!(pool.used(), 0);
 	}
 
-	/// The runs a publisher holds unsent bill each, though the report they shadow merges them,
-	/// and a debt forgets them with that report rather than settle them: their wire was never
-	/// told, so a start that owes them later gives them up again.
+	/// On a drop-tracking reader, debt reopens unreported skips and miss verdicts instead of
+	/// settling them into the floor: their wire was never told, so a later lowered start can
+	/// still report them, while reported runs above them fold normally.
 	#[test]
-	fn a_debt_forgets_what_is_held_unsent() {
+	fn a_debt_reopens_unreported_verdicts_for_a_drop_reader() {
+		struct GivenUp {
+			runs: RangeSet<u64>,
+			reopened: Vec<Range<u64>>,
+		}
+		impl Beside for GivenUp {
+			fn runs(&self) -> u64 {
+				self.runs.len() as u64
+			}
+			fn given_up_end(&self, key: u64) -> Option<u64> {
+				self.runs.get(&key).map(|run| run.end)
+			}
+			fn next_held(&self, key: u64) -> Option<u64> {
+				self.runs
+					.overlapping(&(key..u64::MAX))
+					.next()
+					.map(|run| run.start.max(key))
+			}
+			fn forget(&mut self, folded: Range<u64>) {
+				self.runs.remove(folded);
+			}
+			fn reopen(&mut self, untold: Range<u64>) -> bool {
+				let found: Vec<_> = self
+					.runs
+					.overlapping(&untold)
+					.map(|run| run.start.max(untold.start)..run.end.min(untold.end))
+					.collect();
+				if found.is_empty() {
+					return false;
+				}
+				for run in &found {
+					self.runs.remove(run.clone());
+				}
+				self.reopened.extend(found);
+				true
+			}
+		}
 		let (pool, track) = account();
 		let mut record = Record::default();
-		record.delivered.insert(0);
-		record.tell(1..5, Report::Dropped);
-		for key in 1..5 {
-			let hole = match key % 2 {
-				0 => Hole::Skip,
-				_ => Hole::drop(StreamError::NotFound),
-			};
-			record.hold_unsent(key..key + 1, hole);
-		}
-		record.delivered.insert(6);
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(pool.used(), (1 + 1 + 4) * RUN_OVERHEAD, "each held run bills");
+		record.skipped.insert(0, Duration::from_millis(100));
+		record.written_off.insert(0..1);
+		let mut beside = GivenUp {
+			runs: RangeSet::new(),
+			reopened: Vec::new(),
+		};
+		beside.runs.insert(1..5);
+		// Reported stretch above the untold prefix folds cleanly.
+		record.tell(5..6, Report::Settled);
+		record.tell(6..7, Report::Dropped);
+		record.tell(7..8, Report::Skip);
+		let standing = Standing {
+			drops: true,
+			..Standing::default()
+		};
+		record.settle(|| track.clone(), &mut beside, standing.clone());
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(pool.used(), RUN_OVERHEAD, "only the group above them stays");
-		assert_eq!(record.take_unsent_below(5), None);
-		let mut untold = RangeSet::new();
-		untold.insert(1..6);
-		assert_eq!(record.untold(1..6), untold, "owed again, not settled");
+		record.settle(|| track.clone(), &mut beside, standing);
+		assert_eq!(beside.runs.len(), 0, "unreported miss verdicts were reopened");
+		assert_eq!(beside.reopened, vec![1..5]);
+		assert!(record.rescan, "reopening a miss verdict asks for a rescan");
+		assert!(
+			!record.told(0) && !record.told(1) && !record.told(4),
+			"untold prefix stays untold"
+		);
+		assert!(
+			record.told(5) && record.told(6) && record.told(7),
+			"reported stretch stays told"
+		);
+		assert_eq!(
+			pool.used(),
+			RUN_OVERHEAD,
+			"only the folded reported stretch stays billed"
+		);
 	}
 
 	/// Under a debt its track could not pay, a record folds what is final into its floor:

@@ -6239,6 +6239,7 @@ impl TrackRun {
 		if (self.floor, self.cap) != range {
 			self.move_cursor();
 		}
+		self.sync_drop_owed();
 		self.bounded = self.ctx.version.has_ranges() && self.requested.bounded();
 	}
 
@@ -6531,9 +6532,8 @@ impl TrackRun {
 		self.update(update.with_ranges(ranges));
 	}
 
-	/// Move where delivery starts down to `start`, owing the subscriber what was given up from
-	/// there: the record forgets the runs it holds unsent there, and a front's copies all they
-	/// reported there, so the next drop scan, which this asks for, gives them up again.
+	/// Move where delivery starts down to `start`, widening the owed-drop filter so the next
+	/// drop scan reports what was given up from there.
 	fn lower_start(&mut self, start: u64) {
 		let Start::Resolved(resolved) = &mut self.start else {
 			return;
@@ -6541,11 +6541,17 @@ impl TrackRun {
 		if start >= *resolved {
 			return;
 		}
-		let lowered = start..*resolved;
 		*resolved = start;
-		self.track.record_mut().release_unsent(lowered.clone());
-		self.track.untell_copies(lowered);
-		self.track.rescan_drops();
+		self.sync_drop_owed();
+	}
+
+	/// Tell the track subscriber which keys' drops this wire currently owes: from `start` on,
+	/// plus any lite-07 explicit history ranges below it.
+	fn sync_drop_owed(&mut self) {
+		if let Start::Resolved(start) = self.start {
+			let owed = self.owed(start);
+			self.track.set_drop_owed(owed);
+		}
 	}
 
 	/// Apply [`Self::floor`] and [`Self::cap`] to the read cursor.
@@ -6869,22 +6875,8 @@ impl TrackRun {
 		let Poll::Ready((range, hole)) = polled else {
 			return Ok(false);
 		};
-		let unowed = matches!(self.start, Start::Resolved(start) if range.start < start)
-			&& hole.stale_budget().is_some()
-			&& reversible(&hole, self.final_bound());
 		match &mut self.start {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
-			// A stale run below the start goes unnamed, as at the start (see [`Self::resolve`]).
-			&mut Start::Resolved(start) if unowed => {
-				let owed = self.owed(start);
-				for below in owed.gaps(&range) {
-					self.track.untell_stale(below);
-				}
-				for part in owed.overlapping(&range) {
-					let part = part.start.max(range.start)..part.end.min(range.end);
-					self.forward_range(part, &hole, writer)?;
-				}
-			}
 			_ => {
 				self.forward_range(range, &hole, writer)?;
 			}
@@ -7256,16 +7248,16 @@ impl TrackRun {
 		// above it is named as it would have been after the start. Below it, nothing is owed. The
 		// final runs reaching up to it unbroken are named all the same, so a reader filling below
 		// the start (a relay whose reader reaches lower) learns nothing there exists. The rest,
-		// past a stale run, a group still held, or a key nothing gave up, go unnamed: naming them
+		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
 		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
-		// one per group. A stale one is forgotten, so a wider budget may still serve it, though a
-		// front's copies keep a cached group's (see [`track::Subscriber::untell_stale`]): each
-		// would otherwise give it up again on every scan an update widening the budget asks for,
-		// one poll at a time ahead of every group. A final one stays told for the same reason,
-		// held unsent in the record; an update that asks below the start names it then. On lite-07, whose ranges bound what a stale verdict was judged within, a
-		// run stale under the track's own freshness bound is final all the same (see
-		// [`Self::final_bound`]): a relay reading from the oldest group would otherwise wait on it
-		// forever.
+		// one per group. The subscriber's drop filter is then bounded to `owed(start)` so a later
+		// budget widening never rescans or re-emits drops below the start, while keeping the read
+		// floor open so cached groups newly inside the wider budget are still served (and name
+		// their reaching gaps directly from the track). An update lowering the start widens the
+		// drop filter so the untold runs below it are named then. On lite-07, whose ranges bound
+		// what a stale verdict was judged within, a run stale under the track's own freshness
+		// bound is final all the same (see [`Self::final_bound`]): a relay reading from the oldest
+		// group would otherwise wait on it forever.
 		let bound = self.final_bound();
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
@@ -7280,16 +7272,14 @@ impl TrackRun {
 		let send = self.owed(reach);
 		for (range, hole) in skipped.iter() {
 			for below in send.gaps(range) {
-				match reversible(hole, bound) {
-					true => self.track.untell_stale(below),
-					false => self.track.record_mut().hold_unsent(below, hole.clone()),
-				}
+				self.track.untell(below);
 			}
 			for part in send.overlapping(range) {
 				let part = part.start.max(range.start)..part.end.min(range.end);
 				self.forward_range(part, hole, writer)?;
 			}
 		}
+		self.sync_drop_owed();
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
 			writer.buffer(&lite::SubscribeResponse::End(end))?;
@@ -7332,9 +7322,8 @@ impl TrackRun {
 		key: u64,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		let mut reach = key;
-		while let Some((run, hole)) = self.track.record_mut().take_unsent_below(reach) {
-			reach = run.start;
+		let bound = self.final_bound();
+		for (run, hole) in self.track.reaching_drops(key, self.floor, bound) {
 			self.forward_range(run, &hole, writer)?;
 		}
 		Ok(())
@@ -12238,9 +12227,11 @@ mod serve_group_test {
 			};
 			let reaching: Vec<_> = (served..start).step_by(20).map(|key| (key - 19, key - 1)).collect();
 			assert_eq!(widened, reaching, "{version:?} routed {routed}: a widened budget");
-			if routed {
-				assert_eq!(steps, reaching.len(), "{version:?}: a step per group served");
-			}
+			assert_eq!(
+				steps,
+				reaching.len(),
+				"{version:?} routed {routed}: a step per group served"
+			);
 			let named = named + widened.len();
 
 			// One lowering the start asks for those keys, so each gap there is named then.
@@ -12265,6 +12256,131 @@ mod serve_group_test {
 				),
 			}
 		}
+	}
+
+	/// On a plain track with fills, a debt fold after SUBSCRIBE_START must not settle pre-join
+	/// drops that `Misses` adopted below the start: a later lowered start still names every gap.
+	#[kio::test]
+	async fn a_lowered_start_still_names_gaps_after_debt_fold() {
+		let version = Version::Lite06;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default());
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let mut track = track::Producer::new(broadcast, "test", crate::track::Info::timed());
+		let dynamic = track.requests();
+		for key in (0..1000).step_by(20) {
+			write_group(&mut track, key, key);
+			track.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+		}
+		let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let start = run.start.resolved().expect("resolved");
+
+		// Shrink the pool and write more groups/gaps above `start` so the reader pays debt and
+		// runs `Record::fold` while `Misses` holds adopted drops below `start`.
+		pool.resize(1);
+		for key in (1000..1120).step_by(20) {
+			write_group(&mut track, key, key);
+			track.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		}
+
+		// Lower the start over the history below `start`. Even if pool pressure also shed
+		// `state.drops`, reopening the adopted miss verdicts lets upstream fills answer them.
+		let named = drops(&mut writer, &log, version).await.len();
+		run.replace(lite::SubscribeUpdate {
+			wanted_group: None,
+			order: crate::track::Order::Descending,
+			priority: 1,
+			max_delay: Some(Duration::from_millis(100)),
+			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
+		});
+		loop {
+			let mut progressed = false;
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {
+				progressed = true;
+			}
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) {
+				fill.drop_groups(fill.start().group..fill.end());
+				progressed = true;
+			}
+			if !progressed {
+				break;
+			}
+		}
+		let lowered = drops(&mut writer, &log, version).await.split_off(named);
+		let covered: rangemap::RangeInclusiveSet<u64> = lowered.into_iter().map(|(a, b)| a..=b).collect();
+		for key in (0..start - 20).step_by(20) {
+			for gap in key + 1..key + 20 {
+				assert!(
+					covered.contains(&gap),
+					"gap key {gap} (group {key}) must still be dropped after debt fold + lowered start (got {covered:?})"
+				);
+			}
+		}
+	}
+
+	/// On a front, a debt fold on the logical record must not prevent a later budget widening
+	/// from naming the contiguous final drop reaching up to each cached group served below start.
+	#[kio::test]
+	async fn a_widened_budget_still_names_reaching_drop_after_debt_fold() {
+		let version = Version::Lite06;
+		let logical_pool = crate::cache::Pool::new(crate::cache::Config::default());
+		let logical_broadcast = Arc::new(broadcast::Info {
+			pool: logical_pool.clone(),
+			..Default::default()
+		});
+		let mut front = track::Routed::with_broadcasts(
+			logical_broadcast,
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in (0..1000).step_by(20) {
+			write_group(&mut front.copy, key, key);
+			front.copy.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+		}
+		let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+		let subscriber = front
+			.logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.expect("an accepted logical track answers at once")
+			.unwrap();
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let start = run.start.resolved().expect("resolved");
+
+		// Shrink the logical pool and serve more groups/gaps above `start` so `logical.record`
+		// pays debt and folds while `copy` keeps the cached history intact.
+		logical_pool.resize(1);
+		for key in (1000..1120).step_by(20) {
+			write_group(&mut front.copy, key, key);
+			front.copy.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		}
+
+		// Widen the budget without lowering the start: each cached group newly served below
+		// `start` must still get its reaching drop from the serving copy.
+		let named = drops(&mut writer, &log, version).await.len();
+		let served = start - 100;
+		run.replace(lite::SubscribeUpdate {
+			wanted_group: None,
+			order: crate::track::Order::Descending,
+			priority: 1,
+			max_delay: Some(Duration::from_millis(1100 - served)),
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		});
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let mut widened = drops(&mut writer, &log, version).await.split_off(named);
+		widened.sort();
+		let reaching: Vec<_> = (served..start).step_by(20).map(|key| (key - 19, key - 1)).collect();
+		assert_eq!(widened, reaching, "reaching drops survive logical record debt fold");
 	}
 
 	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,

@@ -423,11 +423,6 @@ impl Misses {
 		&self.given_up
 	}
 
-	/// The part of [`Self::given_up`] never produced, reported skipped.
-	pub fn skipped(&self) -> &RangeSet<u64> {
-		&self.skipped
-	}
-
 	/// The exclusive end of the run from `key` this reader's fills refused or it gave
 	/// up, `None` when it may still be read.
 	pub fn gone(&self, key: u64) -> Option<u64> {
@@ -1898,11 +1893,85 @@ impl Misses {
 		widened
 	}
 
-	/// The parts of `range` given up as stale, which a widening may take back.
-	pub fn stale_within(&self, range: &ops::Range<u64>) -> Vec<ops::Range<u64>> {
-		(self.stale.overlapping(range))
-			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
-			.collect()
+	/// Report each given-up run overlapping `span` whose verdict still stands under `budget`:
+	/// skips, non-stale misses, and this reader's own stale verdicts that still settle `budget`.
+	/// Adopted stale verdicts are excluded: `DropCursor` reads them directly from `state.drops`,
+	/// so superseding a stale run withdraws it instead of resurrecting it from `misses.stale`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn fold_given_up(
+		&self,
+		span: &ops::Range<u64>,
+		budget: Option<&Budget>,
+		mut f: impl FnMut(ops::Range<u64>, Hole),
+	) {
+		for run in self.given_up.overlapping(span) {
+			let run = run.start.max(span.start)..run.end.min(span.end);
+			if run.is_empty() {
+				continue;
+			}
+			for skipped in self.skipped.overlapping(&run) {
+				let part = skipped.start.max(run.start)..skipped.end.min(run.end);
+				if !part.is_empty() {
+					f(part, Hole::Skip);
+				}
+			}
+			for missed in self.skipped.gaps(&run) {
+				for (stale, judged) in self.stale.overlapping(&missed) {
+					let part = stale.start.max(missed.start)..stale.end.min(missed.end);
+					if part.is_empty() || judged.adopted.is_some() {
+						continue;
+					}
+					let settled = match budget {
+						Some(budget) => {
+							let current = match budget.is_uniform() {
+								true => budget.at(part.start),
+								false => budget.widest(),
+							};
+							current <= judged.budget
+						}
+						None => true,
+					};
+					if settled {
+						f(part, Hole::missed(Some(judged.budget)));
+					}
+				}
+				for part in self.stale.gaps(&missed) {
+					f(part, Hole::missed(None));
+				}
+			}
+		}
+	}
+
+	/// The contiguous final given-up run ending at `end`, clamped to `floor`, if any: a skip,
+	/// a non-stale miss, or this reader's own stale verdict at or above `bound`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn final_below(&self, end: u64, floor: u64, bound: Option<Duration>) -> Option<(ops::Range<u64>, Hole)> {
+		let prev = end.checked_sub(1)?;
+		if prev < floor {
+			return None;
+		}
+		let run = self.given_up.get(&prev)?;
+		let start = run.start.max(floor);
+		if let Some(skipped) = self.skipped.get(&prev) {
+			return Some((skipped.start.max(start)..end, Hole::Skip));
+		}
+		let start = self
+			.skipped
+			.overlapping(&(start..end))
+			.next_back()
+			.map_or(start, |skipped| skipped.end.max(start));
+		if let Some((stale, judged)) = self.stale.get_key_value(&prev) {
+			if judged.adopted.is_some() || bound.is_none_or(|bound| judged.budget < bound) {
+				return None;
+			}
+			return Some((stale.start.max(start)..end, Hole::missed(Some(judged.budget))));
+		}
+		let start = self
+			.stale
+			.overlapping(&(start..end))
+			.next_back()
+			.map_or(start, |(stale, _)| stale.end.max(start));
+		Some((start..end, Hole::missed(None)))
 	}
 
 	/// Judge `run` afresh: no longer given up, and judged again by the next probe.
@@ -2311,6 +2380,27 @@ impl super::super::record::Beside for Misses {
 			self.skipped.remove(folded.clone());
 			self.stale.remove(folded);
 		}
+	}
+
+	fn reopen(&mut self, untold: ops::Range<u64>) -> bool {
+		if untold.is_empty() {
+			return false;
+		}
+		let runs: Vec<_> = (self.given_up.overlapping(&untold))
+			.map(|run| run.start.max(untold.start)..run.end.min(untold.end))
+			.collect();
+		if runs.is_empty() {
+			return false;
+		}
+		for run in runs {
+			self.given_up.remove(run.clone());
+			self.skipped.remove(run.clone());
+			self.stale.remove(run.clone());
+			self.judged.remove(run);
+		}
+		self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
+		self.at = None;
+		true
 	}
 }
 

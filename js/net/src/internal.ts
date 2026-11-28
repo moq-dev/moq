@@ -763,6 +763,15 @@ export interface ResumeSource {
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
 	 */
 	untell(start: bigint, end: bigint): void;
+	/** Restrict drop reporting on every copy to `owed`; see `hooks.setDropOwed`. */
+	setDropOwed(owed: Run[]): void;
+	/** Contiguous final drops below `key` on the serving copy; see `hooks.reachingDrops`. */
+	reachingDrops(
+		key: bigint,
+		floor: bigint,
+		bound: number | undefined,
+		untold: (start: bigint, end: bigint) => Run[],
+	): DropRun[];
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1344,11 +1353,22 @@ export const hooks: {
 	 */
 	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
-	 * Forget what a front's route copies reported of `[start, end)`, now that a lowered start owes
-	 * it, keeping what the subscriber's own record holds. Mirrors the Rust
-	 * `track::Subscriber::untell_copies`.
+	 * Restrict drop reporting on this subscriber (and any route copies) to `owed`, keeping the
+	 * group read floor open so budget widenings can still serve cached groups below the start
+	 * without re-scanning or re-emitting drops there. Mirrors Rust `track::Subscriber::set_drop_owed`.
 	 */
-	untellCopies: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	setDropOwed: (subscriber: Subscriber, owed: Run[]) => void;
+	/**
+	 * Contiguous final drops below `key`, at or above `floor`, that were never told to the wire,
+	 * in ascending key order. Mirrors Rust `track::Subscriber::reaching_drops`.
+	 */
+	reachingDrops: (
+		subscriber: Subscriber,
+		key: bigint,
+		floor: bigint,
+		bound: number | undefined,
+		untold?: (start: bigint, end: bigint) => Run[],
+	) => DropRun[];
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1892,7 +1912,10 @@ export const hooks: {
 	untell: () => {
 		throw new Error("track.ts not loaded");
 	},
-	untellCopies: () => {
+	setDropOwed: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reachingDrops: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {

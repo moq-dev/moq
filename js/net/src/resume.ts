@@ -585,6 +585,8 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/** Keys whose drops a wire publisher currently owes (`undefined` = all); mirrors Rust `Reader::drop_owed`. */
+	#dropOwed?: Run[];
 	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
 	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -835,6 +837,7 @@ class Reader implements ResumeSource {
 		source.retain();
 		this.#readWhole(copy);
 		this.#bound(copy);
+		if (this.#dropOwed) hooks.setDropOwed(copy.sub, this.#dropOwed);
 		this.#copies.splice(index, 0, copy);
 		this.route.copied();
 		const shell = this.#shell;
@@ -2297,6 +2300,41 @@ class Reader implements ResumeSource {
 
 	untell(start: bigint, end: bigint): void {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
+	}
+
+	setDropOwed(owed: Run[]): void {
+		if (
+			this.#dropOwed &&
+			this.#dropOwed.length === owed.length &&
+			this.#dropOwed.every((run, i) => run.start === owed[i].start && run.end === owed[i].end)
+		)
+			return;
+		for (const run of [...this.#drops]) {
+			for (const outside of runGaps(owed, run.start, run.end))
+				this.#drops = removeRun(this.#drops, outside.start, outside.end);
+		}
+		this.#dropOwed = owed;
+		for (const copy of this.#copies) hooks.setDropOwed(copy.sub, owed);
+	}
+
+	reachingDrops(
+		key: bigint,
+		floor: bigint,
+		bound: number | undefined,
+		untold: (start: bigint, end: bigint) => Run[],
+	): DropRun[] {
+		const serving = this.#serving();
+		if (!serving) return [];
+		const cursor = this.#shell.cursor.peek();
+		let minKey = max(floor, cursor.start);
+		for (const copy of this.#copies) {
+			if (copy === serving || !this.#feeds(copy)) continue;
+			const start = max(cursor.start, copy.floor ?? 0n);
+			const end = copyEnd(copy) ?? UNBOUNDED;
+			if (start < key && end > minKey) minKey = max(minKey, min(end, key));
+		}
+		if (minKey >= key) return [];
+		return hooks.reachingDrops(serving.sub, key, minKey, bound, untold);
 	}
 
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader

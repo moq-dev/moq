@@ -7368,11 +7368,21 @@ impl Routed {
 	/// A logical track named `name`, and a copy of it serving it, both with `info`.
 	pub(crate) fn new(name: &str, info: Info) -> Self {
 		let broadcast = Arc::new(broadcast::Info::default());
+		Self::with_broadcasts(broadcast.clone(), broadcast, name, info)
+	}
+
+	/// [`Self::new`] with separate broadcasts for the logical front and its serving copy.
+	pub(crate) fn with_broadcasts(
+		logical_broadcast: Arc<broadcast::Info>,
+		copy_broadcast: Arc<broadcast::Info>,
+		name: &str,
+		info: Info,
+	) -> Self {
 		let routes = super::resume::Producer::new();
-		let logical = Request::new(broadcast.clone(), name)
+		let logical = Request::new(logical_broadcast, name)
 			.routes(routes.consume())
 			.accept(info.clone());
-		let copy = Producer::new(broadcast, name, info);
+		let copy = Producer::new(copy_broadcast, name, info);
 		routes.serve(copy.consume());
 		Self {
 			logical,
@@ -8966,6 +8976,7 @@ impl Subscribing {
 				Logical {
 					state: self.state.clone(),
 					record: Record::default(),
+					drops: false,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -9395,6 +9406,8 @@ enum Inner {
 struct Logical {
 	state: kio::Consumer<TrackState>,
 	record: Record,
+	/// Whether a drop consumer (wire publisher or ordered reader) reads this subscriber.
+	drops: bool,
 }
 
 /// A group a [`Subscriber`] reserved without handing it out; see
@@ -10346,6 +10359,12 @@ struct Cursor {
 	record: Record,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
+	/// The keys whose drops a wire publisher currently owes (`None` = all keys in range).
+	/// Separate from [`Self::min_key`], so a budget widening can still serve cached groups
+	/// below the start without re-scanning or re-emitting drops there.
+	drop_owed: Option<Arc<RangeSet<u64>>>,
+	/// Bumped whenever [`Self::drop_owed`] changes, so [`DropCursor`] rescans newly owed keys.
+	drop_owed_rev: u64,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
 	/// The keys a bounded window owes that the local floor or cap keeps out and the track
@@ -10589,19 +10608,22 @@ struct Heads {
 	filled: BTreeMap<u64, group::Consumer>,
 }
 
-/// The keys a [`DropCursor`] reports from: a cursor's span, narrowed to its window, and
-/// the drift that says which received stale runs settle it.
+/// The keys a [`DropCursor`] reports from: a cursor's span, narrowed to its window, optional
+/// owed-drop set, and the drift that says which received stale runs settle it.
 struct Within<'a> {
 	span: ops::Range<u64>,
 	window: &'a Window,
 	revision: u64,
 	drift: Option<&'a Drift>,
+	owed: Option<&'a RangeSet<u64>>,
+	owed_rev: u64,
+	misses: Option<&'a miss::Misses>,
 }
 
-/// The span, window revision, and the budget and coverage that settle received stale runs
-/// (see [`Drift::settles`]) a [`DropCursor`] last scanned the whole span under; between them
-/// it folds in only the runs that changed, and what the window gained.
-type Scan = (ops::Range<u64>, u64, Option<(Budget, Coverage)>);
+/// The span, window revision, owed-drop revision, and the budget and coverage that settle
+/// received stale runs (see [`Drift::settles`]) a [`DropCursor`] last scanned under; between
+/// them it folds in only the runs that changed, and what the window gained.
+type Scan = (ops::Range<u64>, u64, u64, Option<(Budget, Coverage)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
 /// the cache on every poll.
@@ -10705,6 +10727,64 @@ impl DropCursor {
 		Some(grown)
 	}
 
+	/// The parts of `span` that `owed` owes drops for (all of `span` when `owed` is `None`).
+	fn owed_spans(span: &ops::Range<u64>, owed: Option<&RangeSet<u64>>) -> Vec<ops::Range<u64>> {
+		if span.is_empty() {
+			return Vec::new();
+		}
+		match owed {
+			None => vec![span.clone()],
+			Some(owed) => owed
+				.overlapping(span)
+				.map(|run| run.start.max(span.start)..run.end.min(span.end))
+				.filter(|run| !run.is_empty())
+				.collect(),
+		}
+	}
+
+	/// The first part of `range` inside both `owed` and `window`.
+	fn clip_owed(range: ops::Range<u64>, window: &Window, owed: Option<&RangeSet<u64>>) -> Option<ops::Range<u64>> {
+		if range.is_empty() {
+			return None;
+		}
+		match owed {
+			None => window.clip(range),
+			Some(owed) => owed.overlapping(&range).find_map(|run| {
+				let part = run.start.max(range.start)..run.end.min(range.end);
+				(!part.is_empty()).then(|| window.clip(part)).flatten()
+			}),
+		}
+	}
+
+	/// Re-queue verdicts `within.misses` holds over `span` (for a full scan or a received drop
+	/// `state.drops` shed before it went out), skipping any key a servable group now occupies.
+	fn requeue_given_up(
+		record: &mut Record,
+		state: &TrackState,
+		within: &Within<'_>,
+		budget: Option<&Budget>,
+		span: ops::Range<u64>,
+	) {
+		let Some(misses) = within.misses else {
+			return;
+		};
+		misses.fold_given_up(&span, budget, |run, hole| {
+			let mut from = run.start;
+			for (&key, slot) in state.lookup.range(run.clone()) {
+				if !slot.serves_end() {
+					continue;
+				}
+				if from < key {
+					Self::give_up(record, from..key, hole.clone());
+				}
+				from = key.saturating_add(1);
+			}
+			if from < run.end {
+				Self::give_up(record, from..run.end, hole);
+			}
+		});
+	}
+
 	/// The lowest unreported run of `within` given up, now marked reported, with why.
 	fn next(
 		&mut self,
@@ -10716,37 +10796,50 @@ impl DropCursor {
 		let (span, window) = (&within.span, within.window);
 		// A cut already reclaimed from the cache is in the track's drops instead.
 		for key in cut {
-			if let Some(slot) = state.lookup.get(&key) {
+			if within.owed.is_none_or(|owed| owed.contains(&key))
+				&& let Some(slot) = state.lookup.get(&key)
+			{
 				Self::cut(record, key, slot);
 			}
 		}
-		// Rescan the span only after the window moves other than by growing, or what settles a
-		// stale run does, since out-of-window and unsettling runs were skipped and may be owed
-		// now; otherwise fold in only the runs that changed and what the window gained, so a
-		// drop costs each cursor the runs it touches, even one that starts a range.
+		// Rescan the owed spans only after the window moves other than by growing, the owed-drop
+		// set changes, or what settles a stale run does, since out-of-window and unsettling runs
+		// were skipped and may be owed now; otherwise fold in only the runs that changed and what
+		// the window gained, so a drop costs each cursor the runs it touches, even one that starts
+		// a range.
 		if let Some(drift) = within.drift {
 			self.drift = Some((drift.budget.clone(), drift.coverage.clone()));
 		}
-		let scan = (span.clone(), within.revision, self.drift.clone());
+		let scan = (span.clone(), within.revision, within.owed_rev, self.drift.clone());
 		let rescan = std::mem::take(&mut record.rescan);
 		let grown = match &self.scanned {
 			_ if rescan => None,
 			Some(scanned) if *scanned == scan => Some(Vec::new()),
-			Some((old_span, _, old_drift)) if old_span == span => self.grown(state, window, old_drift.as_ref(), span),
+			Some((old_span, _, old_owed_rev, old_drift)) if old_span == span && *old_owed_rev == within.owed_rev => {
+				self.grown(state, window, old_drift.as_ref(), span)
+			}
 			_ => None,
 		};
 		let full = grown.is_none();
 		self.scanned = Some(scan);
 		self.groups = window.groups().cloned();
+		let owed = Self::owed_spans(span, within.owed);
 		let changed: Vec<ops::Range<u64>> = match grown {
 			Some(grown) => {
 				// What the window newly reads may hold cuts the scan skipped.
 				for run in &grown {
-					for (&key, slot) in state.lookup.range(run.clone()) {
-						Self::cut(record, key, slot);
+					for part in Self::owed_spans(run, within.owed) {
+						for (&key, slot) in state.lookup.range(part) {
+							Self::cut(record, key, slot);
+						}
 					}
 				}
-				state.drops_changes.since(self.seen).chain(grown).collect()
+				state
+					.drops_changes
+					.since(self.seen)
+					.chain(grown)
+					.flat_map(|run| Self::owed_spans(&run, within.owed))
+					.collect()
 			}
 			None => {
 				let received: Vec<_> = record
@@ -10758,7 +10851,7 @@ impl DropCursor {
 				for run in received {
 					record.pending.remove(run);
 				}
-				vec![span.clone()]
+				owed.clone()
 			}
 		};
 		self.seen = state.drops_changes.revision();
@@ -10794,9 +10887,13 @@ impl DropCursor {
 				}
 			}
 		}
+		let budget = self.drift.as_ref().map(|(budget, _)| budget);
 		if full {
-			for (&key, slot) in state.lookup.range(span.clone()) {
-				Self::cut(record, key, slot);
+			for part in &owed {
+				for (&key, slot) in state.lookup.range(part.clone()) {
+					Self::cut(record, key, slot);
+				}
+				Self::requeue_given_up(record, state, within, budget, part.clone());
 			}
 		}
 		while let Some((range, pending)) = record
@@ -10807,24 +10904,36 @@ impl DropCursor {
 		{
 			record.pending.remove(range.clone());
 			// A received run the track has since forgotten, shed or superseded, is unknown
-			// again: only the part the track still holds as it was folded in is owed.
+			// again unless this reader's misses already adopted it as its own verdict.
 			let range = match pending.received {
-				true => {
-					let Some((held, _)) = state.drops.overlapping(&range).find(|(_, hole)| **hole == pending.hole)
-					else {
-						continue;
-					};
-					let held = range.start.max(held.start)..range.end.min(held.end);
-					if held.end < range.end {
-						record.pending.insert(held.end..range.end, pending.clone());
+				true => match state.drops.overlapping(&range).find(|(_, hole)| **hole == pending.hole) {
+					Some((held, _)) if held.start <= range.start => {
+						let held = range.start..range.end.min(held.end);
+						if held.end < range.end {
+							record.pending.insert(held.end..range.end, pending.clone());
+						}
+						held
 					}
-					held
-				}
+					Some((held, _)) => {
+						let prefix = range.start..held.start.min(range.end);
+						record.pending.insert(prefix.end..range.end, pending.clone());
+						Self::requeue_given_up(record, state, within, budget, prefix);
+						continue;
+					}
+					None => {
+						Self::requeue_given_up(record, state, within, budget, range);
+						continue;
+					}
+				},
 				false => range,
 			};
-			// Only what this subscriber asked for is owed: the first run of its ranges in it,
-			// the rest of the range waiting its turn.
-			let Some(clipped) = window.clip(range.start.max(span.start)..range.end.min(span.end)) else {
+			// Only what this subscriber asked for and currently owes drops for is reported: the
+			// first run in it, the rest of the range waiting its turn.
+			let Some(clipped) = Self::clip_owed(
+				range.start.max(span.start)..range.end.min(span.end),
+				window,
+				within.owed,
+			) else {
 				continue;
 			};
 			if clipped.end < range.end {
@@ -10946,6 +11055,8 @@ impl Cursor {
 			seek_pending: BTreeMap::new(),
 			record: Record::default(),
 			drops: None,
+			drop_owed: None,
+			drop_owed_rev: 0,
 			misses: None,
 			kept_out: None,
 			routed_out: None,
@@ -10960,6 +11071,72 @@ impl Cursor {
 		cursor
 	}
 
+	/// Whether drops for `key` are currently owed to this cursor's drop consumer.
+	fn drop_owes(&self, key: u64) -> bool {
+		self.drop_owed.as_ref().is_none_or(|owed| owed.contains(&key))
+	}
+
+	/// The contiguous final drops below `key`, at or above `floor`, that `record` has not
+	/// reported yet, in ascending key order.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reaching_drops(
+		&self,
+		key: u64,
+		floor: u64,
+		bound: Option<Duration>,
+		record: &Record,
+	) -> Vec<(ops::Range<u64>, Hole)> {
+		let floor = floor.max(self.floor());
+		let state = self.state.read();
+		let mut found = Vec::new();
+		let mut reach = key;
+		while reach > floor {
+			let prev = reach - 1;
+			if record.told(prev) || !self.filter.window.contains(prev) {
+				break;
+			}
+			let next = if let Some((run, hole)) = state.drops.get_key_value(&prev) {
+				let reversible = hole
+					.stale_budget()
+					.is_some_and(|budget| bound.is_none_or(|bound| budget < bound));
+				(!reversible).then(|| (run.start.max(floor)..reach, hole.clone()))
+			} else if let Some(slot) = state.lookup.get(&prev)
+				&& slot.visible
+				&& !slot.serves_end()
+				&& let Some(err) = slot.verdict()
+			{
+				Some((prev..reach, Hole::drop(StreamError::from(err))))
+			} else if let Some(misses) = &self.misses {
+				misses.final_below(reach, floor, bound)
+			} else {
+				None
+			};
+			let Some((mut run, hole)) = next else {
+				break;
+			};
+			let Some(untold) = record.untold(run.clone()).iter().next_back().cloned() else {
+				break;
+			};
+			if untold.end < reach {
+				break;
+			}
+			run.start = run.start.max(untold.start);
+			if let Some(groups) = self.filter.window.groups() {
+				let Some(inside) = groups.within(run.start, prev).last() else {
+					break;
+				};
+				if *inside.end() < prev {
+					break;
+				}
+				run.start = run.start.max(*inside.start());
+			}
+			reach = run.start;
+			found.push((run, hole));
+		}
+		found.reverse();
+		found
+	}
+
 	/// The next run given up, judging the live edge first only when `probe`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
@@ -10968,15 +11145,14 @@ impl Cursor {
 		self.sync();
 		if self.drops.is_none() {
 			self.drops = Some(Box::new(DropCursor::new(&self.state.read())));
+			// Seed pending before probing: an ordered read may already have advanced `next_key`
+			// past misses it gave up before drops were first polled, and `probe` clips `misses`
+			// below `next_key`.
 			if let Some(misses) = &self.misses {
-				for run in misses.given_up().iter() {
-					for skipped in misses.skipped().overlapping(run) {
-						let skipped = skipped.start.max(run.start)..skipped.end.min(run.end);
-						DropCursor::give_up(&mut self.record, skipped, Hole::Skip);
-					}
-					for missed in misses.skipped().gaps(run) {
-						DropCursor::give_up(&mut self.record, missed, Hole::missed(None));
-					}
+				for part in DropCursor::owed_spans(&(0..u64::MAX), self.drop_owed.as_deref()) {
+					misses.fold_given_up(&part, None, |run, hole| {
+						DropCursor::give_up(&mut self.record, run, hole);
+					});
 				}
 			}
 		}
@@ -11003,6 +11179,9 @@ impl Cursor {
 			window: &self.filter.window,
 			revision: self.filter.revision,
 			drift: judged.as_ref(),
+			owed: self.drop_owed.as_deref(),
+			owed_rev: self.drop_owed_rev,
+			misses: self.misses.as_deref(),
 		};
 		let drops = match &mut self.drops {
 			Some(drops) => drops,
@@ -12501,6 +12680,7 @@ impl Cursor {
 	fn write_off_stale(&mut self, key: u64, content: stats::Content, drift: &Drift) {
 		self.stale.add(content);
 		if self.drops.is_some()
+			&& self.drop_owes(key)
 			&& let Some(end) = key.checked_add(1)
 		{
 			self.record
@@ -13491,6 +13671,7 @@ impl Subscriber {
 					from,
 					handed,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
+					drops: cursor.drops.is_some(),
 				};
 				let state = &cursor.state;
 				match cursor.misses.as_deref_mut() {
@@ -13503,6 +13684,7 @@ impl Subscriber {
 					from,
 					handed,
 					ranges: resume.ranges(),
+					drops: logical.drops,
 				};
 				let state = &logical.state;
 				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
@@ -13527,65 +13709,69 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget what a front's copies reported of `range`, now that a lowered start owes it, so
-	/// whichever copy serves then gives up again what its wire was never told. The reader's own
-	/// record keeps what was.
+	/// Forget what this reader reported of `range`, which its publisher never told its wire: a
+	/// run given up below where delivery starts. Ranges that later ask for it report it again,
+	/// on a front through whichever copy serves then.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn untell_copies(&mut self, range: ops::Range<u64>) {
-		if let Inner::Resume(resume, _) = &mut self.inner {
-			resume.untell(range);
-		}
-	}
-
-	/// Forget what this reader reported of a stale run in `range` its publisher never told its
-	/// wire, so a wider budget may still serve it. A front's copies forget only what their fills
-	/// gave up, which a widening asks again only while untold (see [`Cursor::rejudge`]); each
-	/// re-offers a cached group it skipped regardless, so keeping that told spares re-reporting
-	/// every one on each widening.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn untell_stale(&mut self, range: ops::Range<u64>) {
+	pub(crate) fn untell(&mut self, range: ops::Range<u64>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.record.untell(range),
 			Inner::Resume(resume, logical) => {
 				logical.record.untell(range.clone());
-				resume.untell_misses(range);
+				resume.untell(range);
 			}
 		}
 	}
 
-	/// Forget what this copy reported of the parts of `range` its fills gave up as stale,
-	/// returning them; see [`Self::untell_stale`].
+	/// Restrict drop reporting to `owed` (`start..` plus any disjoint history ranges below it).
+	/// Separate from [`Self::set_range`], so a budget widening can still serve cached groups
+	/// below the start without re-scanning or re-emitting drops there.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn untell_misses(&mut self, range: ops::Range<u64>) -> RangeSet<u64> {
+	pub(crate) fn set_drop_owed(&mut self, owed: RangeSet<u64>) {
+		self.set_drop_owed_arc(Arc::new(owed));
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn set_drop_owed_arc(&mut self, owed: Arc<RangeSet<u64>>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
-				let stale = (cursor.misses.as_ref()).map_or_else(Vec::new, |misses| misses.stale_within(&range));
-				for run in &stale {
-					cursor.record.untell(run.clone());
+				if cursor.drop_owed.as_deref() == Some(&*owed) {
+					return;
 				}
-				stale.into_iter().collect()
+				cursor.drop_owed = Some(owed);
+				cursor.drop_owed_rev = cursor.drop_owed_rev.wrapping_add(1);
 			}
-			// A copy that is itself a front reported what its own copies did.
 			Inner::Resume(resume, logical) => {
-				let untold = resume.untell_misses(range);
-				for run in untold.iter() {
-					logical.record.untell(run.clone());
-				}
-				untold
+				logical.drops = true;
+				resume.set_drop_owed(owed);
 			}
 		}
 	}
 
-	/// Rescan the track's recorded drops on the next drop poll, once delivery has widened below
-	/// where an earlier start held drops back.
+	/// The contiguous final drops below `key`, at or above `floor`, that this subscriber's wire
+	/// was never told of, in ascending key order. Used when a budget widening serves a cached
+	/// group below the start, so the gaps reaching up to it are named directly from the track
+	/// or serving copy without holding unsent runs in the record.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn rescan_drops(&mut self) {
-		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.record.rescan = true,
-			Inner::Resume(resume, logical) => {
-				logical.record.rescan = true;
-				resume.rescan_drops();
-			}
+	pub(crate) fn reaching_drops(&self, key: u64, floor: u64, bound: Option<Duration>) -> Vec<(ops::Range<u64>, Hole)> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.reaching_drops(key, floor, bound, &cursor.record),
+			Inner::Resume(resume, logical) => resume.reaching_drops(key, floor, bound, &logical.record),
+		}
+	}
+
+	/// [`Self::reaching_drops`] checking `told` against an enclosing front's wire `record`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn reaching_drops_for(
+		&self,
+		key: u64,
+		floor: u64,
+		bound: Option<Duration>,
+		record: &Record,
+	) -> Vec<(ops::Range<u64>, Hole)> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.reaching_drops(key, floor, bound, record),
+			Inner::Resume(resume, _) => resume.reaching_drops(key, floor, bound, record),
 		}
 	}
 
@@ -14226,6 +14412,9 @@ impl Subscriber {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop_probing(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
+		if let Inner::Resume(_, logical) = &mut self.inner {
+			logical.drops = true;
+		}
 		// What a publisher told its wire since is billed now.
 		self.settle_record(None);
 		match &mut self.inner {
@@ -36918,7 +37107,10 @@ mod test {
 			let waiter = kio::Waiter::noop();
 			assert_eq!(drain_groups(&mut subscriber), [3], "routed {routed}");
 			assert_eq!(drained_drops(&mut subscriber), [(0, 3)], "routed {routed}");
-			subscriber.untell_stale(0..3);
+			subscriber.untell(0..3);
+			let mut owed = RangeSet::new();
+			owed.insert(3..u64::MAX);
+			subscriber.set_drop_owed(owed);
 			assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "routed {routed}");
 			subscriber.update(narrow.with_max(Duration::from_secs(60))).unwrap();
 			assert!(subscriber.poll_next_group(&waiter).is_pending());

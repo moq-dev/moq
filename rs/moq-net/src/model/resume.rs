@@ -603,6 +603,7 @@ impl Consumer {
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
+				drop_owed: None,
 				received: RangeSet::new(),
 				received_checked: None,
 				declared: None,
@@ -806,6 +807,8 @@ struct Copy {
 	/// The track's [`track::Consumer::evicted`] count when [`Reader::backfill_gaps`] last left
 	/// it a group the reader lacks to drain, so an eviction since asks the serving route again.
 	drains: Option<u64>,
+	/// The owed-drop filter to apply once [`Self::sub`] answers; see [`Reader::drop_owed`].
+	drop_owed: Option<Arc<RangeSet<u64>>>,
 }
 
 // Boxed: a copy holds one for its whole life, and neither arm should pad every copy.
@@ -1066,12 +1069,15 @@ impl Copy {
 			let sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
 			// The routes judge where the reader ends, not each copy.
-			let sub = sub
+			let mut sub = sub
 				.with_range((
 					Bound::Included(self.start(groups.0)),
 					groups.1.map_or(Bound::Unbounded, Bound::Excluded),
 				))
 				.parked();
+			if let Some(owed) = &self.drop_owed {
+				sub.set_drop_owed_arc(owed.clone());
+			}
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
@@ -1651,23 +1657,29 @@ impl Subscriber {
 		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
-	/// Forget every copy's report of `range`; see [`track::Subscriber::untell_copies`].
+	/// Forget every copy's report of `range`; see [`track::Subscriber::untell`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
 		self.reader().untell(range)
 	}
 
-	/// Forget what every copy reported of the stale runs in `range` its fills gave up, returning
-	/// them; see [`track::Subscriber::untell_stale`].
+	/// Restrict drop reporting on every copy to `owed`; see [`track::Subscriber::set_drop_owed`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn untell_misses(&mut self, range: std::ops::Range<u64>) -> RangeSet<u64> {
-		self.reader().untell_misses(range)
+	pub(super) fn set_drop_owed(&mut self, owed: Arc<RangeSet<u64>>) {
+		self.reader().set_drop_owed(owed)
 	}
 
-	/// Rescan drops on every copy; see [`track::Subscriber::rescan_drops`].
+	/// The contiguous final drops below `key` on the serving copy; see
+	/// [`track::Subscriber::reaching_drops`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn rescan_drops(&mut self) {
-		self.reader().rescan_drops()
+	pub(super) fn reaching_drops(
+		&self,
+		key: u64,
+		floor: u64,
+		bound: Option<Duration>,
+		record: &super::record::Record,
+	) -> Vec<(std::ops::Range<u64>, track::Hole)> {
+		self.reader().reaching_drops(key, floor, bound, record)
 	}
 
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -2196,6 +2208,9 @@ struct Reader {
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
 	drops: RangeMap<u64, track::Hole>,
+	/// The keys whose drops a wire publisher currently owes (`None` = all keys in range);
+	/// propagated to every copy, including copies that become ready later.
+	drop_owed: Option<Arc<RangeSet<u64>>>,
 	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
 	/// a new upstream subscription can supersede. Kept apart so a poll costs these runs, not every queued one.
 	received: RangeSet<u64>,
@@ -2642,6 +2657,7 @@ impl Reader {
 			lease: Arc::new(()),
 			feeds: true,
 			drains: None,
+			drop_owed: self.drop_owed.clone(),
 		});
 		self.learn_end(None);
 	}
@@ -3548,33 +3564,71 @@ impl Reader {
 	fn untell(&mut self, range: std::ops::Range<u64>) {
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
-				// A copy that is itself a front reported what its own copies did.
-				sub.record_mut().untell(range.clone());
-				sub.untell_copies(range.clone());
+				sub.untell(range.clone());
 			}
 		}
 	}
 
+	/// Restrict drop reporting on every copy (and future copies) to `owed`, pruning any
+	/// already-queued drops outside it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn untell_misses(&mut self, range: std::ops::Range<u64>) -> RangeSet<u64> {
-		let mut untold = RangeSet::new();
+	fn set_drop_owed(&mut self, owed: Arc<RangeSet<u64>>) {
+		if self.drop_owed.as_deref() == Some(&*owed) {
+			return;
+		}
+		let outside: Vec<_> = self.drops.iter().flat_map(|(run, _)| owed.gaps(run)).collect();
+		for run in outside {
+			self.remove_drop(run);
+		}
 		for copy in &mut self.copies {
+			copy.drop_owed = Some(owed.clone());
 			if let Sub::Ready(sub) = &mut copy.sub {
-				for run in sub.untell_misses(range.clone()).iter() {
-					untold.insert(run.clone());
-				}
+				sub.set_drop_owed_arc(owed.clone());
 			}
 		}
-		untold
+		self.drop_owed = Some(owed);
 	}
 
+	/// The contiguous final drops below `key` on the serving copy that `record` has not
+	/// reported yet and no replaced copy may still deliver.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn rescan_drops(&mut self) {
-		for copy in &mut self.copies {
-			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.rescan_drops();
+	fn reaching_drops(
+		&self,
+		key: u64,
+		floor: u64,
+		bound: Option<Duration>,
+		record: &super::record::Record,
+	) -> Vec<(std::ops::Range<u64>, track::Hole)> {
+		let serving = self.generation;
+		let Some(Sub::Ready(sub)) = self
+			.copies
+			.last()
+			.filter(|copy| Some(copy.generation) == serving)
+			.map(|copy| &copy.sub)
+		else {
+			return Vec::new();
+		};
+		let (start, _) = self.groups;
+		let floor = floor.max(start);
+		let mut feeding = RangeSet::new();
+		for copy in &self.copies {
+			if Some(copy.generation) == serving || !copy.feeds {
+				continue;
+			}
+			let from = copy.start(start);
+			let until = copy.end().unwrap_or(u64::MAX);
+			if from < until {
+				feeding.insert(from..until);
 			}
 		}
+		let floor = feeding
+			.overlapping(&(floor..key))
+			.next_back()
+			.map_or(floor, |run| run.end.min(key).max(floor));
+		if floor >= key {
+			return Vec::new();
+		}
+		sub.reaching_drops_for(key, floor, bound, record)
 	}
 
 	/// Forget `run` as queued, received or not.
@@ -3707,6 +3761,7 @@ impl Reader {
 			lease: Arc::new(()),
 			feeds: true,
 			drains: None,
+			drop_owed: self.drop_owed.clone(),
 		};
 		// The last copy stays the newest route's own.
 		self.copies.insert(self.copies.len() - 1, copy);
