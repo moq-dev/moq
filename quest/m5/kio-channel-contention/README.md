@@ -93,7 +93,7 @@ Decided (maintainer, 2026-10-07):
   the callers above these sites. Then bring the options back with numbers.
   Submitting staged io_uring SQEs before a blocking acquire only hides the
   stall, so on its own it is not a fix.
-- Every change lands with the profile's before and after plus `just bench`;
+- Every change lands with the profile's before and after plus `just bench-relay`;
   a measured no-win is a valid outcome.
 
 Decided (maintainer, 2026-10-14):

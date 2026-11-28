@@ -43,7 +43,7 @@ if [[ -n $report ]]; then
     root=$(git rev-parse --show-toplevel)
     out=${BENCH_RESULTS:-$root/target/bench/nightly/$1}
     mkdir -p "$out"
-    rm -rf "$out/report.json" "$out/paired.json" "$out/raw" "$out/swole"
+    rm -rf "$out/report.json" "$out/paired.json" "$out/unpaired" "$out/raw" "$out/swole"
     mkdir -p "$out/raw" "$out/swole"
 fi
 
@@ -51,19 +51,25 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
 # Time one label's benchmarks with swole, paired with the base when there is one, keeping
-# every measure in its report (see bench/README.md). A failed pair, as when the base's
-# benchmark panics, still fails the run, but the head is timed alone so tonight keeps its
-# trend point.
+# every measure in its report (see bench/README.md). When a pair fails, as when the base's
+# benchmark panics, the head is timed alone: if that passes, the label is listed in
+# `unpaired` so the night keeps its trend points and the gate fails after the upload.
 swole() {
     local label=$1
     shift
     local bench=(nix run --inputs-from "$root" swole -- bench)
     local args=(--report "$out/swole/$label.json" -- --locked "$@")
-    if [[ -n $base ]]; then
-        "${bench[@]}" "$base" "${args[@]}" && return
-        failed+=("$label paired with $base")
+    if [[ -z $base ]]; then
+        run "${bench[@]}" "${args[@]}"
+        return
     fi
-    run "${bench[@]}" "${args[@]}"
+    "${bench[@]}" "$base" "${args[@]}" && return
+    echo "nightly: $label failed paired with $base; timing its head alone"
+    if "${bench[@]}" "${args[@]}"; then
+        echo "$base $label" >>"$out/unpaired"
+    else
+        failed+=("${bench[*]} ${args[*]}")
+    fi
 }
 
 javascript() {
@@ -213,12 +219,8 @@ case "$1" in
         ;;
 esac
 
-# The report covers whatever finished, so one failed run doesn't cost the rest their trend
-# points; the failure still fails the job after it.
-status=0
-finish || status=$?
+finish
 
 if [[ -n $report ]]; then
     just gh benchmark-report "$report" "$out" "$out/report.json"
 fi
-exit "$status"

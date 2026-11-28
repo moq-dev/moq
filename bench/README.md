@@ -918,10 +918,11 @@ one whose whole interval is more than 10% faster is listed as faster, and the
 rest as unchanged. A benchmark only one side has is reported as new or
 removed, as is every benchmark of a base target from before swole's harness
 written with Criterion, which swole times as none. A base target that runs
-neither harness, such as one with a plain `main`, fails its pair. A pair that
-fails, as when the base cannot build or run, fails the job rather than passing
-uncompared, but its head is then timed alone, so the night keeps its trend
-points.
+neither harness, such as one with a plain `main`, fails its pair. When a pair
+fails, as when the base cannot build or run, its head is timed alone: the night
+keeps its trend points, the comparison lists those benchmarks as unpaired, and
+the gate fails the job after the upload. A head that fails alone too fails the
+job without a report.
 
 Pairing cancels load common to both samples of a pair, but not load that slows
 one side more, which a hosted runner's neighbors can; the 10% bar leaves room

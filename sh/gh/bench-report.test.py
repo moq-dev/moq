@@ -361,6 +361,25 @@ class ReportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.paired(self.root, "c2")
 
+    def test_a_failed_pair_lists_its_head_and_fails_the_gate(self):
+        # nightly.sh timed gst's head alone after its pair failed.
+        self.swole("kio", {"lock": (100, 100, (1.0, 0.95, 1.05))}, base="c1")
+        self.swole("gst", {"catalog": (None, 80, None)})
+        (self.root / "unpaired").write_text("c1 gst\n")
+        combined = report.paired(self.root, "c2")
+        self.assertEqual(combined["base"], "c1")
+        self.assertEqual(
+            {case["name"]: case["verdict"] for case in combined["cases"]},
+            {"rust/kio/lock": "unchanged", "rust/gst/catalog": "unpaired"},
+        )
+        (self.root / "paired.json").write_text(json.dumps(combined))
+        self.assertEqual(report.gate(self.root), 1)
+        # With every pair failed, the comparison still names the base.
+        (self.root / "unpaired").write_text("c1 gst\nc1 kio\n")
+        self.swole("kio", {"lock": (None, 100, None)})
+        combined = report.paired(self.root, "c2")
+        self.assertEqual((combined["base"], {case["verdict"] for case in combined["cases"]}), ("c1", {"unpaired"}))
+
     def test_paired_comparison_publishes_beside_the_trend(self):
         self.paired_reports()
         source = self.root / "inputs" / "bench-rust"

@@ -121,16 +121,44 @@ def verdict(change):
     return "unchanged"
 
 
+def unpaired(directory):
+    """The base of each label whose pair failed and whose head nightly.sh then timed alone."""
+    path = directory / "unpaired"
+    if not path.exists():
+        return {}
+    labels = {}
+    for line in path.read_text().splitlines():
+        base, label = line.split()
+        labels[label] = base
+    return labels
+
+
 def paired(directory, commit):
     """Combine each label's paired times under its trend series names; None when no label was paired."""
     reports = swole_reports(directory)
-    bases = {data.get("base") for data in reports.values()}
+    alone = unpaired(directory)
+    if missing := alone.keys() - reports.keys():
+        raise ValueError(f"no swole report for unpaired labels: {sorted(missing)}")
+    bases = {data.get("base") for label, data in reports.items() if label not in alone} | set(alone.values())
     if bases == {None}:
         return None
     if len(bases) != 1:
         raise ValueError(f"swole reports disagree on their paired base: {sorted(map(str, bases))}")
     cases = []
     for label, data in reports.items():
+        if label in alone:
+            # Its pair failed, so its head's times stand without a comparison.
+            for name, benchmark in data["benchmarks"].items():
+                head = benchmark["head"]
+                cases.append(
+                    {
+                        "name": f"rust/{label}/{name}",
+                        "base_ns": None,
+                        "current_ns": nanoseconds(head, label),
+                        "verdict": "unpaired",
+                    }
+                )
+            continue
         for name, benchmark in data["benchmarks"].items():
             base, head = benchmark.get("base"), benchmark.get("head")
             case = {
@@ -152,17 +180,20 @@ def change_pct(ratio):
 
 
 def gate(directory):
-    """Print paired regressions; nonzero on any."""
+    """Print paired regressions and failed pairs; nonzero on any."""
     path = directory / "paired.json"
     if not path.exists():
         raise ValueError(f"no paired comparison in {directory}")
     comparison = json.loads(path.read_text())
     regressions = [case for case in comparison["cases"] if case["verdict"] == "regression"]
+    alone = [case for case in comparison["cases"] if case["verdict"] == "unpaired"]
     lines = [
         f"Paired comparison of {comparison['commit'][:9]} against {comparison['base'][:9]}: "
-        f"{len(regressions)} regressions beyond {comparison['threshold_pct']}%",
+        f"{len(regressions)} regressions beyond {comparison['threshold_pct']}%"
+        + (f", {len(alone)} benchmarks whose pair failed and whose head timed alone" if alone else ""),
         "",
     ]
+    lines += [f"- `{case['name']}`: its pair failed" for case in alone]
     for case in regressions:
         change = case["change"]
         lines.append(
@@ -174,7 +205,7 @@ def gate(directory):
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as stream:
             stream.write(text)
-    return 1 if regressions else 0
+    return 1 if regressions or alone else 0
 
 
 def measurement_unit(column):
@@ -505,6 +536,7 @@ def paired_table(cases):
 # Paired verdicts by section: open sections hold what needs a look tonight.
 PAIRED_SECTIONS = [
     ({"regression"}, "Regressions", True),
+    ({"unpaired"}, "Pair failed, timed alone", True),
     ({"faster"}, "Faster", True),
     ({"new", "removed"}, "Measured on one side only", False),
     ({"unchanged"}, "Unchanged", False),

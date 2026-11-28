@@ -260,17 +260,28 @@ class NightlyTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("no previous scheduled Nightly", result.stderr)
             self.assertEqual(calls, [])
-            # A failed pair fails the group, but times the head alone into the same report and
-            # still writes the group's report.
-            result, calls = self.run_group(
-                "rust-uring", cwd=repo, BENCH_BASE="HEAD~1", NIGHTLY_FAIL_LIKE=f"* bench {parent} *udp_uring"
-            )
-            self.assertEqual(result.returncode, 1)
-            self.assertIn(f"failed: uring-udp_uring paired with {parent}", result.stderr)
+            # A failed pair times the head alone into the same report and lists the label as
+            # unpaired, so the group still reports and the gate fails on it.
+            with tempfile.TemporaryDirectory() as results:
+                result, calls = self.run_group(
+                    "rust-uring",
+                    cwd=repo,
+                    BENCH_BASE="HEAD~1",
+                    BENCH_RESULTS=results,
+                    NIGHTLY_FAIL_LIKE=f"* bench {parent} *udp_uring",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((Path(results) / "unpaired").read_text(), f"{parent} uring-udp_uring\n")
             udp = [(base, path) for base, path in self.swole if path.endswith("/uring-udp_uring.json")]
             self.assertEqual([base for base, _ in udp], [parent, ""])
             self.assertEqual(udp[0][1], udp[1][1])
             self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "), calls[-1])
+            # A head that fails alone too fails the group, which then publishes no report.
+            result, calls = self.run_group(
+                "rust-uring", cwd=repo, BENCH_BASE="HEAD~1", NIGHTLY_FAIL_LIKE="* bench *udp_uring"
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertFalse(any(call.startswith("just gh") for call in calls))
 
     def test_swole_library_and_runner_share_a_revision(self):
         # The flake's runner drives the benchmarks the Cargo-locked harness builds.
@@ -289,10 +300,8 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("js", "js bench reader")
         self.assertEqual(result.returncode, 1)
         self.assertIn("just js bench frames", calls)
-        self.assertIn("just js clock-bench", calls)
+        self.assertEqual(calls[-1], "just js clock-bench")
         self.assertIn("failed: just js bench reader", result.stderr)
-        # The report still covers the benchmarks that finished.
-        self.assertTrue(calls[-1].startswith("just gh benchmark-report js "), calls[-1])
 
     def test_binding_runner_fails_without_its_report(self):
         # The stubs write no reports, so every runner fails the group, a crash included.
@@ -441,15 +450,14 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-test", NIGHTLY_NO_JUNIT=run.removeprefix("just "))
         self.assertEqual(result.returncode, 1)
         self.assertIn("no JUnit report from: just rs bench-tests", result.stderr)
-        # The report still runs, and finds no tables.
-        self.assertTrue(calls[-1].startswith("just gh benchmark-report rust-test "), calls[-1])
+        self.assertFalse(any(call.startswith("just gh") for call in calls))
 
     def test_benchmark_filter_that_runs_nothing_fails(self):
         # A test behind a feature the build lacks matches nothing, and nextest still passes.
         result, calls = self.run_group("rust-test", NIGHTLY_UNMATCHED="benchmark_feed_fetch_wakes")
         self.assertEqual(result.returncode, 1)
         self.assertIn("no test ran for benchmark_feed_fetch_wakes", result.stderr)
-        self.assertTrue(calls[-1].startswith("just gh benchmark-report rust-test "), calls[-1])
+        self.assertFalse(any(call.startswith("just gh") for call in calls))
 
     def test_every_nightly_benchmark_test_exists(self):
         # A filter naming a removed test matches nothing; this catches it without a build.
@@ -471,9 +479,8 @@ class NightlyTest(unittest.TestCase):
             build = next(call for call in calls if call.startswith("nix run") and "-p moq-net" in call)
             result, calls = self.run_group("rust-bench", build.removeprefix("nix "), BENCH_RESULTS=results)
         self.assertEqual(result.returncode, 1)
-        # Every later target still runs, and the report covers what finished.
-        self.assertIn("-p kio --benches", calls[-2])
-        self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "), calls[-1])
+        # A failed group publishes no report, but every later target still runs.
+        self.assertIn("-p kio --benches", calls[-1])
 
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")
