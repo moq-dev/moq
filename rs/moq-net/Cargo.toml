@@ -46,7 +46,6 @@ futures = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 hashlink = { workspace = true }
 kio = { workspace = true, features = ["macros"] }
-moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
 rangemap = { workspace = true }
@@ -236,6 +235,10 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "prefixes"
+harness = false
 
 [[bench]]
 name = "path"

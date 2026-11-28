@@ -39,7 +39,6 @@ default-members = [
     "rs/moq-mux",
     "rs/moq-nvenc",
     "rs/moq-opus",
-    "rs/moq-pattern",
     "rs/moq-quic",
     "rs/moq-relay",
     "rs/moq-rtmp",
@@ -150,7 +149,6 @@ moq-net = { version = "0.3.10", path = "rs/moq-net" }
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.1.2", path = "rs/moq-nvenc" }
 moq-opus = { version = "0.1.0", path = "rs/moq-opus" }
-moq-pattern = { version = "0.1.2", path = "rs/moq-pattern" }
 # default-features off so each consumer picks its crypto provider.
 moq-quic = { version = "0.1.0", path = "rs/moq-quic", default-features = false }
 moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = false }

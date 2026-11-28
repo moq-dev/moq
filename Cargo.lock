@@ -4295,7 +4295,7 @@ dependencies = [
  "kio",
  "moq-auth",
  "moq-crypto",
- "moq-pattern",
+ "moq-net",
  "pkcs1 0.8.0",
  "pkcs8 0.11.0",
  "rand 0.10.3",
@@ -4693,7 +4693,6 @@ dependencies = [
  "kio",
  "libc",
  "moq-net",
- "moq-pattern",
  "num_enum",
  "proptest",
  "rand 0.10.3",
@@ -4749,17 +4748,6 @@ dependencies = [
  "num-complex",
  "num-traits",
  "thiserror 2.0.21",
- "workspace-hack",
-]
-
-[[package]]
-name = "moq-pattern"
-version = "0.1.2"
-dependencies = [
- "bench-harness",
- "moq-pattern",
- "serde",
- "serde_json",
  "workspace-hack",
 ]
 

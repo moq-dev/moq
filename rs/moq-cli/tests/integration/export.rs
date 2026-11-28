@@ -1086,8 +1086,8 @@ async fn next_identity(announced: &mut moq_net::origin::Routes) -> moq_net::Iden
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
-	let demo = moq_net::Pattern::literal("demo").unwrap();
-	let mut announced = relay.origin.filter(&demo).unwrap().routes();
+	let demo = moq_net::Prefixes::from(moq_net::Prefix::try_from("demo").unwrap());
+	let mut announced = relay.origin.scope("", &demo).unwrap().routes();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
 	let incumbent = next_identity(&mut announced).await;

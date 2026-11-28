@@ -409,20 +409,23 @@ export class Connection {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements matching `filter`, spanning reconnects
+	 * Subscribe to broadcast announcements at or beneath `prefix`, spanning reconnects
 	 * and URL switches: a switch retracts everything from
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return list(this.routes(filter, options));
+	announced(prefix: Path.Valid = Path.empty(), options?: Announce.Options): Announce.Consumer {
+		return list(this.routes(prefix, options));
 	}
 
 	/**
-	 * Every route change matching `filter`, spanning reconnects like {@link announced}.
+	 * Every route change at or beneath `prefix`, spanning reconnects like {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Routes {
+	routes(prefix: Path.Valid = Path.empty(), options?: Announce.Options): Routes {
+		// Throw here: inside the effect below, a refused prefix would leave the listing open and empty.
+		Path.Prefix.parse(prefix);
+		Path.encode(prefix);
 		const producer = new AnnounceProducer();
 		const consumer = producer.consume();
 
@@ -438,8 +441,16 @@ export class Connection {
 				else producer.synced();
 				return;
 			}
+			let routes: Routes;
+			try {
+				routes = origin.routes(prefix, options);
+			} catch (err) {
+				// The origin's root can still push the prefix past the wire limits: end the listing with why.
+				producer.close(err instanceof Error ? err : new Error(String(err)));
+				return;
+			}
 			// A URL switch retracts what the old origin announced.
-			pumpAnnounced(effect, origin.routes(filter, options), producer);
+			pumpAnnounced(effect, routes, producer);
 		});
 
 		closeUnwanted(producer);

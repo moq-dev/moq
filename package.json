@@ -48,7 +48,6 @@
 		"js/net",
 		"js/qmux",
 		"js/clock",
-		"js/pattern",
 		"js/auth",
 		"js/e2ee",
 		"js/json",

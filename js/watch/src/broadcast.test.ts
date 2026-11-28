@@ -807,9 +807,9 @@ describe("cross-broadcast renditions", () => {
 		const owner = new Origin.Producer();
 		const scopes: string[] = [];
 		const announced = owner.announced.bind(owner);
-		owner.announced = (filter, options) => {
-			scopes.push(filter?.text ?? "**");
-			return announced(filter, options);
+		owner.announced = (prefix, options) => {
+			scopes.push(prefix ?? "");
+			return announced(prefix, options);
 		};
 		const source = new Broadcast({
 			origin: owner,

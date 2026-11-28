@@ -682,7 +682,6 @@ int main(int argc, char **argv) {
         memset(&announce, 0, sizeof(announce));
         announce.prefix = broadcast;
         announce.prefix_len = strlen(broadcast);
-        announce.filter = ""; // Exact path only, excluding the health sibling.
         c.finish.announcements = moq_origin_announced((uint32_t)c.origin, &announce, on_finish_announce, &c);
         if (c.finish.announcements <= 0) fail("error: finish announcement registration failed\n");
     }

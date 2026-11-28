@@ -70,7 +70,7 @@ typedef RouteOptions = MoqRouteOptions;
 /// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
-/// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
+/// The prefix to list, with every path beneath it, and the hidden-path opt-in for announcement discovery.
 typedef AnnounceConfig = MoqAnnounceConfig;
 
 /// Follows a specific broadcast path across the publisher identities that serve it.
@@ -86,7 +86,7 @@ typedef RouteInfo = MoqRouteInfo;
 /// identity a route reported back as is, rather than re-parsing its text.
 typedef Identity = MoqIdentity;
 
-/// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
+/// A route over a prefix: its origin-relative path and route metadata.
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or

@@ -33,15 +33,14 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin you passed as Client(publish:consume:), or by a fresh
 // auto-created one. The duplex no-config path (the typical client) shares one
 // origin between both sides.
-let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
+let announced = try session.consume.announced(prefix: "demos")
 for try await event in announced {
     // The listing reports each path once while it stays present, even as its publisher
     // restarts; `session.consume.follow(path:)` hands out each new run, or nil once it
     // goes offline.
     guard case .present(let announcement) = event else { continue }
-    // Prefix stays origin-relative; captures reports what * matched.
+    // Prefix stays origin-relative: every path at or beneath `demos`.
     print("got broadcast \(announcement.prefix)")
-    print("captures \(announcement.captures)")
 
     let broadcast = try await session.consume.request(path: announcement.prefix)
     let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)

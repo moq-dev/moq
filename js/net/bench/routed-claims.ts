@@ -22,9 +22,7 @@ for (const identities of [1, 64, 256, 1024])
 			createBidirectionalStream: () => new Promise<never>(() => {}),
 		} as unknown as WebTransport;
 		const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
-		const streams = Array.from({ length: readers }, () =>
-			subscriber.routes(Path.Pattern.subtree(Path.empty()), { claims: true }),
-		);
+		const streams = Array.from({ length: readers }, () => subscriber.routes(Path.empty(), { claims: true }));
 		for (let i = 0; i < 8; i++) await yieldNow();
 		await subscriber.announce({ status: "ok" });
 		const start = performance.now();

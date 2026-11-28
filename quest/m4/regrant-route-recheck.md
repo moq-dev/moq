@@ -13,7 +13,7 @@ Found by [moq-dev/moq#7536](https://github.com/moq-dev/moq/pull/7536), which swe
 
 So one `AUTH_OK` costs routes × members per stream, times K announce streams, a product [peer grant bound](/quest/m5/peer-grant-bound.md), which bounds decoding and comparing the grant itself, leaves alone.
 
-Since [moq-dev/moq#9251](https://github.com/moq-dev/moq/pull/9251) a grant is a sorted set of prefixes (`Prefixes` in `moq-pattern`), and matching one path costs a binary search per segment of the path, so the per-route factor is log members rather than members. The walk over every live route remains, and is what this quest bounds.
+Since [moq-dev/moq#9251](https://github.com/moq-dev/moq/pull/9251) a grant is a sorted set of prefixes (`Prefixes` in `moq-net`), and matching one path costs a binary search per segment of the path, so the per-route factor is log members rather than members. The walk over every live route remains, and is what this quest bounds.
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): its own quest beside the grant-algebra bound.
 

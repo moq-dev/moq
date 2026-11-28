@@ -1214,16 +1214,11 @@ unsafe fn route_options(
 /// meaning the defaults.
 #[repr(C)]
 pub struct moq_announce_config {
-	/// A literal path root, NOT NULL terminated. NULL when `prefix_len` is 0.
+	/// The prefix to list, covering it and every path beneath it, NOT NULL terminated.
+	/// NULL when `prefix_len` is 0, which lists every path.
 	pub prefix: *const c_char,
 	/// The length in bytes of `prefix`.
 	pub prefix_len: usize,
-
-	/// A pattern relative to `prefix`, NOT NULL terminated, or NULL for every
-	/// path beneath it. Empty is a valid exact filter.
-	pub filter: *const c_char,
-	/// The length in bytes of `filter`.
-	pub filter_len: usize,
 
 	/// Also list hidden paths: those with a segment starting with `.` below the prefix.
 	pub hidden: bool,
@@ -1249,12 +1244,6 @@ pub struct moq_announce_event {
 	pub prefix: *const c_char,
 	/// The length in bytes of `prefix`.
 	pub prefix_len: usize,
-
-	/// What each requested filter wildcard matched. Each string is NOT NULL terminated.
-	/// Empty when the filter has no wildcards; only full matches are listed.
-	pub captures: *const moq_string,
-	/// The number of entries in `captures`.
-	pub captures_len: usize,
 
 	/// Which event this is.
 	pub kind: moq_announce_kind,
@@ -2690,9 +2679,9 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 	})
 }
 
-/// Learn about broadcasts matching a discovery filter under an origin.
+/// Learn about broadcasts announced under a prefix of an origin.
 ///
-/// `config` selects the paths; NULL lists every visible one. Delivered
+/// `config` selects the prefix; NULL lists every visible path. Delivered
 /// [moq_announce_event] prefixes remain relative to the origin.
 ///
 /// `on_announce` is invoked with a positive announced ID for each event (see
@@ -2720,28 +2709,23 @@ pub unsafe extern "C" fn moq_origin_announced(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let (filter, hidden) = match unsafe { config.as_ref() } {
-			None => (moq_net::Pattern::all(), false),
+		let (prefix, hidden) = match unsafe { config.as_ref() } {
+			None => (moq_net::Prefix::all(), false),
 			Some(config) => {
 				let prefix = unsafe { ffi::parse_str(config.prefix, config.prefix_len)? };
-				let filter = if config.filter.is_null() {
-					moq_net::Pattern::all()
-				} else {
-					unsafe { ffi::parse_str(config.filter, config.filter_len)? }.parse()?
-				};
-				(filter.rooted(prefix)?, config.hidden)
+				(prefix.parse()?, config.hidden)
 			}
 		};
 		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
-		State::lock().origin.announced(origin, filter, hidden, on_announce)
+		State::lock().origin.announced(origin, prefix, hidden, on_announce)
 	})
 }
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the route information. The `prefix`, `captures`,
-/// and capture string pointers borrow the announcement's storage: copy them out
-/// before calling [moq_origin_announced_free], which invalidates them.
+/// The destination is filled with the route information. The `prefix` pointer borrows
+/// the announcement's storage: copy it out before calling [moq_origin_announced_free],
+/// which invalidates it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

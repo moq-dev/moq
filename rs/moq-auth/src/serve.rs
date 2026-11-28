@@ -825,7 +825,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
-	use moq_pattern::Prefixes;
+	use moq_net::Prefixes;
 
 	fn prefixes(texts: &[&str]) -> Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()

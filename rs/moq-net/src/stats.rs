@@ -155,7 +155,7 @@
 //!
 //! # Cycles
 //!
-//! A [`Registry`] built with excluded patterns ([`Config::exclude`]) returns
+//! A [`Registry`] built with excluded prefixes ([`Config::exclude`]) returns
 //! empty handles (whose bumps no-op) for any path they match. The `moq-stats`
 //! publisher excludes its own top-level subtree this way, breaking the feedback
 //! loop where serving a stats broadcast would itself generate more stats
@@ -174,7 +174,7 @@ use std::{
 use kio::Lock;
 use serde::{Deserialize, Serialize};
 
-use crate::{Path, Pattern, Patterns, time::Instant, util::SendCell};
+use crate::{Path, Prefix, Prefixes, time::Instant, util::SendCell};
 
 mod outcomes;
 mod routes;
@@ -1006,16 +1006,16 @@ pub struct SessionEntry {
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Patterns whose broadcasts are not tracked: a matching path gets an empty
-	/// handle whose bumps no-op. A publisher excludes its own stats subtree
-	/// (`.stats/**`) this way, breaking the stats-of-stats feedback loop. Empty
+	/// Prefixes whose broadcasts are not tracked: a path at or beneath one gets an
+	/// empty handle whose bumps no-op. A publisher excludes its own stats subtree
+	/// (`.stats`) this way, breaking the stats-of-stats feedback loop. Empty
 	/// (the default) tracks everything.
-	pub exclude: Patterns,
-	/// Patterns matched against a path relative to the counting session's root:
-	/// a match under that root is not tracked for that session. A relay that
-	/// presents each root's stats under the root excludes that subtree this way.
-	/// Empty (the default) excludes nothing.
-	pub exclude_rooted: Patterns,
+	pub exclude: Prefixes,
+	/// Prefixes matched against a path relative to the counting session's root:
+	/// a path at or beneath one under that root is not tracked for that session. A
+	/// relay that presents each root's stats under the root excludes that subtree
+	/// this way. Empty (the default) excludes nothing.
+	pub exclude_rooted: Prefixes,
 }
 
 impl Config {
@@ -1024,17 +1024,17 @@ impl Config {
 		Self::default()
 	}
 
-	/// Add a pattern to exclude from tracking. May be chained to exclude
-	/// several.
-	pub fn with_exclude(mut self, pattern: Pattern) -> Self {
-		self.exclude.insert(pattern);
+	/// Add a prefix to exclude from tracking, with its subtree. May be chained to
+	/// exclude several.
+	pub fn with_exclude(mut self, prefix: Prefix) -> Self {
+		self.exclude.insert(prefix);
 		self
 	}
 
-	/// Add a pattern to exclude under each session's root. May be chained to
+	/// Add a prefix to exclude under each session's root. May be chained to
 	/// exclude several. See [`Self::exclude_rooted`].
-	pub fn with_exclude_rooted(mut self, pattern: Pattern) -> Self {
-		self.exclude_rooted.insert(pattern);
+	pub fn with_exclude_rooted(mut self, prefix: Prefix) -> Self {
+		self.exclude_rooted.insert(prefix);
 		self
 	}
 }
@@ -1045,11 +1045,11 @@ impl Config {
 /// [`Registry::report`] to publish the counters as MoQ broadcasts.
 #[derive(Clone)]
 pub struct Registry {
-	/// Paths these patterns match get empty handles (bumps no-op); see
+	/// Paths at or beneath these get empty handles (bumps no-op); see
 	/// [`Config::exclude`].
-	exclude: Patterns,
+	exclude: Prefixes,
 	/// The same, relative to the counting session's root; see [`Config::exclude_rooted`].
-	exclude_rooted: Patterns,
+	exclude_rooted: Prefixes,
 	/// `None` for a disabled registry: bumps are dropped and nothing is tracked.
 	shared: Option<Arc<Shared>>,
 }
@@ -1129,8 +1129,8 @@ impl Registry {
 	/// Build a no-op registry: every handle is empty and all bumps are dropped.
 	pub fn disabled() -> Self {
 		Self {
-			exclude: Patterns::new(),
-			exclude_rooted: Patterns::new(),
+			exclude: Prefixes::new(),
+			exclude_rooted: Prefixes::new(),
 			shared: None,
 		}
 	}
@@ -2657,7 +2657,7 @@ mod tests {
 	}
 
 	fn test_stats() -> Registry {
-		Registry::new(Config::new().with_exclude(Pattern::subtree(".stats").unwrap()))
+		Registry::new(Config::new().with_exclude(".stats".parse().unwrap()))
 	}
 
 	#[test]
@@ -3323,7 +3323,7 @@ mod tests {
 	/// and no other, and a session's rows stay under its root across a retag.
 	#[test]
 	fn rooted_exclusion_follows_the_session_root() {
-		let stats = Registry::new(Config::new().with_exclude_rooted(Pattern::subtree(".stats").unwrap()));
+		let stats = Registry::new(Config::new().with_exclude_rooted(".stats".parse().unwrap()));
 		let tier = Tier::default();
 		let path = crate::Path::from_static;
 		let rooted = stats

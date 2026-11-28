@@ -934,7 +934,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0, sock_cmsg, uring_cmsg, qmux, token, jwk]
+        target: [lite, announce, ietf, varint, path, ingest, request, session_lite, session_ietf, packet, params, streamid, streams, frame, connection, fmp4, mkv, ts, flv, cmaf, annexb, catalog, amf0, sock_cmsg, uring_cmsg, qmux, token, jwk]
         # A whole session runs at 50 to 90 inputs a second, and its coverage still climbs
         # after five minutes, so it gets fifteen.
         include:

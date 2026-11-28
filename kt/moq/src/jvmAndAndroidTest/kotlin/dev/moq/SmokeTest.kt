@@ -1200,14 +1200,17 @@ class SmokeTest {
     }
 
     @Test
-    fun `announced pattern reports captures`() = runTest {
+    fun `announced lists a prefix and refuses a wildcard`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            val announced =
-                origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
-            origin.route("room/alice/chat", RouteOptions()).use {
-                val update = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertEquals("room/alice/chat", update.announce.prefix)
-                assertEquals(listOf("alice"), update.announce.captures)
+            val announced = origin.consume().announced(AnnounceConfig(prefix = "room/alice"))
+            origin.route("room/bob/chat", RouteOptions()).use {
+                origin.route("room/alice/chat", RouteOptions()).use {
+                    val update = assertIs<AnnounceEventPresent>(announced.nextRoute())
+                    assertEquals("room/alice/chat", update.announce.prefix)
+                }
+            }
+            assertFailsWith<MoqException.InvalidPrefix> {
+                origin.consume().announced(AnnounceConfig(prefix = "room/*"))
             }
         }
     }

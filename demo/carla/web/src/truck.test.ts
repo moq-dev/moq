@@ -536,7 +536,7 @@ describe("Truck control", () => {
 
 	test("a bystander's e-stop publishes a broadcast of its own until the status echoes it", async () => {
 		const { truck, driving, origin, echo, close } = setup();
-		const announced = origin.announced(Moq.Path.Pattern.parse("viewer/carla/truck1/*"));
+		const announced = origin.announced(Moq.Path.from("viewer/carla/truck1"));
 		try {
 			truck.emergencyStop();
 			const entry = await announced.next();

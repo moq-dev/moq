@@ -53,7 +53,7 @@ class FakeSession {
 }
 
 const announce = (stream: Announce.Producer, prefix: Path.Valid, cost: bigint, kind: "start" | "update") =>
-	stream.append({ prefix, captures: undefined, kind, route: WireRoute.normalize({ cost }) });
+	stream.append({ prefix, kind, route: WireRoute.normalize({ cost }) });
 
 console.log("touched,heads,routes,update_us");
 for (const touched of ["covering", "single"] as const) {
@@ -120,16 +120,14 @@ for (const watchers of [8, 128, 2048]) {
 			forwardAnnounced(session as unknown as Session, origin);
 			return session;
 		});
-		const held = Array.from({ length: watchers }, (_, index) =>
-			origin.announced(Path.Pattern.subtree(Path.from(`w${index}`))),
-		);
+		const held = Array.from({ length: watchers }, (_, index) => origin.announced(Path.from(`w${index}`)));
 		await flush();
 
 		const samples: number[] = [];
 		for (let round = 0; round < 6; round++) {
 			const start = performance.now();
 			for (let index = 0; index < 64; index++) {
-				const watch = origin.announced(Path.Pattern.subtree(Path.from(`touched/${index}`)));
+				const watch = origin.announced(Path.from(`touched/${index}`));
 				await flush();
 				watch.close();
 				await flush();

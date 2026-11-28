@@ -1,9 +1,10 @@
 # `@moq/net`
 
 ```ts
+import { Prefixes } from "@moq/net/prefix";
+
 export namespace Announce {
 	export interface Announce {
-		captures: Path.Pattern[] | undefined;
 		prefix: Path.Valid;
 		route: Origin.RouteInfo;
 	}
@@ -35,8 +36,8 @@ export namespace Auth {
 	}
 	export interface Grant {
 		expires?: Clock.Wall;
-		publish: Path.Prefixes;
-		subscribe: Path.Prefixes;
+		publish: Prefixes;
+		subscribe: Prefixes;
 	}
 	export class Handle {
 		constructor();
@@ -230,7 +231,7 @@ export namespace Connection {
 	export type Redirect = "follow" | "same-host" | "ignore";
 	export interface Session {
 		abort(): void;
-		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		readonly closed: Signals.GetPromise<Error | null>;
@@ -275,7 +276,7 @@ export class Connection {
 	constructor(props?: Connection.Props);
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
-	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer;
 	answered(): Promise<void>;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
@@ -523,7 +524,7 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export class Consumer implements Origin.Reader {
-		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
@@ -541,7 +542,7 @@ export namespace Origin {
 	}
 	export class Producer implements Origin.Table {
 		constructor();
-		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer;
 		claim(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Claim;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -550,11 +551,11 @@ export namespace Origin {
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
-		scope(root: Path.Valid, prefixes: Path.Prefixes): Origin.Producer;
+		scope(root: Path.Valid, prefixes: Prefixes): Origin.Producer;
 		withPriority(priority: number): Origin.Producer;
 	}
 	export interface Reader {
-		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
@@ -609,23 +610,17 @@ export namespace Origin {
 }
 
 export namespace Path {
-	export { InvalidPattern } from "@moq/pattern";
-	export { InvalidPrefix } from "@moq/pattern";
-	export { Pattern } from "@moq/pattern";
-	export { Patterns } from "@moq/pattern";
-	export { Prefix } from "@moq/pattern";
-	export { Prefixes } from "@moq/pattern";
+	export { InvalidPrefix } from "@moq/net/prefix";
+	export { Prefix } from "@moq/net/prefix";
+	export { Prefixes } from "@moq/net/prefix";
 	export type Relative = string & {
 		__brand: "Relative";
 	};
-	export { Segment } from "@moq/pattern";
-	export { Specificity } from "@moq/pattern";
 	export type Valid = string & {
 		__brand: "Name";
 	};
-	export { compareSpecificity } from "@moq/pattern";
 	export function empty(): Path.Valid;
-	export { escape } from "@moq/pattern";
+	export { escape } from "@moq/net/prefix";
 	export function from(...paths: string[]): Path.Valid;
 	export function hasPrefix(prefix: Path.Valid, path: Path.Valid): boolean;
 	export function head(path: Path.Valid, n: number): Path.Valid | undefined;
@@ -636,7 +631,7 @@ export namespace Path {
 	export function resolve(base: Path.Valid, rel: Path.Relative): Path.Valid;
 	export function stripPrefix(prefix: Path.Valid, path: Path.Valid): Path.Valid | null;
 	export function tryResolve(base: Path.Valid, rel: Path.Relative): Path.Valid | undefined;
-	export { unescape } from "@moq/pattern";
+	export { unescape } from "@moq/net/prefix";
 }
 
 export const SessionCode: ((code: number) => SessionCode) & {

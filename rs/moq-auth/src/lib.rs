@@ -13,7 +13,7 @@
 //! - [`Claims`], [`Key`], and [`KeySet`]: the JWT a client presents in its query, with
 //!   the keys that sign and verify it. `moq auth generate|sign|verify` is the CLI.
 //!
-//! Grants and claims name paths with [`Prefixes`] from `moq-pattern`, re-exported here:
+//! Grants and claims name paths with [`Prefixes`] from `moq-net`, re-exported here:
 //! `foo` is `foo` and everything beneath it, and the empty prefix is everything. A grant
 //! holds no wildcard: a [`Prefix`] refuses `foo/**`, `**`, and `*`. Until the next two
 //! version migrations, a token, key scope, or [`Grant`] is written with each prefix as
@@ -68,7 +68,7 @@ pub use error::*;
 pub use grant::*;
 pub use key::*;
 pub use key_id::*;
-pub use moq_pattern::{InvalidPattern, InvalidPrefix, Prefix, Prefixes};
+pub use moq_net::{InvalidPrefix, Prefix, Prefixes};
 pub use rate::*;
 pub use request::*;
 pub use set::*;

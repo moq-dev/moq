@@ -110,9 +110,7 @@ impl Relay {
 	/// paths spread over that many first segments and the driver publishes each
 	/// as its own bucket track; without, every path shares one.
 	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize, buckets: Option<usize>) -> Self {
-		let registry = stats::Registry::new(
-			stats::Config::new().with_exclude(moq_net::Pattern::subtree(".stats").expect("literal prefix")),
-		);
+		let registry = stats::Registry::new(stats::Config::new().with_exclude(".stats".parse().expect("a prefix")));
 		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
 		let nested = "/s".repeat(depth - 2);
 		let path_names: Vec<String> = (0..paths)

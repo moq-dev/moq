@@ -55,12 +55,12 @@ import Moq
 let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
-for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
+for try await event in try session.consume.announced(prefix: "live") {
     // A path stays present across publisher restarts: hold follow(path:) to be handed each
     // new run, or nil once it goes offline.
     guard case .present(let announcement) = event else { continue }
-    // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
-    print(announcement.captures)
+    // Prefixes stay origin-relative.
+    print(announcement.prefix)
     let broadcast = try await session.consume.request(path: announcement.prefix)
     for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)

@@ -165,12 +165,12 @@ class Client:
         """
         return self._connected().publisher.route(path, hidden=hidden, cost=cost, identity=identity, epoch=epoch)
 
-    def announced(self, prefix: str = "", *, filter: str | None = None, hidden: bool = False) -> AnnounceConsumer:
-        """Async-iterate broadcasts under ``prefix`` matching an optional pattern.
+    def announced(self, prefix: str = "", *, hidden: bool = False) -> AnnounceConsumer:
+        """Async-iterate broadcasts at or beneath ``prefix``.
 
         See :meth:`OriginConsumer.announced`.
         """
-        return self._connected().consumer.announced(prefix, filter=filter, hidden=hidden)
+        return self._connected().consumer.announced(prefix, hidden=hidden)
 
     def follow(self, path: str, *, identity: Identity | None = None) -> Following:
         """Follow the broadcast at exactly ``path`` across its publisher identities.

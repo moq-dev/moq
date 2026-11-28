@@ -1,8 +1,7 @@
 //! Segment-aware root matching, mirroring `moq_net::Path`.
 //!
 //! A token's root and a connection's path are literal paths, so overlapping them is
-//! prefix arithmetic; everything beneath is a pattern from `moq-pattern`, re-exported
-//! from this crate so a token minting service does not pull in the wire stack. The
+//! prefix arithmetic; everything beneath is a [`Prefix`](crate::Prefix) from `moq-net`. The
 //! boundary rules must stay identical to `moq_net::Path`, which the relay applies to
 //! the same strings. `moq_net::Path` refuses the empty segments [`normalize`] drops, so
 //! a string spelled with one is refused there rather than read as another path. Minting
@@ -28,7 +27,7 @@ pub fn validate(root: &str) -> crate::Result<()> {
 			_ => return invalid(r"contains a `\` that escapes neither `\` nor `/`"),
 		}
 	}
-	if moq_pattern::parts(root).any(str::is_empty) {
+	if moq_net::path::parts(root).any(str::is_empty) {
 		return invalid("contains an empty segment");
 	}
 	Ok(())
@@ -53,7 +52,7 @@ pub fn signable(root: &str) -> crate::Result<()> {
 /// slashes are implicit at boundaries and `/foo//bar/` == `foo/bar`. An escaped `/`
 /// is part of its segment, so it stays.
 pub fn normalize(path: &str) -> String {
-	moq_pattern::parts(path)
+	moq_net::path::parts(path)
 		.filter(|part| !part.is_empty())
 		.collect::<Vec<_>>()
 		.join("/")

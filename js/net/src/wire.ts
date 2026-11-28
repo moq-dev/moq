@@ -70,7 +70,7 @@ export interface OriginProducer {
 	 * ask their peer for announcements under exactly these. Returns the unsubscribe.
 	 */
 	interests(listener: InterestListener): Dispose;
-	/** Whether an advertised prefix overlaps the handle's allowed paths. */
+	/** Whether an advertised prefix is nameable here and overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
 	/** Land a route a peer announced, taken as given and never forwarded back to a peer. */
 	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Claim;

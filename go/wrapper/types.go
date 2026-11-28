@@ -36,10 +36,8 @@ type (
 	// Identity names one continuous stream at a path. Compare two with Eq: a session mints one
 	// for a route whose wire carries none, and it differs from a named identity with the same Text.
 	Identity = ffi.MoqIdentity
-	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
-	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
-	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
-	// empty when the filter has no wildcards.
+	// Announce is a route over a prefix: the origin-relative Prefix and the RouteInfo
+	// serving it. It carries no broadcast; resolve a path with [OriginConsumer.Request].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventPresent or AnnounceEventAbsent.
 	// Another publisher identity taking a path over keeps it present; see it with [OriginConsumer.Follow].

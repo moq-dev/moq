@@ -12,9 +12,9 @@ use std::borrow::Cow;
 /// empty ones included, so a caller that requires non-empty segments checks them itself.
 ///
 /// ```
-/// let parts: Vec<_> = moq_pattern::parts(r"room/a\/b/cam").collect();
+/// let parts: Vec<_> = moq_net::path::parts(r"room/a\/b/cam").collect();
 /// assert_eq!(parts, ["room", r"a\/b", "cam"]);
-/// assert_eq!(moq_pattern::parts("").count(), 0);
+/// assert_eq!(moq_net::path::parts("").count(), 0);
 /// ```
 pub fn parts(path: &str) -> Parts<'_> {
 	Parts {
@@ -80,8 +80,8 @@ impl std::iter::FusedIterator for Parts<'_> {}
 /// path, where every `\` escapes the byte after it.
 ///
 /// ```
-/// assert_eq!(moq_pattern::unescape(r"a\/b\\c"), r"a/b\c");
-/// assert_eq!(moq_pattern::unescape("plain"), "plain");
+/// assert_eq!(moq_net::path::unescape(r"a\/b\\c"), r"a/b\c");
+/// assert_eq!(moq_net::path::unescape("plain"), "plain");
 /// ```
 pub fn unescape(segment: &str) -> Cow<'_, str> {
 	if !segment.contains('\\') {
@@ -103,7 +103,7 @@ pub fn unescape(segment: &str) -> Cow<'_, str> {
 /// Borrows content with neither.
 ///
 /// ```
-/// assert_eq!(moq_pattern::escape(r"a/b\c"), r"a\/b\\c");
+/// assert_eq!(moq_net::path::escape(r"a/b\c"), r"a\/b\\c");
 /// ```
 pub fn escape(content: &str) -> Cow<'_, str> {
 	if !content.contains(['\\', '/']) {

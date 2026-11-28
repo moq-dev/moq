@@ -33,7 +33,7 @@ pub struct Config {
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
 	/// `node` is unset), announced under a fresh [`Identity`](moq_net::Identity) each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
-	/// more stats.
+	/// more stats; [`Producer::new`] panics if it holds a `*`, which a prefix refuses.
 	pub prefix: Path,
 	/// Node suffix that disambiguates broadcasts from different relays sharing a
 	/// cluster origin. Set this on every node in multi-relay deployments. May be
@@ -209,8 +209,9 @@ impl Producer {
 			return (producer, Publisher(Run::Done));
 		};
 
-		// The prefix is a literal path, so its subtree claim cannot fail.
-		let exclude = moq_net::Pattern::subtree(prefix.as_str()).expect("the stats prefix is a literal path");
+		// A grant prefix refuses a `*` until the pattern spelling of grants is gone; no stats
+		// prefix holds one.
+		let exclude: moq_net::Prefix = prefix.as_str().parse().expect("the stats prefix holds no `*`");
 		let mut registry = moq_net::stats::Config::new().with_exclude(exclude.clone());
 		if roots {
 			// Where a relay mounts each root's view: a read there counts as no root's traffic.

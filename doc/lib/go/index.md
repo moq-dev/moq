@@ -56,8 +56,7 @@ if err != nil {
 }
 defer client.Close()
 
-filter := "*/camera"
-announced, err := client.Announced(moq.AnnounceOptions{Prefix: "live/", Filter: &filter})
+announced, err := client.Announced(moq.AnnounceOptions{Prefix: "live"})
 if err != nil {
     log.Fatal(err)
 }
@@ -73,8 +72,8 @@ for event, err := range announced.All(ctx) {
         continue // AnnounceEventAbsent
     }
     ann := present.Announce
-    // Prefix stays origin-relative; Captures is a list, empty without wildcards.
-    fmt.Printf("captures: %v\n", ann.Captures)
+    // Prefix stays origin-relative.
+    fmt.Printf("prefix: %v\n", ann.Prefix)
     broadcast, err := client.Request(ctx, ann.Prefix, nil)
     if err != nil {
         log.Fatal(err)

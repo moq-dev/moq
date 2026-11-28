@@ -203,17 +203,18 @@ test("an announcement survives the first of its two sources ending", async () =>
 	expect(await settlesWithin(announced.next(), clock, Duration.millis(250))).toBe(false);
 });
 
-test("announced lists literal matches unless covering asks for overlapping routes too", async () => {
+test("announced lists routes beneath the prefix unless covering asks for those above it too", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
-	const scope = Path.Pattern.parse("**/*.chat");
-	const listed = subscriber.routes(scope);
-	const covering = subscriber.routes(scope, { covering: true });
+	const prefix = Path.from("room/lobby");
+	const listed = subscriber.routes(prefix);
+	const covering = subscriber.routes(prefix, { covering: true });
 
-	// `room` could serve `room/lobby.chat`, but its own name is no match.
+	// `room` could serve `room/lobby/chat`, but it lies above the prefix; `other` lies nowhere near it.
 	for (const [requestId, path] of [
 		[0n, "room"],
-		[1n, "lobby.chat"],
+		[1n, "other"],
+		[2n, "room/lobby/chat"],
 	] as const) {
 		const request = await Stream.open(pair.server, { version: VERSION });
 		void subscriber.runPublishNamespace(
@@ -222,11 +223,18 @@ test("announced lists literal matches unless covering asks for overlapping route
 		);
 	}
 	expect(await covering.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-	expect(await covering.next()).toMatchObject({ prefix: Path.from("lobby.chat"), kind: "start" });
-	expect(await listed.next()).toMatchObject({ prefix: Path.from("lobby.chat"), kind: "start" });
+	expect(await covering.next()).toMatchObject({ prefix: Path.from("room/lobby/chat"), kind: "start" });
+	expect(await listed.next()).toMatchObject({ prefix: Path.from("room/lobby/chat"), kind: "start" });
 
 	listed.close();
 	covering.close();
+});
+
+test("a prefix no request can carry is refused before anything is asked", () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	expect(() => subscriber.routes(Path.from("room/*"))).toThrow(Path.InvalidPrefix);
+	expect(() => subscriber.routes(Path.from("a".repeat(Path.MAX_BYTES + 1)))).toThrow("bytes");
 });
 
 /**
@@ -1915,17 +1923,17 @@ test("a request overlapping one on its way out waits for the peer to end it", as
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
-	const narrow = subscriber.routes(Path.Pattern.subtree(Path.from("a/b")));
+	const narrow = subscriber.routes(Path.from("a/b"));
 	const stream = await acceptSubscribeNamespace(pair.client, version);
 	await inlineNamespace(stream, Path.from("x"), undefined, version);
 	expect(await narrow.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
 
 	// A request still open is no blocker, and hears the narrower one's route go at once.
-	const watcher = subscriber.routes(Path.Pattern.subtree(Path.from("a/b")));
+	const watcher = subscriber.routes(Path.from("a/b"));
 	const watching = await acceptSubscribeNamespace(pair.client, version);
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
 	narrow.close();
-	const broad = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
+	const broad = subscriber.routes(Path.from("a"));
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "offline" });
 
 	// Draft 22 cancels with a reset, and the broader request waits on the peer's half.

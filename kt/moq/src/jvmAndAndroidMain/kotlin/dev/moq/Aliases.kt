@@ -90,7 +90,7 @@ typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 
 /**
- * A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement
+ * The prefix to list, with every path beneath it, and the hidden-path opt-in for announcement
  * discovery.
  */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
@@ -98,10 +98,7 @@ typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** Follows a specific broadcast path across the publisher identities that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
 
-/**
- * A route over a prefix: its origin-relative path, required wildcard captures (empty without
- * wildcards), and route metadata.
- */
+/** A route over a prefix: its origin-relative path and route metadata. */
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**

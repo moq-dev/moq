@@ -18,4 +18,4 @@ What remains (from `main` at c681b7a09, added 2026-11-12 by `/quest-plan`):
   in the `check` script for `js/clock`, `js/qmux`, `js/signals`, and `js/watch`.
 - Move the `js/json` and `js/publish` bench typechecks into their package
   `check` scripts alongside the existing checks in `js/net`, `js/e2ee`,
-  `js/hang`, and `js/pattern`.
+  and `js/hang`.

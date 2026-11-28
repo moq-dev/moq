@@ -36,9 +36,6 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
-	scopeCaptures,
-	scopeHead,
-	scopeOverlaps,
 	staleHole,
 } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -571,54 +568,50 @@ export class Subscriber {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements matching `scope`. Paths are relative
-	 * to the session, not the scope.
+	 * Subscribe to broadcast announcements at or beneath `prefix`. Paths are relative
+	 * to the session, not the prefix.
 	 *
 	 * Reflected announces (those whose hop chain already includes this
 	 * connection) are always dropped: moq-lite-06 has none to keep, and older
 	 * versions stay consistent with that.
 	 *
-	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
+	 * Hidden routes (a `.`-prefixed segment below the prefix) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the request on lite-07+; an older peer
 	 * never hides anything, so the rule is also applied here.
 	 *
-	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
-	 * also asks for those whose subtree overlaps it. A lite-07 stream reports the best claim at
-	 * each path, or each identity's with `options.claims`.
+	 * Only routes at or beneath `prefix` are reported, unless `options.covering` also asks for
+	 * those above it. A lite-07 stream reports the best claim at each path, or each identity's
+	 * with `options.claims`.
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.RouteOptions): announce.Routes {
+	routes(prefix: Path.Valid = Path.empty(), options?: announce.RouteOptions): announce.Routes {
+		// Refuse a prefix no request can carry before any reader registers for it.
+		Path.Prefix.parse(prefix);
+		Path.encode(prefix);
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
 		const consumer = announced.consume();
 		// The last reader leaving ends the stream, which cancels the request.
 		closeUnwanted(announced);
-		const prefix = scopeHead(scope);
 		const hidden = options?.hidden ?? false;
 		const covering = options?.covering ?? false;
 		if (this.#routed) {
 			// Lite-07: every reader shares the session's one Announce Stream.
-			this.#routed.attach(announced, { prefix, scope, hidden, covering, claims: options?.claims ?? false });
+			this.#routed.attach(announced, { prefix, hidden, covering, claims: options?.claims ?? false });
 		} else {
-			void this.#runAnnounced(announced, prefix, scope, hidden, covering);
+			void this.#runAnnounced(announced, prefix, hidden);
 		}
 		return consumer;
 	}
 
-	async #runAnnounced(
-		announced: announce.Producer,
-		prefix: Path.Valid,
-		scope: Path.Pattern,
-		hidden: boolean,
-		covering: boolean,
-	): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
 		const msg = new AnnounceRequest(prefix, this.hop);
-		const visible = (path: Path.Valid) =>
-			(covering ? scopeOverlaps(scope, path) : scope.matches(path)) && (hidden || !hiddenBelow(prefix, path));
+		// Every path the peer sends lies beneath the prefix, so only hiding filters it.
+		const visible = (path: Path.Valid) => hidden || !hiddenBelow(prefix, path);
 
 		// Opened outside the try so the catch can reach it: a protocol violation below has
 		// to reset the stream, not just close our side of it.
@@ -650,7 +643,6 @@ export class Subscriber {
 		type Advertisement = {
 			live: boolean;
 			route: WireRoute;
-			captures: Path.Pattern[] | undefined;
 		};
 		// Each holds one of the session's announce slots, reflected and hidden ones included.
 		const advertised = new SlotMap<Path.Valid, Advertisement>(this.#announces);
@@ -736,12 +728,11 @@ export class Subscriber {
 							priority: this.#link.priority,
 						});
 						const live = visible(path);
-						const captures = scopeCaptures(scope, path);
-						advertised.set(path, { live, route, captures });
+						advertised.set(path, { live, route });
 						if (!live) continue;
 						this.#consumes.announce(path, announced, route);
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ prefix: path, captures, kind: "start", route });
+						announced.append({ prefix: path, kind: "start", route });
 					}
 					break;
 				}
@@ -762,7 +753,7 @@ export class Subscriber {
 					if (routesEqual(ad.route, route)) continue;
 					advertised.set(path, { ...ad, route });
 					this.#consumes.announce(path, announced, route);
-					announced.append({ prefix: path, captures: ad.captures, kind: "update", route });
+					announced.append({ prefix: path, kind: "update", route });
 				}
 			};
 			stopDrain = this.#goaway?.changed(() => drainAdvertised());
@@ -885,7 +876,6 @@ export class Subscriber {
 					console.debug(`announced: broadcast=${path} active=false`);
 					announced.append({
 						prefix: path,
-						captures: previous.captures,
 						kind: "end",
 						route: previous.route,
 					});
@@ -923,7 +913,6 @@ export class Subscriber {
 						advertised.set(path, {
 							live: false,
 							route: { identity, epoch, hops: full, cost: Cost.zero },
-							captures: undefined,
 						});
 						continue;
 					}
@@ -942,7 +931,6 @@ export class Subscriber {
 					advertised.set(path, {
 						live: false,
 						route: { identity, epoch, hops: [], cost: Cost.zero },
-						captures: undefined,
 					});
 					continue;
 				}
@@ -958,9 +946,8 @@ export class Subscriber {
 					cost: Cost.charged(cost ?? Cost.zero, link),
 					priority: this.#link.priority,
 				});
-				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
-					advertised.set(path, { live: false, route, captures });
+					advertised.set(path, { live: false, route });
 					continue;
 				}
 
@@ -968,10 +955,10 @@ export class Subscriber {
 				// next consume subscribes fresh, while the handles already out keep theirs.
 				const previous = advertised.get(path);
 				if (restart && previous?.live) {
-					advertised.set(path, { live: true, route, captures });
+					advertised.set(path, { live: true, route });
 					this.#consumes.announce(path, announced, route, true);
 					console.debug(`announced: broadcast=${path} restart=true identity=${identity} epoch=${epoch}`);
-					announced.append({ prefix: path, captures, kind: "restart", route });
+					announced.append({ prefix: path, kind: "restart", route });
 					continue;
 				}
 
@@ -980,20 +967,20 @@ export class Subscriber {
 				// route in place, so a forwarder re-prices without retracting.
 				if (previous?.live) {
 					// An update preserves the advertisement's identity.
-					advertised.set(path, { live: true, route, captures });
+					advertised.set(path, { live: true, route });
 					this.#consumes.announce(path, announced, route);
 					console.debug(`announced: broadcast=${path} rerouted`);
 					if (!routesEqual(previous.route, route)) {
-						announced.append({ prefix: path, captures, kind: "update", route });
+						announced.append({ prefix: path, kind: "update", route });
 					}
 					continue;
 				}
 
-				advertised.set(path, { live: true, route, captures });
+				advertised.set(path, { live: true, route });
 				this.#consumes.announce(path, announced, route);
 
 				console.debug(`announced: broadcast=${path} active=true identity=${identity}`);
-				announced.append({ prefix: path, captures, kind: "start", route });
+				announced.append({ prefix: path, kind: "start", route });
 			}
 
 			announced.close();

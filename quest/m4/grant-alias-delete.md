@@ -33,6 +33,13 @@ The alias is `alias` in `rs/moq-auth/src/wire.rs`. In JS it is `readPrefix`, `re
    tokens, key scopes, and grants like every other wildcard, with the message naming the
    prefix to write. Tokens 0.22 minted with an `exp` have expired by then. Delete this quest.
 
+`Prefix` (in `moq-net` and `@moq/net` since
+[moq-dev/moq#9800](https://github.com/moq-dev/moq/pull/9800)) refuses any `*` so a pattern
+written where a prefix belongs fails loudly, and so does every path an origin publishes,
+mounts, or looks up, in Rust and JS, so no broadcast exists that no prefix can name and that
+pre-0.22 subscribers would read as a wildcard. Step 2 decides whether both refusals outlive
+the alias: lifting them together makes `*` an ordinary path byte.
+
 ## Waiting
 
 - Maintainer: open the API or wire phase of the cycle after 0.22, before step 1 lands. A

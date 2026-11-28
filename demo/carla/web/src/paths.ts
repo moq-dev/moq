@@ -9,8 +9,8 @@
  */
 import * as Moq from "@moq/net";
 
-/** Every camera broadcast, and nothing else that shares the relay. */
-export const CAMERAS = Moq.Path.Pattern.parse("carla/*/*.hang");
+/** Where every camera broadcast lies; {@link parseCamera} picks the cameras out of what is listed. */
+export const CAMERAS = Moq.Path.from("carla");
 
 /** One announced camera. */
 export interface Camera {
@@ -22,8 +22,9 @@ export interface Camera {
 
 /** Parse a camera broadcast path, or `undefined` for anything else. */
 export function parseCamera(path: string): Camera | undefined {
-	if (!CAMERAS.matches(path)) return undefined;
-	const [, truck, file] = path.split("/");
+	// Split only at an unescaped `/`, keeping each segment escaped as written.
+	const [root, truck, file, ...rest] = Moq.Path.parts(path as Moq.Path.Valid);
+	if (root !== CAMERAS || !truck || rest.length > 0 || !file?.endsWith(".hang")) return undefined;
 	return { truck, id: `${truck}/${file.slice(0, -".hang".length)}` };
 }
 

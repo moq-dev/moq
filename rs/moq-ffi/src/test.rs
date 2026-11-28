@@ -4272,16 +4272,15 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 	source.close().unwrap();
 }
 
-/// Announcement filters do not re-root the origin, so relative broadcast references
-/// keep the same meaning as they have on the unfiltered consumer.
+/// An announcement prefix does not re-root the origin, so relative broadcast references
+/// keep the same meaning as they have on the whole consumer.
 #[tokio::test]
 async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer
 		.announced(MoqAnnounceConfig {
-			prefix: "a/".into(),
-			filter: None,
+			prefix: "a".into(),
 			hidden: false,
 		})
 		.unwrap();
@@ -4297,11 +4296,6 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 		assert!(
 			matches!(prefix.as_str(), "a/pub" | "a/source"),
 			"covered prefix should stay relative to the origin: {prefix}"
-		);
-		assert_eq!(
-			announcement.captures,
-			vec![prefix.strip_prefix("a/").unwrap().to_string()],
-			"the implicit trailing glob captures the suffix beneath the literal prefix"
 		);
 		if prefix == "a/pub" {
 			break await_announced(&consumer, "a/pub").await;
@@ -4323,32 +4317,26 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 	source.close().unwrap();
 }
 
+/// A prefix lists itself and what lies beneath it, and refuses a wildcard loudly.
 #[tokio::test]
-async fn announced_filters_patterns_and_reports_captures() {
+async fn announced_lists_a_prefix_and_refuses_a_wildcard() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	for (filter, captures) in [("*/chat", vec!["alice"]), ("alice/chat", vec![])] {
-		let announced = consumer
-			.announced(MoqAnnounceConfig {
-				prefix: "room".into(),
-				filter: Some(filter.into()),
-				hidden: false,
-			})
-			.unwrap();
+	let announced = consumer
+		.announced(MoqAnnounceConfig {
+			prefix: "room/alice".into(),
+			hidden: false,
+		})
+		.unwrap();
+	let _other = create_announced(&origin, "room/bob/chat");
+	let _chat = create_announced(&origin, "room/alice/chat");
+	assert_eq!(next_announced(&announced).await.prefix, "room/alice/chat");
 
-		// A claim at `room` could serve a match, but its own name is none, so it is not listed.
-		let broad = serve(&origin, "room");
-		let chat = create_announced(&origin, "room/alice/chat");
-		let audio = create_announced(&origin, "room/alice/audio");
-		let update = next_announced(&announced).await;
-
-		assert_eq!(update.prefix, "room/alice/chat");
-		assert_eq!(update.captures, captures);
-
-		chat.close().unwrap();
-		audio.close().unwrap();
-		broad.cancel();
-	}
+	let wildcard = consumer.announced(MoqAnnounceConfig {
+		prefix: "room/*".into(),
+		hidden: false,
+	});
+	assert!(matches!(wildcard, Err(MoqError::InvalidPrefix { .. })));
 }
 
 /// A `.`-named broadcast is listed only when the config opts in or the prefix names it.
@@ -4367,7 +4355,6 @@ async fn announced_hides_dot_paths_unless_asked() {
 		let announced = consumer
 			.announced(MoqAnnounceConfig {
 				prefix: prefix.into(),
-				filter: None,
 				hidden,
 			})
 			.unwrap();

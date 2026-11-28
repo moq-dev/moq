@@ -31,9 +31,6 @@ import {
 	hooks,
 	receive,
 	routeHops,
-	scopeCaptures,
-	scopeHead,
-	scopeOverlaps,
 	superseded,
 } from "./internal.ts";
 import * as Path from "./path.ts";
@@ -103,10 +100,17 @@ class Scope {
 		return joined;
 	}
 
-	/** The absolute paths a reader's `filter`, relative to the root, lists within this scope. */
-	patterns(filter: Path.Pattern = Path.Pattern.all()): Path.Patterns {
-		const rooted = new Path.Patterns([filter.rooted(this.root)]);
-		return this.allowed?.patterns().intersect(rooted) ?? rooted;
+	/**
+	 * The absolute subtrees a reader of `prefix`, relative to the root, lists within this scope.
+	 * Throws {@link Path.InvalidPrefix} for a prefix holding a `*`, which no grant can name, and
+	 * an error for one past the wire limits, which no session could ask its peer about.
+	 */
+	listed(prefix: Path.Valid): Path.Prefixes {
+		const rooted = new Path.Prefixes([Path.Prefix.parse(Path.encode(Path.join(this.root, prefix)))]);
+		if (!this.allowed) return rooted;
+		// A grant beneath the root can still pass the wire limits; no session could ask about it.
+		const listed = this.allowed.intersect(rooted).toArray();
+		return new Path.Prefixes(listed.filter((member) => Path.check(member.text as Path.Valid) === undefined));
 	}
 
 	/** The root-relative prefixes this scope asks its peer about: its own, already disjoint. */
@@ -541,7 +545,6 @@ interface Handoff {
 }
 
 interface Presented extends Advertised {
-	readonly captures: Path.Pattern[] | undefined;
 	/** See {@link Candidate.lost}. */
 	readonly lost?: () => boolean;
 }
@@ -556,11 +559,23 @@ class VersionedSignal<T> extends Signal<T> {
 	}
 }
 
+// Which routes a listing reports relative to each listed prefix: those at or beneath it, those
+// that could serve it from above too (`covering`), or only those at or above it (`exact`).
+type Reach = "beneath" | "both" | "above";
+
 // Navigation belongs to relative references, resolved before publication.
 function publishPath(path: Path.Valid): void {
+	nameable(path);
 	if (Path.parts(path).some((segment) => segment === "." || segment === "..")) {
 		throw new Error("broadcast path contains a navigation segment");
 	}
+}
+
+// A `*` stays out of every path while a prefix refuses one (so a pattern written where a
+// prefix belongs fails loudly): a broadcast no listing can root at, and that pre-0.22
+// subscribers read as a wildcard, is refused before it is published or watched.
+function nameable(path: Path.Valid): void {
+	if (path.includes("*")) throw new Error("path contains a `*`");
 }
 
 // A broadcast created through the origin: its producer, the handle the origin routes, and
@@ -1356,8 +1371,8 @@ export interface Reader {
 	/** Follow `path` across publisher identities; see {@link Consumer.follow}. */
 	follow(path: Path.Valid, options?: FollowOptions): Following;
 
-	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
-	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	/** The available broadcasts at or beneath `prefix`, as a live stream; see {@link Consumer.announced}. */
+	announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer;
 }
 
 /**
@@ -1491,7 +1506,9 @@ export class Producer implements Table {
 					for (const [prefix, count] of wants) for (let i = 0; i < count; i++) listener(prefix, false);
 				});
 			},
-			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
+			// A peer's route holding a `*` is skipped: `receive` would refuse it (see `nameable`),
+			// and that throw would end discovery for the whole session.
+			accepts: (prefix) => !prefix.includes("*") && this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			snapshot: (prefix) =>
 				this.#borrowed?.closed ? () => {} : this.#hold(this.#state.addSnapshot(this.#scope.prefix(prefix))),
@@ -1731,8 +1748,8 @@ export class Producer implements Table {
 	 *
 	 * A route is always a prefix on the wire: a claim covers `prefix` and every path beneath it
 	 * (the empty prefix claims every path). A service that only serves some of them advertises
-	 * the covering prefix and rejects the rest as they are requested; consumers narrow with a
-	 * {@link Path.Pattern} locally. The claim is priced, credentialed and shown like an exact
+	 * the covering prefix and rejects the rest as they are requested; consumers filter
+	 * announced paths locally. The claim is priced, credentialed and shown like an exact
 	 * route, and forwarded by sessions while it is visible.
 	 *
 	 * A consumer resolving a path under it that no announced local broadcast wins is handed to
@@ -2050,14 +2067,14 @@ export class Producer implements Table {
 		return this.#reader.follow(path, options);
 	}
 
-	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
-	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
-		return this.#reader.announced(filter, options);
+	/** The available broadcasts at or beneath `prefix`, as a live stream; see {@link Consumer.announced}. */
+	announced(prefix?: Path.Valid, options?: Announce.Options): Announce.Consumer {
+		return this.#reader.announced(prefix, options);
 	}
 
-	/** Every route change matching `filter`; see {@link Consumer.routes}. @internal */
-	routes(filter?: Path.Pattern, options?: Announce.Options): announce.Routes {
-		return this.#reader.routes(filter, options);
+	/** Every route change at or beneath `prefix`; see {@link Consumer.routes}. @internal */
+	routes(prefix?: Path.Valid, options?: Announce.Options): announce.Routes {
+		return this.#reader.routes(prefix, options);
 	}
 
 	/**
@@ -2402,7 +2419,7 @@ export class Consumer implements Reader {
 	follow(path: Path.Valid, options: FollowOptions = {}): Following {
 		const identity = options.identity;
 		const absolute = this.#scope.path(path);
-		Path.Pattern.literal(path);
+		nameable(absolute);
 		let watch = this.#state.watchers.get(absolute);
 		if (!watch) {
 			watch = { users: 0, version: new Signal(0) };
@@ -2509,9 +2526,9 @@ export class Consumer implements Reader {
 	// One resolution of `path`. A follower's (`announced`) takes only an announced front and
 	// never reports absence: {@link follow} retries it on the next identity instead.
 	#resolve(path: Path.Valid, identity: Identity.Valid | undefined, announced: boolean): Requesting {
-		Path.Pattern.literal(path);
 		const relative = path;
 		path = this.#scope.path(path);
+		nameable(path);
 		const requests = this.#state.requests.peek();
 		if (this.#state.closed.peek() !== undefined) {
 			// Closed origin: a request that can never resolve ends at once.
@@ -2711,34 +2728,37 @@ export class Consumer implements Reader {
 	}
 
 	/**
-	 * The paths announced matching `filter` within this handle's scope, each reported as it
-	 * becomes present or absent: every currently advertised one arrives first as `present`.
-	 * Another identity taking a path over keeps it present; {@link follow} it to see the
-	 * broadcast change. The filter is any pattern, relative to the root, and only picks what is
-	 * listed: what the wildcards stood for is each announcement's `captures`. A local broadcast
-	 * appears once it announces, exactly as a peer sees it. Only routes whose literal name
-	 * matches the filter are listed, unless `options.covering` also asks for every route whose
-	 * subtree overlaps it, a broadcast included. The stream ends when the origin closes or the
-	 * consumer is closed. Hidden routes are left out unless `options.hidden` opts in (see
-	 * {@link Announce.Options}). While open, it watches the filter's literal head: a `consume`
-	 * session asks its peer for announcements there.
+	 * The paths announced at or beneath `prefix`, relative to the root, within this handle's
+	 * scope, each reported as it becomes present or absent: every currently advertised one
+	 * arrives first as `present`. Another identity taking a path over keeps it present;
+	 * {@link follow} it to see the broadcast change. A local broadcast appears once it announces,
+	 * exactly as a peer sees it. Only routes at or beneath the prefix are listed, unless
+	 * `options.covering` also asks for every route whose subtree overlaps it, a broadcast
+	 * included. The stream ends when the origin closes or the consumer is closed. Hidden routes
+	 * are left out unless `options.hidden` opts in (see {@link Announce.Options}). While open, it
+	 * watches the prefix: a `consume` session asks its peer for announcements there. Throws
+	 * {@link Path.InvalidPrefix} for a prefix holding a `*`.
 	 */
-	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return announce.list(this.routes(filter, options));
+	announced(prefix: Path.Valid = Path.empty(), options?: Announce.Options): Announce.Consumer {
+		return announce.list(this.routes(prefix, options));
 	}
 
 	/**
-	 * Every change to the routes matching `filter`, for code that forwards routes: a re-price
-	 * is an `update`, and another identity serving a path a `restart`. The filter, options and
-	 * the watch are as for {@link announced}.
+	 * Every change to the routes at or beneath `prefix`, for code that forwards routes: a
+	 * re-price is an `update`, and another identity serving a path a `restart`. The prefix,
+	 * options and the watch are as for {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
+	routes(prefix: Path.Valid = Path.empty(), options?: Announce.Options): announce.Routes {
 		const producer = new announce.Producer();
-		const patterns = this.#scope.patterns(filter);
-		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
-		void this.#runAnnounced(producer, patterns, options?.hidden ?? false, options?.covering ?? false);
+		const reach: Reach = options?.exact ? "above" : options?.covering ? "both" : "beneath";
+		let listed = this.#scope.listed(prefix);
+		// An exact listing asks what could serve the path itself, which a scope reaching only
+		// beneath it never lets this handle request: nothing to list or wait on.
+		if (reach === "above" && !this.#scope.covers(prefix)) listed = new Path.Prefixes();
+		void producer.closed.then(this.#state.watch(listed.toArray().map((member) => member.text as Path.Valid)));
+		void this.#runAnnounced(producer, listed, options?.hidden ?? false, reach);
 		const consumer = producer.consume();
 		// The last reader leaving ends the stream and its watch.
 		closeUnwanted(producer);
@@ -2746,47 +2766,43 @@ export class Consumer implements Reader {
 	}
 
 	/** The routes visible to one announcement watcher. */
-	#listed(patterns: Path.Patterns, hidden: boolean, covering: boolean): Map<Path.Valid, Presented> {
+	#listed(listed: Path.Prefixes, hidden: boolean, reach: Reach): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
 		const root = this.#scope.root;
-		const scopes = [...patterns]
-			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
-			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
+		const heads = listed.toArray().map((member) => member.text as Path.Valid);
 		// Every prefix at or above the root presents as the empty path, where the claims covering the
 		// root compete as one tier, as a request beneath the root resolves.
-		const atRoot: Filed<{ candidate: Candidate; path: Path.Valid; pattern: Path.Pattern }>[] = [];
-		const present = (path: Path.Valid, entry: Candidate, pattern: Path.Pattern): Presented => ({
+		const atRoot: Filed<Candidate>[] = [];
+		const present = (entry: Candidate): Presented => ({
 			ref: entry.ref,
 			// Draining is this node's selection state: readers, and the peers a relay forwards to, see
 			// the route as it is.
 			route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
-			captures: scopeCaptures(pattern, path),
 			lost: entry.lost,
 		});
 		for (const [path, candidates] of this.#state.snapshot()) {
 			// Every candidate is a claim on the subtree it is filed at, a broadcast included, so a
 			// covering reader sees each one whose subtree overlaps its scope, as Rust's cursor does.
-			const scope = scopes.find(
-				({ pattern, head }) =>
-					(covering || pattern.matches(path)) &&
-					scopeOverlaps(pattern, path) &&
+			const seen = heads.some(
+				(head) =>
+					((reach !== "above" && Path.hasPrefix(head, path)) ||
+						(reach !== "beneath" && Path.hasPrefix(path, head))) &&
 					(hidden || !hiddenBelow(head, path)),
 			);
-			if (scope === undefined) continue;
+			if (!seen) continue;
 			const relative = Path.stripPrefix(root, path);
 			if (relative === null || relative === Path.empty()) {
 				if (relative === null && !Path.hasPrefix(path, root)) continue;
 				const depth = Path.parts(path).length;
 				candidates.forEach((candidate, order) => {
 					// Hold the empty path's place in the order the snapshot lists its first claim.
-					if (atRoot.length === 0) next.set(Path.empty(), present(path, candidate, scope.pattern));
-					const filed = { candidate, path, pattern: scope.pattern };
+					if (atRoot.length === 0) next.set(Path.empty(), present(candidate));
 					atRoot.push({
 						prefix: path,
 						depth,
 						order,
 						arrival: arrival(candidate.ref),
-						candidate: filed,
+						candidate,
 						route: candidate.route,
 					});
 				});
@@ -2794,23 +2810,22 @@ export class Consumer implements Reader {
 			}
 			// The preferred candidate wins, unless a higher epoch of its identity supersedes it.
 			const entry = firstEligible(candidates, () => true);
-			if (entry) next.set(relative, present(path, entry, scope.pattern));
+			if (entry) next.set(relative, present(entry));
 		}
 		// Hashed on the root, as a request for it resolves. A broadcast above the root serves only
 		// its own path, so a tier-mate that serves the root ranks ahead of it, as `presented` ranks them.
 		const best = bestOfTier(root, atRoot, {
-			serves: (entry) => !entry.candidate.candidate.exact || entry.prefix === root,
+			serves: (entry) => !entry.candidate.exact || entry.prefix === root,
 		});
-		if (best)
-			next.set(Path.empty(), present(best.candidate.path, best.candidate.candidate, best.candidate.pattern));
+		if (best) next.set(Path.empty(), present(best.candidate));
 		return next;
 	}
 
 	async #runAnnounced(
 		producer: announce.Producer,
-		patterns: Path.Patterns,
+		listed: Path.Prefixes,
 		hidden: boolean,
-		covering: boolean,
+		reach: Reach,
 	): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by ref
 		// plus route. Diffing the identity rather than mere presence means a republish emits a
@@ -2821,13 +2836,12 @@ export class Consumer implements Reader {
 			for (;;) {
 				if (this.#state.closed.peek() !== undefined) break;
 
-				const next = this.#listed(patterns, hidden, covering);
+				const next = this.#listed(listed, hidden, reach);
 
 				for (const [path, snap] of active) {
 					if (!next.has(path))
 						producer.append({
 							prefix: path,
-							captures: snap.captures,
 							kind: snap.lost?.() ? "offline" : "end",
 							route: snap.route,
 						});
@@ -2835,11 +2849,11 @@ export class Consumer implements Reader {
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "start", route: snap.route });
+						producer.append({ prefix: path, kind: "start", route: snap.route });
 					} else if (!sameIdentity(prev, snap)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "restart", route: snap.route });
+						producer.append({ prefix: path, kind: "restart", route: snap.route });
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
+						producer.append({ prefix: path, kind: "update", route: snap.route });
 					}
 				}
 				active = next;
@@ -2848,9 +2862,14 @@ export class Consumer implements Reader {
 				// list: one under a hidden segment holds only a reader that opts in.
 				let behind = false;
 				for (const prefix of this.#state.snapshots.peek().keys()) {
-					for (const pattern of patterns) {
-						if (!pattern.overlaps(Path.Pattern.subtree(prefix))) continue;
-						if (hidden || !hiddenBelow(scopeHead(pattern), prefix)) behind = true;
+					for (const member of listed) {
+						if (
+							reach === "above"
+								? !Path.hasPrefix(prefix, member.text as Path.Valid)
+								: !member.overlaps(prefix)
+						)
+							continue;
+						if (hidden || !hiddenBelow(member.text as Path.Valid, prefix)) behind = true;
 					}
 				}
 				if (behind) producer.behind();
@@ -2899,6 +2918,9 @@ export class Consumer implements Reader {
 		signal?: AbortSignal,
 	): Promise<broadcast.Consumer | undefined> {
 		signal?.throwIfAborted();
+		// Nothing can serve a path holding `*` (see `nameable`), so a peer's request for one is
+		// refused here rather than handed to a claim whose answer would throw.
+		if (path.includes("*")) return undefined;
 		const cancelled = new Once<true>();
 		let release: Dispose | undefined;
 		const abort = () => {

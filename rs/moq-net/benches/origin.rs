@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Identity, Pattern, Prefix, Prefixes, Timestamp, auth, broadcast, origin, track};
+use moq_net::{Identity, Prefix, Prefixes, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -185,17 +185,15 @@ fn bench_announce_covering(c: &mut Criterion) {
 								.unwrap()
 						})
 						.collect();
-					let consumer = producer
-						.consume()
-						.filter(&"**/*.chat".parse::<Pattern>().unwrap())
-						.unwrap();
+					let scope = Prefixes::from(Prefix::try_from("room/live.chat").unwrap());
+					let consumer = producer.consume().scope("", &scope).unwrap();
 					let consumer = if covering { consumer.covering() } else { consumer };
 					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.routes()).collect();
 					for cursor in &mut cursors {
 						while cursor.next().now_or_never().flatten().is_some() {}
 					}
 					b.iter(|| {
-						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
+						for (name, delivered) in [("room/live.chat", true), ("room", covering)] {
 							let route = producer.claim(name, moq_net::origin::RouteOptions::default()).unwrap();
 							for cursor in &mut cursors {
 								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);

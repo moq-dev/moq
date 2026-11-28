@@ -36,7 +36,8 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
   bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits
   lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag from
   lite-07, and keeps `GROUP_END` as the last frame's exclusive end.
-- ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
+- ✅ Added delete `moq-pattern` and `@moq/pattern`
+  ([moq-dev/moq#9800](https://github.com/moq-dev/moq/pull/9800))
   and removing `identity` from `hang::catalog` (landed)
   to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
   keep `moq-pattern` or catalog `identity`). Wildcards never transit the wire,

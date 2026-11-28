@@ -375,8 +375,8 @@ impl From<serde_json::Error> for Error {
 	}
 }
 
-impl From<moq_net::InvalidPattern> for Error {
-	fn from(err: moq_net::InvalidPattern) -> Self {
+impl From<moq_net::InvalidPrefix> for Error {
+	fn from(err: moq_net::InvalidPrefix) -> Self {
 		Error::InvalidConfig(err.to_string())
 	}
 }

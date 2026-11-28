@@ -399,7 +399,6 @@ dependencies = [
  "hashbrown",
  "hashlink",
  "kio",
- "moq-pattern",
  "num_enum",
  "rand",
  "rangemap",
@@ -408,13 +407,6 @@ dependencies = [
  "thiserror",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "moq-pattern"
-version = "0.1.2"
-dependencies = [
- "serde",
 ]
 
 [[package]]

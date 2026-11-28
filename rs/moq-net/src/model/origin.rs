@@ -20,9 +20,9 @@ use super::{
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
-	Error, Identity, InvalidPattern, Path, Pattern, Patterns, Prefixes,
+	Error, Identity, Path, Prefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
-	path::{self, Segment},
+	path,
 	time::{Deadlines, Instant},
 	util::{Keepalive, SendCell, TaskSet, Tasks, TasksWeak},
 };
@@ -1130,17 +1130,11 @@ enum Held {
 /// overwrites the pending `Announce` (or is delivered as another active update),
 /// a pending `Restart` stays one until delivered whatever metadata follows it,
 /// and `UnannounceAnnounce` preserves a real retract-then-announce key.
-type AnnounceMeta = (RouteMeta, Option<Vec<Pattern>>);
-
 enum PendingUpdate {
-	Announce(AnnounceMeta),
-	Restart(AnnounceMeta),
-	Unannounce(AnnounceMeta, Gone),
-	UnannounceAnnounce {
-		old: AnnounceMeta,
-		gone: Gone,
-		new: AnnounceMeta,
-	},
+	Announce(RouteMeta),
+	Restart(RouteMeta),
+	Unannounce(RouteMeta, Gone),
+	UnannounceAnnounce { old: RouteMeta, gone: Gone, new: RouteMeta },
 }
 
 /// How a route left a cursor: the origin ended it, or this node lost it.
@@ -1306,8 +1300,7 @@ impl OriginConsumerState {
 		}
 	}
 
-	fn apply_announce(&mut self, prefix: Path, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
-		let meta = (meta, captures);
+	fn apply_announce(&mut self, prefix: Path, meta: RouteMeta) {
 		let new = match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// First announce, a stale announce being replaced, or a metadata update.
 			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(meta),
@@ -1323,8 +1316,7 @@ impl OriginConsumerState {
 
 	/// Another identity replaces the route at `prefix`, or announces it afresh when
 	/// the consumer never saw the old one.
-	fn apply_restart(&mut self, prefix: Path, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
-		let meta = (meta, captures);
+	fn apply_restart(&mut self, prefix: Path, meta: RouteMeta) {
 		let new = match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			Some(PendingUpdate::Unannounce(old, gone) | PendingUpdate::UnannounceAnnounce { old, gone, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, gone, new: meta }
@@ -1334,7 +1326,7 @@ impl OriginConsumerState {
 			_ if self
 				.delivered
 				.get(&prefix)
-				.is_some_and(|delivered| delivered.identity == meta.0.3) =>
+				.is_some_and(|delivered| delivered.identity == meta.3) =>
 			{
 				PendingUpdate::Announce(meta)
 			}
@@ -1346,8 +1338,7 @@ impl OriginConsumerState {
 		self.put(prefix, new);
 	}
 
-	fn apply_unannounce(&mut self, prefix: Path, last: RouteMeta, captures: Option<Vec<Pattern>>, gone: Gone) {
-		let last = (last, captures);
+	fn apply_unannounce(&mut self, prefix: Path, last: RouteMeta, gone: Gone) {
 		match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely, and nothing is owed for it.
@@ -1362,14 +1353,9 @@ impl OriginConsumerState {
 			}
 			// The embedded announce cancels with this retraction; the consumer still
 			// needs the leading one. Its reason is the later one only when both carry
-			// one identity (captures and identity); otherwise the later reason is for a
-			// route never delivered.
+			// one identity; otherwise the later reason is for a route never delivered.
 			Some(PendingUpdate::UnannounceAnnounce { old, gone: prior, new }) => {
-				let gone = if old.1 == new.1 && old.0.3 == new.0.3 {
-					gone
-				} else {
-					prior
-				};
+				let gone = if old.3 == new.3 { gone } else { prior };
 				self.put(prefix, PendingUpdate::Unannounce(old, gone));
 			}
 		}
@@ -1419,7 +1405,7 @@ impl OriginConsumerState {
 			}
 			let pending = self.pending.get_mut(prefix).unwrap();
 			let wake = match pending.update.as_ref().unwrap() {
-				PendingUpdate::Announce((meta, _))
+				PendingUpdate::Announce(meta)
 					if self
 						.delivered
 						.get(prefix)
@@ -1428,7 +1414,7 @@ impl OriginConsumerState {
 				{
 					pending.hold(now, hold)
 				}
-				PendingUpdate::Restart((meta, _))
+				PendingUpdate::Restart(meta)
 					if self
 						.delivered
 						.get(prefix)
@@ -1436,7 +1422,7 @@ impl OriginConsumerState {
 				{
 					pending.hold(now, hold)
 				}
-				PendingUpdate::Announce((meta, _)) => match retracted.get(prefix).filter(|q| q.holds(meta)) {
+				PendingUpdate::Announce(meta) => match retracted.get(prefix).filter(|q| q.holds(meta)) {
 					Some(Quarantine {
 						held: Held::Anchoring(seen),
 						..
@@ -1472,17 +1458,17 @@ impl OriginConsumerState {
 	fn take_update(&mut self, prefix: Path) -> (RouteEvent, bool) {
 		let pending = self.remove(&prefix).unwrap();
 		let owed = pending.owed;
-		let ((meta, captures), kind) = match pending.update.unwrap() {
+		let (meta, kind) = match pending.update.unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
-				let kind = match self.delivered.insert(prefix.clone(), Delivered::new(&meta.0)) {
+				let kind = match self.delivered.insert(prefix.clone(), Delivered::new(&meta)) {
 					None => RouteKind::Start,
 					Some(_) => RouteKind::Update,
 				};
 				(meta, kind)
 			}
 			PendingUpdate::Restart(meta) => {
-				self.delivered.insert(prefix.clone(), Delivered::new(&meta.0));
+				self.delivered.insert(prefix.clone(), Delivered::new(&meta));
 				(meta, RouteKind::Restart)
 			}
 			PendingUpdate::Unannounce(meta, gone) => {
@@ -1499,7 +1485,6 @@ impl OriginConsumerState {
 		};
 		let announce = Announce {
 			prefix,
-			captures,
 			route: RouteInfo {
 				hops: meta.0,
 				cost: meta.1,
@@ -1593,13 +1578,6 @@ struct RouteEntry {
 	/// The route layer let go of the claim this entry follows through another of its
 	/// copies, whose own retraction is on its way. See [`Claim::retire`].
 	retired: bool,
-	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time: every path the
-	/// entry may serve.
-	///
-	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
-	/// and building one allocates a segment vector and a canonical string. Holding
-	/// it makes that visit a comparison.
-	claim: Pattern,
 	/// Whether the job routes answering this prefix route take its identity, which it
 	/// minted rather than was given: their readers continue on the job's route. It moves
 	/// to a fresh one as each job carrying it stops serving; see [`OriginState::advance`].
@@ -1709,18 +1687,24 @@ impl RouteEntry {
 			_ => true,
 		}
 	}
-
-	/// Whether this route and `allowed` share any path beneath the entry's prefix.
-	fn overlaps(&self, allowed: &Patterns) -> bool {
-		allowed.overlaps(&self.claim)
-	}
 }
 
 // Published names are literal coordinates. Navigation belongs to Relative,
 // resolved before publication, so a name remains stable when carried by a URL.
 fn publish_path(path: &Path) -> Result<(), Error> {
+	nameable(path)?;
 	if path.parts().any(|segment| matches!(segment, "." | "..")) {
 		return Err(Error::NavigationSegment);
+	}
+	Ok(())
+}
+
+// A `*` stays out of every path while a prefix refuses one (so a pattern written where a
+// prefix belongs fails loudly): a broadcast no listing can root at, and that pre-0.22
+// subscribers read as a wildcard, is refused before it is published or watched.
+fn nameable(path: &Path) -> Result<(), Error> {
+	if path.as_str().contains('*') {
+		return Err(Error::InvalidPath);
 	}
 	Ok(())
 }
@@ -1745,15 +1729,6 @@ pub(crate) fn filed(scope: &Prefixes, requested: &Path, publishes: impl Fn(&Path
 			(prefix, below)
 		})
 		.collect()
-}
-
-/// The paths a prefix can cover, using an exact pattern at the path depth limit.
-fn prefix_claim(prefix: &Path) -> Result<Pattern, InvalidPattern> {
-	if prefix.depth() == Path::MAX_PARTS {
-		Pattern::literal(prefix.as_str())
-	} else {
-		Pattern::subtree(prefix.as_str())
-	}
 }
 
 /// A served route's request queue: what materializes a requested path on demand.
@@ -1917,10 +1892,8 @@ struct CursorRoute {
 	meta: RouteMeta,
 	/// Whether it serves requests: part of the dedupe key, but never delivered.
 	served: bool,
-	/// The absolute prefix it was announced at, which decides `captures`.
+	/// The absolute prefix it was announced at.
 	prefix: Path,
-	/// What the cursor's scope captured from `prefix`.
-	captures: Option<Vec<Pattern>>,
 	/// The route entry that won, which a lookup reports a change of.
 	id: u64,
 }
@@ -1935,15 +1908,15 @@ impl WeakEntry for RemoteFront {
 	}
 }
 
-/// One registered announce cursor: which patterns it may see, how prefixes are
+/// One registered announce cursor: which prefixes it may see, how prefixes are
 /// re-rooted, and the per-cursor delivery buffer.
 struct TableCursor {
 	/// The prefix stripped from every delivered path.
 	root: Path,
-	/// The absolute patterns this cursor is scoped to (its token / scope).
-	allowed: Patterns,
-	/// Where the cursor hangs in the [`RouteTable`]: the literal heads of
-	/// `allowed`. A route the cursor can see sits at or under one of them, or on
+	/// The absolute prefixes this cursor is scoped to (its token / scope).
+	allowed: Prefixes,
+	/// Where the cursor hangs in the [`RouteTable`]: the members of `allowed`, or for a
+	/// lookup its root. A route the cursor can see sits at or under one of them, or on
 	/// the walk down to one.
 	heads: Vec<Path>,
 	/// The routes this cursor may see (control-plane split horizon).
@@ -1962,9 +1935,9 @@ struct TableCursor {
 	/// The absolute prefixes a mount shadows: routes at or beneath them are not
 	/// this cursor's to present.
 	holes: Vec<Path>,
-	/// For a cursor reading through a mount: the mount and the handle's own
-	/// patterns, so a wildcard captures what the handle names rather than the target.
-	named: Option<(Mount, Patterns)>,
+	/// For a cursor reading through a mount: the mount, which must be able to name what
+	/// it presents.
+	mount: Option<Mount>,
 	/// Whether the cursor counts an [`Interest`] at each of its heads.
 	interested: bool,
 	/// The last delivered best route per presented (relative) prefix, for change
@@ -1974,20 +1947,26 @@ struct TableCursor {
 	ranked: bool,
 	/// Whether the cursor serves a path lookup ([`Consumer::path_routes`]), which reads only
 	/// what serves its root: the entry [`RouteTable::best_route`] picks for it, as a request
-	/// does. It reports no captures, so a claim filed above the root takes over from one filed
-	/// there in place, and it reports any change of the entry serving the root, which a refused
-	/// request asks again.
+	/// does. It sees only the routes covering its root, so one claiming only paths beneath it
+	/// never masks the one that serves it, and it reports any change of the entry serving the
+	/// root, which a refused request asks again.
 	lookup: bool,
 }
 
 impl TableCursor {
+	/// Whether a route at the absolute `prefix` could serve something this cursor lists: its
+	/// subtree overlaps the scope, or for a lookup, covers the root.
+	fn reaches(&self, prefix: &Path) -> bool {
+		match self.lookup {
+			true => self.root.has_prefix(prefix),
+			false => self.allowed.overlaps(prefix.as_str()),
+		}
+	}
+
 	/// Where `prefix` presents on this cursor, named relative to the cursor root.
-	/// The prefix stays a prefix; the scope and filter only decide visibility.
-	/// `claim` is the prefix's [`prefix_claim`], which the caller already holds:
-	/// building one allocates, and the sweeps below ask this per route per
-	/// cursor.
-	fn presented(&self, prefix: &Path, claim: &Pattern) -> Option<Path> {
-		if !self.allowed.overlaps(claim) {
+	/// The prefix stays a prefix; the scope only decides visibility.
+	fn presented(&self, prefix: &Path) -> Option<Path> {
+		if !self.reaches(prefix) {
 			return None;
 		}
 
@@ -1997,54 +1976,28 @@ impl TableCursor {
 		self.root.has_prefix(prefix).then(Path::default)
 	}
 
-	/// What the cursor's most specific matching scope member captures from an
-	/// exact announced prefix. An overlap-only route does not pin every wildcard.
-	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
-		if self.lookup {
-			return None;
-		}
-		let (literal, allowed) = match &self.named {
-			Some((mount, allowed)) => (Pattern::literal(mount.name(prefix)?.as_str()).ok()?, allowed),
-			None => (Pattern::literal(prefix.as_str()).ok()?, &self.allowed),
-		};
-		allowed
-			.iter()
-			.filter_map(|allowed| {
-				allowed
-					.captures(&literal)
-					.map(|captures| (allowed.specificity(), captures))
-			})
-			.max_by_key(|(specificity, _)| *specificity)
-			.map(|(_, captures)| captures)
-	}
-
 	/// Whether this cursor waits on `snapshot`: what it delivers could present here,
 	/// as [`Self::visible`] judges a route at or beneath its prefix.
 	fn awaits(&self, snapshot: &SnapshotEntry) -> bool {
 		self.horizon.admits_link(snapshot.link)
-			&& self.allowed.overlaps(&snapshot.claim)
+			&& self.reaches(&snapshot.prefix)
 			&& self.hidden.reaches(&self.heads, &snapshot.prefix)
 			&& !self.holes.iter().any(|hole| snapshot.prefix.has_prefix(hole))
 			// Too deep for the mount to name means everything beneath is too.
-			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&snapshot.prefix))
+			&& self.mount.as_ref().is_none_or(|mount| mount.names(&snapshot.prefix))
 	}
 
 	/// Whether this cursor may observe `entry` at all: advertised, not behind
-	/// the excluded peer (split horizon), within the cursor's patterns, and
+	/// the excluded peer (split horizon), within the cursor's prefixes, and
 	/// nameable through its mount.
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		entry.live()
 			&& self.horizon.admits(entry)
-			&& entry.overlaps(&self.allowed)
-			&& (self.covering
-				|| match &self.named {
-					Some((mount, allowed)) => mount
-						.name(&entry.prefix)
-						.is_some_and(|name| allowed.matches(name.as_str())),
-					None => self.allowed.matches(entry.prefix.as_str()),
-				}) && self.discovers(&entry.prefix)
+			&& self.reaches(&entry.prefix)
+			&& (self.covering || self.allowed.matches(entry.prefix.as_str()))
+			&& self.discovers(&entry.prefix)
 			&& !self.holes.iter().any(|hole| entry.prefix.has_prefix(hole))
-			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
+			&& self.mount.as_ref().is_none_or(|mount| mount.names(&entry.prefix))
 	}
 
 	/// Deliver a changed winner at this presented prefix, reporting a route left with
@@ -2054,14 +2007,14 @@ impl TableCursor {
 			if let Some(last) = self.current.remove(presented)
 				&& let Ok(mut state) = self.state.write()
 			{
-				state.apply_unannounce(self.under.rejoin(presented), last.meta, last.captures, gone);
+				state.apply_unannounce(self.under.rejoin(presented), last.meta, gone);
 			}
 			return;
 		};
 		let served = entry.server.is_some();
 		let previous = self.current.get(presented);
 		// Compared in place first: most visits find the winner unchanged, and building
-		// what it delivers allocates. Captures follow from the prefix.
+		// what it delivers allocates.
 		if previous.is_some_and(|previous| {
 			previous.identity == entry.identity
 				&& previous.prefix == entry.prefix
@@ -2073,7 +2026,6 @@ impl TableCursor {
 		}
 
 		let meta = entry.meta(self.ranked);
-		let captures = self.captures(&entry.prefix);
 		let previous = self.current.insert(
 			presented.clone(),
 			CursorRoute {
@@ -2081,23 +2033,14 @@ impl TableCursor {
 				meta: meta.clone(),
 				served,
 				prefix: entry.prefix.clone(),
-				captures: captures.clone(),
 				id: entry.id,
 			},
 		);
 		match previous {
-			// Captures are consumer identity, not route metadata. Replace the old
-			// identity explicitly so consumers keyed on it remove it.
-			Some(previous) if previous.captures != captures => {
-				if let Ok(mut state) = self.state.write() {
-					state.apply_unannounce(self.under.rejoin(presented), previous.meta, previous.captures, gone);
-					state.apply_announce(self.under.rejoin(presented), meta, captures);
-				}
-			}
 			// Another identity: whatever was resolved under the prefix is another stream.
 			Some(previous) if previous.identity != entry.identity => {
 				if let Ok(mut state) = self.state.write() {
-					state.apply_restart(self.under.rejoin(presented), meta, captures);
+					state.apply_restart(self.under.rejoin(presented), meta);
 				}
 			}
 			// Unchanged metadata and servability: nothing the consumer could
@@ -2111,7 +2054,7 @@ impl TableCursor {
 				if previous.meta == meta && previous.served == served && !(self.lookup && previous.id != entry.id) => {}
 			_ => {
 				if let Ok(mut state) = self.state.write() {
-					state.apply_announce(self.under.rejoin(presented), meta, captures);
+					state.apply_announce(self.under.rejoin(presented), meta);
 				}
 			}
 		}
@@ -2210,29 +2153,12 @@ impl Mount {
 		})
 	}
 
-	/// The handle-side absolute `patterns` beneath this mount, as origin-side
-	/// patterns beneath its target.
-	///
-	/// A member too deep to root matches no valid path and drops, except that a
-	/// `**` one segment past the limit can only match nothing and is dropped instead,
-	/// so a deep target keeps its exact path.
-	fn translate(&self, patterns: &Patterns) -> Patterns {
+	/// The handle-side absolute `prefixes` beneath this mount, as origin-side prefixes
+	/// beneath its target. A member too deep to root covers no valid path and drops.
+	fn translate(&self, prefixes: &Prefixes) -> Prefixes {
 		let target = self.target.as_str();
-		patterns
-			.rebase(self.at.as_str())
-			.iter()
-			.filter_map(|member| {
-				member
-					.rooted(target)
-					.or_else(|_| {
-						let segments = member
-							.segments()
-							.iter()
-							.filter(|segment| **segment != Segment::Globstar);
-						Pattern::new(segments.cloned())?.rooted(target)
-					})
-					.ok()
-			})
+		(prefixes.rebase(self.at.as_str()).iter())
+			.filter_map(|member| member.rooted(target).ok())
 			.collect()
 	}
 
@@ -2330,21 +2256,13 @@ impl Default for OriginScope {
 	}
 }
 
-/// The announce-interest prefixes that cover what a cursor lists on a prefix-only
-/// wire: each member's literal head, minus heads another already covers.
-///
-/// A pattern's literal segments are spelled like a path's, so a head fails only when it
-/// is too long for a path, and then it asks for nothing.
-pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<Path> {
-	let mut heads: Vec<Path> = allowed
+/// Where a cursor listing `allowed` hangs: each member as a path. A member too long for a
+/// path covers none and asks for nothing.
+fn heads(allowed: &Prefixes) -> Vec<Path> {
+	allowed
 		.iter()
-		.filter_map(|pattern| Path::new(pattern.head()).ok())
-		.collect();
-	heads.sort();
-	heads.dedup();
-	let covered = heads.clone();
-	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
-	heads
+		.filter_map(|prefix| Path::new(prefix.as_str()).ok())
+		.collect()
 }
 
 /// Which routes beneath a hidden segment an announce cursor reports.
@@ -2427,15 +2345,12 @@ pub enum RouteKind {
 /// [`prefix`](Self::prefix) and every path beneath it are servable. A broadcast
 /// announces its own path, so the prefix usually names one, but resolve it with
 /// [`Consumer::request`]; the application decides which paths name
-/// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
+/// broadcasts, and filters them locally when it wants a subset.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Announce {
 	/// The prefix the route covers, relative to the consuming cursor's root.
 	pub prefix: Path,
-	/// What the scope's wildcards stood for when the announced prefix pins all of
-	/// them. `None` for an overlap-only route or a scope without a complete match.
-	pub captures: Option<Vec<Pattern>>,
 	/// The route serving the prefix. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: RouteInfo,
@@ -2706,9 +2621,8 @@ impl Producer {
 	/// producer may publish under (after [`scope`](Self::scope)) or beneath a
 	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
-	/// [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`], [`Error::InvalidPath`] if it holds a segment no
-	/// pattern can spell (`*` or `**`), [`Error::NavigationSegment`] for a literal `.` or `..`,
-	/// or [`Error::Closed`] once the origin's
+	/// [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`], [`Error::InvalidPath`] if it holds a `*`,
+	/// [`Error::NavigationSegment`] for a literal `.` or `..`, or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn route(&self, path: impl TryInto<Path, Error: Into<Error>>, options: RouteOptions) -> Result<Route, Error> {
 		let full = self.root.join(&path::convert(path)?)?;
@@ -2736,10 +2650,6 @@ impl Producer {
 		if full.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
-		// refuse it here rather than publish a broadcast no cursor can see.
-		let claim = prefix_claim(&full)?;
-
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
 
@@ -2750,7 +2660,7 @@ impl Producer {
 			hop: Hop::from(self.node),
 			shared: self.shared.clone(),
 			requested: full.clone(),
-			prefixes: vec![(full.clone(), claim, 0)],
+			prefixes: vec![(full.clone(), 0)],
 			excluded: self.scope.excluded.clone(),
 			local: true,
 			link: self.link,
@@ -2939,7 +2849,7 @@ impl Producer {
 	/// A route is always a prefix on the wire: a claim covers `prefix` and every path
 	/// beneath it (the empty prefix claims every path). A service that only serves some of
 	/// them, say `pid/*.hang`, advertises the covering prefix and refuses the
-	/// rest as they are requested; consumers narrow with a [`Pattern`] locally.
+	/// rest as they are requested; consumers narrow what they list locally.
 	/// This is the one shape every wire carries, so a route means the same
 	/// thing on every hop.
 	///
@@ -3089,7 +2999,7 @@ impl Producer {
 	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
 	/// so a target is always read as the origin holds it. Mounts may share a target.
 	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`],
-	/// and [`Error::InvalidPath`] if `at` holds a segment no pattern can spell.
+	/// and [`Error::InvalidPath`] if `at` holds a `*`.
 	pub fn mount(
 		&self,
 		at: impl TryInto<Path, Error: Into<Error>>,
@@ -3100,8 +3010,7 @@ impl Producer {
 		if at.depth() > Path::MAX_PARTS || target.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		// A mount point no pattern can spell could never be announced or authorized.
-		Pattern::literal(at.as_str())?;
+		nameable(&at)?;
 		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 		// An excluded subtree at, above, or beneath the target would be read under `at`.
 		if !self.scope.allowed.matches(target.as_str())
@@ -3171,9 +3080,9 @@ struct Announcing {
 	shared: SendCell<kio::Shared<OriginState>>,
 	/// The absolute advertised prefix, which also keys the ingress announce counters.
 	requested: Path,
-	/// Where the route is filed in the table (see [`filed`]), each with its
-	/// [`prefix_claim`] and how many segments beneath the advertised prefix it lies.
-	prefixes: Vec<(Path, Pattern, u8)>,
+	/// Where the route is filed in the table (see [`filed`]), each with how many segments
+	/// beneath the advertised prefix it lies.
+	prefixes: Vec<(Path, u8)>,
 	/// The absolute subtrees the producer may not serve.
 	excluded: Arc<[Path]>,
 	local: bool,
@@ -3193,17 +3102,11 @@ impl Announcing {
 		if requested.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		// Refuses a path only a pattern could spell.
-		prefix_claim(&requested)?;
 		if !producer.scope.publishes(&requested) {
 			return Err(Error::Unauthorized);
 		}
 		let scope = &producer.scope;
-		let mut prefixes = Vec::new();
-		for (prefix, below) in filed(&scope.allowed, &requested, |prefix| scope.publishes(prefix)) {
-			let claim = prefix_claim(&prefix)?;
-			prefixes.push((prefix, claim, below));
-		}
+		let prefixes = filed(&scope.allowed, &requested, |prefix| scope.publishes(prefix));
 		if prefixes.is_empty() {
 			return Err(Error::Unauthorized);
 		}
@@ -3244,7 +3147,7 @@ impl Announcing {
 		let minted = route.identity.clone().unwrap_or_else(Identity::random);
 		let filed: Arc<[Path]> = self.prefixes.iter().map(|(prefix, ..)| prefix.clone()).collect();
 		let mut entries = Vec::with_capacity(self.prefixes.len());
-		for (prefix, claim, below) in &self.prefixes {
+		for (prefix, below) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
 			shared.next_route += 1;
@@ -3282,11 +3185,10 @@ impl Announcing {
 				advertised: serving.advertised,
 				stale,
 				retired: false,
-				claim: claim.clone(),
 				lends: serving.lends,
 				lent: None,
 			});
-			shared.sync_route(prefix, claim, Gone::End);
+			shared.sync_route(prefix, Gone::End);
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
@@ -3814,8 +3716,8 @@ enum Retract {
 	Retired { ended: bool },
 }
 
-/// The write half of an advertisement: a live claim that paths under a
-/// [`Pattern`] can be served.
+/// The write half of an advertisement: a live claim that paths under a prefix can be
+/// served.
 ///
 /// Held by a [`Route`]; dropping it retracts the route, which [`Routes`]s
 /// observe and sessions withdraw from their peers.
@@ -3938,8 +3840,7 @@ impl AnnounceProducer {
 				) {
 				entry.since = stamp;
 			}
-			let claim = entry.claim.clone();
-			shared.sync_route(prefix, &claim, Gone::End);
+			shared.sync_route(prefix, Gone::End);
 			if let Some(((lender, lender_id), identity)) = spent {
 				shared.advance(&lender, lender_id, &identity);
 			}
@@ -4028,9 +3929,8 @@ impl AnnounceProducer {
 			if let Some(server) = &entry.server {
 				released.extend(server.lock().renew());
 			}
-			let claim = entry.claim.clone();
 			let spent = entry.lent.take().map(|lender| (lender, entry.identity.clone()));
-			shared.sync_route(prefix, &claim, Gone::End);
+			shared.sync_route(prefix, Gone::End);
 			if let Some(((lender, lender_id), identity)) = spent {
 				shared.advance(&lender, lender_id, &identity);
 			}
@@ -4084,7 +3984,7 @@ impl AnnounceProducer {
 				Retract::Lost | Retract::Retired { ended: false } => Gone::Offline,
 				Retract::Ended | Retract::Withdrawn | Retract::Retired { ended: true } => Gone::End,
 			};
-			shared.sync_route(&entry.prefix, &entry.claim, gone);
+			shared.sync_route(&entry.prefix, gone);
 			if entry.advertised
 				&& let Some((lender, lender_id)) = &entry.lent
 			{
@@ -6009,7 +5909,7 @@ struct RouteTable {
 struct RouteNode {
 	/// Routes announced exactly at this prefix.
 	entries: Vec<RouteEntry>,
-	/// Cursors with an interest head at this prefix (see [`interest_prefixes`]).
+	/// Cursors with an interest head at this prefix (see [`TableCursor::heads`]).
 	cursors: Vec<ConsumerId>,
 	/// Cursors at this node or below. An announcement walks only the subtrees
 	/// that hold one, so a deep table of routes nobody watches costs nothing.
@@ -6183,9 +6083,8 @@ struct SnapshotEntry {
 	id: u64,
 	/// The link its routes arrive on, so a horizon hiding them never waits on it.
 	link: Link,
-	/// The prefix's [`prefix_claim`], so a cursor whose patterns miss it never waits on it.
-	claim: Pattern,
-	/// The absolute prefix, so a cursor that could see nothing beneath it never waits on it.
+	/// The absolute prefix, so a cursor that could see nothing at or beneath it never waits
+	/// on it.
 	prefix: Path,
 }
 
@@ -6817,12 +6716,12 @@ impl OriginState {
 	/// Recompute which entries at `prefix` are stale after its withdrawals changed.
 	fn restale(&mut self, prefix: &Path) {
 		let peers = self.withdrawn.get(prefix);
-		let mut changed = None;
+		let mut changed = false;
 		for entry in self.routes.at_mut(prefix) {
 			let stale = peers.is_some_and(|peers| entry.hops.iter().any(|hop| peers.contains(hop)));
 			if entry.stale != stale {
 				entry.stale = stale;
-				changed = Some(entry.claim.clone());
+				changed = true;
 				// Back in contention, it ranks as newly arrived.
 				if entry.live() {
 					entry.since = self.next_route;
@@ -6830,8 +6729,8 @@ impl OriginState {
 				}
 			}
 		}
-		if let Some(claim) = changed {
-			self.sync_route(prefix, &claim, Gone::End);
+		if changed {
+			self.sync_route(prefix, Gone::End);
 		}
 	}
 
@@ -6877,9 +6776,8 @@ impl OriginState {
 
 	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
 	/// every cursor it can present on. Called after an entry covering `prefix`
-	/// was added, updated, or removed. `claim` is `prefix`'s [`prefix_claim`],
-	/// held by the entry that changed.
-	fn sync_route(&mut self, prefix: &Path, claim: &Pattern, gone: Gone) {
+	/// was added, updated, or removed.
+	fn sync_route(&mut self, prefix: &Path, gone: Gone) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		let mut candidates = None;
@@ -6887,7 +6785,7 @@ impl OriginState {
 			let Some(cursor) = self.cursors.get_mut(&id) else {
 				continue;
 			};
-			if let Some(presented) = cursor.presented(prefix, claim) {
+			if let Some(presented) = cursor.presented(prefix) {
 				if presented.is_empty() {
 					// A cursor root can collapse several covering prefixes into one.
 					Self::sync_cursor(routes, cursor, &presented, gone);
@@ -6926,10 +6824,7 @@ impl OriginState {
 	/// Start a [`Snapshot`] at the absolute `prefix` for the routes arriving on `link`.
 	fn snapshot(&mut self, shared: &SendCell<kio::Shared<OriginState>>, prefix: Path, link: Link) -> Snapshot {
 		// A prefix past the depth limit can carry no route, so nothing waits on it.
-		let Ok(claim) = prefix_claim(&prefix) else {
-			return Snapshot::landed();
-		};
-		if self.closed {
+		if prefix.depth() > Path::MAX_PARTS || self.closed {
 			return Snapshot::landed();
 		}
 		let id = self.next_snapshot;
@@ -6939,7 +6834,6 @@ impl OriginState {
 			SnapshotEntry {
 				id,
 				link,
-				claim,
 				prefix: prefix.clone(),
 			},
 		);
@@ -7079,7 +6973,7 @@ impl OriginState {
 				node.walk(&mut |node| nodes.push(node));
 			}
 			for entry in nodes.into_iter().flat_map(|node| node.entries.iter()) {
-				if let Some(p) = cursor.presented(&entry.prefix, &entry.claim) {
+				if let Some(p) = cursor.presented(&entry.prefix) {
 					presented.insert(p);
 				}
 			}
@@ -7229,7 +7123,7 @@ impl OriginState {
 		let filed = entry.filed.clone();
 		let identity = Identity::random();
 		for at in filed.iter() {
-			let mut moved = Vec::new();
+			let mut moved = false;
 			for entry in self.routes.at_mut(at) {
 				let same = entry.lends
 					&& entry.identity == *spent
@@ -7237,11 +7131,11 @@ impl OriginState {
 				if same {
 					entry.identity = identity.clone();
 					entry.epoch = 0;
-					moved.push(entry.claim.clone());
+					moved = true;
 				}
 			}
-			for claim in moved {
-				self.sync_route(at, &claim, Gone::End);
+			if moved {
+				self.sync_route(at, Gone::End);
 			}
 		}
 	}
@@ -7914,10 +7808,6 @@ pub struct Consumer {
 	max_hops: NonZeroUsize,
 	scope: OriginScope,
 
-	// What `announced` and `routes` list, absolute: the scope's subtrees, narrowed by
-	// each `filter`. Discovery only; requests answer to the scope alone.
-	listed: Patterns,
-
 	// A prefix that is automatically stripped from all paths.
 	root: Path,
 
@@ -7972,7 +7862,6 @@ impl Consumer {
 			node: producer.node,
 			max_hops: producer.max_hops,
 			scope: producer.scope.clone(),
-			listed: producer.scope.allowed.patterns(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
 			stats,
@@ -8053,7 +7942,6 @@ impl Consumer {
 			node: self.node,
 			max_hops: self.max_hops,
 			scope: OriginScope::default(),
-			listed: Patterns::from(Pattern::all()),
 			root: Path::default(),
 			shared: self.shared.clone(),
 			stats: stats::Session::default(),
@@ -8297,7 +8185,6 @@ impl Consumer {
 	pub(crate) fn empty(&self) -> Self {
 		Self {
 			scope: OriginScope::empty(),
-			listed: Patterns::new(),
 			..self.clone()
 		}
 	}
@@ -8317,11 +8204,10 @@ impl Consumer {
 	///
 	/// Allocates a per-cursor coalescing buffer and replays the currently
 	/// announced routes as initial updates. Routes stay prefixes and are named
-	/// relative to this consumer's root; its scope and [`filter`](Self::filter)s only
-	/// decide visibility. Only routes whose literal name both admit are reported, unless
-	/// [`covering`](Self::covering) asks for every route that could serve them.
-	/// Routes with a segment starting with `.` below the literal head of what is listed
-	/// are hidden unless [`with_hidden`](Self::with_hidden) opted in.
+	/// relative to this consumer's root; its scope only decides visibility. Only routes
+	/// the scope covers are reported, unless [`covering`](Self::covering) asks for every
+	/// route that could serve them. Routes with a segment starting with `.` below a
+	/// prefix of the scope are hidden unless [`with_hidden`](Self::with_hidden) opted in.
 	/// The stream also watches its scope: a client session fed by this origin asks
 	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`Routes`] to unregister.
@@ -8333,10 +8219,13 @@ impl Consumer {
 	fn listing(&self, lookup: bool) -> Routes {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let cursor =
-			|root: Path, allowed: Patterns, hidden: Hidden, mount: Option<&Mount>, under: Path, holes: Vec<Path>| {
+			|root: Path, allowed: Prefixes, hidden: Hidden, mount: Option<&Mount>, under: Path, holes: Vec<Path>| {
 				TableCursor {
+					heads: match lookup {
+						true => vec![root.clone()],
+						false => heads(&allowed),
+					},
 					root,
-					heads: interest_prefixes(&allowed),
 					allowed,
 					horizon: self.horizon,
 					hidden,
@@ -8344,7 +8233,7 @@ impl Consumer {
 					state: state.clone(),
 					under,
 					holes,
-					named: mount.map(|mount| (mount.clone(), self.listed.clone())),
+					mount: mount.cloned(),
 					interested: self.interested,
 					current: HashMap::new(),
 					ranked: self.horizon.node == NodeFilter::Own,
@@ -8369,7 +8258,7 @@ impl Consumer {
 			};
 			let cursors = vec![cursor(
 				root,
-				mount.translate(&self.listed),
+				mount.translate(&self.scope.allowed),
 				self.hidden.translate(mount),
 				Some(mount),
 				Path::default(),
@@ -8387,10 +8276,11 @@ impl Consumer {
 
 		// Otherwise the consumer's own cursor, minus the mounted and excluded subtrees,
 		// plus one cursor per mount beneath the root it may discover, presenting under it.
-		let heads = interest_prefixes(&self.listed);
+		// A lookup reads only what covers its root, which no mount beneath it does.
+		let heads = heads(&self.scope.allowed);
 		let mut holes = self.scope.holes(None).unwrap_or_default();
 		let mut cursors = Vec::new();
-		for mount in self.scope.mounts.iter() {
+		for mount in self.scope.mounts.iter().filter(|_| !lookup) {
 			let Some(under) = mount.at.strip_prefix(&self.root) else {
 				continue;
 			};
@@ -8398,7 +8288,7 @@ impl Consumer {
 			let Some(mount_holes) = self.scope.holes(Some(mount)) else {
 				continue;
 			};
-			let allowed = mount.translate(&self.listed);
+			let allowed = mount.translate(&self.scope.allowed);
 			// Hidden at the mount point means hidden throughout: the dot segment is above
 			// everything the mount holds. A top-up feed's rule moves onto the target.
 			if allowed.is_empty()
@@ -8422,7 +8312,7 @@ impl Consumer {
 			0,
 			cursor(
 				self.root.clone(),
-				self.listed.clone(),
+				self.scope.allowed.clone(),
 				self.hidden.clone(),
 				None,
 				Path::default(),
@@ -8466,38 +8356,27 @@ impl Consumer {
 	///
 	/// [`Self::follow`] resolves each identity this reports, and [`Self::request`] concludes
 	/// absence from its sync. Fails with [`Error::Unauthorized`] when this consumer's scope can
-	/// never cover the path, and with [`Error::InvalidPath`] when no pattern can spell it (a
-	/// segment containing `*`).
+	/// never cover the path.
 	pub(crate) fn path_routes(&self, path: impl TryInto<Path, Error: Into<Error>>) -> Result<Follow, Error> {
 		let path = path::convert(path)?;
 
 		// On a consumer limited to `foo/specific`, no route can ever cover `foo`.
 		let root = self.root.join(&path)?;
+		nameable(&root)?;
+		// The join is bounded in bytes only, and the interest it registers must encode.
+		if root.depth() > Path::MAX_PARTS {
+			return Err(BoundsExceeded.into());
+		}
 		if !self.scope.permits(&root) {
 			return Err(Error::Unauthorized);
 		}
 
-		// List the path itself, which still sees every route whose claim covers it: the
-		// rest of the origin never wakes it, and a route claiming only paths beneath it (a
-		// scoped dynamic at the same prefix) never masks the one that serves it, just as a
-		// request skips it. A lookup answers to the scope alone, so it starts from the
-		// scope's subtrees rather than this handle's discovery filters.
-		let rooted = Pattern::literal(path.as_str())?
-			.rooted(self.root.as_str())
-			.map_err(|_| BoundsExceeded)?;
-		let listed = self
-			.scope
-			.allowed
-			.patterns()
-			.intersect(&rooted.into())
-			.map_err(|_| Error::Unauthorized)?;
 		// Rooted at the path, so every claim covering it presents at the root, ranked as one
-		// answer the way a request ranks them, wherever each claim is filed.
-		let consumer = Consumer {
-			root,
-			listed,
-			..self.clone()
-		};
+		// answer the way a request ranks them, wherever each claim is filed. The lookup sees
+		// only those claims (see `TableCursor::lookup`): the rest of the origin never wakes
+		// it, and a route claiming only paths beneath it (a scoped dynamic at the same
+		// prefix) never masks the one that serves it, just as a request skips it.
+		let consumer = Consumer { root, ..self.clone() };
 
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
@@ -8559,7 +8438,7 @@ impl Consumer {
 	/// Pass an owned [`Identity`] to follow only that stream: another one taking over ends
 	/// it, and the identity is handed out again when it serves the path again. Fails with
 	/// [`Error::Unauthorized`] when this consumer's scope can never cover the path, and with
-	/// [`Error::InvalidPath`] when no pattern can spell it.
+	/// [`Error::InvalidPath`] when it holds a `*`.
 	pub fn follow(
 		&self,
 		path: impl TryInto<Path, Error: Into<Error>>,
@@ -8581,32 +8460,11 @@ impl Consumer {
 		let root = self.root.join(&path::convert(root)?)?;
 		let rooted = prefixes.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
-		// A filter too intricate to narrow with the scope lists nothing it can name; refuse
-		// it rather than list less than asked.
-		let listed = self
-			.listed
-			.intersect(&rooted.patterns())
-			.map_err(|_| Error::Unauthorized)?;
 		Ok(Consumer {
 			scope,
-			listed,
 			root,
 			..self.clone()
 		})
-	}
-
-	/// A clone whose [`announced`](Self::announced) and [`routes`](Self::routes) list only
-	/// the routes `pattern`, relative to this root, matches, and report what its wildcards
-	/// captured ([`Announce::captures`]). Filters narrow each other. A discovery filter, not
-	/// a scope: requests are unaffected.
-	///
-	/// Returns [`Error::BoundsExceeded`] when rooting the pattern would exceed the path
-	/// limit or the root holds a `*`, and [`Error::Unauthorized`] when the filter is too
-	/// intricate to narrow what this handle lists.
-	pub fn filter(&self, pattern: &Pattern) -> Result<Consumer, Error> {
-		let rooted = pattern.rooted(self.root.as_str()).map_err(|_| BoundsExceeded)?;
-		let listed = self.listed.intersect(&rooted.into()).map_err(|_| Error::Unauthorized)?;
-		Ok(Consumer { listed, ..self.clone() })
 	}
 
 	/// Resolve a broadcast by exact path, optionally pinning its [`Identity`].
@@ -9248,10 +9106,10 @@ impl Routes {
 			let Some(cursor) = table.cursors.get(id) else {
 				continue;
 			};
-			for (presented, CursorRoute { meta, captures, .. }) in &cursor.current {
+			for (presented, CursorRoute { meta, .. }) in &cursor.current {
 				let prefix = cursor.under.rejoin(presented);
 				if revoked.contains(&prefix) {
-					state.apply_unannounce(prefix, meta.clone(), captures.clone(), Gone::End);
+					state.apply_unannounce(prefix, meta.clone(), Gone::End);
 					continue;
 				}
 				if advertised.contains(&prefix) {
@@ -9261,14 +9119,14 @@ impl Routes {
 							Some(PendingUpdate::Unannounce(..) | PendingUpdate::UnannounceAnnounce { .. })
 						)
 					}) {
-						state.apply_announce(prefix, meta.clone(), captures.clone());
+						state.apply_announce(prefix, meta.clone());
 					}
 					continue;
 				}
 				// The wire never sent this route, so it is a fresh start without a hold.
 				state.delivered.remove(&prefix);
 				self.retracted.remove(&prefix);
-				state.put(prefix, PendingUpdate::Announce((meta.clone(), captures.clone())));
+				state.put(prefix, PendingUpdate::Announce(meta.clone()));
 			}
 		}
 	}
@@ -10217,36 +10075,6 @@ mod tests {
 		assert!(matches!(err, Error::Unroutable));
 	}
 
-	/// A wildcard spanning the mount point captures the path as the handle names
-	/// it, so capture-keyed consumers key a mounted route like any other.
-	#[kio::test]
-	async fn mount_captures_the_named_path() {
-		let producer = origin(1).produce();
-		let _foo = producer.route(".svc/p1/foo", RouteOptions::default()).unwrap();
-		let project = mounted(&producer, "p1", &[""]).with_hidden(true);
-
-		let Some(RouteEvent {
-			kind: RouteKind::Start,
-			announce: update,
-		}) = project.routes().try_next()
-		else {
-			panic!("expected foo to start");
-		};
-		assert_eq!(update.prefix.as_str(), ".svc/foo");
-		assert_eq!(update.captures, Some(vec![".svc/foo".parse::<Pattern>().unwrap()]));
-
-		let inside = project.scope(".svc", &Prefixes::all()).unwrap();
-		let Some(RouteEvent {
-			kind: RouteKind::Start,
-			announce: update,
-		}) = inside.routes().try_next()
-		else {
-			panic!("expected foo to start");
-		};
-		assert_eq!(update.prefix.as_str(), "foo");
-		assert_eq!(update.captures, Some(vec!["foo".parse::<Pattern>().unwrap()]));
-	}
-
 	/// A target at the maximum depth still presents its exact path: nothing a scope
 	/// covers beneath it fits there.
 	#[kio::test]
@@ -10373,18 +10201,6 @@ mod tests {
 		let mounted = excluded.mount("view", "public").unwrap();
 		let err = mounted.consume().request(".stats/node", None).await.err().unwrap();
 		assert!(matches!(err, Error::Unauthorized), "{err:?}");
-	}
-
-	/// A mount point no pattern can spell could never be announced or authorized.
-	#[kio::test]
-	async fn mount_refuses_a_wildcard_mount_point() {
-		let (producer, _driver) = Producer::new(Config::from(origin(1)));
-		for at in ["*", "p1/*", "p1/**", "p1/a*"] {
-			assert!(
-				matches!(producer.mount(at, ".svc/p1"), Err(Error::InvalidPath(_))),
-				"{at}"
-			);
-		}
 	}
 
 	/// Egress through a mount counts under the path the reader named, so it
@@ -12193,56 +12009,10 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
+	/// A broader route of another identity taking over a presented prefix from a lost one
+	/// is a restart: another identity serves the prefix, so it never goes offline.
 	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn capture_change_retracts_before_reannouncing_a_presented_prefix() {
-		let producer = origin(1).produce();
-		let _broad = producer.announce("room", RouteInfo::new()).unwrap();
-		let exact = producer.announce("room/alice", RouteInfo::new()).unwrap();
-		let consumer = producer
-			.consume()
-			.filter(&"room/*".parse::<Pattern>().unwrap())
-			.unwrap()
-			.scope("room/alice", &Prefixes::all())
-			.unwrap()
-			.covering();
-		let mut announced = consumer.routes();
-
-		let Some(Some(RouteEvent {
-			kind: RouteKind::Start,
-			announce: first,
-		})) = announced.next().now_or_never()
-		else {
-			panic!("expected the announcement");
-		};
-		assert_eq!(first.prefix.as_str(), "");
-		assert_eq!(first.captures, Some(Vec::new()));
-
-		drop(exact);
-		let Some(Some(RouteEvent {
-			kind: RouteKind::End,
-			announce: retracted,
-		})) = announced.next().now_or_never()
-		else {
-			panic!("expected the retraction");
-		};
-		assert_eq!(retracted.prefix.as_str(), "");
-		assert_eq!(retracted.captures, Some(Vec::new()));
-		let Some(Some(RouteEvent {
-			kind: RouteKind::Start,
-			announce: replacement,
-		})) = announced.next().now_or_never()
-		else {
-			panic!("expected the replacement");
-		};
-		assert_eq!(replacement.prefix.as_str(), "");
-		assert_eq!(replacement.captures, None);
-	}
-
-	/// A forwarded route lost with its session retracts its identity as offline,
-	/// even when a broader route takes over the presented prefix.
-	#[kio::test]
-	async fn capture_change_reports_a_lost_route_offline() {
+	async fn a_broader_route_taking_over_a_lost_one_restarts() {
 		let producer = origin(1).produce();
 		let _broad = producer.announce("room", RouteInfo::new()).unwrap();
 		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
@@ -12255,29 +12025,8 @@ mod tests {
 		announced.expect_next_active("").await;
 
 		drop(exact);
-		announced.expect_next_offline("").await;
-		announced.expect_next_active("").await;
-	}
-
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn capture_change_coalesced_keeps_the_lost_route_offline() {
-		let producer = origin(1).produce();
-		let broad = producer.announce("room", RouteInfo::new()).unwrap();
-		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
-		let mut announced = producer
-			.consume()
-			.scope("room/alice", &Prefixes::all())
-			.unwrap()
-			.covering()
-			.routes();
-		announced.expect_next_active("").await;
-
-		// Both leave before the next poll: the one retraction delivered is the
-		// exact route's, which was lost rather than withdrawn.
-		drop(exact);
-		drop(broad);
-		announced.expect_next_offline("").await;
+		announced.expect_next_restarted("").await;
+		announced.assert_next_wait();
 	}
 
 	#[kio::test]
@@ -12334,14 +12083,6 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn interest_prefixes_fall_back_above_an_escaped_slash() {
-		let heads = |pattern: &str| interest_prefixes(&Patterns::from(pattern.parse::<Pattern>().unwrap()));
-		assert_eq!(heads(r"room/a\/*"), [Path::from_static("room")]);
-		assert_eq!(heads(r"a\/b\/*"), [Path::empty()]);
-		assert_eq!(heads(r"a\/b/*"), [Path::from_static(r"a\/b")]);
-	}
-
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn follow_resolves_once_announced() {
@@ -12363,32 +12104,6 @@ mod tests {
 		broadcast.announce().unwrap();
 		let resolved = resolving.await.expect("resolves once announced").unwrap();
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
-		drop(broadcast);
-	}
-
-	/// A discovery filter narrows what a handle lists, never what it resolves: a path the
-	/// filter leaves out still follows and requests through the scope alone.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_filter_never_narrows_a_lookup() {
-		let producer = origin(1).produce();
-		let broadcast = producer.route("b", RouteOptions::hidden()).unwrap();
-		broadcast.announce().unwrap();
-		let consumer = producer.consume().filter(&"a".parse().unwrap()).unwrap();
-		consumer.routes().assert_next_wait();
-
-		let mut following = consumer.follow("b", None).unwrap();
-		let followed = kio::clock::timeout(Duration::from_secs(1), following.available())
-			.await
-			.expect("follows a path the filter leaves out")
-			.unwrap()
-			.expect("the followed broadcast");
-		assert_eq!(followed.info().path.as_str(), "b");
-		let requested = kio::clock::timeout(Duration::from_secs(1), consumer.request("b", None))
-			.await
-			.expect("requests a path the filter leaves out")
-			.unwrap();
-		assert_eq!(requested.info().path.as_str(), "b");
 		drop(broadcast);
 	}
 
@@ -18609,20 +18324,35 @@ mod tests {
 		}
 	}
 
+	/// A `*` names no prefix, so no broadcast, claim, mount point, or lookup may hold one.
 	#[kio::test]
-	async fn route_refuses_a_path_no_pattern_can_spell() {
+	async fn a_star_is_refused_everywhere_a_path_is_named() {
 		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		for path in ["room/*", "room/cam*1", "**"] {
+			assert!(matches!(
+				producer.route(path, RouteOptions::default()),
+				Err(Error::InvalidPath)
+			));
+			assert!(matches!(
+				producer.announce(path, RouteInfo::new()),
+				Err(Error::InvalidPath)
+			));
+			assert!(matches!(producer.mount(path, "room"), Err(Error::InvalidPath)));
+			assert!(matches!(consumer.follow(path, None), Err(Error::InvalidPath)));
+		}
+	}
 
-		// A `*` segment is a valid path but an invalid literal, so its route could
-		// never be built: refuse the broadcast instead of publishing one that
-		// announces nowhere.
+	/// A lookup whose rooted path exceeds the wire's depth is refused before it registers an
+	/// interest no session could encode.
+	#[kio::test]
+	async fn a_lookup_past_the_depth_limit_is_refused() {
+		let producer = origin(1).produce();
+		let half = vec!["a"; Path::MAX_PARTS / 2 + 1].join("/");
+		let rooted = producer.consume().scope(half.as_str(), &Prefixes::all()).unwrap();
 		assert!(matches!(
-			producer.route("room/*", RouteOptions::hidden()),
-			Err(Error::InvalidPath(_))
-		));
-		assert!(matches!(
-			producer.announce("room/**", RouteInfo::new()),
-			Err(Error::InvalidPath(_))
+			rooted.follow(half.as_str(), None),
+			Err(Error::BoundsExceeded(_))
 		));
 	}
 
@@ -18691,71 +18421,19 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn a_filter_lists_its_matches_and_reports_captures() {
-		let producer = origin(1).produce();
-		let consumer = producer.consume().filter(&"room/*/chat".parse().unwrap()).unwrap();
-		let mut listed = consumer.routes();
-		let mut announced = consumer.covering().routes();
-
-		let alice = producer.route("room/alice/chat", RouteOptions::hidden()).unwrap();
-		alice.announce().unwrap();
-		let Some(RouteEvent {
-			kind: RouteKind::Start,
-			announce: update,
-		}) = announced.try_next()
-		else {
-			panic!("expected alice's chat");
-		};
-		assert_eq!(update.prefix.as_str(), "room/alice/chat");
-		assert_eq!(update.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
-		listed.expect_next_active("room/alice/chat").await;
-
-		let audio = producer.route("room/alice/audio", RouteOptions::hidden()).unwrap();
-		audio.announce().unwrap();
-		announced.assert_next_wait();
-
-		let broad = producer.announce("room", RouteInfo::new()).unwrap();
-		let Some(RouteEvent {
-			kind: RouteKind::Start,
-			announce: update,
-		}) = announced.try_next()
-		else {
-			panic!("expected the overlapping broad route");
-		};
-		assert_eq!(update.prefix.as_str(), "room");
-		assert_eq!(update.captures, None, "an overlap does not pin the wildcard");
-		listed.assert_next_wait();
-
-		drop(broad);
-		drop(audio);
-		drop(alice);
-	}
-
-	#[kio::test]
 	async fn announced_lists_full_names_in_replay_and_live_changes() {
 		let producer = origin(1).produce();
-		let consumer = (producer.consume().scope("project", &Prefixes::all()).unwrap())
-			.filter(&"**/*.chat".parse().unwrap())
-			.unwrap();
+		let consumer = producer.consume().scope("project", &Prefixes::all()).unwrap();
 		let cam = producer.announce("project/cam.hang", RouteInfo::new()).unwrap();
-		let overlap = producer.announce("project/room/mic.hang", RouteInfo::new()).unwrap();
 		let chat = producer.announce("project/lobby.chat", RouteInfo::new()).unwrap();
 		let _other = producer.announce("elsewhere/lobby.chat", RouteInfo::new()).unwrap();
-		// Every route whose subtree could hold a match, within the scope.
-		let mut routing = consumer.clone().covering().routes();
-		routing.expect_next_active("cam.hang").await;
-		routing.expect_next_active("lobby.chat").await;
-		routing.expect_next_active("room/mic.hang").await;
-		routing.assert_next_wait();
 		let mut selected = consumer.routes();
+		selected.expect_next_active("cam.hang").await;
 		selected.expect_next_active("lobby.chat").await;
 		selected.assert_next_wait();
 
 		let nested = producer.announce("project/room/lobby.chat", RouteInfo::new()).unwrap();
 		selected.expect_next_active("room/lobby.chat").await;
-		overlap.update(RouteInfo::new().with_cost(2)).unwrap();
-		drop(overlap);
-		selected.assert_next_wait();
 		drop(nested);
 		selected.expect_next_ended("room/lobby.chat").await;
 		drop(cam);
@@ -18775,7 +18453,7 @@ mod tests {
 			.announce("room/alice", RouteInfo::new().with_identity(first_identity.clone(), 0))
 			.unwrap();
 		assert!(
-			matches!(selected.expect_next().await, RouteEvent { kind: RouteKind::Start, announce: a } if a.prefix.is_empty() && a.captures.is_some())
+			matches!(selected.expect_next().await, RouteEvent { kind: RouteKind::Start, announce: a } if a.prefix.is_empty())
 		);
 		exact
 			.update(RouteInfo::new().with_identity(first_identity, 0).with_cost(2))
@@ -18816,7 +18494,6 @@ mod tests {
 	async fn announced_matches_mounted_names_and_keeps_exclusions() {
 		let producer = origin(1).produce();
 		let _broad = producer.announce(".svc", RouteInfo::new()).unwrap();
-		let _overlap = producer.announce(".svc/p1/mic.hang", RouteInfo::new()).unwrap();
 		let _hidden = producer
 			.announce(".svc/p1/.private/lobby.chat", RouteInfo::new())
 			.unwrap();
@@ -18824,8 +18501,6 @@ mod tests {
 			.announce(".svc/p1/private/lobby.chat", RouteInfo::new())
 			.unwrap();
 		let project = mounted(&producer, "p1", &[""])
-			.filter(&"**/*.chat".parse().unwrap())
-			.unwrap()
 			.with_hidden(true)
 			.exclude(".svc/private")
 			.unwrap();
@@ -18850,8 +18525,10 @@ mod tests {
 		let producer = origin(1).produce();
 		let local = producer.route("project/cam.chat", RouteOptions::default()).unwrap();
 		let overlap = producer.forward("project/room", RouteInfo::new()).unwrap();
-		let consumer = (producer.consume().scope("project", &Prefixes::all()).unwrap())
-			.filter(&"**/*.chat".parse().unwrap())
+		// Scoped to two paths beneath `project`, so the route at `project/room` covers one of
+		// them without being listed.
+		let consumer = (producer.consume())
+			.scope("project", &scopes(&["cam.chat", "room/lobby.chat"]))
 			.unwrap()
 			.local()
 			.with_stats(

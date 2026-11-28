@@ -45,14 +45,14 @@ import asyncio, moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        # The filter is relative to the literal prefix; prefixes stay origin-relative.
-        async for event in client.announced("live/", filter="*/camera"):
+        # Lists `live` and every path beneath it; prefixes stay origin-relative.
+        async for event in client.announced("live"):
             # A path stays present across publisher restarts: hold client.follow(path) to
             # be handed each new run, or None once it goes offline.
             if not isinstance(event, moq.AnnounceEventPresent):
                 continue  # AnnounceEventAbsent
             announcement = event.announce
-            print(announcement.captures)  # list of wildcard matches, empty without wildcards
+            print(announcement.prefix)
             broadcast = await client.request(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             id, audio = next(iter(catalog.audio.items()))

@@ -15,7 +15,7 @@ contract with one import. It also generates keys, signs and verifies JWTs, and
 checks a connection path against a token's claims exactly as `moq auth serve`
 does. A grant can label its session's stats independently of its authorization
 root. Tokens are interchangeable with the Rust side. Grants and claims are
-[`Prefix`](https://www.npmjs.com/package/@moq/pattern) sets: `foo` covers `foo`
+`Prefix` sets (from `@moq/net/prefix`, re-exported): `foo` covers `foo`
 and everything beneath it, and the empty prefix is everything. `Key.sign` and
 the CLI refuse a wildcard such as `foo/**` or `*`. A token, key scope, or grant
 spells each prefix as the subtree pattern releases before 0.22 read, `foo/**`

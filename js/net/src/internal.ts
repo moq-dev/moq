@@ -88,15 +88,6 @@ export function groupBounds(groups: Groups = {}): { start: bigint; end?: bigint 
 }
 
 /**
- * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
- * The peer echoes every suffix beneath it, and the caller filters what arrives. A pattern's
- * literal segments are spelled like a path's, so its head is always a path.
- */
-export function scopeHead(scope: Path.Pattern): Path.Valid {
-	return Path.from(scope.head);
-}
-
-/**
  * Whether a segment of `path` below `prefix` starts with `.`, which hides it from announce
  * discovery unless the request opts in. A path at or above the prefix never hides.
  */
@@ -290,16 +281,6 @@ export function within(path: Path.Valid, scopes: Iterable<Path.Prefixes | undefi
 		out = out ? out.intersect(beneath) : beneath;
 	}
 	return out;
-}
-
-/** Whether the announced prefix's subtree overlaps `scope`. */
-export function scopeOverlaps(scope: Path.Pattern, prefix: Path.Valid): boolean {
-	return scope.overlaps(Path.Pattern.subtree(prefix));
-}
-
-/** What `scope` captures from an exact announced prefix, if it pins every wildcard. */
-export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pattern[] | undefined {
-	return scope.captures(Path.Pattern.literal(prefix));
 }
 
 /** A half-open run of group keys, `[start, end)`. */

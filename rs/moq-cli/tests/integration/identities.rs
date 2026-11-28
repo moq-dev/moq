@@ -153,8 +153,8 @@ async fn replacement(version: &str) {
 	let viewer_origin = moq_tokio::origin::spawn();
 	let viewer = viewer_origin.consume();
 	let watch = |path| {
-		let path = moq_net::Pattern::literal(path).unwrap();
-		viewer.filter(&path).unwrap().routes()
+		let prefix = moq_net::Prefixes::from(moq_net::Prefix::try_from(path).unwrap());
+		viewer.scope("", &prefix).unwrap().routes()
 	};
 	let mut catalog_follow = watch("live/catalog.hang");
 	let mut media_follow = watch("live/media");

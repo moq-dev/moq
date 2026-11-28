@@ -456,10 +456,7 @@ mod tests {
 	use std::task::{Context, Waker};
 
 	fn grant(publish: &str) -> Grant {
-		Grant::new(
-			publish.parse::<moq_pattern::Prefix>().unwrap(),
-			moq_pattern::Prefixes::new(),
-		)
+		Grant::new(publish.parse::<moq_net::Prefix>().unwrap(), moq_net::Prefixes::new())
 	}
 
 	fn poll<F: Future>(future: F) -> Poll<F::Output> {

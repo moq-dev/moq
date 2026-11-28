@@ -64,7 +64,7 @@ each with repository `moq-dev/moq`, workflow `release-rs.yml`, and environment
 `publish` (the job runs in it). Already on crates.io (30): hang, kio, libmoq,
 moq-archive, moq-audio, moq-auth, moq-boy, moq-cli, moq-ffi, moq-gst, moq-hls,
 moq-json, moq-loc, moq-msf, moq-mux, moq-native, moq-net, moq-nvenc,
-moq-pattern, moq-relay, moq-rtmp, moq-sock, moq-srt, moq-stats,
+moq-pattern (deleted before 0.22, so it needs none), moq-relay, moq-rtmp, moq-sock, moq-srt, moq-stats,
 moq-tokio, moq-transcode, moq-uring, moq-v4l, moq-video, qmux. Not yet
 published (6), so their first publish needs the token and they get a trusted
 publisher after it: moq-c, moq-congestion, moq-crypto,

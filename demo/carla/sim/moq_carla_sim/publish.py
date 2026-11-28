@@ -312,6 +312,23 @@ CONTROL_DELAY = timedelta(milliseconds=250)
 _runs = itertools.count(1)
 
 
+def _driver(prefix: str, path: str) -> str | None:
+    """The driver id `path` names: its one segment beneath `prefix`, still escaped
+    as written, else None. A `\\/` escapes a slash within a segment."""
+    rest = path.removeprefix(f"{prefix}/")
+    if rest == path or not rest:
+        return None
+    escaped = False
+    for char in rest:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "/":
+            return None
+    return rest
+
+
 class Drivers:
     """A truck's drivers: follows each driver broadcast under the truck's prefix
     and fans its controls into the command queue.
@@ -356,14 +373,18 @@ class Drivers:
         Each driver path the listing reports present gets its own task, so one
         slow or stuck driver cannot hold up the others. That task follows the
         path across the driver's runs; a run that another takes over, or whose
-        path goes away, ends, and with it its lease.
+        path goes away, ends, and with it its lease. Only a direct child of
+        `prefix` names a driver: the prefix itself and anything deeper are skipped.
         """
         drivers: dict[str, asyncio.Task[None]] = {}
         try:
-            async with client.announced(prefix, filter="*") as announced:
+            async with client.announced(prefix) as announced:
                 async for event in announced:
                     # Every variant carries `announce`; uniffi's stubs type only the enum.
-                    driver = event.announce.captures[0]  # pyright: ignore[reportAttributeAccessIssue]
+                    path: str = event.announce.prefix  # pyright: ignore[reportAttributeAccessIssue]
+                    driver = _driver(prefix, path)
+                    if driver is None:
+                        continue
                     if isinstance(event, moq.AnnounceEventAbsent):
                         task = drivers.pop(driver, None)
                         if task is not None:

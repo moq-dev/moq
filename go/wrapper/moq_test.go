@@ -2062,52 +2062,28 @@ func TestStaleRouteLeavesItsReplacementAlone(t *testing.T) {
 	}
 }
 
-func TestAnnouncedPatternCaptures(t *testing.T) {
+// A prefix lists itself and what lies beneath it, and refuses a wildcard.
+func TestAnnouncedPrefix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	filter := "*/chat"
-	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room", Filter: &filter})
+	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room/alice"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer announced.Cancel()
 
-	newRoute(t, origin, "room/alice/audio", moq.RouteOptions{})
+	newRoute(t, origin, "room/bob/chat", moq.RouteOptions{})
 	newRoute(t, origin, "room/alice/chat", moq.RouteOptions{})
 
 	update := nextAnnounced(t, ctx, announced)
 	if update.Prefix != "room/alice/chat" {
 		t.Fatalf("update = %+v, want room/alice/chat", update)
 	}
-	if len(update.Captures) != 1 || update.Captures[0] != "alice" {
-		t.Fatalf("captures = %v, want [alice]", update.Captures)
-	}
-}
 
-// An exact filter with no wildcards still reports a full match: captures is
-// empty.
-func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	origin := newOrigin(t)
-	filter := ""
-	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room/alice/chat", Filter: &filter})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer announced.Cancel()
-
-	newRoute(t, origin, "room/alice/chat", moq.RouteOptions{})
-
-	update := nextAnnounced(t, ctx, announced)
-	if update.Prefix != "room/alice/chat" {
-		t.Fatalf("update = %+v, want room/alice/chat", update)
-	}
-	if len(update.Captures) != 0 {
-		t.Fatalf("captures = %#v, want an empty slice", update.Captures)
+	if _, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room/*"}); !errors.Is(err, moq.ErrInvalidPrefix) {
+		t.Fatalf("Announced(room/*) = %v, want ErrInvalidPrefix", err)
 	}
 }
 

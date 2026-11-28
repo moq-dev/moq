@@ -19,7 +19,7 @@ export class Nodes {
 	/** Watch `origin` for nodes under `prefix`, `.stats` by default. */
 	constructor(origin: Origin.Reader, prefix: Path.Valid = Path.from(PREFIX)) {
 		this.#prefix = prefix;
-		this.#announced = origin.announced(Path.Pattern.subtree(Path.join(prefix, Path.from("node"))), {
+		this.#announced = origin.announced(Path.join(prefix, Path.from("node")), {
 			hidden: true,
 		});
 	}

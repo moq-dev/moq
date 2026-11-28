@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Pattern, Prefix, Prefixes, Version, origin};
+use moq_net::{Prefix, Prefixes, Version, origin};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -113,17 +113,16 @@ async fn remote_ietf_peer_hears_the_covering_route() {
 }
 
 /// A relay forwards a claim at `room` through a scope granting `room/lobby.chat`, since the
-/// claim covers it, so a request for `room/lobby.chat` is served across both hops. A
-/// `**/*.chat` listing at the far end shows only literal matches, so the claim stays out of it.
-/// lite-07 tells a claim at the scope's region instead, here `room/lobby.chat` itself, which the
-/// listing then matches.
+/// claim covers it, so a request for `room/lobby.chat` is served across both hops. A listing at
+/// the far end scoped to the same paths shows only the routes the scope covers, so the claim
+/// stays out of it. lite-07 tells a claim at the scope's region instead, here `room/lobby.chat`
+/// itself, which the listing then shows.
 #[kio::test]
 async fn relays_route_a_covering_claim_that_listings_omit() {
 	let scope: Prefixes = ["lobby.chat", "room/lobby.chat"]
 		.into_iter()
 		.map(|prefix| Prefix::try_from(prefix).unwrap())
 		.collect();
-	let chat = "**/*.chat".parse::<Pattern>().unwrap();
 	for version in [
 		"moq-lite-03",
 		"moq-lite-06",
@@ -161,7 +160,7 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		options.client_subscribe = Some(client.clone());
 		let _downstream = connect_mock(options).await;
 
-		let scoped = client.consume().filter(&chat).unwrap();
+		let scoped = client.consume().scope("", &scope).unwrap();
 		let mut listed = scoped.routes();
 		let mut covering = scoped.clone().covering().routes();
 		kio::clock::sleep(SETTLE).await;

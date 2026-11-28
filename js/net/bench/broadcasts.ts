@@ -46,18 +46,21 @@ for (const scope of [
 			);
 			let notifications = 0;
 			const streams = Array.from({ length: observerCount }, (_, index) =>
-				scope === "full-name" || scope === "overlap-only"
-					? origin.consume().routes(Path.Pattern.parse("**/*.chat"))
-					: (scope === "producer-scopes"
-							? origin.scope(Path.empty(), Path.Prefixes.parse([`room/0/tag-${index}`]))
-							: scope === "rooted-producers"
-								? origin.scope(Path.from("room"), Path.Prefixes.parse([`0/tag-${index}`]))
-								: origin
-						).routes(
-							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
-							// These scopes only lie beneath the touched route, so they measure the covering view.
-							{ covering: scope !== "unscoped" },
-						),
+				scope === "full-name"
+					? origin.consume().routes(touched)
+					: scope === "overlap-only"
+						? // Beneath the touched route without covering, so it lists nothing.
+							origin.consume().routes(Path.from(`room/0/${index}.chat`))
+						: (scope === "producer-scopes"
+								? origin.scope(Path.empty(), Path.Prefixes.parse([`room/0/tag-${index}`]))
+								: scope === "rooted-producers"
+									? origin.scope(Path.from("room"), Path.Prefixes.parse([`0/tag-${index}`]))
+									: origin
+							).routes(
+								scope === "distinct-scopes" ? Path.from(`room/0/tag-${index}`) : undefined,
+								// These scopes only lie beneath the touched route, so they measure the covering view.
+								{ covering: scope !== "unscoped" },
+							),
 			);
 			const readers = streams.map(async (stream) => {
 				for await (const event of stream) {

@@ -2,9 +2,8 @@
  * Segment-aware root matching, mirroring `@moq/net`'s path module.
  *
  * A token's root and a connection's path are literal paths, so overlapping them is
- * prefix arithmetic; everything beneath is a prefix from `@moq/pattern`, re-exported
- * from this package so a token minting service does not pull in the networking
- * stack. The normalization and boundary rules must stay identical to the Rust
+ * prefix arithmetic; everything beneath is a prefix from `@moq/net/prefix`, an entrypoint
+ * that does not load the networking stack. The normalization and boundary rules must stay identical to the Rust
  * `moq-auth` crate's `path` module, which mints and checks the same tokens. Minting
  * checks a root with {@link signable} instead, so a token never names a path no peer
  * can spell.
@@ -16,7 +15,7 @@
  * @module
  */
 
-import { parts } from "@moq/pattern";
+import { parts } from "@moq/net/prefix";
 
 /** The most UTF-8 bytes a path may hold, matching `@moq/net`'s path limit. */
 const MAX_BYTES = 4096;

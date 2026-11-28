@@ -215,12 +215,12 @@ public final class OriginConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// List the paths under a literal prefix matching an optional pattern filter, as each
+    /// List the paths at or beneath a prefix, which holds no `*`, as each
     /// becomes present or absent. A new publisher identity keeps its path present, so use
     /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
     /// out unless `hidden`.
-    public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
-        AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
+    public func announced(prefix: String = "", hidden: Bool = false) throws -> AnnounceConsumer {
+        AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, hidden: hidden)))
     }
 
     /// Follow an exact path, resolving each stream that serves it.

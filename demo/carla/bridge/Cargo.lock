@@ -1049,7 +1049,6 @@ dependencies = [
  "hashbrown 0.17.2",
  "hashlink",
  "kio",
- "moq-pattern",
  "num_enum",
  "rand",
  "rangemap",
@@ -1067,13 +1066,6 @@ dependencies = [
  "cudarc",
  "libloading 0.9.1",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "moq-pattern"
-version = "0.1.2"
-dependencies = [
- "serde",
 ]
 
 [[package]]

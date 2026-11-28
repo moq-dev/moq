@@ -14,7 +14,6 @@
 		"@moq/msf": "workspace:*",
 		"@moq/net": "workspace:*",
 		"@moq/obs": "workspace:*",
-		"@moq/pattern": "workspace:*",
 		"@moq/publish": "workspace:*",
 		"@moq/qmux": "workspace:*",
 		"@moq/room": "workspace:*",

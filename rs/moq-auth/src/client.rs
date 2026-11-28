@@ -523,7 +523,7 @@ impl<S: Post> Driver<S> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_pattern::Prefixes;
+	use moq_net::Prefixes;
 	use std::task::Poll;
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, Request as Received, ResponseTemplate};

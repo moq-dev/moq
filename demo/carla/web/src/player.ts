@@ -120,7 +120,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
 
-				// A broad route can cover the scope without naming one camera.
+				// Other broadcasts under the prefix name no camera.
 				if (!parseCamera(entry.prefix)) continue;
 
 				// A restarted simulator keeps its path present, and the watch broadcast

@@ -87,17 +87,13 @@ test("a closed follower never acquires another publisher", async () => {
 	origin.close();
 });
 
-test.each(["request", "follow"] as const)(
-	"%s refuses unwatchable paths and scope violations before registering",
-	(method) => {
-		const origin = new Producer();
-		expect(() => origin[method](Path.from("camera*main"))).toThrow();
-		const scoped = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("pool/job/cam"))]));
-		expect(() => scoped[method](Path.from("pool/job"))).toThrow();
-		expect(wireOf(origin).requests.peek()?.size).toBe(0);
-		origin.close();
-	},
-);
+test.each(["request", "follow"] as const)("%s refuses scope violations before registering", (method) => {
+	const origin = new Producer();
+	const scoped = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("pool/job/cam"))]));
+	expect(() => scoped[method](Path.from("pool/job"))).toThrow();
+	expect(wireOf(origin).requests.peek()?.size).toBe(0);
+	origin.close();
+});
 
 test("unrelated routes never notify followers", async () => {
 	const origin = new Producer();
