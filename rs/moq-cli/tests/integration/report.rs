@@ -266,8 +266,14 @@ async fn export_health_grades_each_report_against_the_last() {
 	}
 	drop(stdin);
 	assert!(health.iter().all(|health| health["role"] == "publisher"));
-	assert!(health[0].get("interval").is_none(), "the first report has nothing to diff against");
-	assert!(health[1].get("interval").is_some(), "the next spans the time between reports");
+	assert!(
+		health[0].get("interval").is_none(),
+		"the first report has nothing to diff against"
+	);
+	assert!(
+		health[1].get("interval").is_some(),
+		"the next spans the time between reports"
+	);
 	sink.kill().await.unwrap();
 	import.kill().await.unwrap();
 }
