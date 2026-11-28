@@ -150,6 +150,9 @@ impl<R: Incoming> Connection<R> {
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
 		let mut request = request.with_stats(stats).with_limits(lifecycle.cluster.limits(&lease));
+		if let Some(keep_alive) = lifecycle.cluster.keep_alive(&lease) {
+			request = request.with_keep_alive(keep_alive);
+		}
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}

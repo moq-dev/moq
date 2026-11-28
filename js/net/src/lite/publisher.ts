@@ -1031,10 +1031,12 @@ export class Publisher {
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
 		// moq-lite carries no per-request auth, so a swap alone sends nothing.
+		// A drain is this node's ranking, never an announcement: the peer hears the route as it is.
 		const onWire = (route: WireRoute): WireRoute => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
 			auth: undefined,
+			draining: undefined,
 		});
 
 		// Another identity is another stream, which these versions announce as an end and a start.

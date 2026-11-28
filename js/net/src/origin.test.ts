@@ -1927,8 +1927,7 @@ test("a stale takeover's refusal leaves a request whose source came back", async
 	origin.close();
 });
 
-// A GOAWAY ranks a session's routes last, whatever their cost: a preference state this node
-// keeps, which readers (and the peers a relay forwards to) never see.
+// A GOAWAY ranks a session's routes last, whatever their cost, and readers see the route drain.
 test("a draining route ranks below every other and still serves alone", async () => {
 	const origin = new Producer();
 	const path = Path.from("drained");
@@ -1944,7 +1943,7 @@ test("a draining route ranks below every other and still serves alone", async ()
 	const alone = await routes.next();
 	expect(alone?.kind).toBe("start");
 	expect(alone?.route.cost).toBe(1n);
-	expect(alone?.route.draining).toBeUndefined();
+	expect(alone?.route.draining).toBe(true);
 
 	// A costlier route wins, since the draining one ranks last.
 	const standby = new BroadcastProducer();

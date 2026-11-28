@@ -648,6 +648,48 @@ mod tests {
 		assert!(toml::from_str::<Config>("[limits.peer]\nmax_streams = 64\n").is_err());
 	}
 
+	/// A peer link's keep-alive merges from the file and flags into one, reaches the links the
+	/// relay dials without touching `[quic]`, and is refused half set.
+	#[test]
+	fn peer_keep_alive_merges_and_dials() {
+		if !test_env::Env::without(&[
+			"MOQ_QUIC_KEEP_ALIVE_SOFT",
+			"MOQ_QUIC_KEEP_ALIVE_HARD",
+			"MOQ_LIMITS_PEER_QUIC_KEEP_ALIVE_SOFT",
+			"MOQ_LIMITS_PEER_QUIC_KEEP_ALIVE_HARD",
+		])
+		.isolate()
+		{
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-keep-alive.toml");
+		std::fs::write(&path, "[limits.peer.quic]\nkeep_alive_soft = \"2s\"\n").unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--limits-peer-quic-keep-alive-hard=8s".into(),
+		])
+		.unwrap();
+		let peer = &config.limits.peer.quic;
+		peer.validate().unwrap();
+		let keep_alive = peer.keep_alive().unwrap().expect("a keep-alive");
+		assert_eq!(
+			(keep_alive.soft, keep_alive.hard),
+			(std::time::Duration::from_secs(2), std::time::Duration::from_secs(8))
+		);
+		assert_eq!(config.quic.resolve().liveness, None, "[quic] stays unprobed");
+		let mut dialed = config.quic.clone();
+		peer.dial(&mut dialed);
+		assert_eq!(dialed.resolve().liveness, Some(keep_alive));
+
+		let half: Config = toml::from_str("[limits.peer.quic]\nkeep_alive_soft = \"2s\"\n").unwrap();
+		assert!(half.limits.peer.quic.validate().is_err());
+		let inverted: Config =
+			toml::from_str("[limits.peer.quic]\nkeep_alive_soft = \"8s\"\nkeep_alive_hard = \"2s\"\n").unwrap();
+		assert!(inverted.limits.peer.quic.validate().is_err());
+	}
+
 	/// A zero peer stream limit or window would wedge the connection, so it never parses.
 	#[test]
 	fn zero_peer_quic_limits_are_refused() {

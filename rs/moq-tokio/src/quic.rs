@@ -233,6 +233,34 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub keep_alive: Option<crate::cli::Duration>,
 
+	/// Report a session's peer stale once it goes unheard this long, probing it once half of
+	/// this passes. A stale peer's routes rank below every other's until it is heard again.
+	/// Set it with [`keep_alive_hard`](Self::keep_alive_hard); unset (the default) probes
+	/// nothing and never reports staleness.
+	///
+	/// Every session built from this section probes, so a relay sets it on its peer links
+	/// (`[limits.peer.quic]`) rather than here, which would probe every local client too.
+	#[usage(
+		name = "quic-keep-alive-soft",
+		long = "quic-keep-alive-soft",
+		env = "MOQ_QUIC_KEEP_ALIVE_SOFT",
+		setting = "quic.keep_alive_soft"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub keep_alive_soft: Option<crate::cli::Duration>,
+
+	/// Close a session whose peer goes unheard this long, as an idle timeout. Set with
+	/// [`keep_alive_soft`](Self::keep_alive_soft), longer than it and no longer than the
+	/// idle timeout.
+	#[usage(
+		name = "quic-keep-alive-hard",
+		long = "quic-keep-alive-hard",
+		env = "MOQ_QUIC_KEEP_ALIVE_HARD",
+		setting = "quic.keep_alive_hard"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub keep_alive_hard: Option<crate::cli::Duration>,
+
 	/// Enable path MTU discovery. Defaults to off.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
@@ -559,6 +587,15 @@ impl Config {
 		if self.keylog.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
 			return Err(crate::Error::KeylogUnset);
 		}
+		let liveness = liveness(self.keep_alive_soft, self.keep_alive_hard)?;
+		let idle_timeout = self.resolve().idle_timeout;
+		if let (Some(liveness), Some(idle_timeout)) = (liveness, idle_timeout)
+			&& liveness.hard > idle_timeout
+		{
+			return Err(crate::Error::KeepAlive(
+				"quic.keep_alive_hard must not exceed quic.idle_timeout",
+			));
+		}
 		self.validate_limits()
 	}
 
@@ -627,6 +664,7 @@ impl Config {
 			gso: self.gso,
 			idle_timeout,
 			keep_alive,
+			liveness: liveness(self.keep_alive_soft, self.keep_alive_hard).ok().flatten(),
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control.unwrap_or_default(),
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
@@ -636,6 +674,29 @@ impl Config {
 			keylog: self.keylog.clone(),
 		}
 	}
+}
+
+/// The session keep-alive `soft` and `hard` describe: both or neither, each nonzero, and
+/// `hard` past `soft`.
+pub fn liveness(
+	soft: Option<crate::cli::Duration>,
+	hard: Option<crate::cli::Duration>,
+) -> crate::Result<Option<moq_net::transport::KeepAlive>> {
+	let (soft, hard) = match (soft, hard) {
+		(None, None) => return Ok(None),
+		(Some(soft), Some(hard)) => (Duration::from(soft), Duration::from(hard)),
+		_ => {
+			return Err(crate::Error::KeepAlive(
+				"quic.keep_alive_soft and quic.keep_alive_hard are set together",
+			));
+		}
+	};
+	if soft.is_zero() || hard <= soft {
+		return Err(crate::Error::KeepAlive(
+			"quic.keep_alive_soft must be nonzero and shorter than quic.keep_alive_hard",
+		));
+	}
+	Ok(Some(moq_net::transport::KeepAlive::new(soft, hard)))
 }
 
 /// Every knob at its default, which is what an untouched [`Config`] resolves to.
@@ -667,6 +728,9 @@ pub struct Resolved {
 	///
 	/// Unset by default, since the interval depends on the peer's idle timeout.
 	pub keep_alive: Option<Duration>,
+	/// The keep-alive every session built from this section runs, reporting a quiet peer
+	/// stale; `None` (the default) for none.
+	pub liveness: Option<moq_net::transport::KeepAlive>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
 	/// Congestion control algorithm, defaulting to [`CongestionControl::Bbr`].
@@ -922,6 +986,30 @@ mod tests {
 		assert!(reported.contains("--quic-gso / MOQ_QUIC_GSO"), "{reported}");
 		assert!(reported.contains("--server-quic-qlog"), "{reported}");
 		assert!(reported.contains("--quic-qlog / MOQ_QUIC_QLOG"), "{reported}");
+	}
+
+	/// A session keep-alive is off by default, and a `hard` past the idle timeout, which the
+	/// transport would refuse as each session opens, is refused at startup instead.
+	#[test]
+	fn keep_alive_hard_fits_the_idle_timeout() {
+		let keep_alive = |soft: u64, hard: u64| Config {
+			keep_alive_soft: Some(Duration::from_secs(soft).into()),
+			keep_alive_hard: Some(Duration::from_secs(hard).into()),
+			..Default::default()
+		};
+		assert_eq!(Config::default().resolve().liveness, None);
+		let fits = keep_alive(2, 10);
+		fits.validate().unwrap();
+		assert_eq!(
+			fits.resolve().liveness,
+			Some(moq_net::transport::KeepAlive::new(Duration::from_secs(2), Duration::from_secs(10)))
+		);
+		assert!(matches!(keep_alive(2, 11).validate(), Err(crate::Error::KeepAlive(_))));
+		let longer = Config {
+			idle_timeout: Some(Duration::from_secs(30).into()),
+			..keep_alive(2, 11)
+		};
+		longer.validate().unwrap();
 	}
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the

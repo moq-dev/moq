@@ -129,6 +129,7 @@ impl Client {
 		// transports must not require a rustls crypto provider.
 		let tls = config.tls.build()?;
 
+		let liveness = quic.resolve().liveness;
 		let qmux = crate::qmux_config(&quic.resolve());
 		#[cfg(not(feature = "test-support"))]
 		let quic = crate::quic::Client::new(&config, &quic);
@@ -164,6 +165,9 @@ impl Client {
 		}
 		if let Some(implementation) = &config.implementation {
 			moq = moq.with_implementation(implementation);
+		}
+		if let Some(keep_alive) = liveness {
+			moq = moq.with_keep_alive(keep_alive);
 		}
 
 		Ok(Self {

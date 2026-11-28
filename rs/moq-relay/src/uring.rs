@@ -861,6 +861,11 @@ impl crate::incoming::Sealed for Request {
 		self
 	}
 
+	fn with_keep_alive(mut self, keep_alive: moq_net::transport::KeepAlive) -> Self {
+		self.handshake = self.handshake.with_keep_alive(keep_alive);
+		self
+	}
+
 	fn with_publisher(mut self, publish: moq_net::origin::Consumer) -> Self {
 		self.handshake = self.handshake.with_publisher(publish);
 		self

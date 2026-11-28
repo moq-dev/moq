@@ -422,6 +422,9 @@ impl Server {
 		let tls_stream = tls.map(|tls| TcpTls::new(&config, &versions, tls)).transpose()?;
 
 		let mut moq = config.server().with_stats(stats);
+		if let Some(keep_alive) = resolved.liveness {
+			moq = moq.with_keep_alive(keep_alive);
+		}
 		if let Some(window) = window {
 			moq = moq.with_receive_window(window);
 		}
@@ -1461,6 +1464,14 @@ impl Request {
 	/// Set request caps after authorizing the peer and before answering SETUP.
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		*self.handshake = (*self.handshake).with_limits(limits);
+		self
+	}
+
+	/// Probe a quiet peer and report it stale, overriding `[quic]`'s keep-alive, such as for
+	/// a peer the caller authorized as a relay link; see
+	/// [`moq_net::server::Handshake::with_keep_alive`].
+	pub fn with_keep_alive(mut self, keep_alive: moq_net::transport::KeepAlive) -> Self {
+		*self.handshake = (*self.handshake).with_keep_alive(keep_alive);
 		self
 	}
 

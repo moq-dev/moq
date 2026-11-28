@@ -87,6 +87,10 @@ pub enum Error {
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
 
+	/// A session keep-alive that cannot run, saying why.
+	#[error("invalid keep-alive: {0}")]
+	KeepAlive(&'static str),
+
 	/// A zero `Backoff::healthy`, which would count every session as healthy.
 	#[error("the healthy backoff bar must be non-zero")]
 	BackoffHealthy,

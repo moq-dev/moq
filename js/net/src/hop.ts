@@ -123,11 +123,18 @@ export interface RouteInfo {
 	 * request again once it turns available.
 	 */
 	readonly available: boolean;
+	/**
+	 * Whether the route ranks below every other available one, whatever its cost, yet above one
+	 * held unavailable, and still serves when nothing else does: the session it arrived on is
+	 * going away (the peer sent a GOAWAY), or a lite-07 path to its origin crosses such a session.
+	 * A ranking state, never a saturated cost.
+	 */
+	readonly draining: boolean;
 }
 
 /**
- * The read-only facts an announcement shows of `route`, leaving its epoch, hop chain,
- * credential, and drain state internal.
+ * The read-only facts an announcement shows of `route`, leaving its epoch, hop chain, and
+ * credential internal.
  *
  * @internal
  */
@@ -136,6 +143,7 @@ export function routeInfo(route: WireRoute): RouteInfo {
 		identity: route.identity,
 		cost: route.cost,
 		available: route.available ?? true,
+		draining: route.draining ?? false,
 	};
 }
 
@@ -170,10 +178,8 @@ export interface WireRoute {
 	 */
 	readonly auth?: Credential;
 	/**
-	 * The session it arrived on is going away (the peer sent a GOAWAY): it ranks below every
-	 * other available route, whatever its cost, yet above one held unavailable, and still serves
-	 * when nothing else does. A preference state, never a saturated cost. Local: never forwarded,
-	 * and readers never see it.
+	 * See {@link RouteInfo.draining}; unset means not draining. Never forwarded at its own cost:
+	 * a relay advertises a draining route at its real cost.
 	 */
 	readonly draining?: boolean;
 	/** See {@link RouteInfo.available}; unset means available. */
