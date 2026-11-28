@@ -50,7 +50,7 @@ moq-net = { workspace = true, features = ["async"] }
 # The QUIC state machine `quic::driver` drives; rind supplies its cryptography.
 moq-quic = { workspace = true }
 moq-sock = { workspace = true }
-notify = "8"
+notify = "9"
 qmux = { workspace = true }
 rand = "0.10.1"
 rcgen = { workspace = true }
