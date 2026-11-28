@@ -170,9 +170,9 @@ Three causes, plus one media flake:
 - Found validating that fix: one Chromium lite-06 cell left 4 subscriptions open, each holding
   group 39's stream after its first frame, though the relay had completed them. Most likely
   Chromium lost the group's reset ([the Chromium reset fix](/quest/m4/browser-fixes/chromium-reset-before-accept.md)),
-  and lite-06 has no drop to name the group. A flake, owned by
-  [the lite-06 lost reset child](/quest/m0/test-flakes-5/lite06-lost-reset-hang.md) of the test
-  flakes epic.
+  and lite-06 has no drop to name the group. Recurred in scheduled run 46166329015; fixed in
+  [moq-dev/moq#9864](https://github.com/moq-dev/moq/pull/9864): a lite-06 group stream silent for
+  the grace after the subscription's end is ended with an error, so the reader fetches it.
 - 11-26 Chromium media: `volume scales the output: volume 0.25: only 27/31 samples carried audio`,
   seen once. A flake, owned by [the volume check child](/quest/m0/test-flakes-5/volume-check-audio-gap.md)
   of the test flakes epic.

@@ -1,4 +1,4 @@
-import { type Duration, now, sleep } from "@moq/clock";
+import { type Duration, type Instant, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
 import { GRACE, Ledger, MAX_RUNS } from "./ledger.ts";
@@ -20,6 +20,21 @@ export interface Counted {
 	park(): void;
 	/** Hold the end open again once it reads the group itself. Idempotent. */
 	resume(): void;
+	/**
+	 * Settles once {@link Tail.settle} gave up on it: the subscription ended and the grace passed
+	 * while it delivered nothing, as a stream whose reset the browser lost does. It stays counted
+	 * until the reader ends it with {@link done}.
+	 */
+	readonly stalled: Promise<void>;
+}
+
+// A stream the end is held open for.
+interface Held {
+	// When it last delivered data.
+	last: () => Instant;
+	// When it began being held, since a resumed stream's wait on a copy is not its quiet time.
+	since: Instant;
+	stall: () => void;
 }
 
 /**
@@ -41,6 +56,8 @@ export class Tail {
 	// Group streams whose header arrived, and those still being read and holding the end.
 	#streams = 0;
 	#active = 0;
+	// The counted streams holding the end open, which a settle gives up on once they go quiet.
+	#held = new Set<Held>();
 	// The lowest group a stream's header named, which proves the group exists.
 	#first: bigint | undefined;
 	#changed = new Signal(0);
@@ -56,6 +73,7 @@ export class Tail {
 	/** Release what the tail keeps beside its ledger, once its subscription ended. */
 	close(): void {
 		this.#dropped = [];
+		this.#held.clear();
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */
@@ -68,19 +86,32 @@ export class Tail {
 		return this.#first;
 	}
 
-	/** Record a group stream whose header arrived, held until it is read to its end. */
-	open(key: bigint): Counted {
+	/**
+	 * Record a group stream whose header arrived, held until it is read to its end. `last` says
+	 * when it last delivered data, so a settle can give up on a quiet one; without it the stream is
+	 * waited for until it ends, which is what a reader that cannot tell its stream is lost wants.
+	 */
+	open(key: bigint, last?: () => Instant): Counted {
 		this.#streams += 1;
 		if (this.#first === undefined || key < this.#first) this.#first = key;
 		this.#active += 1;
 		this.#account(key, key + 1n);
 
+		let stall!: () => void;
+		const stalled = new Promise<void>((resolve) => {
+			stall = resolve;
+		});
+		const held: Held | undefined = last && { last, since: now(), stall };
+		if (held) this.#held.add(held);
+
 		// Parked holds nothing.
 		let state: "held" | "parked" | "done" = "held";
 		return {
+			stalled,
 			done: () => {
 				if (state === "done") return;
 				if (state === "held") this.#active -= 1;
+				if (held) this.#held.delete(held);
 				state = "done";
 				this.#bump();
 			},
@@ -88,12 +119,17 @@ export class Tail {
 				if (state !== "held") return;
 				state = "parked";
 				this.#active -= 1;
+				if (held) this.#held.delete(held);
 				this.#bump();
 			},
 			resume: () => {
 				if (state !== "parked") return;
 				state = "held";
 				this.#active += 1;
+				if (held) {
+					held.since = now();
+					this.#held.add(held);
+				}
 				this.#bump();
 			},
 		};
@@ -185,18 +221,20 @@ export class Tail {
 	 *
 	 * A stream still being read is waited for, until its own FIN or reset, or until a drop naming
 	 * its group lets go of it (see {@link Counted.done}). The grace gives up on streams that never
-	 * arrived, and `limit` caps it. With no grace nothing is timed: every start waits for the wire
-	 * to account for it.
+	 * arrived, and `limit` caps it. Once it passes, a stream that delivered nothing for that long
+	 * is given up on too ({@link Counted.stalled}): a browser can lose a stream's reset, leaving it
+	 * open forever. With no grace nothing is timed: every start waits for the wire to account for it.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
 		const grace = this.#grace();
 		this.#ledger.expire(now(), grace);
 
+		const wait = grace === undefined ? undefined : limit === undefined ? grace : grace.min(limit);
 		let expired = false;
 		const timer = new AbortController();
-		if (grace !== undefined) {
-			void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
+		if (wait !== undefined) {
+			void sleep(wait, { signal: timer.signal }).then(
 				() => {
 					expired = true;
 					this.#bump();
@@ -204,14 +242,46 @@ export class Tail {
 				() => {},
 			);
 		}
+		// Wakes the loop when the quietest stream's grace ends, one at a time.
+		let wake: AbortController | undefined;
 		try {
 			while (closed.peek() === undefined) {
 				if (this.#active === 0 && (expired || complete())) return;
+				if (expired && wait !== undefined) {
+					wake?.abort();
+					const next = this.#quiet(wait);
+					if (next !== undefined) {
+						wake = new AbortController();
+						void sleep(next, { signal: wake.signal }).then(
+							() => this.#bump(),
+							() => {},
+						);
+					}
+				}
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {
 			timer.abort();
+			wake?.abort();
 		}
+	}
+
+	// Give up on each held stream that delivered nothing for `window`, and return how long until the
+	// next one would have, or undefined with none held.
+	#quiet(window: Duration): Duration | undefined {
+		const at = now();
+		let next: Duration | undefined;
+		for (const held of this.#held) {
+			const quiet = at.since(held.last().max(held.since));
+			if (quiet.ge(window)) {
+				this.#held.delete(held);
+				held.stall();
+				continue;
+			}
+			const left = window.sub(quiet);
+			next = next === undefined ? left : next.min(left);
+		}
+		return next;
 	}
 
 	#account(start: bigint, end: bigint): void {

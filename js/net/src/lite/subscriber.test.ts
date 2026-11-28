@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Elapsed, timeout, yieldNow } from "@moq/clock";
+import { Duration, Elapsed, Instant, timeout, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Getter, Signal } from "@moq/signals";
 import type { RouteOptions } from "../announced.ts";
@@ -1770,6 +1770,113 @@ test("lite-07: a group reset after its header settles the end without a drop", a
 		request.inbound.close();
 		expect(await track.recvGroup()).toBeUndefined();
 		expect(await track.closed).toBeNull();
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
+// Lite-06: Chromium can lose the reset of a Group Stream, leaving it open after its data forever, and
+// lite-06 names no drop to account for the group. Once the publisher ended the subscription and the
+// grace passed with the stream delivering nothing, the group ends with an error a reader can fetch
+// from, and the subscription ends; a stream still delivering within each grace is waited for.
+test("lite-06: a group stream silent for the grace after the end is ended with an error", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_06;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const consumer = subscriber.consume(Path.from("room")).track("video");
+	const track = consumer.subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const subscribe = await opened(1);
+		await subscribe.reading;
+		await respond(subscribe, version, [{ start: answer(version, 0n) }]);
+
+		const lost = handStream(version);
+		lost.write(
+			await Writer.collect(version, async (w) => {
+				await w.u62(0n);
+				await w.u53(1);
+				await w.write(new Uint8Array([1]));
+			}),
+		);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+		await respond(subscribe, version, [{ end: new SubscribeEnd(1n) }], true);
+		await drainReactions();
+		// Within the grace the stream may still deliver its end.
+		await clock.advance(GRACE.div(2));
+		expect(group?.closed.peek()).toBeUndefined();
+
+		await clock.advance(GRACE);
+		await running;
+		const err = await group?.closed;
+		expect(err).toMatchObject({ code: StreamCode.DeliveryTimeout });
+		expect(await track.recvGroup()).toBeUndefined();
+
+		// The reader that still wants the group asks upstream again, and gets it whole.
+		const fetch = consumer.fetchGroup(0n);
+		await opened(2);
+		await answerTrackInfo(streams[2], version, 1000);
+		const request = await opened(3);
+		await request.reading;
+		request.inbound.enqueue(new Uint8Array([0, 1, 1]));
+		request.inbound.close();
+		expect((await (await fetch).readFrame())?.payload).toEqual(new Uint8Array([1]));
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
+// Lite-06: a Group Stream still delivering past the subscription's end, each frame within the grace of
+// the one before, is waited for and finishes whole.
+test("lite-06: a group stream still delivering after the end finishes whole", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_06;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+
+		const slow = handStream(version);
+		const frame = (delta: bigint, byte: number) =>
+			Writer.collect(version, async (w) => {
+				await w.u62(delta);
+				await w.u53(1);
+				await w.write(new Uint8Array([byte]));
+			});
+		slow.write(await frame(0n, 1));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), slow.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }], true);
+		await drainReactions();
+		// Three grace periods in all, with a frame inside each.
+		for (const byte of [2, 3, 4]) {
+			await clock.advance(GRACE.mul(3).div(4));
+			slow.write(await frame(0n, byte));
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([byte]));
+			expect(group?.closed.peek()).toBeUndefined();
+		}
+		slow.finish();
+		await running;
+		expect(await group?.closed).toBeNull();
+		expect(await track.recvGroup()).toBeUndefined();
 	} finally {
 		track.close();
 		subscriber.close();
@@ -3632,7 +3739,10 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	type Entry = {
 		track: Producer;
-		tail: { covers(start: bigint, end: bigint): boolean; open(key: bigint): { done(): void } };
+		tail: {
+			covers(start: bigint, end: bigint): boolean;
+			open(key: bigint, last?: () => Instant): { done(): void };
+		};
 	};
 	let entry: Entry | undefined;
 	const internal = subscriber as unknown as {
@@ -3666,7 +3776,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		// A group stream's header: the tail accounts for it, and the track holds the group.
 		const arrive = (key: bigint) => {
 			if (!entry) throw new Error("no subscription");
-			const read = entry.tail.open(key);
+			const read = entry.tail.open(key, () => Instant.ZERO);
 			return { group: hooks.receiveGroup(entry.track, { start: key, offset: 0 }), read };
 		};
 

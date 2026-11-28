@@ -1,3 +1,4 @@
+import { type Instant, now } from "@moq/clock";
 import { fromTransport, StreamCode, streamCode, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
@@ -261,6 +262,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#chunks: Uint8Array[] = [];
 	#chunked = 0; // bytes across #chunks
+	#last = now(); // when the stream last delivered bytes, or it was created
 	// Undefined once the stream finishes, or without a stream: the buffer is consumed then EOF.
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
@@ -279,6 +281,11 @@ export class Reader {
 		this.#buffer = buffer ?? new Uint8Array();
 		this.#reader = stream?.getReader();
 		this.version = version;
+	}
+
+	/** When the stream last delivered bytes, which tells a watcher a quiet stream from one still arriving. */
+	get last(): Instant {
+		return this.#last;
 	}
 
 	// Adds more data to the buffer, returning true if more data was added.
@@ -308,6 +315,7 @@ export class Reader {
 
 		this.#chunks.push(result.value);
 		this.#chunked += result.value.byteLength;
+		this.#last = now();
 
 		return true;
 	}

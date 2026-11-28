@@ -3606,7 +3606,7 @@ export class Subscriber {
 			}
 			target.taken = true;
 			target.arrived();
-			const counted = entry.tail.open(group.key);
+			const counted = entry.tail.open(group.key, () => stream.last);
 			try {
 				const format = {
 					scale: entry.timescale,
@@ -3638,7 +3638,7 @@ export class Subscriber {
 		const overtaken = hasSkip(this.version) && tail.dropped(group.key);
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
-		const counted = tail.open(group.key);
+		const counted = tail.open(group.key, () => stream.last);
 
 		try {
 			// The publisher contradicted its own end, which no later group can repair. lite-05
@@ -3690,7 +3690,13 @@ export class Subscriber {
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
-			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
+			// A stream the subscription's end gave up on, as one whose reset the browser lost, fails like
+			// a reset, so the reader may fetch what it still wants.
+			const quiet = counted.stalled.then((): never => {
+				console.debug(`group stream stalled: group=${group.key} track=${track.name}`);
+				throw new StreamError(StreamCode.DeliveryTimeout, { message: "stalled" });
+			});
+			const end = await race([entry.filling ? untilAbandoned(producer, frames) : frames, quiet]);
 
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
 			if (end === undefined) producer.finish();
