@@ -2281,10 +2281,10 @@ mod resume_overlap {
 			}
 
 			#[bench(
-							args = shapes($waiting),
-							setup = $setup,
-							items = |case: Case<(usize, usize, usize)>| case.of.0 * case.of.1,
-						)]
+										args = shapes($waiting),
+										setup = $setup,
+										items = |case: Case<(usize, usize, usize)>| case.of.0 * case.of.1,
+									)]
 			fn $name(mut drain: Drain) -> Drain {
 				drain.rig.drain(drain.retained);
 				drain

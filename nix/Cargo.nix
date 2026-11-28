@@ -19630,11 +19630,6 @@ rec {
             ];
           }
           {
-            name = "libc";
-            packageId = "libc";
-            target = { target, features }: (target."unix" or false);
-          }
-          {
             name = "moq-net";
             packageId = "moq-net";
             usesDefaultFeatures = false;
