@@ -1896,7 +1896,7 @@ export class Publisher {
 				const log = e === givenUp?.peek() ? console.debug : console.warn;
 				log(`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`);
 				if (group) hooks.releaseGroupReader(group, e);
-				stream.abort(e);
+				stream.abort(servedError(e));
 			}
 		} finally {
 			hold.abort();
