@@ -22392,10 +22392,11 @@ fn timed_end(group: &group::Consumer, frame: u64) -> Option<u64> {
 		None => frame,
 	};
 	// A relayed copy in this scheme serves its upstream's IDs verbatim, which need not be the
-	// ones its timestamps derive, so only its last relayed object places an end after it.
+	// ones its timestamps derive, so only its last relayed data object places an end after it:
+	// an END_OF_GROUP already relayed holds that ID, and is no object the end follows.
 	if group_relayed_same_mode(group, true) {
 		return match group.last_frame() {
-			Some(last) if frame == last + 1 => group.last_object().map(|id| id.saturating_add(1)),
+			Some(last) if frame == last + 1 => group.last_data_object().map(|id| id.saturating_add(1)),
 			_ => None,
 		};
 	}
@@ -22418,11 +22419,17 @@ impl TimedIds {
 	}
 
 	/// The IDs of `group` read from where its cursor sits, which follow the ID of the frame
-	/// before it: [`Error::Unsupported`] when this copy no longer holds the frames that decide it.
+	/// before it: [`Error::Unsupported`] when this copy no longer holds the frames that decide it,
+	/// and [`Error::TimestampMismatch`] when a timestamp before it decreases, as [`Self::next`].
 	fn at(group: &group::Consumer) -> Result<Self, Error> {
 		let prior = match group.index() {
-			0 => None,
-			index => Some(group.timed_entry(index - 1).ok_or(Error::Unsupported)?),
+			// Even its first frame may not be the group's: `timed_frame` is `None` for any copy
+			// that can't derive its IDs.
+			0 => {
+				group.timed_frame(0).ok_or(Error::Unsupported)?;
+				None
+			}
+			index => Some(group.timed_entry(index - 1).ok_or(Error::Unsupported)??),
 		};
 		Ok(Self {
 			start: group.start,
@@ -23603,7 +23610,7 @@ mod compression_tests {
 	}
 
 	/// A lite-05/06 copy may hold a timestamp below its predecessor, which draft-23 can't carry:
-	/// the ID assignment refuses it, whether it reads from frame 0 or resumes past frame 0.
+	/// the ID assignment refuses it, whether it reads from frame 0 or resumes before or past it.
 	#[test]
 	fn timed_ids_refuse_a_decreasing_timestamp() {
 		let ms = |ms| Timestamp::from_millis(ms).unwrap();
@@ -23631,6 +23638,67 @@ mod compression_tests {
 		assert!(matches!(ids.next(ms(20)), Err(Error::TimestampMismatch)));
 		// A tie is not a decrease.
 		assert_eq!(ids.next(ms(40)).unwrap(), (41, Some(1)));
+
+		// A read resuming past the decrease can't skip it.
+		group.write_frame(ms(40), b"x".as_slice()).unwrap();
+		consumer.skip_to(3);
+		assert!(matches!(TimedIds::at(&consumer), Err(Error::TimestampMismatch)));
+	}
+
+	/// A draft-22 copy holding Objects 0 and 2 derives draft-23 timestamp IDs once a gap declares
+	/// Object 1 never existed; without that, it may lack a frame, so it derives none and its
+	/// streams refuse.
+	#[test]
+	fn a_legacy_copy_derives_timestamp_ids_across_declared_gaps() {
+		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+		info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			version: Version::Draft22,
+			values: Vec::new(),
+		}));
+		for declared in [true, false] {
+			let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
+			let mut group = track.create_group(group::Info { start: 1000 }).unwrap();
+			group
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object: true,
+					first_id: 0,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			for id in [0, 2] {
+				group.mark_gap(id, (declared && id == 2).then_some(1)).unwrap();
+				let mut frame = group
+					.create_object(crate::frame::Header {
+						info: crate::frame::Info {
+							size: 1,
+							timestamp: Timestamp::from_millis(1000).unwrap(),
+						},
+						fields: Some(Arc::new(crate::model::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(bytes::Bytes::from_static(b"x")).unwrap();
+				group = frame.finish().unwrap();
+			}
+			let group = group.finish().unwrap();
+			let consumer = group.consume();
+			let label = format!("declared={declared}");
+			assert_eq!(group_last_id_exact(&consumer, true), declared, "{label}");
+			match declared {
+				true => {
+					assert_eq!(consumer.timed_id(1), Some(1), "{label}");
+					assert!(TimedIds::at(&consumer).is_ok(), "{label}");
+				}
+				false => assert!(matches!(TimedIds::at(&consumer), Err(Error::Unsupported)), "{label}"),
+			}
+		}
 	}
 
 	/// A draft-23 copy relayed in the same scheme ends one past its last relayed Object ID, which
@@ -23673,6 +23741,14 @@ mod compression_tests {
 			frame.write(bytes::Bytes::from_static(b"x")).unwrap();
 			group = frame.finish().unwrap();
 		}
+		// The END_OF_GROUP that took Object ID 36 is no data object, so the end stays at it.
+		group
+			.handle()
+			.set_end_object(crate::model::object::Fields {
+				id: 36,
+				properties: Default::default(),
+			})
+			.unwrap();
 		let group = group.finish().unwrap();
 		let consumer = group.consume();
 		assert_eq!(timed_end(&consumer, 2), Some(36));

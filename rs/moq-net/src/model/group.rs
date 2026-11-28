@@ -1045,11 +1045,19 @@ impl GroupState {
 	///
 	/// Derived from timestamps alone, so every copy holding frame 0 agrees on them, while a
 	/// copy without it cannot know where a run of tied timestamps pushed the IDs.
+	/// `timestamp_ids` says whether a relayed copy's wire Object IDs are timestamp IDs.
 	#[cfg(feature = "async")]
-	fn timed_ids(&self, start: u64) -> Option<impl Iterator<Item = (u64, u64)> + '_> {
-		// A relayed copy from a stream missing the group's head, or whose IDs already strayed
-		// from the derived ones, can't vouch for where its IDs fall.
-		if self.held() != 0 || self.wire().is_some_and(|wire| !wire.first_object || wire.sparse) {
+	fn timed_ids(&self, start: u64, timestamp_ids: bool) -> Option<impl Iterator<Item = (u64, u64)> + '_> {
+		let whole = match self.wire() {
+			None => true,
+			// Timestamp IDs skip ticks with no gap mark, so only a copy from the group's first
+			// object whose IDs match the derived ones vouches for holding every frame.
+			Some(wire) if timestamp_ids => wire.first_object && !wire.sparse,
+			// Ordinal IDs declare each skipped ID with a gap, so a copy whose gaps account for
+			// every ID it lacks, its head's included, holds every frame.
+			Some(wire) => wire.fetchable,
+		};
+		if self.held() != 0 || !whole {
 			return None;
 		}
 		let partial = self.partial.as_ref().map(|partial| partial.timestamp);
@@ -1640,6 +1648,17 @@ impl GroupState {
 
 	pub(super) fn wire(&self) -> Option<&Wire> {
 		self.relay.as_ref()?.wire.as_ref()
+	}
+
+	/// See [`Handle::last_data_object`].
+	fn last_data_object(&self) -> Option<u64> {
+		match self.wire() {
+			Some(wire) => match self.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
+			None => (self.next_index as u64).checked_sub(1),
+		}
 	}
 
 	fn wire_mut(&mut self) -> Option<&mut Wire> {
@@ -3357,14 +3376,7 @@ impl Handle {
 	/// else its frame index; `None` before the first frame. A terminal object does not
 	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
 	pub(crate) fn last_data_object(&self) -> Option<u64> {
-		let state = self.state.read();
-		match state.wire() {
-			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
-				Some(relay) => relay.last_before_end,
-				None => wire.last,
-			},
-			None => (state.next_index as u64).checked_sub(1),
-		}
+		self.state.read().last_data_object()
 	}
 
 	/// Cap the group at `frames`, for a track end inside it, or lift the cap with `None`:
@@ -4574,6 +4586,7 @@ impl Consumer {
 		self.cursor.state.read().past_cut(index)
 	}
 
+	/// The last object's ID, the terminal one included, as a relay preserves it for Largest.
 	#[cfg(feature = "async")]
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
@@ -4581,6 +4594,12 @@ impl Consumer {
 			Some(wire) => wire.last,
 			None => (state.next_index as u64).checked_sub(1),
 		}
+	}
+
+	/// The last data object's ID, as [`Handle::last_data_object`]: never the terminal object.
+	#[cfg(feature = "async")]
+	pub(crate) fn last_data_object(&self) -> Option<u64> {
+		self.cursor.state.read().last_data_object()
 	}
 
 	/// The ordinal of the last frame written, which a dense Object ID equals.
@@ -4593,14 +4612,36 @@ impl Consumer {
 	/// when it is not written yet or this copy no longer holds frame 0.
 	#[cfg(feature = "async")]
 	pub(crate) fn timed_id(&self, index: u64) -> Option<u64> {
-		self.timed_entry(index).map(|(id, _)| id)
+		let index = usize::try_from(index).ok()?;
+		self.cursor
+			.state
+			.read()
+			.timed_ids(self.start, self.timestamp_ids() == Some(true))?
+			.nth(index)
+			.map(|(id, _)| id)
 	}
 
-	/// Frame `index`'s moq-timestamp Object ID and timestamp value, as [`Self::timed_id`].
+	/// Frame `index`'s moq-timestamp Object ID and timestamp value, as [`Self::timed_id`], or
+	/// [`Error::TimestampMismatch`] when a timestamp through it decreases, which those IDs
+	/// can't carry: a lite-05/06 copy may hold one.
 	#[cfg(feature = "async")]
-	pub(crate) fn timed_entry(&self, index: u64) -> Option<(u64, u64)> {
+	pub(crate) fn timed_entry(&self, index: u64) -> Option<Result<(u64, u64)>> {
 		let index = usize::try_from(index).ok()?;
-		self.cursor.state.read().timed_ids(self.start)?.nth(index)
+		let state = self.cursor.state.read();
+		let mut prior: Option<(u64, u64)> = None;
+		for (count, (id, timestamp)) in state
+			.timed_ids(self.start, self.timestamp_ids() == Some(true))?
+			.enumerate()
+		{
+			if prior.is_some_and(|(_, prior)| timestamp < prior) {
+				return Some(Err(Error::TimestampMismatch));
+			}
+			prior = Some((id, timestamp));
+			if count == index {
+				return prior.map(Ok);
+			}
+		}
+		None
 	}
 
 	/// The moq-timestamp Object ID of the last frame written. A copy that no longer holds
@@ -4609,7 +4650,10 @@ impl Consumer {
 	pub(crate) fn last_timed_id(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
 		let last = state.next_index.checked_sub(1)?;
-		if let Some((id, _)) = state.timed_ids(self.start).and_then(|mut ids| ids.nth(last)) {
+		if let Some((id, _)) = state
+			.timed_ids(self.start, self.timestamp_ids() == Some(true))
+			.and_then(|mut ids| ids.nth(last))
+		{
 			return Some(id);
 		}
 		match state.timeline {
@@ -4623,7 +4667,7 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn timed_frame(&self, id: u64) -> Option<u64> {
 		let state = self.cursor.state.read();
-		let mut ids = state.timed_ids(self.start)?;
+		let mut ids = state.timed_ids(self.start, self.timestamp_ids() == Some(true))?;
 		Some(match ids.position(|(timed, _)| timed >= id) {
 			Some(index) => index as u64,
 			None => state.next_index as u64,
