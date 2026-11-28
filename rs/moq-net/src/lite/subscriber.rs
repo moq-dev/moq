@@ -73,6 +73,14 @@ impl std::ops::Deref for Subscriber {
 	}
 }
 
+/// Tests set fields on a subscriber they have not cloned yet.
+#[cfg(test)]
+impl std::ops::DerefMut for Subscriber {
+	fn deref_mut(&mut self) -> &mut Shared {
+		Arc::get_mut(&mut self.0).expect("a test configures its subscriber before cloning it")
+	}
+}
+
 pub(super) struct Shared {
 	runtime: crate::time::Deadlines,
 	session: Transport,
