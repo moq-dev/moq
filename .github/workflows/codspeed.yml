@@ -50,10 +50,7 @@ jobs:
         env:
           BENCHMARKS: ${{ inputs.benchmarks }}
         run: |
-          # One benchmark at a time: some read the wall clock, so their counts
-          # follow the host's load, and a bisect step must count under the same
-          # load as the nightly it is compared against.
-          args=(run --jobs 1 --out kixel-metrics/metrics.json)
+          args=(run --out kixel-metrics/metrics.json)
           if [ -n "$BENCHMARKS" ]; then
             printf '%s\n' "$BENCHMARKS" > "$RUNNER_TEMP/benchmarks"
             # A suspect this commit lacks is named in the job summary, not a failure.

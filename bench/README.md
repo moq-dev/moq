@@ -978,11 +978,9 @@ The Instructions workflow counts each deterministic bench's instructions every
 night on `main`, under stock Valgrind on a hosted runner, through
 [rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
 benchmark runs alone in its own Valgrind process, so a change of a few percent
-shows without the paired comparison's rounds. Some counts still move
-between runs of the same code: some benches read the wall clock and follow the
-host's load, by up to 32%, and some shift with the checkout's path
-([quest](/quest/m0/repeatable-instruction-counts.md)). CI counts one benchmark
-at a time (`--jobs 1`), so a bisect step counts under the nightly's load. It does not see
+shows without the paired comparison's rounds. The same code counts the same
+instructions at any host load and in any checkout, so CI counts as many
+benchmarks at once as the runner has cores. It does not see
 syscalls, I/O, contention, or caches, and CodSpeed's Criterion, which counts
 them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
 single-threaded targets without I/O, and Nightly keeps measuring every bench.
@@ -1013,9 +1011,7 @@ names the missing ones on stderr and in a GitHub Actions job summary, failing
 only when the commit has none of them. `compare` counts the base and the working tree from one
 worktree under `~/.cache/rust2-bench`, so a path the build compiles in moves
 neither side, and selects each side's packages and targets from what that side
-has, so a package or target only one side has reads as added or removed. Not
-every count repeats yet (`quest/m0/repeatable-instruction-counts.md`), so recount
-a change it reports with `--jobs 1`, as CI counts, before trusting it. It keeps the worktree and its build for
+has, so a package or target only one side has reads as added or removed. It keeps the worktree and its build for
 the next compare; delete the directory, then `git worktree prune`, to reclaim
 them.
 

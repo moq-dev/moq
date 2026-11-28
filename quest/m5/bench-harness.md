@@ -21,7 +21,7 @@ Recommendations for the implementer:
 - One PR: Criterion can leave only once every target has moved, and a half-moved tree makes Nightly and `sh/rs/instructions.sh` run both harnesses.
 - Keep each benchmark's name where the harness can (its file, then module, function, and argument), so Kixel Quest's instruction series continue instead of restarting. Name in the PR the ones that change.
 - The rewrite is a boundary for Nightly's paired timing: a base before it has only Criterion benches. Recommended: for a base before the rewrite, Nightly times the head alone and says the pair was skipped, so the first night reports without keeping `bench/run.sh`'s `--criterion` path alive. Delete that path and its `BENCH_BASE` scripts once the harness replaces them.
-- `sh/rs/instructions.sh` selects targets by what CodSpeed's Criterion couldn't count, such as skipping `iter_custom`. Revisit that selection against what the harness counts, beside [repeatable counts](/quest/m0/repeatable-instruction-counts.md).
+- `sh/rs/instructions.sh` selects targets by what CodSpeed's Criterion couldn't count, such as skipping `iter_custom`. Revisit that selection against what the harness counts.
 - Kixel Quest finds the counts by the workflow's artifact and dispatches bisects by workflow. Check in kixel-ai/kixel.quest whether it keys on the file name `codspeed.yml` before renaming it, and move both together if it does.
 - Update `bench/README.md`'s Instruction counts section and every comment that names CodSpeed or `cfg(codspeed)`.
 
@@ -30,7 +30,3 @@ Public API: none. Wire: none.
 ## Waiting
 
 - kixel-ai/rust2: paired timing, `quest/m1/codspeed/paired.md` in its quest tree; check that the file is gone from rust2's `main` and moq's rust2 flake pin includes it.
-
-## Related
-
-- [Repeatable instruction counts](/quest/m0/repeatable-instruction-counts.md) - the same counts' noise
