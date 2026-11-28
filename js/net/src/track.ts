@@ -3659,6 +3659,9 @@ export class Subscriber {
 		budget: Budget;
 		coverage?: Coverage;
 	};
+	// Whether a publisher polled a resumed reader's drops: only then does it report what it
+	// hands out. A debt fold raising #floor is no sign of it. Mirrors the Rust `Logical::dropping`.
+	#resumeDropping = false;
 	#reported = new Runs<Run>(() => true);
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
@@ -5511,9 +5514,7 @@ export class Subscriber {
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.settleIfDropping = (subscriber, key) => {
 			if (
-				subscriber.#resume !== undefined
-					? subscriber.#reported.size > 0 || subscriber.#floor > 0n
-					: subscriber.#dropsSeen !== undefined
+				subscriber.#resume !== undefined ? subscriber.#resumeDropping : subscriber.#dropsSeen !== undefined
 			) {
 				subscriber.#settled(key, key + 1n);
 			}
@@ -6281,6 +6282,7 @@ export class Subscriber {
 	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
 		if (this.#resume) {
+			this.#resumeDropping = true;
 			for (;;) {
 				const queued = this.#nextResumedDrop();
 				if (queued) return queued;

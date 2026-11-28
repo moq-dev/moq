@@ -8983,6 +8983,7 @@ impl Subscribing {
 				Logical {
 					state: self.state.clone(),
 					record: Record::default(),
+					dropping: false,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -9412,6 +9413,9 @@ enum Inner {
 struct Logical {
 	state: kio::Consumer<TrackState>,
 	record: Record,
+	/// Whether a publisher polled this reader's drops: only then does its record report what
+	/// it hands out. A debt fold raising the floor is no sign of it.
+	dropping: bool,
 }
 
 /// A group a [`Subscriber`] reserved without handing it out; see
@@ -13666,7 +13670,7 @@ impl Subscriber {
 			Inner::Plain(cursor) if cursor.drops.is_some() => {
 				cursor.record.tell(key..end, Report::Final);
 			}
-			Inner::Resume(_, logical) if logical.record.has_reports() => {
+			Inner::Resume(_, logical) if logical.dropping => {
 				logical.record.tell(key..end, Report::Final);
 			}
 			_ => {}
@@ -14337,6 +14341,7 @@ impl Subscriber {
 			// Each copy reports to its own route; the logical record keeps one route's run from
 			// going out over what another's already settled.
 			Inner::Resume(resume, logical) => loop {
+				logical.dropping = true;
 				if let Some(next) = logical.record.next_pending() {
 					return Poll::Ready(next);
 				}

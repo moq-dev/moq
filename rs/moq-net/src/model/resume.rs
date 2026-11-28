@@ -17313,7 +17313,19 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn nested_fronts_compact_fresh_skips_with_short_retention() {
-		const BASE: u64 = 1_000_003;
+		nested_fronts_compact_fresh_skips(1_000_003);
+	}
+
+	/// From key 0, a debt fold raises each front's floor over the handed-out prefix, which must
+	/// not make a copy that never polled drops start reporting what it hands out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn nested_fronts_from_key_zero_compact_fresh_skips() {
+		nested_fronts_compact_fresh_skips(0);
+	}
+
+	#[cfg(feature = "async")]
+	fn nested_fronts_compact_fresh_skips(base: u64) {
 		const SPACING: u64 = 17;
 		let outer_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1));
 		let inner_pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1));
@@ -17366,7 +17378,7 @@ mod test {
 		let mut most_outer = 0;
 		let mut most_inner = 0;
 		for n in 0..200u64 {
-			let key = BASE + n * SPACING;
+			let key = base + n * SPACING;
 			let mut group = source.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(ts(key), &b"x"[..]).unwrap();
 			group.finish_at(key + SPACING).unwrap();
@@ -17380,7 +17392,7 @@ mod test {
 		}
 		let mut earliest_retained = true;
 		source.consume().with_skips(&mut |skip_end| {
-			earliest_retained = skip_end(BASE + 1).is_some();
+			earliest_retained = skip_end(base + 1).is_some();
 		});
 		assert!(
 			!earliest_retained,

@@ -143,11 +143,6 @@ impl Record {
 		}
 	}
 
-	/// Whether this record has already recorded reports or folded a report floor.
-	pub fn has_reports(&self) -> bool {
-		self.floor > 0 || !self.reported.is_empty()
-	}
-
 	/// Forget every report of `range`, which the wire was never told: a run given up below
 	/// where delivery starts, which a later widening may still serve or report.
 	pub fn untell(&mut self, range: Range<u64>) {
@@ -1793,6 +1788,55 @@ mod test {
 		);
 		assert!(record.reported.is_empty());
 		assert!(!record.told(BASE + 1));
+	}
+
+	/// A received copy learns a group's skip from its GROUP_END, which can land after the next
+	/// group is handed out, so the hand-out's tail check never sees it. The full scan's
+	/// watermark still compacts each such gap while its proof is held, which the drop set keeps
+	/// for the pool's expiry window, far more than the 16 groups kept here.
+	#[test]
+	fn late_skip_proofs_compact_on_the_full_scan() {
+		use std::cell::RefCell;
+
+		struct RecentSkips(RefCell<std::collections::VecDeque<Range<u64>>>);
+		impl SkipLookup for RecentSkips {
+			fn with_skips(&self, f: &mut dyn FnMut(SkipEnd<'_>)) {
+				let skips = self.0.borrow();
+				f(&|key| skips.iter().find(|r| r.contains(&key)).map(|r| r.end));
+			}
+		}
+
+		const BASE: u64 = 1_000;
+		const SPACING: u64 = 17;
+		let (_pool, track) = account();
+		let mut record = Record::default();
+		let skips = RecentSkips(RefCell::new(std::collections::VecDeque::new()));
+		let mut most_runs = 0;
+		for n in 0..1_000u64 {
+			let key = BASE + n * SPACING;
+			record.delivered.insert(key);
+			record.settle_with(
+				|| track.clone(),
+				&mut (),
+				Standing {
+					from: BASE,
+					handed: Some(key),
+					ranges: None,
+				},
+				Some(&skips),
+			);
+			most_runs = most_runs.max(record.delivered.runs());
+			// The gap below this group is proved only now, after it was handed out.
+			if n > 0 {
+				let mut q = skips.0.borrow_mut();
+				q.push_back(key - SPACING + 1..key);
+				while q.len() > 16 {
+					q.pop_front();
+				}
+			}
+		}
+		assert!(most_runs <= 16, "late proofs left {most_runs} delivered runs");
+		assert!(record.reported.is_empty());
 	}
 
 	/// When a `Report::Withdrawable` run sits directly at `self.floor` over a delivered prefix,
