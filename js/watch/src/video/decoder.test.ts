@@ -434,7 +434,7 @@ async function guardedPlayback(
 		release() {
 			for (const emit of pending.splice(0)) emit();
 		},
-		// A restarted publisher takes the name: another instance of the same broadcast.
+		// A restarted publisher takes the name: another identity of the same broadcast.
 		republish() {
 			closeAll();
 			producer = new Moq.Broadcast.Producer();
@@ -633,7 +633,7 @@ it("keeps the clock when only the catalog's broadcast is republished", async () 
 		playback.republishCatalog();
 		await microtasks();
 
-		// The media is the same instance, so its timeline did not start over.
+		// The media is the same identity, so its timeline did not start over.
 		expect(playback.decoder.out.timestamp.peek()).toEqual(Duration.millis(10_000));
 		expect(reset).not.toHaveBeenCalled();
 	} finally {

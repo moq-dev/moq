@@ -64,6 +64,11 @@ func TimestampToDuration(t Timestamp) (time.Duration, error) {
 // and receive. On a scale-less track the timestamp is Unscaled at the frame's group key.
 type Frame = ffi.MoqFrame
 
+// FrameHeader is a frame's header without its payload, as a metadata subscription reads it:
+// the declared payload Size in bytes (0 for an empty frame) and its Timestamp (Unscaled at
+// the frame's group key on a scale-less track).
+type FrameHeader = ffi.MoqFrameHeader
+
 // Datagram is a best-effort track datagram as received: sequence number, timestamp
 // (Unscaled at the sequence on a scale-less track), and payload.
 type Datagram = ffi.MoqDatagram

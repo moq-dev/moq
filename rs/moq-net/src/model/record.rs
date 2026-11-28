@@ -9,7 +9,7 @@ use rangemap::{RangeMap, RangeSet};
 use super::cache;
 use super::delivered::Delivered;
 use super::skipped::Skipped;
-use super::subscription::{Cover, minus};
+use super::subscription::{Accounted, Cover, minus};
 use super::track::Hole;
 
 /// Heap a record keeps per run: its widest entry, doubled for half-full `BTreeMap` nodes as
@@ -63,16 +63,15 @@ impl Pending {
 }
 
 /// How a reader reported a run, and what its wire was told. Every report is final: a drop,
-/// stale (OLD) or not, settles its keys for good on the wire.
+/// stale (OLD) or not, settles its keys for good on the wire, and a skip goes out over none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Report {
-	/// Served on a Group Stream, or given up on a version that has no skip: nothing goes out
-	/// over it.
+	/// Served on a Group Stream, or given up on a version that has no skip.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Settled,
-	/// Dropped, though a skip still goes out over it.
+	/// Dropped.
 	Dropped,
-	/// Skipped, which replaces a drop.
+	/// Skipped, as SUBSCRIBE_SKIP names it.
 	Skip,
 }
 
@@ -84,37 +83,23 @@ impl Report {
 			Hole::Drop { .. } => Self::Dropped,
 		}
 	}
-
-	/// Whether this report stops `hole` going out over it: only a skip goes out over a drop.
-	pub fn blocks(self, hole: &Hole) -> bool {
-		match self {
-			Self::Settled | Self::Skip => true,
-			Self::Dropped => !matches!(hole, Hole::Skip),
-		}
-	}
 }
 
 impl Record {
-	/// Report the first part of `range` nothing already reported blocks, as `hole` says,
-	/// replacing what it goes out over. `None` when every part is blocked.
+	/// Report the first part of `range` nothing reported already, as `hole` says. `None`
+	/// when every part was.
 	pub fn report(&mut self, range: Range<u64>, hole: &Hole) -> Option<Range<u64>> {
 		let range = range.start.max(self.floor)..range.end;
 		if range.is_empty() {
 			return None;
 		}
-		let blocked: RangeSet<u64> = self
-			.reported
-			.overlapping(&range)
-			.filter(|(_, report)| report.blocks(hole))
-			.map(|(run, _)| run.clone())
-			.collect();
-		let gap = blocked.gaps(&range).next()?;
+		let gap = self.reported.gaps(&range).next()?;
 		self.reported.insert(gap.clone(), Report::of(hole));
 		Some(gap)
 	}
 
-	/// The lowest pending run's first part nothing already reported blocks, now reported, with
-	/// why; the rest of that run waits its turn.
+	/// The lowest pending run's first part nothing reported already, now reported, with why;
+	/// the rest of that run waits its turn.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn next_pending(&mut self) -> Option<(Range<u64>, Hole)> {
 		while let Some((range, pending)) = self
@@ -165,6 +150,16 @@ impl Record {
 		if !range.is_empty() {
 			self.reported.remove(range);
 		}
+	}
+}
+
+impl Accounted for Record {
+	fn first_gap(&self, range: &Range<u64>) -> Option<u64> {
+		let range = range.start.max(self.floor)..range.end;
+		if range.is_empty() {
+			return None;
+		}
+		self.reported.gaps(&range).next().map(|gap| gap.start)
 	}
 }
 
@@ -275,6 +270,10 @@ impl Record {
 		let moved = reader.ranges.is_some() && reader.ranges != self.retired;
 		if moved {
 			self.retired = reader.ranges.clone();
+			// What a fold counted as handed out before any range held it, the ranges now owe.
+			if let Some(ranges) = &reader.ranges {
+				self.delivered.reopen(ranges);
+			}
 		}
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
@@ -424,7 +423,7 @@ impl Record {
 	/// Settle everything below `floor` for good.
 	fn raise(&mut self, floor: u64) {
 		self.floor = floor;
-		self.delivered.forget_below(floor);
+		self.delivered.settle_below(floor);
 		self.skipped.forget(0..floor);
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);

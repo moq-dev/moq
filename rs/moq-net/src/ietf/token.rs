@@ -47,7 +47,7 @@ pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> R
 /// An `AUTHORIZATION TOKEN` parameter on a request message, decoded by the SETUP option's
 /// rules except that a registration overflows the cache instead of falling back to a value.
 ///
-/// The parameter may repeat, so a request decodes it as a `Vec` and every instance is checked.
+/// The parameter may repeat, so a request decodes it as a `Vec` and every identity is checked.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RequestToken(pub Token);
 

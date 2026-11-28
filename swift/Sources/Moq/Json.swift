@@ -76,15 +76,6 @@ extension Json {
             TrackDemand(try ffi.demand())
         }
 
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
-        }
-
         /// Finish the track, closing any open group.
         public func finish() throws {
             try ffi.finish()
@@ -141,7 +132,9 @@ extension Json {
 
     /// Write side of a JSON stream track (lossless append-log).
     ///
-    /// Every `append` is preserved and delivered in order.
+    /// Every `append` is preserved and delivered in order. Once it appended a record,
+    /// `finish()` it: releasing it unfinished is not supported, and aborts its track with
+    /// `Dropped`.
     public final class StreamProducer<Value: Encodable>: Sendable {
         let ffi: MoqJsonStreamProducer
 
@@ -160,15 +153,6 @@ extension Json {
         /// A watch-only handle to whether the track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())
-        }
-
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track, closing the group.
@@ -214,7 +198,9 @@ extension Json {
     /// Write side of a JSON window track: records pushed at the back and popped from the front.
     ///
     /// The window rolls to new groups that restate the records it retains, so a reader can join at
-    /// any point. Not advertised in the broadcast's catalog; a reader names the track.
+    /// any point. Not advertised in the broadcast's catalog; a reader names the track. Once it
+    /// pushed a record, `finish()` it: releasing it unfinished is not supported, and aborts its
+    /// track with `Dropped`.
     public final class WindowProducer<Value: Encodable>: Sendable {
         let ffi: MoqJsonWindowProducer
 
@@ -252,15 +238,6 @@ extension Json {
         /// A watch-only handle to whether the track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())
-        }
-
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
         }
 
         /// Finish the track, closing any open group.

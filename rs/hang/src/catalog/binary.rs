@@ -95,17 +95,6 @@ pub struct BinaryConfig {
 	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
-	/// The instance of the stream the reference names, when the catalog knows it. Absent names
-	/// whichever stream the reader resolves first, as in every catalog before this field.
-	///
-	/// A reader refuses a broadcast of another instance rather than fall back to it. A route
-	/// over a wire that carries no instance has one its session minted, which proves nothing,
-	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
-	/// catalog's own stream.
-	#[serde(default)]
-	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
-	pub instance: Option<moq_net::Instance>,
-
 	/// Whether the track is a latest-value blob or an append log. Always stated: see [`Mode`].
 	#[serde_as(as = "serde_with::DisplayFromStr")]
 	pub mode: Mode,
@@ -153,7 +142,6 @@ impl BinaryConfig {
 		Self {
 			broadcast: None,
 			track: None,
-			instance: None,
 			mode,
 			mime: None,
 			bitrate: None,

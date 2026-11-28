@@ -441,8 +441,11 @@ run by default:
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no
-  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
-  revision whose session API predates this harness reports it unsupported.
+  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. It
+  builds against every revision since
+  [moq-dev/moq#9386](https://github.com/moq-dev/moq/pull/9386) made `proxy` an
+  `origin::Config` field, which its relay origin sets; an older revision reports it
+  unsupported.
 - `group`, on request: every subscriber drains one finished 512-frame group in
   object batches through the relay's private reader, as moq-net's
   `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
@@ -462,7 +465,7 @@ callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
 `python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
 instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
 SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
-version (default `moq-lite-06`).
+version (default `moq-lite-06`; `moq-lite-07-wip` runs too).
 
 ### Heap
 
@@ -830,9 +833,8 @@ The Nightly workflow keeps history on one `gh-pages` branch, where
 `github-action-benchmark` appends each night's points to `bench/{costs,rates}/data.js`
 with its alerts, comments, and charts unused. The publisher runs only on `main`,
 serializes history writes, renders the table from that history even when every
-source failed, and deploys the branch explicitly. Re-running its job in place
-fails, because the earlier attempt's `github-pages` artifact remains; delete
-that artifact first or wait for the next Nightly.
+source failed, and deploys the branch explicitly by the uploaded artifact's ID, so
+re-running its job in place deploys that attempt's upload.
 
 The table includes these measurements:
 
@@ -980,18 +982,25 @@ shows without the paired comparison's rounds. Some counts still move
 between runs of the same code: some benches read the wall clock and follow the
 host's load, by up to 32%, and some shift with the checkout's path
 ([quest](/quest/m0/repeatable-instruction-counts.md)). CI counts one benchmark
-at a time (`--jobs 1`), so a bisect step counts under the nightly's load. It does not see
-syscalls, I/O, contention, or caches, and CodSpeed's Criterion, which counts
-them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
+at a time (`--jobs 1`), so a bisect step counts under the nightly's load. Beside
+each count, swole writes its estimated cycles, which weigh Callgrind's simulated
+cache misses and branch mispredicts. It does not see syscalls, I/O, or
+contention, and CodSpeed's Criterion, which counts them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
 single-threaded targets without I/O, and Nightly keeps measuring every bench.
 Workspace benches import `criterion`, which `rs/bench-harness` resolves to
 Criterion, or to CodSpeed's instrumented Criterion under `cfg(codspeed)`, which
-swole sets. Nothing gates on it.
+swole sets. swole cannot see a CodSpeed bench's threads, so it counts each
+five times and records the median, with the least and most beside it; once the
+benches move to swole's own harness ([quest](/quest/m5/bench-harness.md)), one
+that runs alone counts once. Nothing gates on it.
 
 Each count's measure names the environment it ran in, such as `instructions
-(x86_64-3059cd1d9e65)`: Valgrind's simulated CPU, glibc's tunables, and the
-Valgrind version, which swole's flake input pins. Counts compare only within one
-fingerprint, and a Valgrind bump starts new series. A matching fingerprint does
+(x86_64-9d154cd7ab99)` and `estimated cycles (x86_64-9d154cd7ab99)`: Valgrind's
+simulated CPU, glibc's tunables, the Valgrind version, the library swole preloads
+into each counted process to pin its randomness and clock, and the cache and
+branch simulation with its cycle model, which swole's flake input pins. Counts
+compare only within one fingerprint, and a bump that moves any of them starts
+new series. A matching fingerprint does
 not yet reproduce CI's counts: two hosts sharing one agreed exactly on fewer
 than a quarter of the benchmarks. On x86-64 Linux:
 
@@ -1003,13 +1012,17 @@ nix develop --command just rs instructions compare origin/main  # a table of eac
 
 Add `--benchmarks <file>`, one name a line, to count only those benchmarks and
 build only the bench targets of their names, plus any target of the same name in
-another listed package, since Cargo's `--bench` takes no package. `compare` selects the same packages and targets at both
-commits, so its base needs every package `sh/rs/instructions.sh` lists. It
-counts the base in another worktree, whose path alone can move a count, so
-recount a change it reports in one checkout, with `--jobs 1` as CI counts,
-before trusting it. It keeps each
-checkout's base worktree and build under `~/.cache/swole` for the next
-compare; delete the directory, then `git worktree prune`, to reclaim them.
+another listed package, since Cargo's `--bench` takes no package. A name the
+commit lacks fails the run; `run` with `--allow-missing` counts the rest and
+names the missing ones on stderr and in a GitHub Actions job summary, failing
+only when the commit has none of them. `compare` counts the base and the working tree from one
+worktree under `~/.cache/swole`, so a path the build compiles in moves
+neither side, and selects each side's packages and targets from what that side
+has, so a package or target only one side has reads as added or removed. Not
+every count repeats yet (`quest/m0/repeatable-instruction-counts.md`), so recount
+a change it reports with `--jobs 1`, as CI counts, before trusting it. It keeps the worktree and its build for
+the next compare; delete the directory, then `git worktree prune`, to reclaim
+them.
 
 ### Kixel Quest
 
@@ -1019,7 +1032,9 @@ the run finishes and turns a regression into an investigation quest in
 `quest/m0/`. It bisects one to the landing that caused it by dispatching the
 Instructions workflow on a `kixel-bisect/<run>/<commit>` branch, with its
 `benchmarks` input naming the suspects, so each step builds and counts only
-those. The Instructions workflow uploads swole's `metrics.json`, which
+those. A step at a commit lacking some suspects counts the rest
+(`--allow-missing`), and Kixel Quest reads the missing ones as skipped there,
+not clean. The Instructions workflow uploads swole's `metrics.json`, which
 swole checks against Kixel Quest's limits as it writes it; Nightly reports
 every successful source's report, without its `bench-*` prefix, and each paired
 comparison's base as a second observation of that commit (`just gh

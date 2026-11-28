@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import { ProtocolViolation } from "../error.ts";
+import { ProtocolViolation, StreamCode } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import type { Range } from "../track.ts";
@@ -24,7 +24,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 	spanOf,
@@ -266,12 +265,15 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 		{ start: { joined: { absolute: 9n, frame: 0, max: 4 } } },
 	]);
 	await expect(update([1, 0, 4, 9, 0, 0])).rejects.toThrow(ProtocolViolation);
-	// Any other type is a violation, and so is a Position at frame 0, as a start or an end.
-	await expect(update([1, 2, 0, 0, 0])).rejects.toThrow(ProtocolViolation);
-	await expect(update([1, 1, 0, 2, 7, 0])).rejects.toThrow(ProtocolViolation);
+	// Position at frame 0 is valid as both start and end (exact group match / exclusive group end).
+	expect((await update([1, 2, 0, 0, 0])).ranges).toEqual([{ start: { absolute: 0n, frame: 0 } }]);
+	expect((await update([1, 1, 0, 2, 7, 0])).ranges).toEqual([
+		{ start: { time: 0n }, end: { absolute: 7n, frame: 0 } },
+	]);
 	expect((await update([1, 1, 0, 2, 7, 4])).ranges).toEqual([
 		{ start: { time: 0n }, end: { absolute: 7n, frame: 4 } },
 	]);
+	// Any other type is a violation.
 	await expect(update([1, 5, 0, 0])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 0, 5, 0])).rejects.toThrow(ProtocolViolation);
 });
@@ -298,9 +300,9 @@ test("a joined start round-trips on lite-07", async () => {
 	]);
 
 	// The count, the type, group, frame, and max age plus one, then the end's type and time, 251
-	// and 9000 each in two bytes.
+	// and 9000 each in two bytes, then a payload `Meta`.
 	const buf = await encodeMessage(version, new Subscribe({ ...props, ranges: [joined(5n, 0, 250)] }));
-	expect([...buf.slice(buf.length - 9)]).toEqual([1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28]);
+	expect([...buf.slice(buf.length - 10)]).toEqual([1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0]);
 
 	// An end can't be a join, placed or not.
 	await expect(
@@ -441,7 +443,7 @@ test("a lite-07 range may end partway through a group, stopping it there", async
 	expect(positionFrames([empty, { start: { absolute: 9n, frame: 3 } }])).toEqual(new Map([[9n, 3]]));
 });
 
-test("lite-07 sends an absolute anchor as a time, an end as the time before it", async () => {
+test("lite-07 sends an absolute anchor as a Position at frame 0", async () => {
 	const update = new SubscribeUpdate({
 		priority: 0,
 		ranges: [{ start: { absolute: 7n }, end: { absolute: 10n } }],
@@ -450,11 +452,20 @@ test("lite-07 sends an absolute anchor as a time, an end as the time before it",
 		new Reader(undefined, await encodeMessage(Version.DRAFT_07, update), Version.DRAFT_07),
 		Version.DRAFT_07,
 	);
-	expect(got.ranges).toEqual([{ start: { time: 7n }, end: { time: 9n } }]);
-	// Nothing comes before group 0, so an end there can't go out.
-	await expect(
-		encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 0n } }] })),
-	).rejects.toThrow("empty subscription range cannot be encoded");
+	expect(got.ranges).toEqual([{ start: { absolute: 7n, frame: 0 }, end: { absolute: 10n, frame: 0 } }]);
+	// Position(0, 0) as an exclusive end encodes without underflow.
+	const zero = await SubscribeUpdate.decode(
+		new Reader(
+			undefined,
+			await encodeMessage(
+				Version.DRAFT_07,
+				new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 0n } }] }),
+			),
+			Version.DRAFT_07,
+		),
+		Version.DRAFT_07,
+	);
+	expect(zero.ranges).toEqual([{ end: { absolute: 0n, frame: 0 } }]);
 });
 
 test("lite-07 carries every range, times and no start included, and older wires the span alone", async () => {
@@ -565,18 +576,22 @@ test("SubscribeDrop is restored on draft-07", async () => {
 	expect(await encode(Version.DRAFT_06, drop)).toEqual(new Uint8Array([2, 3, 1, 3, 7]));
 });
 
-test("SubscribeSkip is type 3 on draft-07 alone", async () => {
-	const skip: SubscribeResponse = { skip: new SubscribeSkip({ start: 1n, end: 4n }) };
-	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([3, 2, 1, 4]));
+test("lite-07 carries skips in SubscribeDrop(SKIP) and rejects type 3", async () => {
+	const skip: SubscribeResponse = { drop: new SubscribeDrop({ start: 1n, end: 4n, error: StreamCode.Skip }) };
+	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([2, 3, 1, 4, 0x3a]));
 	const got = await responseRoundtrip(Version.DRAFT_07, skip);
-	if (!("skip" in got)) throw new Error("expected skip");
-	expect([got.skip.start, got.skip.end]).toEqual([1n, 4n]);
-	await expect(encode(Version.DRAFT_06, skip)).rejects.toThrow();
+	if (!("drop" in got)) throw new Error("expected drop");
+	expect([got.drop.start, got.drop.end, got.drop.error]).toEqual([1n, 4n, StreamCode.Skip]);
+	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+		await expect(
+			decodeSubscribeResponse(new Reader(undefined, new Uint8Array([3, 2, 1, 4]), version), version),
+		).rejects.toThrow(ProtocolViolation);
+	}
 });
 
 // Lite-07 carries a non-empty `[Group Start, Group End)`, which reaches but never passes the
 // reserved group 2^64-1.
-test("lite-07 drop and skip spans are non-empty and stop at the reserved group", async () => {
+test("lite-07 drop spans are non-empty and stop at the reserved group", async () => {
 	const top = (1n << 64n) - 1n;
 	for (const [start, end] of [
 		[0n, 1n],
@@ -584,19 +599,16 @@ test("lite-07 drop and skip spans are non-empty and stop at the reserved group",
 		[0n, top],
 		[top - 1n, top],
 	]) {
-		const skip = await responseRoundtrip(Version.DRAFT_07, { skip: new SubscribeSkip({ start, end }) });
-		if (!("skip" in skip)) throw new Error("expected skip");
-		expect([skip.skip.start, skip.skip.end]).toEqual([start, end]);
-		const drop = await responseRoundtrip(Version.DRAFT_07, { drop: new SubscribeDrop({ start, end, error: 7 }) });
-		if (!("drop" in drop)) throw new Error("expected drop");
-		expect([drop.drop.start, drop.drop.end, drop.drop.error]).toEqual([start, end, 7]);
+		for (const error of [StreamCode.Skip, 7]) {
+			const drop = await responseRoundtrip(Version.DRAFT_07, { drop: new SubscribeDrop({ start, end, error }) });
+			if (!("drop" in drop)) throw new Error("expected drop");
+			expect([drop.drop.start, drop.drop.end, drop.drop.error]).toEqual([start, end, error]);
+		}
 	}
 
 	const decode = (body: number[]) =>
 		decodeSubscribeResponse(new Reader(undefined, new Uint8Array(body), Version.DRAFT_07), Version.DRAFT_07);
 	// A Group End not past its Group Start is a protocol violation, empty or reversed.
-	await expect(decode([3, 2, 4, 4])).rejects.toThrow(ProtocolViolation);
-	await expect(decode([3, 2, 4, 3])).rejects.toThrow(ProtocolViolation);
 	await expect(decode([2, 3, 4, 4, 7])).rejects.toThrow(ProtocolViolation);
 	await expect(decode([2, 3, 4, 3, 7])).rejects.toThrow(ProtocolViolation);
 
@@ -605,7 +617,6 @@ test("lite-07 drop and skip spans are non-empty and stop at the reserved group",
 		[3n, 3n],
 		[3n, 1n],
 	]) {
-		await expect(encode(Version.DRAFT_07, { skip: new SubscribeSkip({ start, end }) })).rejects.toThrow(RangeError);
 		await expect(encode(Version.DRAFT_07, { drop: new SubscribeDrop({ start, end, error: 0 }) })).rejects.toThrow(
 			RangeError,
 		);

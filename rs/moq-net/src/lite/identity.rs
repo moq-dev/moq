@@ -1,0 +1,224 @@
+use crate::{
+	Identity,
+	coding::{DecodeError, Decoder, EncodeError, Encoder},
+	route::NodeId,
+};
+
+use super::Version;
+
+/// Encode the identity a request pins as its UTF-8 bytes and minted flag, or empty and
+/// unminted for none. Older versions carry nothing, so the peer resolves whichever identity
+/// wins the path.
+pub(super) fn encode_pin(
+	w: &mut Encoder<'_>,
+	version: Version,
+	identity: Option<&Identity>,
+) -> Result<(), EncodeError> {
+	if !version.has_identity() {
+		return Ok(());
+	}
+	match identity {
+		Some(identity) => encode(w, identity),
+		None => {
+			w.bytes(&[])?;
+			w.bool(false);
+			Ok(())
+		}
+	}
+}
+
+/// Decode the identity a request pins: empty is none, and anything but UTF-8 of at most 256
+/// bytes, or an empty one flagged minted, is refused.
+pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option<Identity>, DecodeError> {
+	if !version.has_identity() {
+		return Ok(None);
+	}
+	match (r.bytes()?, r.bool()?) {
+		([], false) => Ok(None),
+		(bytes, minted) => decode(bytes, minted).map(Some),
+	}
+}
+
+/// Encode the forwarding node a request names, or none to let the receiver select one,
+/// as Node ID 0. Only lite-07 carries it, so an older peer always selects, and what is
+/// set here is dropped.
+pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: Option<NodeId>) -> Result<(), EncodeError> {
+	if !version.has_routes() {
+		return Ok(());
+	}
+	match node {
+		Some(node) => super::announce::encode_node(w, node),
+		None => w.varint(0),
+	}
+}
+
+/// Decode the forwarding node a request names; see [`encode_node`].
+pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<Option<NodeId>, DecodeError> {
+	if !version.has_routes() {
+		return Ok(None);
+	}
+	Ok(match r.varint()? {
+		0 => None,
+		relay => Some(NodeId {
+			relay,
+			marked: r.bool()?,
+		}),
+	})
+}
+
+/// Encode the identity, its minted flag, and the epoch an announcement serves. Every route
+/// carries an identity, so lite-07 refuses to announce one without. Older versions carry
+/// neither, so the receiving session mints an identity of its own.
+pub(super) fn encode_route(
+	w: &mut Encoder<'_>,
+	version: Version,
+	identity: Option<&Identity>,
+	epoch: u64,
+) -> Result<(), EncodeError> {
+	if !version.has_identity() {
+		return Ok(());
+	}
+	encode(w, identity.ok_or(EncodeError::InvalidState)?)?;
+	w.varint(epoch)
+}
+
+/// Decode lite-07's identity and epoch, refusing an identity that is empty, not UTF-8, or
+/// longer than 256 bytes; see [`encode_route`].
+pub(super) fn decode_forwarded(r: &mut Decoder<'_>) -> Result<(Identity, u64), DecodeError> {
+	let identity = decode(r.bytes()?, r.bool()?)?;
+	let epoch = r.varint()?;
+	Ok((identity, epoch))
+}
+
+fn encode(w: &mut Encoder<'_>, identity: &Identity) -> Result<(), EncodeError> {
+	w.bytes(identity.as_str().as_bytes())?;
+	w.bool(identity.is_minted());
+	Ok(())
+}
+
+fn decode(bytes: &[u8], minted: bool) -> Result<Identity, DecodeError> {
+	// Checked before the UTF-8 scan, so an oversized one costs nothing to refuse.
+	if bytes.len() > crate::identity::MAX_LEN {
+		return Err(DecodeError::InvalidValue);
+	}
+	let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?;
+	Identity::decoded(text, minted).map_err(|_| DecodeError::InvalidValue)
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	fn pin(version: Version, identity: Option<&Identity>) -> Option<Identity> {
+		let mut buf = Vec::new();
+		encode_pin(&mut Encoder::new(&mut buf, version.into()), version, identity).unwrap();
+		let mut decoder = Decoder::new(&buf, version.into());
+		let decoded = decode_pin(&mut decoder, version).unwrap();
+		assert!(decoder.is_empty());
+		decoded
+	}
+
+	#[test]
+	fn lite07_carries_the_pin() {
+		let identity = Identity::random();
+		assert_eq!(pin(Version::Lite07, Some(&identity)), Some(identity));
+		assert_eq!(pin(Version::Lite07, None), None);
+	}
+
+	/// The flag, not the text, says a session minted an identity: each round-trips as
+	/// itself, and a named identity that looks like the old `~` mark stays named.
+	#[test]
+	fn lite07_carries_the_minted_flag() {
+		let minted = Identity::minted();
+		let decoded = pin(Version::Lite07, Some(&minted)).unwrap();
+		assert!(decoded.is_minted());
+		assert_eq!(decoded, minted);
+		let named: Identity = "~named".parse().unwrap();
+		assert!(!pin(Version::Lite07, Some(&named)).unwrap().is_minted());
+	}
+
+	#[test]
+	fn refuses_a_bad_minted_flag() {
+		let decode = |text: &[u8], flag: u8| {
+			let mut buf = Vec::new();
+			let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
+			w.bytes(text).unwrap();
+			w.u8(flag);
+			decode_pin(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07)
+		};
+		assert!(decode(b"a", 2).is_err());
+		assert!(decode(b"", 1).is_err(), "no identity is never minted");
+	}
+
+	#[test]
+	fn older_versions_drop_it() {
+		assert_eq!(pin(Version::Lite06, Some(&Identity::random())), None);
+	}
+
+	#[test]
+	fn a_route_carries_its_identity_and_epoch() {
+		let identity = Identity::random();
+		let mut buf = Vec::new();
+		encode_route(
+			&mut Encoder::new(&mut buf, Version::Lite07.into()),
+			Version::Lite07,
+			Some(&identity),
+			7,
+		)
+		.unwrap();
+		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
+		assert_eq!(decode_forwarded(&mut decoder).unwrap(), (identity, 7));
+		assert!(decoder.is_empty());
+
+		// Every lite-07 route names one: none is never sent, and a receiver refuses an
+		// invalid one.
+		assert!(
+			encode_route(
+				&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()),
+				Version::Lite07,
+				None,
+				0
+			)
+			.is_err()
+		);
+		let mut buf = Vec::new();
+		let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
+		w.bytes(&[]).unwrap();
+		w.bool(false);
+		w.varint(0).unwrap();
+		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
+		assert!(decode_forwarded(&mut decoder).is_err());
+	}
+
+	#[test]
+	fn refuses_non_utf8() {
+		let mut buf = Vec::new();
+		let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
+		w.bytes(&[0xff]).unwrap();
+		w.bool(false);
+		assert!(decode_pin(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07).is_err());
+	}
+
+	/// 256 UTF-8 bytes is the ceiling in every message: a pin and a route alike.
+	#[test]
+	fn caps_the_identity_at_256_bytes() {
+		let wire = |text: &[u8]| {
+			let mut buf = Vec::new();
+			let w = &mut Encoder::new(&mut buf, Version::Lite07.into());
+			w.bytes(text).unwrap();
+			w.bool(false);
+			w.varint(0).unwrap();
+			buf
+		};
+		// A multi-byte character counts by its bytes, not as one.
+		let full = "é".repeat(128);
+		let over = format!("{full}a");
+		for (text, ok) in [(full.as_bytes(), true), (over.as_bytes(), false)] {
+			let buf = wire(text);
+			let pin = decode_pin(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07);
+			assert_eq!(pin.is_ok(), ok, "pin of {} bytes", text.len());
+			let route = decode_forwarded(&mut Decoder::new(&buf, Version::Lite07.into()));
+			assert_eq!(route.is_ok(), ok, "route of {} bytes", text.len());
+		}
+	}
+}

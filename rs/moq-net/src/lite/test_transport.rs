@@ -685,6 +685,8 @@ pub struct SinkSession {
 	probe: Option<crate::transport::Probe>,
 	/// Set by [`Self::with_receive_window`], and widened by `set_limits`.
 	receive_window: Arc<Mutex<Option<crate::transport::ReceiveWindow>>>,
+	/// Set by [`Self::with_plain_reset`].
+	plain_reset: bool,
 }
 
 impl SinkSession {
@@ -693,6 +695,13 @@ impl SinkSession {
 			log,
 			..Default::default()
 		}
+	}
+
+	/// Reset like a peer without RESET_STREAM_AT, which may discard a reset stream's
+	/// unread prefix; otherwise every reset is reliable.
+	pub fn with_plain_reset(mut self) -> Self {
+		self.plain_reset = true;
+		self
 	}
 
 	/// Never acknowledge a unidirectional stream's FIN, like a congested peer, so a
@@ -914,6 +923,10 @@ impl poll::Session for SinkSession {
 
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		*self.receive_window.lock().unwrap()
+	}
+
+	fn reliable_reset(&self) -> bool {
+		!self.plain_reset
 	}
 
 	/// Set the connection window, on a transport that reports one.

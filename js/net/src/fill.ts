@@ -68,6 +68,7 @@ export interface Asker {
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
 	accept(state: FillState, pending: Pending, key: bigint, info: Info | undefined): GroupProducer | undefined;
+	answerCached(state: FillState, pending: Pending, key: bigint): boolean;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint, hole?: { error: Error; stale?: number }): void;
 	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
 	settle(state: FillState, pending: Pending): void;
@@ -426,6 +427,16 @@ export class FillState {
 				}
 				return group;
 			},
+			// Answer owed `key` from the cache if the track holds it whole, as an arrival would. Returns
+			// whether it did.
+			answerCached: (state, pending, key) => {
+				if (state.#track.holds(key) !== true) return false;
+				if (pending.exclusive) {
+					pending.answer = { kind: "group", group: key };
+					state.#resolve(pending, pending.start, pending.end);
+				} else state.#resolve(pending, key, key + 1n);
+				return true;
+			},
 			drop: (state, pending, start, end, hole) => {
 				const owed = pending.owed(start, end);
 				if (pending.exclusive && owed.length > 0) pending.answer ??= { kind: "dropped" };
@@ -669,14 +680,19 @@ export class FillGroups {
 	}
 
 	/**
-	 * The next group still owed in the fill's {@link order}: a reader still reads it, and it was
-	 * neither answered nor delivered live since it was asked. `undefined` once none is, so stop
-	 * serving the fill.
+	 * The next group still owed in the fill's {@link order}: a reader still reads it, it was
+	 * neither answered nor delivered live since it was asked, and the track does not hold it whole.
+	 * `undefined` once none is, so stop serving the fill.
 	 */
 	wanted(): bigint | undefined {
-		const owed = this.#pending.owed();
-		if (owed.length === 0) return undefined;
-		return this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1n;
+		for (;;) {
+			const owed = this.#pending.owed();
+			if (owed.length === 0) return undefined;
+			const key = this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1n;
+			// A time start asked once its group already landed, which no arrival answers, is answered by
+			// the cache, not the source, as the Rust `FillGroups::wanted` does.
+			if (!fillOps.answerCached(this.#state, this.#pending, key)) return key;
+		}
 	}
 
 	/**

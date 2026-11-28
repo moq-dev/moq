@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { Once } from "@moq/signals";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { DEFAULT_EXPIRY } from "./cache.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
-import { rejectGroups } from "./fill.ts";
+import { type Asker, FillState, rejectGroups, requestsOf } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
@@ -2328,4 +2329,44 @@ test("fill: replacing the ranges withdraws a lookup still out", async () => {
 	reader.close();
 	requests.close();
 	broadcast.close();
+});
+
+// A time start asked once its group already landed, as when the cache cannot place the time by the
+// groups it holds, is answered by the cache: no arrival answers it, and the handler is never asked
+// for a group the track holds. So is a run's group the cache holds. Mirrors the Rust
+// `FillGroups::wanted`.
+test("fill: a fill answers what the cache holds whole without the handler", async () => {
+	const state = new FillState({
+		name: "video",
+		accept: () => {
+			throw new Error("asked the source for a held group");
+		},
+		drop: () => {},
+		holds: (key) => key === 2n,
+		cached: () => undefined,
+		closed: () => false,
+		released: new Once<unknown>(),
+	});
+	const requests = requestsOf(state);
+	const asker: Asker = {
+		wants: (start, end) => [{ start, end }],
+		priority: () => 0,
+		order: () => "ascending",
+		refuse: () => {},
+	};
+
+	const lookup = defined(state.timeStart(2n, 0n, asker));
+	const time = defined(await requests.requestedFill());
+	expect(time.wanted()).toBeUndefined();
+	expect([lookup.done(), lookup.answer()]).toEqual([true, { kind: "group", group: 2n }]);
+
+	state.ask(1n, 4n, asker);
+	const run = defined(await requests.requestedFill());
+	const wanted: bigint[] = [];
+	for (let key = run.wanted(); key !== undefined; key = run.wanted()) {
+		wanted.push(key);
+		run.dropGroups(key, key + 1n);
+	}
+	expect(wanted).toEqual([1n, 3n]);
+	requests.close();
 });

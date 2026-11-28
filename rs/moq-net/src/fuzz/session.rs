@@ -641,7 +641,7 @@ impl Relay {
 				let mut routes = origin.routes();
 				while let Some(event) = routes.next().await {
 					let path = event.announce.prefix;
-					// A restart is a new instance at the path, which the reader before it never
+					// A restart is a new identity at the path, which the reader before it never
 					// follows onto.
 					let started = matches!(event.kind, origin::RouteKind::Start | origin::RouteKind::Restart);
 					if !started || !path.as_str().starts_with(PEER) {
@@ -949,6 +949,10 @@ impl poll::Session for Recorder {
 
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
+	}
+
+	fn reliable_reset(&self) -> bool {
+		self.inner.reliable_reset()
 	}
 }
 

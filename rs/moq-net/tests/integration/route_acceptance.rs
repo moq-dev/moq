@@ -585,7 +585,7 @@ async fn pool_ties_agree_on_every_edge() {
 	}
 	quiesce().await;
 
-	let instances: Vec<_> = claims.iter().map(|claim| Some(claim.instance())).collect();
+	let identities: Vec<_> = claims.iter().map(|claim| Some(claim.identity())).collect();
 	let mut picked = std::collections::BTreeSet::new();
 	for i in 0..32 {
 		let path = format!("transcode/{i}");
@@ -595,7 +595,7 @@ async fn pool_ties_agree_on_every_edge() {
 			.await
 			.unwrap()
 			.info()
-			.instance
+			.identity
 			.clone();
 		let b = edge_b
 			.consume()
@@ -603,10 +603,10 @@ async fn pool_ties_agree_on_every_edge() {
 			.await
 			.unwrap()
 			.info()
-			.instance
+			.identity
 			.clone();
 		assert_eq!(a, b, "{path}");
-		picked.insert(instances.iter().position(|instance| *instance == a).expect("a member"));
+		picked.insert(identities.iter().position(|identity| *identity == a).expect("a member"));
 	}
 	assert!(picked.len() > 1, "every path picked one member: {picked:?}");
 	drop(pairs);

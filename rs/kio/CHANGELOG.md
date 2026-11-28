@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `kio::model`, behind the off-by-default `model` feature: an exhaustive breadth-first model checker for pure state machines (`Machine`, `Explore`, `check`, `find`) that returns the shortest trace to a broken rule.
+
+### Changed
+
+- kio-macros parses with syn 3, the version serde and futures already build, and the `sim` feature builds futures without its executor and macros.
+
+## [0.6.4](https://github.com/moq-dev/moq/compare/kio-v0.6.3...kio-v0.6.4) - 2026-11-03
+
+### Other
+
+- backport main's benchmark cases to release for the pre-cut pairing
+
+## [0.6.3](https://github.com/moq-dev/moq/compare/kio-v0.6.2...kio-v0.6.3) - 2026-10-22
+
+### Fixed
+
+- *(bench)* keep kio's contended bench beside its other bench targets
+
+### Other
+
+- backport main's benchmarks to release for before/after runs
+
 ## [0.6.2](https://github.com/moq-dev/moq/compare/kio-v0.6.1...kio-v0.6.2) - 2026-09-30
 
 ### Fixed

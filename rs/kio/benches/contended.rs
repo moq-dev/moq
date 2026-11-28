@@ -46,7 +46,7 @@ const THREADS: [usize; 3] = [1, 4, 16];
 /// Consumers on the one channel, from a lone reader up to a large broadcast.
 const CONSUMERS: [usize; 4] = [1, 16, 256, 4096];
 
-/// Frames the log keeps before evicting its oldest, like a group's cache.
+/// Frames the log keeps before evicting its oldest, like a bounded cache.
 const LOG_FRAMES: usize = 64;
 
 /// One pass of a worker over its consumers.

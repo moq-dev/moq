@@ -52,8 +52,8 @@ waited for. Only stream tracks are recorded: a datagram track is live-only, so
 an archive's playback never includes it. An archive cannot recover content
 already lost or evicted before it subscribed.
 
-Pick a distinct store prefix for each publisher instance, such as its broadcast
-path and [instance](/concept/identity). Restarting a recorder on the same instance
+Pick a distinct store prefix for each publisher identity, such as its broadcast
+path and [identity](/concept/identity). Restarting a recorder on the same identity
 and prefix resumes after each track's last stored frame, with whatever the publisher
 still caches from there: an interruption longer than its max age leaves a gap. A prefix already marked complete
 records nothing. Never append a new publisher run that restarts its
@@ -93,7 +93,7 @@ which can differ from an installed package; use the reference matching your vers
 Create an output broadcast, call `archive::Consumer::open` with the stored
 prefix and that broadcast's producer, then announce its publication and run the
 consumer. Opening creates the stored tracks before the host announces them.
-The host chooses the output path and a fresh instance, as
+The host chooses the output path and a fresh identity, as
 [`moq import archive`](/bin/cli#archive) does. A relay routes that publication
 like any other broadcast; it does not look in object storage on a cache miss.
 

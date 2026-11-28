@@ -664,7 +664,8 @@ export class Window {
 		for (const [key, range] of ranges) {
 			window.#ranges.set(key, range);
 			window.#countBudget(range, 1);
-			if (liveMillis(range) !== undefined) window.#joining.set(key, joining(key));
+			const join = joining(key);
+			if (liveMillis(range) !== undefined || join.at !== undefined) window.#joining.set(key, join);
 		}
 		window.#place(latest, holdings);
 		return window;
@@ -792,7 +793,8 @@ export class Window {
 			}
 			this.#retire(key);
 			this.#ranges.set(key, range);
-			if (liveMillis(range) !== undefined) this.#joining.set(key, joining(key));
+			const join = joining(key);
+			if (liveMillis(range) !== undefined || join.at !== undefined) this.#joining.set(key, join);
 			else this.#joining.delete(key);
 			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
 		}
@@ -1222,8 +1224,9 @@ export class Window {
 		let at = rangeTime(range);
 		const live = typeof range.start === "object" ? range.start.live.min : undefined;
 		const budget = rangeBudget(range);
-		// Placed already, where an earlier copy resolved it: its lag places nothing.
-		const placed = live === undefined ? undefined : this.#joining.get(key)?.at;
+		// Placed already (live join or exact-group Position start): start at that exact group without
+		// time-containment lookup.
+		const placed = this.#joining.get(key)?.at;
 		if (placed !== undefined) {
 			this.#count(key, { at: undefined, start: placed, end, floored: true, waiting: false, budget });
 			return;

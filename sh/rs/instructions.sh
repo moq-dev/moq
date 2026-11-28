@@ -18,8 +18,11 @@ command=${1:?$usage}
 export VALGRIND_BUG_494162=1
 bench=(nix run --inputs-from . swole --)
 
+# swole's `sim` counts under Valgrind; `run` counts this commit and `compare <base>` both sides.
+shift
 case "$command" in
-    fingerprint | help | -h | --help) exec "${bench[@]}" "$@" ;;
+    fingerprint) exec "${bench[@]}" fingerprint sim "$@" ;;
+    help | -h | --help) exec "${bench[@]}" --help ;;
     run | compare) ;;
     *)
         echo "$usage" >&2
@@ -51,7 +54,7 @@ declare -A features=(["moq-json"]=bench ["moq-net"]=fuzz ["moq-quic"]=fuzz)
 # The targets the `--benchmarks` file names, when given.
 named=()
 args=("$@")
-for ((i = 1; i < ${#args[@]}; i++)); do
+for ((i = 0; i < ${#args[@]}; i++)); do
     if [[ ${args[i]} == --benchmarks ]]; then
         file=${args[i + 1]:?--benchmarks takes a file}
         while IFS= read -r name || [[ -n $name ]]; do
@@ -91,4 +94,9 @@ for target in $(printf '%s\n' "${benches[@]}" | sort -u); do
     cargo+=(--bench "$target")
 done
 
-exec "${bench[@]}" "$@" -- "${cargo[@]}"
+if [[ $command == compare ]]; then
+    base=${1:?compare takes a base commit}
+    shift
+    exec "${bench[@]}" sim "$base" "$@" -- "${cargo[@]}"
+fi
+exec "${bench[@]}" sim "$@" -- "${cargo[@]}"

@@ -3,7 +3,7 @@ import { Producer as BroadcastProducer } from "./broadcast";
 import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error";
 import { toHop, WireRoute } from "./hop";
-import * as Instance from "./instance.ts";
+import * as Identity from "./identity.ts";
 import { type Following, Producer, type Requesting } from "./origin";
 import * as Path from "./path";
 import { readsFrom } from "./resume.test-util";
@@ -18,11 +18,11 @@ test("a follower moves through restart, end and a later start", async () => {
 	const firstRoute = origin.route(path);
 	const first = firstRoute.broadcast;
 	const request: Following = origin.follow(path);
-	expect(request.active.peek()?.instance).toBe(firstRoute.instance);
+	expect(request.active.peek()?.identity).toBe(firstRoute.identity);
 	const secondRoute = origin.route(path);
 	const second = secondRoute.broadcast;
 	await settle();
-	expect(request.active.peek()?.instance).toBe(secondRoute.instance);
+	expect(request.active.peek()?.identity).toBe(secondRoute.identity);
 	second.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -30,43 +30,43 @@ test("a follower moves through restart, end and a later start", async () => {
 	const thirdRoute = origin.route(path);
 	const third = thirdRoute.broadcast;
 	await settle();
-	expect(request.active.peek()?.instance).toBe(thirdRoute.instance);
+	expect(request.active.peek()?.identity).toBe(thirdRoute.identity);
 	request.close();
 	third.close();
 	first.close();
 	origin.close();
 });
 
-test("an instance-pinned follower refuses another instance", async () => {
+test("an identity-pinned follower refuses another identity", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const instance = Instance.random();
-	const firstRoute = origin.route(path, { instance: { id: instance, epoch: 0n } });
+	const identity = Identity.random();
+	const firstRoute = origin.route(path, { identity: { id: identity, epoch: 0n } });
 	const first = firstRoute.broadcast;
-	const request = origin.follow(path, { instance });
-	const secondRoute = origin.route(path, { instance: { id: Instance.random(), epoch: 0n } });
+	const request = origin.follow(path, { identity });
+	const secondRoute = origin.route(path, { identity: { id: Identity.random(), epoch: 0n } });
 	const second = secondRoute.broadcast;
 	await settle();
-	expect(request.active.peek()?.instance).not.toBe(secondRoute.instance);
+	expect(request.active.peek()?.identity).not.toBe(secondRoute.identity);
 	request.close();
 	first.close();
 	second.close();
 	origin.close();
 });
 
-test("a follower changes its handle on an in-place instance restart", async () => {
+test("a follower changes its handle on an in-place identity restart", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const before = Instance.random();
-	const broadcastRoute = origin.route(path, { instance: { id: before, epoch: 0n } });
+	const before = Identity.random();
+	const broadcastRoute = origin.route(path, { identity: { id: before, epoch: 0n } });
 	const broadcast = broadcastRoute.broadcast;
 	const request = origin.follow(path);
 	const old = request.active.peek();
-	const after = Instance.random();
-	// A session's in-place restart: the route's instance changes under it.
-	wireOf(broadcastRoute).update({ instance: after });
+	const after = Identity.random();
+	// A session's in-place restart: the route's identity changes under it.
+	wireOf(broadcastRoute).update({ identity: after });
 	await settle();
-	expect(request.active.peek()?.instance).toBe(after);
+	expect(request.active.peek()?.identity).toBe(after);
 	expect(request.active.peek()).not.toBe(old);
 	request.close();
 	broadcast.close();
@@ -169,21 +169,21 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 	})();
 	const request = origin.follow(Path.from("pool/job"));
 	await settle();
-	expect(request.active.peek()?.instance).toBe(prefix.instance);
+	expect(request.active.peek()?.identity).toBe(prefix.identity);
 	const belowRoute = origin.route(Path.from("pool/job/thumb"));
 	const below = belowRoute.broadcast;
 	await settle();
-	expect(request.active.peek()?.instance).toBe(prefix.instance);
+	expect(request.active.peek()?.identity).toBe(prefix.identity);
 	const exactRoute = origin.route(Path.from("pool/job"));
 	const exact = exactRoute.broadcast;
 	await settle();
-	expect(request.active.peek()?.instance).toBe(exactRoute.instance);
+	expect(request.active.peek()?.identity).toBe(exactRoute.identity);
 	prefix.setCost(5n);
 	await settle();
-	expect(request.active.peek()?.instance).toBe(exactRoute.instance);
+	expect(request.active.peek()?.identity).toBe(exactRoute.identity);
 	exact.close();
 	await settle();
-	expect(request.active.peek()?.instance).toBe(prefix.instance);
+	expect(request.active.peek()?.identity).toBe(prefix.identity);
 	prefix.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -203,7 +203,7 @@ test("a follower ignores a covering route whose scope excludes its path", async 
 	const exactRoute = origin.route(Path.from("room/alice"), { cost: 5n });
 	const exact = exactRoute.broadcast;
 	const request = origin.follow(Path.from("room/alice"));
-	expect(request.active.peek()?.instance).toBe(exactRoute.instance);
+	expect(request.active.peek()?.identity).toBe(exactRoute.identity);
 	exact.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -226,15 +226,15 @@ test("a follower tracks a route replaced by an identical one", async () => {
 	const first = serve(firstSource);
 	const request = origin.follow(path);
 	await settle();
-	expect(request.active.peek()?.instance).toBe(first.instance);
+	expect(request.active.peek()?.identity).toBe(first.identity);
 
-	// Same (default) route metadata: only the instance each claim minted differs.
+	// Same (default) route metadata: only the identity each claim minted differs.
 	const secondSource = new BroadcastProducer();
 	const second = serve(secondSource);
 	await settle();
 	first.close();
 	await settle();
-	expect(request.active.peek()?.instance).toBe(second.instance);
+	expect(request.active.peek()?.identity).toBe(second.identity);
 
 	request.close();
 	second.close();
@@ -318,7 +318,7 @@ for (const received of [false, true]) {
 	});
 }
 
-test("a hidden job route is hidden until announced under its own instance", async () => {
+test("a hidden job route is hidden until announced under its own identity", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
 	const claim = origin.claim(Path.from("room"));
@@ -332,7 +332,7 @@ test("a hidden job route is hidden until announced under its own instance", asyn
 	expect(request.active.peek()).toBeUndefined();
 	job.announce();
 	await settle();
-	expect(request.active.peek()?.instance).toBe(job.instance);
+	expect(request.active.peek()?.identity).toBe(job.identity);
 	request.close();
 	job.close();
 	claim.close();
@@ -348,27 +348,27 @@ test("a visible job route answers its waiting requesters at once", async () => {
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const shared = origin.request(path);
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const job = pending.route();
 	expect(job.announced).toBe(true);
-	expect(job.instance).toBe(minted);
+	expect(job.identity).toBe(minted);
 	await settle();
-	for (const request of [first, shared]) expect(request.active.peek()?.instance).toBe(job.instance);
+	for (const request of [first, shared]) expect(request.active.peek()?.identity).toBe(job.identity);
 	// The request is answered: routing it again is refused.
 	expect(() => pending.route()).toThrow("request is closed");
 
 	// Ending the job withdraws only its path: the claim keeps answering later requests, under a
-	// fresh instance.
+	// fresh identity.
 	job.close();
-	expect(claim.instance).not.toBe(minted);
+	expect(claim.identity).not.toBe(minted);
 	await settle();
 	const later = origin.request(path);
 	const next = (await requests.next()).value;
 	if (!next) throw new Error("expected another request");
-	const again = next.route({ instance: { id: Instance.parse("stable"), epoch: 2n } });
+	const again = next.route({ identity: { id: Identity.parse("stable"), epoch: 2n } });
 	await settle();
-	expect(again.instance).toBe(Instance.parse("stable"));
-	expect(later.active.peek()?.instance).toBe(again.instance);
+	expect(again.identity).toBe(Identity.parse("stable"));
+	expect(later.active.peek()?.identity).toBe(again.identity);
 	for (const request of [first, shared, later]) request.close();
 	again.close();
 	claim.close();
@@ -390,7 +390,7 @@ test("a hidden job route's broadcast cannot announce itself", async () => {
 	expect(request.active.peek()).toBeUndefined();
 	job.announce();
 	await settle();
-	expect(request.active.peek()?.instance).toBe(job.instance);
+	expect(request.active.peek()?.identity).toBe(job.identity);
 	request.close();
 	job.close();
 	claim.close();
@@ -555,7 +555,7 @@ test("a throwing handler disposes its job route and leaves the claim answerable"
 	origin.close();
 });
 
-test("announcing a job route again keeps it answering under one instance", async () => {
+test("announcing a job route again keeps it answering under one identity", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
 	const claim = origin.claim(Path.from("room"));
@@ -571,7 +571,7 @@ test("announcing a job route again keeps it answering under one instance", async
 	job.announce();
 	await settle();
 	expect(job.broadcast.closed.peek()).toBeUndefined();
-	expect(request.active.peek()?.instance).toBe(job.instance);
+	expect(request.active.peek()?.identity).toBe(job.identity);
 	const reader = request.active.peek()?.track("data").subscribe().ordered();
 	expect(await reader?.readString()).toBe("published");
 	reader?.close();
@@ -608,7 +608,7 @@ for (const cleanup of ["close", "dispose", "broadcast", "announce"] as const) {
 			.writeFrame({ payload: new TextEncoder().encode(cleanup), timestamp: Timestamp.unscaled(0n) });
 		job.announce();
 		await settle();
-		expect(later.active.peek()?.instance).toBe(job.instance);
+		expect(later.active.peek()?.identity).toBe(job.identity);
 		const reader = later.active.peek()?.track("data").subscribe().ordered();
 		expect(await reader?.readString()).toBe(cleanup);
 		reader?.close();
@@ -634,37 +634,37 @@ test("a forwarded request cannot be routed by setting a publisher property", asy
 	origin.close();
 });
 
-test("an instance-pinned follower resumes when its instance returns after a gap", async () => {
+test("an identity-pinned follower resumes when its identity returns after a gap", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const instance = Instance.random();
+	const identity = Identity.random();
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
-	const serve = (instance: Instance.Valid, broadcast: BroadcastProducer) => {
-		const route = origin.claim(path, { instance: { id: instance, epoch: 0n } });
+	const serve = (identity: Identity.Valid, broadcast: BroadcastProducer) => {
+		const route = origin.claim(path, { identity: { id: identity, epoch: 0n } });
 		void (async () => {
 			for await (const request of route.requested()) request.serve(broadcast.consume());
 		})();
 		return route;
 	};
-	const first = serve(instance, source);
-	const request = origin.follow(path, { instance });
+	const first = serve(identity, source);
+	const request = origin.follow(path, { identity });
 	await settle();
-	expect(request.active.peek()?.instance).toBe(instance);
+	expect(request.active.peek()?.identity).toBe(identity);
 	first.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	expect(request.closed.peek()).toBeUndefined();
 	const otherSource = new BroadcastProducer();
-	const other = serve(Instance.random(), otherSource);
+	const other = serve(Identity.random(), otherSource);
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 	other.close();
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
-	const back = serve(instance, source);
+	const back = serve(identity, source);
 	await settle();
-	expect(request.active.peek()?.instance).toBe(instance);
+	expect(request.active.peek()?.identity).toBe(identity);
 	request.close();
 	back.close();
 	keeper.close();
@@ -695,7 +695,7 @@ test("a request owns its scoped discovery until closed", async () => {
 	origin.close();
 });
 
-test("a follower keeps its scoped discovery across instances until closed", async () => {
+test("a follower keeps its scoped discovery across identities until closed", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin);
 	const detach = wire.attach(true);
@@ -713,10 +713,10 @@ test("a follower keeps its scoped discovery across instances until closed", asyn
 	expect(follower.closed.peek()).toBeUndefined();
 	const publication = origin.route(path);
 	await settle();
-	expect(follower.active.peek()?.instance).toBe(publication.instance);
+	expect(follower.active.peek()?.identity).toBe(publication.identity);
 	publication.broadcast.close();
 	await settle();
-	// The instance ending keeps the follower and its discovery open for the next one.
+	// The identity ending keeps the follower and its discovery open for the next one.
 	expect(follower.active.peek()).toBeUndefined();
 	expect(follower.closed.peek()).toBeUndefined();
 	expect(interests).toEqual(["room/audio true"]);
@@ -737,11 +737,11 @@ test("a pending request fails Unroutable once its discovery syncs without a rout
 	});
 	const missing = origin.request(Path.from("room/missing"));
 	const found = origin.request(Path.from("room/found"));
-	const pinned = origin.request(Path.from("room/pinned"), { instance: Instance.random() });
+	const pinned = origin.request(Path.from("room/pinned"), { identity: Identity.random() });
 	const follower = origin.follow(Path.from("room/followed"));
 	// The initial set reports these before it lands, and nothing at all for the rest.
 	const route = wire.receive(Path.from("room/found"));
-	const other = wire.receive(Path.from("room/pinned"), { instance: Instance.random() });
+	const other = wire.receive(Path.from("room/pinned"), { identity: Identity.random() });
 	await settle();
 	for (const request of [missing, found, pinned, follower]) expect(request.closed.peek()).toBeUndefined();
 
@@ -788,7 +788,7 @@ test("awaiting a request's broadcast resolves, now or once routed", async () => 
 	const origin = new Producer();
 	const routed = origin.route(Path.from("room/now"));
 	const now = origin.request(Path.from("room/now"));
-	expect((await now.broadcast()).instance).toBe(routed.instance);
+	expect((await now.broadcast()).identity).toBe(routed.identity);
 	expect(await now.broadcast()).toBe(now.active.peek() as NonNullable<ReturnType<typeof now.active.peek>>);
 
 	const later = origin.request(Path.from("room/later"));
@@ -800,7 +800,7 @@ test("awaiting a request's broadcast resolves, now or once routed", async () => 
 	await settle();
 	expect(resolved).toBe(false);
 	const route = origin.route(Path.from("room/later"));
-	expect((await answer).instance).toBe(route.instance);
+	expect((await answer).identity).toBe(route.identity);
 
 	for (const handle of [now, later, routed, route]) handle.close();
 	origin.close();
@@ -861,7 +861,7 @@ test("the first call fixes a request's answer", async () => {
 	const broadcast = await request.broadcast();
 	route.close();
 	await settle();
-	// The instance ended, so the request closed, yet a later await keeps the first answer.
+	// The identity ended, so the request closed, yet a later await keeps the first answer.
 	expect(request.closed.peek()).not.toBeUndefined();
 	expect(await request.broadcast()).toBe(broadcast);
 
@@ -939,10 +939,10 @@ test("a pending request retries a route gap and never retargets after resolving"
 	const keeper = source.consume();
 	pending.serve(source.consume());
 	await settle();
-	expect(requested.active.peek()?.instance).toBe(second.instance);
+	expect(requested.active.peek()?.identity).toBe(second.identity);
 	const replacement = origin.route(path);
 	await settle();
-	expect(requested.active.peek()?.instance).toBe(second.instance);
+	expect(requested.active.peek()?.identity).toBe(second.identity);
 	second.close();
 	await settle();
 	expect(requested.closed.peek()).toBeInstanceOf(StreamError);
@@ -954,12 +954,12 @@ test("a pending request retries a route gap and never retargets after resolving"
 	origin.close();
 });
 
-test("a plain instance pin never takes an answer without that instance", () => {
+test("a plain identity pin never takes an answer without that identity", () => {
 	const origin = new Producer();
 	const wire = wireOf(origin);
 	const detach = wire.attach(false);
 	const path = Path.from("room/audio");
-	const requested = origin.request(path, { instance: Instance.random() });
+	const requested = origin.request(path, { identity: Identity.random() });
 	expect(requested.closed.peek()).toBeUndefined();
 	const source = new BroadcastProducer();
 	const withdraw = wire.answer(path, source.consume());
@@ -972,39 +972,39 @@ test("a plain instance pin never takes an answer without that instance", () => {
 	origin.close();
 });
 
-// Both instances stay live, and the cheaper one wins the path: a pin follows its own
-// instance's routes, as Rust's lookup does, rather than filter the winner afterward.
-test.each(["request", "follow"] as const)("a %s pinned to a losing instance resolves it", async (method) => {
+// Both identities stay live, and the cheaper one wins the path: a pin follows its own
+// identity's routes, as Rust's lookup does, rather than filter the winner afterward.
+test.each(["request", "follow"] as const)("a %s pinned to a losing identity resolves it", async (method) => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const pinned = Instance.random();
-	const losing = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
-	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const pinned = Identity.random();
+	const losing = origin.claim(path, { identity: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { identity: { id: Identity.random(), epoch: 0n }, cost: 1n });
 	const asked = losing.requested();
-	const requested = origin[method](path, { instance: pinned });
+	const requested = origin[method](path, { identity: pinned });
 	const pending = (await asked.next()).value;
-	if (!pending) throw new Error("the pinned instance's route was not asked");
+	if (!pending) throw new Error("the pinned identity's route was not asked");
 	const source = new BroadcastProducer();
 	pending.serve(source.consume());
 	await settle();
 	expect(requested.closed.peek()).toBeUndefined();
-	expect(requested.active.peek()?.instance).toBe(pinned);
+	expect(requested.active.peek()?.identity).toBe(pinned);
 
 	// A second pin shares the answer, and the path's own requests still resolve the winner.
-	const again = origin.request(path, { instance: pinned });
-	expect(again.active.peek()?.instance).toBe(pinned);
+	const again = origin.request(path, { identity: pinned });
+	expect(again.active.peek()?.identity).toBe(pinned);
 	const plain = origin.request(path);
 	const answer = (await winning.requested().next()).value;
 	if (!answer) throw new Error("the winning route was not asked");
 	const other = new BroadcastProducer();
 	answer.serve(other.consume());
 	await settle();
-	expect(plain.active.peek()?.instance).toBe(winning.instance);
+	expect(plain.active.peek()?.identity).toBe(winning.identity);
 
 	requested.close();
 	again.close();
 	await settle();
-	expect(plain.active.peek()?.instance).toBe(winning.instance);
+	expect(plain.active.peek()?.identity).toBe(winning.identity);
 	plain.close();
 	source.close();
 	other.close();
@@ -1013,32 +1013,32 @@ test.each(["request", "follow"] as const)("a %s pinned to a losing instance reso
 	origin.close();
 });
 
-// A detached request follows its instance's cheapest route, as Rust's does, rather than stay on
+// A detached request follows its identity's cheapest route, as Rust's does, rather than stay on
 // the route it first resolved while that one still serves.
-test("a pinned request moves to a cheaper route of its instance", async () => {
+test("a pinned request moves to a cheaper route of its identity", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const pinned = Instance.random();
-	const far = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
-	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
-	const requested = origin.request(path, { instance: pinned });
+	const pinned = Identity.random();
+	const far = origin.claim(path, { identity: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { identity: { id: Identity.random(), epoch: 0n }, cost: 1n });
+	const requested = origin.request(path, { identity: pinned });
 	const first = (await far.requested().next()).value;
-	if (!first) throw new Error("the pinned instance's route was not asked");
+	if (!first) throw new Error("the pinned identity's route was not asked");
 	const farSource = new BroadcastProducer();
 	first.serve(farSource.consume());
 	await settle();
-	expect(requested.active.peek()?.instance).toBe(pinned);
+	expect(requested.active.peek()?.identity).toBe(pinned);
 
-	// A cheaper route of the same instance, still above the winner: the request moves to it.
-	const near = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 5n });
+	// A cheaper route of the same identity, still above the winner: the request moves to it.
+	const near = origin.claim(path, { identity: { id: pinned, epoch: 0n }, cost: 5n });
 	const asked = near.requested().next();
 	const moved = await Promise.race([asked, settle().then(() => undefined)]);
-	if (!moved?.value) throw new Error("the cheaper route of the instance was not asked");
+	if (!moved?.value) throw new Error("the cheaper route of the identity was not asked");
 	const nearSource = new BroadcastProducer();
 	moved.value.serve(nearSource.consume());
 	await settle();
 	expect(requested.closed.peek()).toBeUndefined();
-	expect(requested.active.peek()?.instance).toBe(pinned);
+	expect(requested.active.peek()?.identity).toBe(pinned);
 
 	// The far route leaving no longer touches it.
 	far.close();
@@ -1057,9 +1057,9 @@ test("a peer's pin is served by a local broadcast that loses the path", async ()
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());
 	const path = Path.from("room/audio");
-	const pinned = Instance.random();
-	const publication = origin.route(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
-	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const pinned = Identity.random();
+	const publication = origin.route(path, { identity: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { identity: { id: Identity.random(), epoch: 0n }, cost: 1n });
 	expect(wire.local(path)).toBeUndefined();
 	expect(wire.local(path, pinned)).toBeDefined();
 	expect(await wire.demand(path, pinned)).toBeDefined();
@@ -1068,13 +1068,13 @@ test("a peer's pin is served by a local broadcast that loses the path", async ()
 	origin.close();
 });
 
-// A peer pinned to the claim's instance is served by its job's route, even when a sibling job
+// A peer pinned to the claim's identity is served by its job's route, even when a sibling job
 // ending moved the claim on before the peer's demand looked again.
 test("a peer's pin reaches its job after a sibling moved the claim on", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const reader = origin.request(Path.from("room/alice"));
 	const asked = (await requests.next()).value;
@@ -1086,11 +1086,11 @@ test("a peer's pin reaches its job after a sibling moved the claim on", async ()
 	const demanded = wire.demand(bob, minted);
 	const next = (await requests.next()).value;
 	if (!next) throw new Error("expected a request");
-	// Bob answers under the claim's instance, then Alice ends before the demand resumes.
+	// Bob answers under the claim's identity, then Alice ends before the demand resumes.
 	const job = next.route();
 	alice.close();
-	expect(claim.instance).not.toBe(minted);
-	expect(job.instance).toBe(minted);
+	expect(claim.identity).not.toBe(minted);
+	expect(job.identity).toBe(minted);
 	expect(await demanded).toBeDefined();
 
 	reader.close();
@@ -1099,13 +1099,13 @@ test("a peer's pin reaches its job after a sibling moved the claim on", async ()
 	origin.close();
 });
 
-// A job naming no instance continues its claim's minted one: a reader resolved through the claim
-// is handed the job's broadcast under the instance it resolved, once, and keeps reading it.
+// A job naming no identity continues its claim's minted one: a reader resolved through the claim
+// is handed the job's broadcast under the identity it resolved, once, and keeps reading it.
 test.each(["request", "follow"] as const)("a %s through a claim continues on its job's route", async (method) => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const reader = method === "request" ? origin.request(path) : origin.follow(path);
 	const handed: unknown[] = [];
@@ -1117,13 +1117,13 @@ test.each(["request", "follow"] as const)("a %s through a claim continues on its
 	const job = pending.route({ hidden: true });
 	const data = job.broadcast.createTrack("data");
 	data.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.unscaled(0n) });
-	expect(job.instance).toBe(minted);
+	expect(job.identity).toBe(minted);
 	job.announce();
 	await settle();
-	expect(job.instance).toBe(minted);
-	expect(claim.instance).toBe(minted);
+	expect(job.identity).toBe(minted);
+	expect(claim.identity).toBe(minted);
 	const active = reader.active.peek();
-	expect(active?.instance).toBe(minted);
+	expect(active?.identity).toBe(minted);
 	const track = active?.track("data").subscribe().ordered();
 	expect(await track?.readString()).toBe("first");
 	data.writeFrame({ payload: new TextEncoder().encode("second"), timestamp: Timestamp.unscaled(1n) });
@@ -1138,29 +1138,29 @@ test.each(["request", "follow"] as const)("a %s through a claim continues on its
 	origin.close();
 });
 
-// Ending a job moves its claim to a fresh instance at once: nothing answers the ended stream's
-// instance again, and the restarted job is a new stream.
-test("a restarted job gets a fresh instance and its old one is refused", async () => {
+// Ending a job moves its claim to a fresh identity at once: nothing answers the ended stream's
+// identity again, and the restarted job is a new stream.
+test("a restarted job gets a fresh identity and its old one is refused", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());
 	const path = Path.from("room/alice");
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const first = origin.request(path);
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route();
 	await settle();
-	const pinned = origin.request(path, { instance: minted });
-	expect(pinned.active.peek()?.instance).toBe(minted);
+	const pinned = origin.request(path, { identity: minted });
+	expect(pinned.active.peek()?.identity).toBe(minted);
 
 	job.close();
-	expect(claim.instance).not.toBe(minted);
+	expect(claim.identity).not.toBe(minted);
 	for (const request of [first, pinned]) {
 		expect((request.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
 	}
-	// A peer naming the ended instance is refused rather than handed the next job.
+	// A peer naming the ended identity is refused rather than handed the next job.
 	await expect(wire.demand(path, minted)).rejects.toMatchObject({ code: StreamCode.Unroutable });
 
 	const later = origin.request(path);
@@ -1168,21 +1168,21 @@ test("a restarted job gets a fresh instance and its old one is refused", async (
 	if (!next) throw new Error("expected another request");
 	const restarted = next.route();
 	await settle();
-	expect(restarted.instance).toBe(claim.instance);
-	expect(restarted.instance).not.toBe(minted);
-	expect(later.active.peek()?.instance).toBe(restarted.instance);
+	expect(restarted.identity).toBe(claim.identity);
+	expect(restarted.identity).not.toBe(minted);
+	expect(later.active.peek()?.identity).toBe(restarted.identity);
 	later.close();
 	restarted.close();
 	claim.close();
 	origin.close();
 });
 
-// A job that never read its instance binds its claim's when it announces, so one still hidden
-// when an unrelated job ends keeps its request and answers it under the claim's new instance.
-test("a hidden job announces under the instance its claim moved to", async () => {
+// A job that never read its identity binds its claim's when it announces, so one still hidden
+// when an unrelated job ends keeps its request and answers it under the claim's new identity.
+test("a hidden job announces under the identity its claim moved to", async () => {
 	const origin = new Producer();
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const alice = origin.request(Path.from("room/alice"));
 	const first = (await requests.next()).value;
@@ -1195,26 +1195,26 @@ test("a hidden job announces under the instance its claim moved to", async () =>
 
 	ended.close();
 	await settle();
-	const moved = claim.instance;
+	const moved = claim.identity;
 	expect(moved).not.toBe(minted);
 	expect(bob.closed.peek()).toBeUndefined();
 	hidden.announce();
 	await settle();
-	expect(hidden.instance).toBe(moved);
-	expect(bob.active.peek()?.instance).toBe(moved);
+	expect(hidden.identity).toBe(moved);
+	expect(bob.active.peek()?.identity).toBe(moved);
 	for (const request of [alice, bob]) request.close();
 	hidden.close();
 	claim.close();
 	origin.close();
 });
 
-// A hidden job that read its instance, as a signer does, announces under it or not at all: once an
+// A hidden job that read its identity, as a signer does, announces under it or not at all: once an
 // unrelated job's end moves the claim past it, the announce is refused and its request goes back to
-// the worker, which prepares the job under the claim's new instance. Every requester waits on.
-test("a job that read its instance is refused once its claim moves", async () => {
+// the worker, which prepares the job under the claim's new identity. Every requester waits on.
+test("a job that read its identity is refused once its claim moves", async () => {
 	const origin = new Producer();
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const alice = origin.request(Path.from("room/alice"));
 	const first = (await requests.next()).value;
@@ -1224,13 +1224,13 @@ test("a job that read its instance is refused once its claim moves", async () =>
 	const second = (await requests.next()).value;
 	if (!second) throw new Error("expected a request");
 	const hidden = second.route({ hidden: true });
-	expect(hidden.instance).toBe(minted);
+	expect(hidden.identity).toBe(minted);
 
 	ended.close();
 	await settle();
-	const moved = claim.instance;
+	const moved = claim.identity;
 	expect(moved).not.toBe(minted);
-	expect(hidden.instance).toBe(minted);
+	expect(hidden.identity).toBe(minted);
 	const late = origin.request(Path.from("room/bob"));
 	expect(() => hidden.announce()).toThrow(expect.objectContaining({ code: StreamCode.Unroutable }));
 	await settle();
@@ -1240,22 +1240,22 @@ test("a job that read its instance is refused once its claim moves", async () =>
 	if (!third) throw new Error("expected the request again");
 	expect(third.path).toBe(Path.from("room/bob"));
 	const again = third.route({ hidden: true });
-	expect(again.instance).toBe(moved);
+	expect(again.identity).toBe(moved);
 	again.announce();
 	await settle();
-	for (const request of [bob, late]) expect(request.active.peek()?.instance).toBe(moved);
+	for (const request of [bob, late]) expect(request.active.peek()?.identity).toBe(moved);
 	for (const request of [alice, bob, late]) request.close();
 	again.close();
 	claim.close();
 	origin.close();
 });
 
-// Each live job keeps the instance it bound; only one carrying the claim's current instance moves
+// Each live job keeps the identity it bound; only one carrying the claim's current identity moves
 // the claim when it ends.
-test("one job ending leaves another job's instance alone", async () => {
+test("one job ending leaves another job's identity alone", async () => {
 	const origin = new Producer();
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const jobs = [];
 	for (const name of ["alice", "bob"]) {
@@ -1266,52 +1266,52 @@ test("one job ending leaves another job's instance alone", async () => {
 	}
 	const [alice, bob] = jobs;
 	await settle();
-	expect(bob.job.instance).toBe(minted);
+	expect(bob.job.identity).toBe(minted);
 
 	alice.job.close();
-	const moved = claim.instance;
+	const moved = claim.identity;
 	expect(moved).not.toBe(minted);
 	await settle();
-	expect(bob.job.instance).toBe(minted);
+	expect(bob.job.identity).toBe(minted);
 	expect(bob.request.closed.peek()).toBeUndefined();
-	expect(bob.request.active.peek()?.instance).toBe(minted);
+	expect(bob.request.active.peek()?.identity).toBe(minted);
 	const again = origin.request(Path.from("room/bob"));
-	expect(again.active.peek()?.instance).toBe(minted);
+	expect(again.active.peek()?.identity).toBe(minted);
 
 	bob.job.close();
-	expect(claim.instance).toBe(moved);
+	expect(claim.identity).toBe(moved);
 	for (const { request } of jobs) request.close();
 	again.close();
 	claim.close();
 	origin.close();
 });
 
-// A claim naming a stable instance keeps it for answers it serves; its jobs mint their own.
-test("a claim naming its instance gives each job a fresh one", async () => {
+// A claim naming a stable identity keeps it for answers it serves; its jobs mint their own.
+test("a claim naming its identity gives each job a fresh one", async () => {
 	const origin = new Producer();
-	const stable = Instance.parse("stable");
-	const claim = origin.claim(Path.from("room"), { instance: { id: stable, epoch: 1n } });
+	const stable = Identity.parse("stable");
+	const claim = origin.claim(Path.from("room"), { identity: { id: stable, epoch: 1n } });
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route();
 	await settle();
-	expect(job.instance).not.toBe(stable);
-	expect(request.active.peek()?.instance).toBe(job.instance);
+	expect(job.identity).not.toBe(stable);
+	expect(request.active.peek()?.identity).toBe(job.identity);
 	job.close();
-	expect(claim.instance).toBe(stable);
+	expect(claim.identity).toBe(stable);
 	request.close();
 	claim.close();
 	origin.close();
 });
 
 // A claim moving on after a job ends keeps the answers it served from held broadcasts: a later
-// request for a held path is answered again without asking the handler, under the new instance.
+// request for a held path is answered again without asking the handler, under the new identity.
 test("a claim moving on keeps its held answers", async () => {
 	const origin = new Producer();
 	const claim = origin.claim(Path.from("room"));
-	const minted = claim.instance;
+	const minted = claim.identity;
 	const requests = claim.requested();
 	const held = new BroadcastProducer();
 	defined(held.createTrack("data")).writeFrame({
@@ -1327,17 +1327,17 @@ test("a claim moving on keeps its held answers", async () => {
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route();
 	await settle();
-	expect(reader.active.peek()?.instance).toBe(minted);
+	expect(reader.active.peek()?.identity).toBe(minted);
 
 	job.close();
-	expect(claim.instance).not.toBe(minted);
+	expect(claim.identity).not.toBe(minted);
 	await settle();
-	// The reader resolved under the old instance keeps its broadcast.
+	// The reader resolved under the old identity keeps its broadcast.
 	expect(reader.closed.peek()).toBeUndefined();
 	const track = reader.active.peek()?.track("data").subscribe().ordered();
 	expect(await track?.readString()).toBe("held");
 	const later = origin.request(Path.from("room/held"));
-	expect(later.active.peek()?.instance).toBe(claim.instance);
+	expect(later.active.peek()?.identity).toBe(claim.identity);
 	const again = later.active.peek()?.track("data").subscribe().ordered();
 	expect(await again?.readString()).toBe("held");
 
@@ -1453,14 +1453,14 @@ test("a held request is unwanted once a direct route takes over", async () => {
 test("a held request is unwanted once its requester gives up the switch", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const id = Instance.random();
-	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 5n });
+	const id = Identity.random();
+	const serving = origin.claim(Path.from("room"), { identity: { id, epoch: 0n }, cost: 5n });
 	const requester = origin.request(path);
 	const source = new BroadcastProducer();
 	defined((await serving.requested().next()).value).serve(source.consume());
 	await requester.broadcast();
 
-	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 1n });
+	const cheaper = origin.claim(Path.from("room"), { identity: { id, epoch: 0n }, cost: 1n });
 	const held = defined((await cheaper.requested().next()).value);
 	const left = unwanted(held);
 	await settle();
@@ -1476,9 +1476,9 @@ test("a held request is unwanted once its requester gives up the switch", async 
 	origin.close();
 });
 
-// A claim of `src`'s one instance at `epoch`, through a peer, shown `above` levels beneath its prefix.
+// A claim of `src`'s one identity at `epoch`, through a peer, shown `above` levels beneath its prefix.
 const epochClaim = (epoch: bigint, above = 0n): Partial<WireRoute> => ({
-	instance: Instance.parse("stable"),
+	identity: Identity.parse("stable"),
 	epoch,
 	hops: [toHop(10n)],
 	claimed: true,
@@ -1562,22 +1562,22 @@ test("a request that moved epochs re-requests a closed answer", async () => {
 	origin.close();
 });
 
-// A pinned request is held to the same rule: while its instance's newer epoch has yet to answer,
+// A pinned request is held to the same rule: while its identity's newer epoch has yet to answer,
 // a fresh request pinned to it never joins the slot still serving the older one.
 test("a superseded epoch never answers a fresh pinned request", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const pinned = Instance.random();
-	const older = origin.claim(path, { instance: { id: pinned, epoch: 1n }, cost: 9n });
-	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
-	const held = origin.request(path, { instance: pinned });
+	const pinned = Identity.random();
+	const older = origin.claim(path, { identity: { id: pinned, epoch: 1n }, cost: 9n });
+	const winning = origin.claim(path, { identity: { id: Identity.random(), epoch: 0n }, cost: 1n });
+	const held = origin.request(path, { identity: pinned });
 	const source = new BroadcastProducer();
 	defined((await older.requested().next()).value).serve(source.consume());
 	const reader = await held.broadcast();
 
-	const newer = origin.claim(path, { instance: { id: pinned, epoch: 2n }, cost: 9n });
+	const newer = origin.claim(path, { identity: { id: pinned, epoch: 2n }, cost: 9n });
 	const switching = defined((await newer.requested().next()).value);
-	const fresh = origin.request(path, { instance: pinned });
+	const fresh = origin.request(path, { identity: pinned });
 	await settle();
 	expect(fresh.active.peek()).toBeUndefined();
 	expect(readsFrom(reader, source)).toBe(true);
@@ -1596,15 +1596,15 @@ test("a superseded epoch never answers a fresh pinned request", async () => {
 	origin.close();
 });
 
-// A pinned request whose answer closes waits on its instance's route to answer again, but ends
-// once that instance's last route leaves first, as one that never parked does.
+// A pinned request whose answer closes waits on its identity's route to answer again, but ends
+// once that identity's last route leaves first, as one that never parked does.
 test("a parked pinned request ends when its last route leaves", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const pinned = Instance.random();
-	const claim = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
-	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
-	const held = origin.request(path, { instance: pinned });
+	const pinned = Identity.random();
+	const claim = origin.claim(path, { identity: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { identity: { id: Identity.random(), epoch: 0n }, cost: 1n });
+	const held = origin.request(path, { identity: pinned });
 	const asked = claim.requested();
 	const source = new BroadcastProducer();
 	defined((await asked.next()).value).serve(source.consume());
@@ -1629,20 +1629,20 @@ test("a parked pinned request ends when its last route leaves", async () => {
 test("a held request is unwanted once a newer epoch wins", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");
-	const id = Instance.random();
-	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 1n }, cost: 5n });
+	const id = Identity.random();
+	const serving = origin.claim(Path.from("room"), { identity: { id, epoch: 1n }, cost: 5n });
 	const requester = origin.request(path);
 	const source = new BroadcastProducer();
 	defined((await serving.requested().next()).value).serve(source.consume());
 	await requester.broadcast();
 
-	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 1n }, cost: 1n });
+	const cheaper = origin.claim(Path.from("room"), { identity: { id, epoch: 1n }, cost: 1n });
 	const held = defined((await cheaper.requested().next()).value);
 	const left = unwanted(held);
 	await settle();
 	expect(left()).toBe(false);
 
-	const newer = origin.claim(Path.from("room"), { instance: { id, epoch: 2n }, cost: 10n });
+	const newer = origin.claim(Path.from("room"), { identity: { id, epoch: 2n }, cost: 10n });
 	await settle();
 	expect(left()).toBe(true);
 	requester.close();

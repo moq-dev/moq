@@ -11,13 +11,21 @@ type WsResult = Result<Message, tungstenite::Error>;
 struct Mock {
 	rx: futures::channel::mpsc::UnboundedReceiver<WsResult>,
 	sent: Vec<Message>,
+	/// The socket has no room, so writes and flushes wait.
+	full: bool,
+	/// The peer sent a Close, after which tungstenite refuses writes.
+	closed: bool,
 }
 
 impl Stream for Mock {
 	type Item = WsResult;
 
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<WsResult>> {
-		self.rx.poll_next_unpin(cx)
+		let next = self.rx.poll_next_unpin(cx);
+		if let Poll::Ready(Some(Ok(Message::Close(_)))) = &next {
+			self.closed = true;
+		}
+		next
 	}
 }
 
@@ -25,16 +33,27 @@ impl Sink<Message> for Mock {
 	type Error = tungstenite::Error;
 
 	fn poll_ready(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Ok(()))
+		match self.full {
+			true => Poll::Pending,
+			false => Poll::Ready(Ok(())),
+		}
 	}
 
 	fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+		if self.closed {
+			return Err(tungstenite::Error::Protocol(
+				tungstenite::error::ProtocolError::SendAfterClosing,
+			));
+		}
 		self.sent.push(message);
 		Ok(())
 	}
 
 	fn poll_flush(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Ok(()))
+		match self.full {
+			true => Poll::Pending,
+			false => Poll::Ready(Ok(())),
+		}
 	}
 
 	fn poll_close(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -47,7 +66,15 @@ fn transport(
 	max_record_size: u64,
 ) -> (futures::channel::mpsc::UnboundedSender<WsResult>, WsTransport<Mock>) {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	let mut transport = WsTransport::new(Mock { rx, sent: Vec::new() }, moq_net::transport::Address::Uri);
+	let mut transport = WsTransport::new(
+		Mock {
+			rx,
+			sent: Vec::new(),
+			full: false,
+			closed: false,
+		},
+		moq_net::transport::Address::Uri,
+	);
 	if let Some(keep_alive) = keep_alive {
 		transport = transport.with_keep_alive(keep_alive).unwrap();
 	}
@@ -93,26 +120,65 @@ async fn any_message_keeps_the_peer_alive() {
 	}
 }
 
+fn pings(transport: &WsTransport<Mock>) -> usize {
+	transport
+		.ws
+		.sent
+		.iter()
+		.filter(|message| matches!(message, Message::Ping(_)))
+		.count()
+}
+
+/// Poll the receive side, then flush, as each driver step does.
+fn step(transport: &mut WsTransport<Mock>) -> Poll<Result<(), Error>> {
+	assert!(try_recv(transport).is_pending());
+	transport.poll_flush(&kio::Waiter::noop())
+}
+
 /// The keep-alive pings once per interval, the first one interval after start.
 #[tokio::test(start_paused = true)]
 async fn pings_each_interval() {
 	let (_peer, mut transport) = transport(Some(KEEP_ALIVE), 16382);
-	let pings = |transport: &WsTransport<Mock>| {
-		transport
-			.ws
-			.sent
-			.iter()
-			.filter(|message| matches!(message, Message::Ping(_)))
-			.count()
-	};
-	assert!(try_recv(&mut transport).is_pending());
+	assert!(step(&mut transport).is_ready());
 	assert_eq!(pings(&transport), 0, "pinged on connect");
 	kio::clock::sleep(Duration::from_millis(25)).await;
-	assert!(try_recv(&mut transport).is_pending());
+	assert!(step(&mut transport).is_ready());
 	assert_eq!(pings(&transport), 1, "one Ping per missed tick, not a burst");
 	kio::clock::sleep(Duration::from_millis(10)).await;
-	assert!(try_recv(&mut transport).is_pending());
+	assert!(step(&mut transport).is_ready());
 	assert_eq!(pings(&transport), 2);
+}
+
+/// A Ping that comes due while the socket is full goes out with the flush that finds room.
+/// The socket keeps one write waker, the driver's, so the Ping must wait on that waker rather
+/// than the receive side's, which nothing wakes until the next tick.
+#[tokio::test(start_paused = true)]
+async fn a_ping_due_on_a_full_socket_goes_out_once_it_drains() {
+	let (_peer, mut transport) = transport(Some(KEEP_ALIVE), 16382);
+	transport.ws.full = true;
+	kio::clock::sleep(Duration::from_millis(15)).await;
+	assert!(step(&mut transport).is_pending(), "the flush waits for room");
+	assert_eq!(pings(&transport), 0);
+
+	transport.ws.full = false;
+	assert!(transport.poll_ready(&kio::Waiter::noop()).is_ready());
+	assert!(transport.poll_flush(&kio::Waiter::noop()).is_ready());
+	assert_eq!(pings(&transport), 1);
+}
+
+/// A peer's Close read on the step a Ping comes due still flushes cleanly, sending the Close
+/// reply tungstenite queued rather than failing on a Ping it refuses.
+#[tokio::test(start_paused = true)]
+async fn a_close_drops_a_due_ping() {
+	let (peer, mut transport) = transport(Some(KEEP_ALIVE), 16382);
+	kio::clock::sleep(Duration::from_millis(15)).await;
+	peer.unbounded_send(Ok(Message::Close(None))).unwrap();
+	assert!(matches!(try_recv(&mut transport), Poll::Ready(Err(Error::Closed))));
+	assert!(matches!(
+		transport.poll_flush(&kio::Waiter::noop()),
+		Poll::Ready(Ok(()))
+	));
+	assert_eq!(pings(&transport), 0);
 }
 
 /// Without a keep-alive, a silent but open peer just leaves `recv` pending.

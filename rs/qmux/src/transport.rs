@@ -26,8 +26,9 @@ use crate::{Config, Error};
 /// [`poll_recv`](Self::poll_recv) gets a waiter of its own, and the driver polls it only
 /// after that waiter is woken. [`poll_flush`](Self::poll_flush) runs only after a step
 /// that received or queued a record, or whose last flush did not finish. So a transport that
-/// writes on its own, such as a keep-alive Ping or a Pong reply, queues it from `poll_recv`
-/// (waking that waiter from its timer), and the flush that follows sends it.
+/// writes on its own, such as a keep-alive Ping or a Pong reply, notes it from `poll_recv`
+/// (waking that waiter from its timer), and the flush that follows queues and sends it, waiting
+/// for room on the flush's waiter.
 pub trait Transport {
 	/// Bind the session's framing, before the first poll.
 	fn bind(&mut self, _config: &Config) {}

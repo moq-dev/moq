@@ -25,7 +25,7 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 /** Setup Parameter id for the client's intended {@link Role} (client-only). */
 const PARAM_ROLE = 0x3n;
-/** Setup Parameter id for the sender's link cost, which this endpoint never sends: it forwards nothing. */
+/** Setup Parameter id for the link cost the sender assigns to this connection (lite-06+). */
 const PARAM_COST = 0x4n;
 /** Setup Parameter id for the endpoint's Hop ID, or from lite-07 a forwarding node's Node ID. */
 const PARAM_HOP = 0x5n;
@@ -185,6 +185,8 @@ export interface SetupProps {
 	path?: string;
 	/** See {@link Setup.role}. Defaults to {@link Role.Both}. */
 	role?: Role;
+	/** See {@link Setup.cost}. Omitted by default. */
+	cost?: bigint;
 	/** See {@link Setup.hop}. Omitted by default. */
 	hop?: Hop;
 	/** See {@link Setup.token}. Omitted by default. */
@@ -221,6 +223,14 @@ export class Setup {
 	role: Role;
 
 	/**
+	 * What subscribing from this endpoint costs, which the peer adds to the route cost of every
+	 * announcement we send it unless it priced the link itself. `undefined` means the default of
+	 * 1. Lite-07 refuses 0 both ways: a free link would leave a route as close as the one it came
+	 * from.
+	 */
+	cost?: bigint;
+
+	/**
 	 * This endpoint's Hop ID. The peer uses it to filter announcements and
 	 * subscriptions whose route flows through this endpoint (lite-06 removed the
 	 * per-stream `exclude_hop` in its favor). `undefined` when the endpoint declares
@@ -242,10 +252,11 @@ export class Setup {
 	 */
 	implementation?: string;
 
-	constructor({ probe, path, role, hop, token, implementation }: SetupProps = {}) {
+	constructor({ probe, path, role, cost, hop, token, implementation }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
+		this.cost = cost;
 		this.hop = hop;
 		this.token = token;
 		this.implementation = implementation;
@@ -269,6 +280,10 @@ export class Setup {
 		// Both is the wire default, sent as the absence of the parameter.
 		if (this.role !== Role.Both) {
 			params.setVarint(PARAM_ROLE, this.role, version);
+		}
+		if (this.cost !== undefined) {
+			if (this.cost === 0n && hasRoutes(version)) throw new Error("setup cost cannot be 0");
+			params.setVarint(PARAM_COST, this.cost, version);
 		}
 		// An endpoint forwards nothing, so on lite-07 it declares no Node ID.
 		if (this.hop !== undefined && this.hop !== 0n && !hasRoutes(version)) {
@@ -299,11 +314,9 @@ export class Setup {
 		const roleCode = await params.getVarint(PARAM_ROLE, version);
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
 
-		// A free link would leave a route as cheap as the one it came from, so lite-07 refuses
-		// one. The value itself is unused: a browser forwards nothing.
-		if (hasRoutes(version) && (await params.getVarint(PARAM_COST, version)) === 0n) {
-			throw new ProtocolViolation("setup cost cannot be 0");
-		}
+		// A free link would leave a route as cheap as the one it came from, so lite-07 refuses one.
+		const cost = await params.getVarint(PARAM_COST, version);
+		if (hasRoutes(version) && cost === 0n) throw new ProtocolViolation("setup cost cannot be 0");
 
 		// Before lite-07, 0 carries no identity (it cannot be excluded), so it decodes as
 		// absent. A lite-07 Node ID is a non-zero id and its Marked, and nothing an
@@ -324,7 +337,7 @@ export class Setup {
 		const implementationBytes = hasImplementation(version) ? params.getBytes(PARAM_IMPLEMENTATION) : undefined;
 		const implementation = implementationBytes === undefined ? undefined : decodeUtf8(implementationBytes);
 
-		const setup = new Setup({ probe, path, role, hop, token, implementation });
+		const setup = new Setup({ probe, path, role, cost, hop, token, implementation });
 		if (pathBytes !== undefined || roleCode !== undefined || token !== undefined) clientParameters.add(setup);
 		return setup;
 	}

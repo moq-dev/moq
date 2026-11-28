@@ -8,7 +8,7 @@ interleaved), so run it on the camera's network and the camera needs no inbound
 port. Audio the stack cannot play, such as G.711, is skipped with a warning.
 
 `moq import rtsp` in [`moq-cli`](../moq-cli) wraps this crate with reconnect and
-a fresh instance per session.
+a fresh identity per session.
 
 ## Library
 
@@ -20,13 +20,13 @@ the session and finishes its tracks.
 
 A broadcast name always means the same content, so a restarted timeline must
 not continue the old broadcast: finish it and publish a fresh one under a new
-instance.
+identity.
 
 ```rust
 let client = moq_rtsp::Client::new("rtsp://admin:secret@192.168.1.64/stream1".parse()?)?;
 
 loop {
-	// Each route mints a fresh instance.
+	// Each route mints a fresh identity.
 	let route = origin.route("camera", moq_net::origin::RouteOptions::default())?;
 	let mut catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), Default::default())?;
 
@@ -37,9 +37,24 @@ loop {
 }
 ```
 
-Two sessions, such as a camera's SD and HD URLs, can publish renditions of one
-broadcast by sharing its catalog: run both pulls and restart both when either
-returns. Each session's timestamps shift onto the catalog's clock.
+Each frame lands on the catalog's clock at its capture, so `sync.clock` gives
+its wall time: where the camera's RTCP sender report for its stream says it was
+taken, or, for a stream without a usable report, no later than any of its
+frames arrived, which trails the capture by the camera's encoding and the
+network. A session waits up to 5 s after its first frame (RFC 3550's minimum
+report interval; a camera reporting less often is placed on its arrivals) for
+every stream's report to agree with its arrivals, holding the catalog and each
+stream's frames since its latest keyframe meanwhile. It stops waiting sooner
+once it holds 1024 frames or 32 MiB, or when the session ends or its timeline
+jumps. Each stream is placed
+on its own, since a camera's `rtptime` need not align them.
+
+A clock fixed before the session, by a shared catalog or
+`Config::with_clock`, is shifted onto. Two sessions, such as a camera's SD and
+HD URLs, can publish renditions of one broadcast by sharing its catalog: their
+frames line up by wall time. Run both pulls, and when either returns, stop the
+other and restart both on a fresh broadcast and catalog: a jumped timeline is new
+content.
 
 Credentials ride the URL's userinfo, as every RTSP tool takes them; they are
 taken out of the URL before dialing and never logged.

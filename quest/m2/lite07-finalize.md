@@ -38,7 +38,8 @@ owns the tier/partition correctness tests, so they run before the cut.
 Reaffirmed 2026-11-14 (maintainer, the m2 triage, below). Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
-wip is current when they land. Decided 2026-10-25: no routing identity proof
+wip is current when they land (superseded 2026-11-26 for metadata-only
+subscriptions, which now gate lite-07; see below). Decided 2026-10-25: no routing identity proof
 gates the cut, and lite-07 routing identities stay declared and unverified
 (2026-11-02: peer grants are dropped and no key proof is planned). Reversed
 2026-11-04 (maintainer, /quest-unblock): a peer proves a route key before the
@@ -67,9 +68,7 @@ The cut:
   final peer refuse each other by ALPN rather than misparse; no
   compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
-  passes. Fix `drafts/draft-lcurley-moq-lite.md:2380` (the lite-07 changelog
-  says `0 is malformed` instead of `0 is GROUP_END`, contradicting lines 2218,
-  2245, and 2376; found in the 2026-11-21 full-codebase audit).
+  passes.
 - SETUP keeps its stronger rule: #4820 put it under the general Message
   Length cap, which only permits rejection (MAY), while "a receiver MUST
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
@@ -161,7 +160,7 @@ would need a breaking release had it landed right after the cut:
   PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
   which fails the route key lane on a Chromium below 158, so only the pinned
   toolchain clears it. As an early signal, before the rename, run the route
-  key lane (`test/interop/clients/js/route-key.ts`) once with Playwright
+  key lane once with Playwright
   1.65.0 or later from npm, which bundles Chromium 158, and put the result in
   the PR. If the tab fails, stop and report it, since only the wire can fix
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
@@ -238,7 +237,9 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
 full-codebase audit): ✅ this quest fixes the changelog typo at
-`drafts/draft-lcurley-moq-lite.md:2380` during the cut.
+`drafts/draft-lcurley-moq-lite.md:2380` during the cut. The draft review in
+[moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553) rewrote that
+changelog without the typo.
 
 Decided 2026-11-24 (maintainer, on
 [moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371#issuecomment-7146881312)):
@@ -259,12 +260,40 @@ and peer resets), removes `FETCH` (`0x3`) and `SUBSCRIBE_SKIP` (superseding the
 and exclusive `End` plus one-shot `SUBSCRIBE` + immediate `FIN`, moves
 `Priority` and `Group Order` onto each `Range` and `Retune`, and adds judged
 `Max Age` to `SUBSCRIBE_DROP(OLD)`.
+Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
+
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ the cut also waits on
+the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720))
+(renaming `Instance` to `Identity`, capping it at 256 UTF-8 bytes for public
+keys, and hashing it in `moq-hls` URLs; rejected: keeping `Instance`, 1024-byte
+cap, raw URLs, no wire cap) and on
+metadata-only subscriptions ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)) plus its
+subscriber API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) (reversing the 2026-11-25
+deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD indexing is
+an immediate consumer and `moq_subscription` changes the C ABI; rejected:
+moving only the wire into `m2`, leaving both in `m3`).
+
+Decided 2026-11-25 (maintainer, the pick round on
+[moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553)): ✅ the cut waits
+for [unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md), so lite-07's
+`FRAME` timestamp deltas freeze unsigned, so the timestamps they produce never
+decrease (rejected: the next wip version after the cut).
+
+Decided 2026-11-27 (maintainer, `/quest-plan` following the frame-0 design pass
+on [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ the cut
+also waits for [keying groups by frame 0](/quest/m2/group-frame-timestamps.md),
+which creates published groups eagerly from frame 0, omits the first `FRAME`
+delta at `Frame Start = 0`, removes zigzag from lite-07, and drops `seek(start)`
+before 0.22 (rejected: folding it into #9794; dropping it).
 
 ## Required
 
-- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
+- [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
 
 ## Related
 
-- [Takeover](/quest/m3/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
+- [Takeover](/quest/m4/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
 - [The moq.pro mesh runs lite-07](/quest/m5/lite07-mesh.md) - the deployment condition that follows this

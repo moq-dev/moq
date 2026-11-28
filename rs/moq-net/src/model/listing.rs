@@ -18,7 +18,7 @@ use std::{
 	task::{Poll, ready},
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hashlink::LinkedHashMap;
@@ -83,8 +83,11 @@ pub enum TracksEvent {
 		/// The track's kind and properties.
 		info: Listed,
 	},
-	/// Every track this hop listed when the listing began, and still lists, has been
-	/// reported. Sent once; later events are live.
+	/// Every track this hop listed once its listing was complete, and still lists, has been
+	/// reported: at once without a [`Lister`], else once it [`synced`](Lister::synced), as a
+	/// relay's copy does on its moq-lite upstream's SYNCED. A copy of a moq-transport upstream
+	/// syncs at once with the tracks this hop already knows, since that upstream never signals a
+	/// complete list. Sent once; later events are live.
 	Synced,
 	/// A track is no longer listed, unfinished: its producer dropped or aborted before
 	/// declaring its end, or the route or handler that listed it withdrew. A handler may still
@@ -168,7 +171,7 @@ impl ListingState {
 			queue.pending.insert(key.clone(), Pending::Add(entry.info.clone()));
 		}
 		if self.synced() {
-			queue.sync = SyncPhase::Counting(queue.pending.len());
+			queue.sync();
 		}
 		let queue = kio::Shared::new(queue);
 		let key = self.readers.insert(queue.clone());
@@ -386,6 +389,8 @@ impl Unlist {
 
 impl Drop for Unlist {
 	fn drop(&mut self) {
+		// As listing, unlisting wakes readers who may look the broadcast up again inline.
+		let _hold = kio::hold();
 		self.state
 			.lock()
 			.listing
@@ -402,6 +407,9 @@ pub(in crate::model) struct ListOnAccept {
 impl ListOnAccept {
 	/// List the track with the info it was accepted with. Called outside the broadcast's lock.
 	pub(in crate::model) fn list(self, info: &track::Info) -> Unlist {
+		// Listing wakes the broadcast's listing readers, who may be polled inline and look the
+		// broadcast up again: hold the wakes until the lock drops.
+		let _hold = kio::hold();
 		let mut state = self.state.lock();
 		Unlist::list(
 			&self.state,
@@ -442,9 +450,10 @@ enum SyncPhase {
 	/// The listing has not synced.
 	#[default]
 	Waiting,
-	/// The listing synced: SYNCED goes out after this many more events, or once the queue
-	/// drains if that comes first.
-	Counting(usize),
+	/// The listing synced: SYNCED goes out once the reader has read these changes, which were
+	/// queued when it synced and so lead the queue. A change queued later joins none of them,
+	/// so it never postpones SYNCED.
+	Owed(HashSet<Key>),
 	/// SYNCED went out.
 	Sent,
 }
@@ -453,13 +462,7 @@ impl Queue {
 	fn add(&mut self, key: Key, info: Listed) {
 		match self.pending.get_mut(&key) {
 			Some(pending) => match *pending {
-				Pending::Remove { finished } => {
-					*pending = Pending::Readd { finished, info };
-					// The readd's extra event must not use up the count owed to changes queued behind it.
-					if let SyncPhase::Counting(left) = &mut self.sync {
-						*left += 1;
-					}
-				}
+				Pending::Remove { finished } => *pending = Pending::Readd { finished, info },
 				// A name is listed once at a time, so only its removal can be pending.
 				_ => debug_assert!(false, "a listed track was listed again"),
 			},
@@ -474,13 +477,7 @@ impl Queue {
 			// Never read: the two cancel.
 			Some(Pending::Add(_)) => {
 				self.pending.remove(key);
-			}
-			// Read, then re-added unread: the reader sees only the last removal, one event fewer.
-			Some(pending @ Pending::Readd { .. }) => {
-				*pending = Pending::Remove { finished };
-				if let SyncPhase::Counting(left) = &mut self.sync {
-					*left = left.saturating_sub(1);
-				}
+				self.dequeued(key);
 			}
 			Some(pending) => *pending = Pending::Remove { finished },
 			None => {
@@ -489,34 +486,29 @@ impl Queue {
 		}
 	}
 
-	/// The events the pending changes take to read.
-	fn events(&self) -> usize {
-		self.pending
-			.values()
-			.map(|pending| match pending {
-				Pending::Readd { .. } => 2,
-				_ => 1,
-			})
-			.sum()
+	/// The change queued under `key` left the queue, so SYNCED no longer waits on it.
+	fn dequeued(&mut self, key: &Key) {
+		if let SyncPhase::Owed(owed) = &mut self.sync {
+			owed.remove(key);
+		}
 	}
 
-	/// The listing synced: SYNCED goes out once what is queued now has been read, or
-	/// earlier if the queue drains first.
+	/// The listing synced: SYNCED goes out once what is queued now has been read.
 	fn sync(&mut self) {
 		if let SyncPhase::Waiting = self.sync {
-			self.sync = SyncPhase::Counting(self.events());
+			self.sync = SyncPhase::Owed(self.pending.keys().cloned().collect());
 		}
 	}
 
 	/// The listing's answer restarted before this reader was told it synced.
 	fn unsync(&mut self) {
-		if let SyncPhase::Counting(_) = self.sync {
+		if let SyncPhase::Owed(_) = self.sync {
 			self.sync = SyncPhase::Waiting;
 		}
 	}
 
 	fn is_ready(&self) -> bool {
-		self.end.is_some() || !self.pending.is_empty() || matches!(self.sync, SyncPhase::Counting(_))
+		self.end.is_some() || !self.pending.is_empty() || matches!(self.sync, SyncPhase::Owed(_))
 	}
 
 	fn next(&mut self) -> Result<Option<TracksEvent>, Error> {
@@ -537,21 +529,25 @@ impl Queue {
 			}
 			None => {}
 		}
-		if let SyncPhase::Counting(left) = self.sync
-			&& (left == 0 || self.pending.is_empty())
+		if let SyncPhase::Owed(owed) = &self.sync
+			&& owed.is_empty()
 		{
 			self.sync = SyncPhase::Sent;
 			return Ok(Some(TracksEvent::Synced));
 		}
 		let (key, pending) = self.pending.pop_front().expect("a ready queue has a pending change");
-		if let SyncPhase::Counting(left) = &mut self.sync {
-			*left -= 1;
-		}
 		Ok(Some(match pending {
-			Pending::Add(info) => TracksEvent::Added { name: key.1, info },
-			Pending::Remove { finished } => removal(key, finished),
+			// Its add stays queued in place, so SYNCED still waits on it if it did.
 			Pending::Readd { finished, info } => {
 				self.pending.insert_front(key.clone(), Pending::Add(info));
+				removal(key, finished)
+			}
+			Pending::Add(info) => {
+				self.dequeued(&key);
+				TracksEvent::Added { name: key.1, info }
+			}
+			Pending::Remove { finished } => {
+				self.dequeued(&key);
 				removal(key, finished)
 			}
 		}))
@@ -568,7 +564,7 @@ fn removal((kind, name): Key, finished: bool) -> TracksEvent {
 
 /// The tracks a broadcast lists, from [`Consumer::tracks`].
 ///
-/// Reports every track listed when it was created, then [`TracksEvent::Synced`], then
+/// Reports every track listed once the listing is complete, then [`TracksEvent::Synced`], then
 /// each change as it happens, until the broadcast ends: a clean end comes after each
 /// track that left before it, and a track still listed then ends unfinished. Listing a broadcast never
 /// requests a track: subscribe to each listed one through [`Consumer::track`].
@@ -793,6 +789,36 @@ mod tests {
 	}
 
 	/// Every event ready now, through the end of the listing.
+	/// A waker that looks the broadcast up again, as an inline executor polling its task would.
+	struct Reenter {
+		consumer: crate::broadcast::Consumer,
+		woken: std::sync::atomic::AtomicBool,
+	}
+
+	impl Reenter {
+		fn new(consumer: &crate::broadcast::Consumer) -> Arc<Self> {
+			Arc::new(Self {
+				consumer: consumer.clone(),
+				woken: false.into(),
+			})
+		}
+
+		fn waiter(self: &Arc<Self>) -> kio::Waiter {
+			kio::Waiter::new(std::task::Waker::from(self.clone()))
+		}
+
+		fn woken(&self) -> bool {
+			self.woken.load(std::sync::atomic::Ordering::SeqCst)
+		}
+	}
+
+	impl std::task::Wake for Reenter {
+		fn wake(self: Arc<Self>) {
+			let _ = self.consumer.track("other");
+			self.woken.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
 	fn drain(tracks: &mut Tracks) -> Vec<String> {
 		let mut events = Vec::new();
 		while let Some(event) = next(tracks) {
@@ -831,6 +857,103 @@ mod tests {
 			events.push(show(queue.next().unwrap().unwrap()));
 		}
 		assert_eq!(events, ["-a", "+a", "+b", "synced"]);
+	}
+
+	/// Re-adds of tracks the reader saw, queued after SYNCED was owed, never postpone it.
+	#[test]
+	fn readds_after_sync_never_postpone_synced() {
+		let key = |name: &str| (Kind::Track, Arc::from(name));
+		let info = || Listed::Track(track::Info::default());
+		let mut queue = Queue::default();
+		queue.sync();
+		let mut events = Vec::new();
+		// An order that kept a re-add ahead of a counted SYNCED forever.
+		for name in ["a", "b", "a", "a", "b", "b", "a", "a"] {
+			if events.iter().any(|event| event == "synced") {
+				break;
+			}
+			queue.remove(&key(name), false);
+			queue.add(key(name), info());
+			events.push(show(queue.next().unwrap().unwrap()));
+		}
+		assert_eq!(events, ["synced"]);
+	}
+
+	/// Under random churn and reads, the reader's view stays consistent, SYNCED follows every
+	/// track listed throughout since the sync within two reads per change then queued, and a
+	/// drained reader sees exactly the live set.
+	#[test]
+	fn random_churn_keeps_synced_complete_and_prompt() {
+		use rand::{RngExt, SeedableRng};
+		use std::collections::BTreeSet;
+
+		let key = |name: &str| (Kind::Track, Arc::from(name));
+		let info = || Listed::Track(track::Info::default());
+		for seed in 0..256u64 {
+			let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+			let mut queue = Queue::default();
+			let mut live = BTreeSet::new();
+			let mut seen = BTreeSet::new();
+			// Tracks listed throughout since the sync, and the reads SYNCED may still take.
+			let mut owed: Option<(BTreeSet<String>, usize)> = None;
+			let mut sent = false;
+			let read = |queue: &mut Queue,
+			            seen: &mut BTreeSet<String>,
+			            owed: &mut Option<(BTreeSet<String>, usize)>,
+			            sent: &mut bool| {
+				let event = show(queue.next().unwrap().unwrap());
+				if event == "synced" {
+					let (throughout, _) = owed.take().expect("SYNCED before the listing synced");
+					assert!(
+						throughout.is_subset(seen),
+						"seed {seed}: {throughout:?} unseen at SYNCED"
+					);
+					*sent = true;
+					return;
+				}
+				if let Some((_, left)) = owed {
+					*left = left
+						.checked_sub(1)
+						.unwrap_or_else(|| panic!("seed {seed}: SYNCED postponed"));
+				}
+				let name = event[1..].to_string();
+				match &event[..1] {
+					"+" => assert!(seen.insert(name), "seed {seed}: added twice"),
+					_ => assert!(seen.remove(&name), "seed {seed}: removed unseen"),
+				}
+			};
+			for _ in 0..200 {
+				match rng.random_range(0..10) {
+					0..5 => {
+						let name = format!("t{}", rng.random_range(0..6));
+						if live.remove(&name) {
+							queue.remove(&key(&name), false);
+							if let Some((throughout, _)) = &mut owed {
+								throughout.remove(&name);
+							}
+						} else {
+							queue.add(key(&name), info());
+							live.insert(name);
+						}
+					}
+					5 if owed.is_none() && !sent => {
+						queue.sync();
+						owed = Some((live.clone(), 2 * queue.pending.len()));
+					}
+					_ if queue.is_ready() => read(&mut queue, &mut seen, &mut owed, &mut sent),
+					_ => {}
+				}
+			}
+			if !sent {
+				queue.sync();
+				owed.get_or_insert_with(|| (live.clone(), 2 * queue.pending.len()));
+			}
+			while queue.is_ready() {
+				read(&mut queue, &mut seen, &mut owed, &mut sent);
+			}
+			assert!(sent, "seed {seed}: never synced");
+			assert_eq!(seen, live, "seed {seed}: drained view differs");
+		}
 	}
 
 	#[test]
@@ -912,6 +1035,63 @@ mod tests {
 		assert!(matches!(lister.remove(Kind::Datagrams, "b"), Err(Error::NotFound)));
 		lister.remove(Kind::Track, "b").unwrap();
 		assert_eq!(drain(&mut tracks), ["~d:b", "-b"]);
+	}
+
+	/// A listed track asked for again because its producer dropped while read is listed again
+	/// once its handler serves it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewed_track_is_listed_again() {
+		let broadcast = Info::new().produce();
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		let _reader = consumer.track("a").unwrap().subscribe(None).await.unwrap();
+		assert_eq!(drain(&mut tracks), ["synced", "+a"]);
+		drop(track);
+		assert_eq!(drain(&mut tracks), ["-a"]);
+		let _next = requests.assert_request().accept(track::Info::timed());
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
+	/// Dropping a listed track's producer wakes a listing reader once the broadcast unlocks,
+	/// so an inline executor can look the broadcast up again from the wake.
+	#[test]
+	fn unlisting_wakes_a_reader_after_unlocking() {
+		let broadcast = Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		assert_eq!(drain(&mut tracks), ["synced", "+a"]);
+
+		let reenter = Reenter::new(&consumer);
+		let waiter = reenter.waiter();
+		assert!(tracks.poll_next(&waiter).is_pending());
+		drop(track);
+		assert!(reenter.woken());
+	}
+
+	/// Accepting a renewal wakes a listing reader once the broadcast unlocks, so an inline
+	/// executor can look the broadcast up again from the wake.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn relisting_wakes_a_reader_after_unlocking() {
+		let broadcast = Info::new().produce();
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		let _reader = consumer.track("a").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+		let request = requests.assert_request();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+
+		let reenter = Reenter::new(&consumer);
+		let waiter = reenter.waiter();
+		assert!(tracks.poll_next(&waiter).is_pending());
+		let _next = request.accept(track::Info::timed());
+		assert!(reenter.woken());
 	}
 
 	/// A datagram track a consumer asked for and a handler served is not in the inventory,
@@ -1184,7 +1364,7 @@ mod tests {
 		// Listing asks the handler for nothing.
 		dynamic.assert_no_request();
 
-		let _resolved = consumer.resolve_track("x", None).unwrap();
+		let _resolved = consumer.resolve_track(&"x".into(), None).unwrap();
 		let _x = dynamic.assert_request().accept(None);
 		assert_eq!(drain(&mut tracks), NONE);
 	}
@@ -1214,8 +1394,9 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["synced", "+c", "+d", "+e"]);
 	}
 
+	/// A track removed before it was read owes SYNCED nothing, and a later change follows it.
 	#[test]
-	fn a_removal_of_a_seen_track_may_precede_synced() {
+	fn a_cancelled_track_owes_synced_nothing() {
 		let broadcast = Info::new().produce();
 		let a = broadcast.create_track("a", None).unwrap();
 		let _b = broadcast.create_track("b", None).unwrap();
@@ -1224,7 +1405,7 @@ mod tests {
 		assert_eq!(next(&mut tracks).as_deref(), Some("+a"));
 		drop(a);
 		drop(c);
-		assert_eq!(drain(&mut tracks), ["+b", "-a", "synced"]);
+		assert_eq!(drain(&mut tracks), ["+b", "synced", "-a"]);
 	}
 
 	#[test]

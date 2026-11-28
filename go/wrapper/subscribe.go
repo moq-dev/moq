@@ -37,6 +37,26 @@ func (b *BroadcastConsumer) SubscribeTrack(
 	return &TrackConsumer{inner: inner}, nil
 }
 
+// SubscribeMeta subscribes to a track's metadata: its groups and each frame's header,
+// without the payload. It is a subscription of its own beside any SubscribeTrack of the same
+// track; to read the payload after all, subscribe to the track from the group reached.
+// subscription works as in SubscribeTrack.
+func (b *BroadcastConsumer) SubscribeMeta(
+	ctx context.Context,
+	name string,
+	subscription *Subscription,
+) (*MetaConsumer, error) {
+	sub, err := subscriptionFFI(subscription)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.SubscribeMeta(ctx, name, sub)
+	if err != nil {
+		return nil, err
+	}
+	return &MetaConsumer{inner: inner}, nil
+}
+
 // FetchGroup fetches one complete group by track name and group start
 // without holding a live subscription.
 func (b *BroadcastConsumer) FetchGroup(
@@ -55,10 +75,7 @@ func (b *BroadcastConsumer) FetchGroup(
 // Resolve returns the broadcast serving a catalog rendition, built with
 // media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
 // empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
-// Its Instance is the stream the reference names: a broadcast proven to serve another one
-// errors instead of resolving, while a route over a wire that carries no instance cannot prove
-// one, so there it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
-// FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
+// Call it on a rendition that carries a reference before SubscribeTrack or FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
 // when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
 // video.Subscribe resolve it themselves.
 //
@@ -185,6 +202,77 @@ func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupCon
 // Cancel stops the stream.
 func (t *TrackConsumer) Cancel() {
 	t.inner.Cancel()
+}
+
+// MetaConsumer is a metadata subscription: a stream of groups from a track, each a stream of
+// frame headers without their payloads.
+type MetaConsumer struct {
+	inner *ffi.MoqMetaConsumer
+}
+
+// RecvGroup returns the next group in arrival order, as TrackConsumer.RecvGroup does, or
+// (nil, nil) when the track ends.
+func (m *MetaConsumer) RecvGroup(ctx context.Context) (*MetaGroup, error) {
+	res, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqMetaGroup, error) {
+		res, err := m.inner.RecvGroup(ctx)
+		if err != nil || res == nil {
+			return nil, err
+		}
+		return *res, nil
+	})
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return &MetaGroup{inner: res}, nil
+}
+
+// Info returns the publisher-side track properties learned during subscription.
+func (m *MetaConsumer) Info() TrackInfo {
+	return trackInfoFromFFI(m.inner.Info())
+}
+
+// Update changes this subscriber's delivery preferences, as TrackConsumer.Update does.
+func (m *MetaConsumer) Update(subscription Subscription) error {
+	sub, err := subscription.ffi()
+	if err != nil {
+		return err
+	}
+	return m.inner.Update(sub)
+}
+
+// GroupsAsArrived ranges over groups in arrival order, as RecvGroup returns them.
+func (m *MetaConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*MetaGroup, error] {
+	return bridge.Seq(ctx, m.inner.Cancel, m.RecvGroup)
+}
+
+// Cancel stops the stream.
+func (m *MetaConsumer) Cancel() {
+	m.inner.Cancel()
+}
+
+// MetaGroup is a stream of frame headers within a single group of a metadata subscription.
+type MetaGroup struct {
+	inner *ffi.MoqMetaGroup
+}
+
+// Start is this group's start within the track.
+func (g *MetaGroup) Start() uint64 {
+	return g.inner.Start()
+}
+
+// NextHeader returns the next frame's header, or (nil, nil) when the group ends.
+func (g *MetaGroup) NextHeader(ctx context.Context) (*FrameHeader, error) {
+	return bridge.Call(ctx, nil, g.inner.NextHeader)
+}
+
+// All ranges over frame headers until the group ends or the loop breaks.
+func (g *MetaGroup) All(ctx context.Context) iter.Seq2[*FrameHeader, error] {
+	return bridge.Seq(ctx, g.inner.Cancel, g.NextHeader)
+}
+
+// Cancel stops the stream.
+func (g *MetaGroup) Cancel() {
+	g.inner.Cancel()
 }
 
 // VideoDecodedFrame is one decoded video frame. It owns the decoder's surface

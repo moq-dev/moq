@@ -218,20 +218,6 @@ pub enum Error {
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
 
-	/// A reference's `instance` names another stream than the one serving its broadcast.
-	///
-	/// The served instance is the one the source resolved first for that path, so a later
-	/// reference cannot move it; the reference fails instead of reading other content.
-	#[error("broadcast {path} serves instance {actual}, not the referenced {expected}")]
-	InstanceMismatch {
-		/// The broadcast's path, relative to the origin root.
-		path: String,
-		/// The instance the reference names.
-		expected: moq_net::Instance,
-		/// The instance the resolved broadcast serves.
-		actual: moq_net::Instance,
-	},
-
 	/// A rendition tried to lower jitter already advertised to subscribers.
 	#[error("catalog jitter cannot decrease for a published rendition")]
 	JitterDecreased,
@@ -268,8 +254,8 @@ pub enum Error {
 		bytes: u64,
 	},
 
-	/// Another publisher instance replaced a followed broadcast, and stitching was off.
-	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
+	/// Another publisher identity replaced a followed broadcast, and stitching was off.
+	#[error("another publisher identity replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
 	Replaced(String),
 	/// A published rendition changed fields that require a new decoder configuration.
 	#[error("rendition `{0}` changed identity; publish it under a new track name")]
@@ -291,6 +277,11 @@ pub enum Error {
 	/// An importer was given input after it finished.
 	#[error("input after finish")]
 	Finished,
+
+	/// A raw data track was handed an empty payload, which its zero-byte discontinuity marker
+	/// leaves no way to carry.
+	#[error("a raw data track can't carry an empty payload: a zero-byte object marks a discontinuity")]
+	EmptyRawPayload,
 }
 
 impl Error {

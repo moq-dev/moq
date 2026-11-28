@@ -31,23 +31,34 @@ const SUPERSEDED: std::time::Duration = std::time::Duration::from_secs(1);
 /// Frames buffered per listener. A rung that falls further behind than this
 /// lags out (skipping to the next group) instead of stalling the other rungs;
 /// the decode task itself never blocks on a slow listener.
-const CAPACITY: usize = 16;
+///
+/// Sized for a whole realistic GOP (two seconds at 60 fps, four at 30): a cold
+/// start decodes the cached current group as fast as the decoder runs, while the
+/// rung is still opening its encoder and then encodes no faster than it decodes,
+/// so anything shorter than the burst loses the first group to lag. A frame is
+/// dropped from the queue once every listener has read it, so only a rung that
+/// is actually behind holds this many.
+const CAPACITY: usize = 128;
 
 /// One item of the shared live feed, in stream order.
 #[derive(Clone)]
 pub(crate) enum Item {
+	/// Source starts its publisher declared it never produces, sent ahead of the group above
+	/// them, or with the next group when the skip trailed that one. A rung mirroring the source
+	/// declares them too, so a lite-07 reader of its output never waits on a pause between groups.
+	Skip(std::ops::Range<u64>),
 	/// A new source group started; the frames that follow belong to it. Carries its key, which
 	/// the output group mirroring it shares.
 	Group(u64),
 	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a GPU
 	/// frame stays on the GPU for every receiving rung.
 	Frame(Arc<moq_video::Frame>),
-	/// The current group ended cleanly.
-	End,
+	/// The current group ended cleanly, with its exclusive end if known.
+	End(Option<u64>),
 	/// The source track ended cleanly; no more items follow.
 	Finished,
-	/// The current group will never end: its source read failed, or this
-	/// listener fell behind and the queue rolled over. Abandon it and pick up at
+	/// The current group will never end: its source read failed, it failed to
+	/// decode, or this listener fell behind and the queue rolled over. Abandon it and pick up at
 	/// the next [`Item::Group`].
 	Lost,
 }
@@ -132,8 +143,9 @@ pub(crate) struct Listener {
 }
 
 impl Listener {
-	/// The next feed item, or `None` when the feed died mid-stream (a source or
-	/// decode error; a clean source end arrives as [`Item::Finished`] first).
+	/// The next feed item, or `None` when the feed died mid-stream (a source
+	/// error, or a decoder that would not open; a clean source end arrives as
+	/// [`Item::Finished`] first).
 	pub(crate) async fn recv(&mut self) -> Option<Item> {
 		match self.receiver.recv().await {
 			Ok(item) => Some(item),
@@ -188,7 +200,9 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// the codec across every `.await` below, so on a multi-thread runtime it would
 	// migrate workers and unbalance the per-thread COM apartment the Windows
 	// backend opens.
-	let mut decoder = moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?;
+	// Opened before subscribing, so a codec this host cannot decode fails here. `None` after a
+	// group failed to decode, until the next group opens a fresh one.
+	let mut decoder = Some(moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?);
 
 	// Starts at the live edge, and keeps a superseded group for [`SUPERSEDED`]:
 	// every rung mirrors each source group as a whole, so a tail dropped because the
@@ -204,52 +218,362 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		})]);
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
-	while let Some(mut group) = subscriber.recv_group().await? {
+	let mut skips = Skips::default();
+	// A skip recording wakes this read, so one landing while the source pauses is named then.
+	// Asked after the read registers, so a skip recorded just before that is seen here instead.
+	while let Some(mut group) = kio::wait(|waiter| {
+		let read = subscriber.poll_recv_group(waiter);
+		skips.recheck(&subscriber, sender);
+		read
+	})
+	.await?
+	{
+		let sink = match &mut decoder {
+			Some(sink) => sink,
+			None => decoder.insert(moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?),
+		};
+
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
+		skips.arrived(group.start, &subscriber, sender);
 		let _ = sender.send(Item::Group(group.start));
 
-		let mut first = true;
-		let complete = loop {
-			let wire = match group.read_frame().await {
-				Ok(Some(wire)) => wire,
-				Ok(None) => break true,
-				// A failed group read loses that group alone, such as one its
-				// publisher gave up; a failed track ends `recv_group` above instead.
-				Err(err) => {
-					tracing::debug!(%err, group = group.start, "lost a source group");
-					break false;
-				}
-			};
-			for frame in container.decode(wire)? {
-				let timestamp = frame.timestamp;
-				// The first frame of a group is a keyframe by construction. This drives
-				// the decoder's gating and parameter-set injection; each rung asks its
-				// own encoder for an output IDR when it opens a group.
-				let keyframe = frame.keyframe || first;
-				first = false;
-
-				decoder.decode(frame.payload, timestamp, keyframe).await?;
-				while let Some(decoded) = decoder.receive()? {
-					let _ = sender.send(Item::Frame(Arc::new(decoded)));
-				}
-			}
-		};
-		// A buffered decoder still owns this group's tail. Drain it before the
-		// boundary so those frames stay in this group rather than appearing after
-		// the next group's keyframe.
-		decoder.flush().await?;
 		// A lost group is never finished short, and every rung hears of it now
 		// rather than at a next group that may never come.
-		if complete {
+		let item = match decode_group(&container, sink, &mut group, &mut skips, &subscriber, sender).await {
+			Ok(true) => Item::End(group.end()),
+			Ok(false) => Item::Lost,
+			// A corrupt packet costs its own group, not every rung's track: each group decodes
+			// from its own keyframe, so the next one starts clean on a fresh decoder. Closed
+			// before that one opens, so a reset never needs a second hardware session.
+			Err(err) => {
+				tracing::warn!(%err, group = group.start, "could not decode a source group");
+				decoder = None;
+				Item::Lost
+			}
+		};
+		skips.ended(group.start, &item);
+		let _ = sender.send(item);
+	}
+	skips.recheck(&subscriber, sender);
+	Ok(())
+}
+
+/// The runs between source groups the feed has named skipped, or has yet to.
+#[derive(Default)]
+struct Skips {
+	/// One past the newest group read, and where the next pause may start: that group's End
+	/// once it ended whole, since no group starts inside a whole group's span.
+	after: Option<(u64, u64)>,
+	/// The last run below a group not known skipped when that group arrived, as
+	/// `(from, pause, group)`. A skip travels apart from the group above it, so it may land
+	/// later: asked again as each frame arrives and whenever the read for the next group wakes.
+	unproven: Option<(u64, u64, u64)>,
+}
+
+impl Skips {
+	/// Name the run below group `start` if the source declared it skipped, or keep it to ask
+	/// again.
+	fn arrived(&mut self, start: u64, subscriber: &moq_net::track::Subscriber, sender: &broadcast::Sender<Item>) {
+		self.recheck(subscriber, sender);
+		let (from, pause) = self.after.unwrap_or((0, 0));
+		if pause < start {
+			match subscriber.is_skipped(pause..start) {
+				true => drop(sender.send(Item::Skip(from..start))),
+				false => self.unproven = Some((from, pause, start)),
+			}
+		}
+	}
+
+	/// Name the run kept from an earlier group once the source declared it skipped.
+	fn recheck(&mut self, subscriber: &moq_net::track::Subscriber, sender: &broadcast::Sender<Item>) {
+		if let Some((from, pause, start)) = self.unproven
+			&& subscriber.is_skipped(pause..start)
+		{
+			self.unproven = None;
+			let _ = sender.send(Item::Skip(from..start));
+		}
+	}
+
+	/// Group `start` ended as `item` says.
+	fn ended(&mut self, start: u64, item: &Item) {
+		// A group arriving late below a newer one moves nothing back.
+		let next = start.saturating_add(1);
+		let pause = match item {
+			Item::End(Some(end)) => (*end).max(next),
+			_ => next,
+		};
+		if self.after.is_none_or(|(from, _)| next > from) {
+			self.after = Some((next, pause));
+		}
+	}
+}
+
+/// Decode one source group into the channel, draining the decoder at its end. Returns whether
+/// the group arrived whole; a read that failed loses it, leaving the decoder empty for the next.
+///
+/// An error is the decoder's or the container's, after which the decoder may hold anything.
+async fn decode_group(
+	container: &moq_mux::catalog::hang::Container,
+	decoder: &mut moq_video::decode::Sink,
+	group: &mut moq_net::group::Consumer,
+	skips: &mut Skips,
+	subscriber: &moq_net::track::Subscriber,
+	sender: &broadcast::Sender<Item>,
+) -> Result<bool, Error> {
+	let mut first = true;
+	let complete = loop {
+		let read = group.read_frame().await;
+		skips.recheck(subscriber, sender);
+		let wire = match read {
+			Ok(Some(wire)) => wire,
+			Ok(None) => break true,
+			// A failed group read loses that group alone, such as one its
+			// publisher gave up; a failed track ends `recv_group` instead.
+			Err(err) => {
+				tracing::debug!(%err, group = group.start, "lost a source group");
+				break false;
+			}
+		};
+		for frame in container.decode(wire)? {
+			let timestamp = frame.timestamp;
+			// The first frame of a group is a keyframe by construction. This drives
+			// the decoder's gating and parameter-set injection; each rung asks its
+			// own encoder for an output IDR when it opens a group.
+			let keyframe = frame.keyframe || first;
+			first = false;
+
+			decoder.decode(frame.payload, timestamp, keyframe).await?;
 			while let Some(decoded) = decoder.receive()? {
 				let _ = sender.send(Item::Frame(Arc::new(decoded)));
 			}
-			let _ = sender.send(Item::End);
-		} else {
-			while decoder.receive()?.is_some() {}
-			let _ = sender.send(Item::Lost);
+		}
+	};
+	// A buffered decoder still owns this group's tail. Drain it before the
+	// boundary so those frames stay in this group rather than appearing after
+	// the next group's keyframe.
+	decoder.flush().await?;
+	if complete {
+		while let Some(decoded) = decoder.receive()? {
+			let _ = sender.send(Item::Frame(Arc::new(decoded)));
+		}
+	} else {
+		while decoder.receive()?.is_some() {}
+	}
+	Ok(complete)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A feed of a 320x240 avc3 source track named `video`, decoded in software.
+	fn feed(source: &moq_net::broadcast::Producer) -> Feed {
+		let mut config = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		let decoder = crate::Config {
+			decoder: moq_video::decode::Kind::Software,
+			..Default::default()
+		}
+		.decoder();
+		Feed::new(source.consume(), "video".into(), config, decoder)
+	}
+
+	/// Write `count` gray frames at 30 fps from `first` (a frame index) into `group`, opening on
+	/// a keyframe.
+	fn write(group: &mut moq_net::group::Producer, first: u64, count: u64) {
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		for index in first..first + count {
+			let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
+			let timestamp = moq_net::Timestamp::from_micros(index * 33_333).unwrap();
+			encoder.encode(&moq_video::Frame::new(surface, timestamp)).unwrap();
+			while let Some(encoded) = encoder.receive().unwrap() {
+				hang::container::Frame {
+					timestamp: encoded.timestamp,
+					payload: encoded.payload,
+				}
+				.write_to(group)
+				.unwrap();
+			}
+		}
+		encoder.flush().unwrap();
+		while let Some(encoded) = encoder.receive().unwrap() {
+			hang::container::Frame {
+				timestamp: encoded.timestamp,
+				payload: encoded.payload,
+			}
+			.write_to(group)
+			.unwrap();
 		}
 	}
-	Ok(())
+
+	/// Read one group off `listener`: its key, how many frames it carried, and whether it
+	/// ended whole rather than lost.
+	async fn read_group(listener: &mut Listener) -> (u64, usize, bool) {
+		let Some(Item::Group(key)) = listener.recv().await else {
+			panic!("expected a group to start");
+		};
+		let mut frames = 0;
+		loop {
+			match listener.recv().await.expect("the feed died") {
+				Item::Frame(_) => frames += 1,
+				Item::End(_) => return (key, frames, true),
+				Item::Lost => return (key, frames, false),
+				Item::Skip(_) | Item::Group(_) | Item::Finished => panic!("group {key} never ended"),
+			}
+		}
+	}
+
+	/// A cold start decodes the cached current group as fast as the decoder runs, while a rung
+	/// reads nothing until its encoder opens. A whole GOP waits for it rather than lagging it
+	/// out of the very group a viewer joined on.
+	#[tokio::test]
+	async fn a_cold_start_keeps_a_whole_cached_gop_for_a_slow_rung() {
+		let source = moq_net::broadcast::Info::default().produce();
+		let track = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let feed = feed(&source);
+		// Reads nothing until the decode is through the burst, as a rung opening its encoder.
+		let mut slow = feed.listen();
+		// Reads eagerly, which tells when that is.
+		let mut eager = feed.listen();
+
+		// Two seconds at 30 fps, cached whole by the time the feed reads it.
+		let mut group = track.create_group(0u64.into()).unwrap();
+		write(&mut group, 0, 60);
+		group.finish().unwrap();
+
+		assert_eq!(read_group(&mut eager).await, (0, 60, true));
+		assert_eq!(read_group(&mut slow).await, (0, 60, true), "the slow rung lost the GOP");
+	}
+
+	/// What the feed says around a source's groups, its frames left out.
+	#[derive(Debug, PartialEq)]
+	enum Seen {
+		Skip(std::ops::Range<u64>),
+		Group(u64),
+		End(Option<u64>),
+		Lost,
+	}
+
+	/// The next item that isn't a frame.
+	async fn next_seen(listener: &mut Listener) -> Seen {
+		loop {
+			match listener.recv().await.expect("the feed died") {
+				Item::Frame(_) => {}
+				Item::Skip(groups) => return Seen::Skip(groups),
+				Item::Group(key) => return Seen::Group(key),
+				Item::End(end) => return Seen::End(end),
+				Item::Lost => return Seen::Lost,
+				Item::Finished => panic!("the source ended"),
+			}
+		}
+	}
+
+	/// The starts a source skips between its media-timed groups reach every listener ahead of the
+	/// group above them, across a pause past a whole group's End and past a lost group too.
+	#[tokio::test]
+	async fn the_source_skips_reach_the_listeners() {
+		const FRAME: u64 = 33_333;
+		let source = moq_net::broadcast::Info::default().produce();
+		let track = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let feed = feed(&source);
+		let mut listener = feed.listen();
+		let mut demand = track.demand();
+		while !demand.wanted_changed().await.unwrap() {}
+		let at = |index: u64| moq_net::Timestamp::from_micros(index * FRAME).unwrap();
+
+		// Two frames, then a pause: the group ends whole well before the next one starts.
+		let mut first = track.append_group(at(0)).unwrap();
+		write(&mut first, 0, 2);
+		first.finish_at(2 * FRAME).unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(0));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(Some(2 * FRAME)));
+
+		// Appending says nothing starts since the previous group, which the feed names in full.
+		let mut lost = track.append_group(at(60)).unwrap();
+		write(&mut lost, 60, 2);
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(1..60 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(60 * FRAME));
+		lost.abort(moq_net::Error::Cancel).unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Lost);
+
+		let mut last = track.append_group(at(150)).unwrap();
+		write(&mut last, 150, 2);
+		last.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(60 * FRAME + 1..150 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(150 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+
+		// A group the source created without skipping below it may still have neighbors there.
+		let mut unproven = track.create_group((200 * FRAME).into()).unwrap();
+		write(&mut unproven, 200, 2);
+		unproven.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(200 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+
+		// A skip landing after the group above it, while the source pauses, is named at once.
+		track.skip_groups(150 * FRAME + 1..200 * FRAME);
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(150 * FRAME + 1..200 * FRAME));
+		let mut next = track.append_group(at(250)).unwrap();
+		write(&mut next, 250, 2);
+		next.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(200 * FRAME + 1..250 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(250 * FRAME));
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+
+		// One landing while the group above it is still arriving is named with its next frame,
+		// not held until a group that may never come.
+		let mut open = track.create_group((300 * FRAME).into()).unwrap();
+		write(&mut open, 300, 2);
+		assert_eq!(next_seen(&mut listener).await, Seen::Group(300 * FRAME));
+		track.skip_groups(250 * FRAME + 1..300 * FRAME);
+		write(&mut open, 302, 2);
+		assert_eq!(next_seen(&mut listener).await, Seen::Skip(250 * FRAME + 1..300 * FRAME));
+		open.finish().unwrap();
+		assert_eq!(next_seen(&mut listener).await, Seen::End(None));
+	}
+
+	/// A source packet that fails to decode costs its own group: every listener hears it lost,
+	/// and the next group decodes whole on a fresh decoder rather than the feed dying with it.
+	#[tokio::test]
+	async fn a_corrupt_packet_costs_only_its_group() {
+		let source = moq_net::broadcast::Info::default().produce();
+		let track = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let feed = feed(&source);
+		let mut listener = feed.listen();
+
+		let mut corrupt = track.create_group(0u64.into()).unwrap();
+		write(&mut corrupt, 0, 2);
+		// A truncated container timestamp: no hang frame at all.
+		corrupt
+			.write_frame(moq_net::Timestamp::from_micros(66_666).unwrap(), &[0xffu8][..])
+			.unwrap();
+		write(&mut corrupt, 3, 2);
+		corrupt.finish().unwrap();
+		let (key, _, whole) = read_group(&mut listener).await;
+		assert_eq!((key, whole), (0, false), "the corrupt group ended whole");
+
+		let mut clean = track.create_group(1u64.into()).unwrap();
+		write(&mut clean, 5, 2);
+		clean.finish().unwrap();
+		assert_eq!(read_group(&mut listener).await, (1, 2, true));
+	}
 }

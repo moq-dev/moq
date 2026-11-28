@@ -939,7 +939,7 @@ impl Misses {
 			state.start,
 			state.drops_revision,
 		);
-		let ended = state.nothing_arrives();
+		let ended = state.immediate_misses();
 		let ledger = state.arrivals.changes();
 		let drops = &state.drops_changes;
 		// Every reader probes on every poll, mostly with nothing changed since the last, so
@@ -1114,10 +1114,7 @@ impl Misses {
 		self.forgotten = revision;
 		// Current ledger runs are indexed by their last mutation. Coalescing retires the
 		// old entries, so a reader that was idle needs no shared mutation history.
-		for changed in ledger
-			.since(self.ledger_revision)
-			.chain(drops.since(self.drops_revision))
-		{
+		for changed in ledger.since(self.ledger_revision) {
 			for run in self.deferred.overlapping(changed.clone()) {
 				candidates.insert(run);
 			}
@@ -1135,6 +1132,32 @@ impl Misses {
 				.collect();
 			for key in arrived {
 				self.refused.remove(key..key + 1);
+			}
+		}
+		for changed in drops.since(self.drops_revision) {
+			for run in self.deferred.overlapping(changed.clone()) {
+				candidates.insert(run);
+			}
+			// A drop or skip landing on the track settles in-flight fills for the keys it
+			// covers under this reader's budget, so the reader withdraws them at once.
+			let mut settled = Vec::new();
+			for run in self.wanted.overlapping(&changed) {
+				let wanted = run.start.max(changed.start)..run.end.min(changed.end);
+				for (drop_run, hole) in state.drops.overlapping(&wanted) {
+					let part = drop_run.start.max(wanted.start)..drop_run.end.min(wanted.end);
+					if !part.is_empty() && drift.settles(part.start, hole) {
+						settled.push(part);
+					}
+				}
+			}
+			if !settled.is_empty() {
+				let mut lost = RangeSet::new();
+				for part in settled {
+					self.adopt_drops(state, part.clone(), drift);
+					self.unwant(part.clone());
+					lost.insert(part);
+				}
+				self.release(&lost);
 			}
 		}
 		// What it judged cached and the track evicted since, before this reader took it, is a
@@ -1273,6 +1296,13 @@ impl Misses {
 		// A gap the feed still waits for becomes a miss when it folds.
 		if let Some(at) = self.deferred.deadline() {
 			state.cache.watch_wall(at, waiter);
+		}
+		// A local track with no fill handler waits on one attaching rather than a timer.
+		if !self.deferred.runs.is_empty() && !state.anchors.received() && !state.fills.read().has_handlers() {
+			let _ = state.fills.poll(waiter, |fills| match fills.has_handlers() {
+				true => std::task::Poll::Ready(()),
+				false => std::task::Poll::Pending,
+			});
 		}
 
 		// An old cache's floor is a boundary inside a missing run, not a drift verdict
@@ -1969,14 +1999,20 @@ impl Inboxes {
 
 impl TrackState {
 	/// How long a hole the live feed may still deliver is waited for before it is a miss:
-	/// the arrival grace, or [`ledger::GRACE`] when nothing bounds that, so every hole is
-	/// asked or given up in finite time. A reader with no budget on a track with no max age
-	/// would otherwise wait out an unbounded grace, and a read of the hole would never end.
+	/// the arrival grace, or [`ledger::GRACE`] when nothing bounds that on a legacy copy, so
+	/// every hole is asked or given up in finite time. A local track or a copy whose wire names
+	/// every start uses no timer.
 	pub(super) fn miss_grace(&self) -> Duration {
 		match self.arrival_grace() {
-			Duration::MAX => ledger::GRACE,
+			Duration::MAX if !self.proven && self.anchors.received() => ledger::GRACE,
 			grace => grace,
 		}
+	}
+
+	/// Whether holes are judged misses immediately without waiting for the live feed: when
+	/// nothing more arrives, or on a local track with a fill handler attached.
+	pub(super) fn immediate_misses(&self) -> bool {
+		self.nothing_arrives() || (!self.anchors.received() && self.fills.read().has_handlers())
 	}
 
 	/// The keys of `groups`, evicted before a reader took them, that a fill could not hold
@@ -2019,9 +2055,9 @@ impl TrackState {
 			}
 		};
 		// Nothing more arrives after an abort, a seal, once the live edge reached a declared
-		// end with no tail owed, or while no subscription feeds the copy: until then, a group
-		// below the end may still arrive.
-		if self.nothing_arrives() {
+		// end with no tail owed, while no subscription feeds the copy, or on a local track with
+		// a fill handler attached: ask fills and settle refusals immediately.
+		if self.immediate_misses() {
 			fed(hole, &mut out);
 			return out;
 		}
@@ -2191,18 +2227,24 @@ fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {
 		.collect()
 }
 
-/// The runs of `run` the cache holds nothing servable for.
+/// The runs of `run` the cache holds nothing servable for and no whole group's span covers.
 pub(super) fn holes(state: &TrackState, run: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 	let mut holes = Vec::new();
-	let mut from = run.start;
-	for (&key, slot) in state.lookup.range(run.clone()) {
+	let mut from = state.span_end(run.start).max(run.start);
+	if from >= run.end {
+		return holes;
+	}
+	for (&key, slot) in state.lookup.range(from..run.end) {
 		if !slot.serves_end() {
 			continue;
 		}
 		if from < key {
 			holes.push(from..key);
 		}
-		from = key + 1;
+		from = slot.end().map_or(key + 1, |end| end.max(key + 1));
+		if from >= run.end {
+			break;
+		}
 	}
 	if from < run.end {
 		holes.push(from..run.end);
@@ -2294,6 +2336,7 @@ mod tests {
 			pool.poll(opened, &noop);
 			let budget = Duration::from_secs(1);
 			let _reader = track.subscribe(Subscription::default().with_max(budget));
+			track.received();
 			for key in [0, 2] {
 				track
 					.create_group(crate::group::Info { start: key })

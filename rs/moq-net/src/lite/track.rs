@@ -18,9 +18,9 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
+	/// The identity the subscriber expects; see [`crate::origin::RouteInfo::identity`].
 	/// Lite07+ only.
-	pub instance: Option<crate::Instance>,
+	pub identity: Option<crate::Identity>,
 	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
 	pub node: Option<crate::route::NodeId>,
@@ -32,7 +32,7 @@ impl Track<'_> {
 	pub fn into_owned(self) -> Track<'static> {
 		Track {
 			broadcast: self.broadcast,
-			instance: self.instance,
+			identity: self.identity,
 			node: self.node,
 			track: Cow::Owned(self.track.into_owned()),
 		}
@@ -47,13 +47,13 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let instance = super::instance::decode_pin(r, version)?;
-		let node = super::instance::decode_node(r, version)?;
+		let identity = super::identity::decode_pin(r, version)?;
+		let node = super::identity::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
-			instance,
+			identity,
 			node,
 			track,
 		})
@@ -65,8 +65,8 @@ impl<'a> Message<'a> for Track<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node)?;
+		super::identity::encode_pin(w, version, self.identity.as_ref())?;
+		super::identity::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -531,12 +531,12 @@ mod test {
 		));
 	}
 
-	/// Lite-07 names the node right after the instance; older versions carry none, so
+	/// Lite-07 names the node right after the identity; older versions carry none, so
 	/// the publisher always selects.
 	#[test]
 	fn track_request_names_its_node_on_lite07_only() {
 		let msg = Track {
-			instance: None,
+			identity: None,
 			node: Some(crate::route::NodeId {
 				relay: 5,
 				marked: false,
@@ -545,7 +545,7 @@ mod test {
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty unminted instance, the node with its Marked, then the
+		// Length, the path, an empty unminted identity, the node with its Marked, then the
 		// track name.
 		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 0, 1, b'v']);
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, msg.node);
@@ -579,7 +579,7 @@ mod test {
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
@@ -596,7 +596,7 @@ mod test {
 	#[test]
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
-			instance: None,
+			identity: None,
 			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),

@@ -21,14 +21,14 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	}
  
 @@ -10558,7 +10558,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
- 		let validity = if subscriber.version.has_instance() {
+ 		let validity = if subscriber.version.has_identity() {
  			Default::default()
  		} else {
 -			crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
 +			crate::model::broadcast::RequestValidity::for_source(&*entry.dynamic, request.path())
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
- 		// The handler exists before the requester sees the source, so a track it
+ 		// A metadata reader gets a copy of its own, filled by a metadata subscription.
 @@ -10586,7 +10586,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
@@ -68,13 +68,13 @@ diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subs
  			served.route.dynamic.disown();
 -			let left = Left(served.route.dynamic.clone());
 +			let left = Left((*served.route.dynamic).clone());
- 			self.stream.orphan(origin, &(path, instance), Box::new(left));
+ 			self.stream.orphan(origin, &(path, identity), Box::new(left));
  		}
  	}
 @@ -839,7 +839,7 @@ impl Routed {
  				gone,
  			} => {
- 				if let Some(served) = self.served.remove(&(origin, path, instance)) {
+ 				if let Some(served) = self.served.remove(&(origin, path, identity)) {
 -					release(served.route.dynamic, gone);
 +					release(std::mem::ManuallyDrop::into_inner(served.route.dynamic), gone);
  				}

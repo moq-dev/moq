@@ -4,10 +4,45 @@
 
 Every change that would need a semver-breaking release if it landed right
 after the next cut of `main` into `release`. The
-[release cut](/quest/m3/release/cut.md) waits on this milestone alone;
-complete it before cutting main into release.
+[release cut](/quest/m3/release/cut.md) and its pre-cut reviews wait on this
+milestone (plus `cut.md`'s m0 blockers, not m1); complete it before cutting
+main into release.
 
 ## Plan
+
+Decided 2026-11-27 (maintainer, `/quest-plan`):
+
+- ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
+  to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
+  [timestamp-ids](/quest/m2/timestamp-ids.md) (rejected: folding into
+  [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).
+  Creates groups eagerly from frame 0 across Rust, JS, `moq-ffi`, `libmoq`, and
+  bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits
+  lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag from
+  lite-07, and keeps `GROUP_END` as the last frame's exclusive end.
+- ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
+  and removing `identity` from `hang::catalog` (landed)
+  to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
+  keep `moq-pattern` or catalog `identity`). Wildcards never transit the wire,
+  grants already moved to `Prefixes`, and wire announcements already carry
+  route `Identity` (preserving `moq_net::Identity` and
+  `BroadcastConsumer::info().identity`), so neither should freeze into `0.22.0`.
+
+Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
+
+- ✅ Added pre-cut Rust API fences (`#[non_exhaustive]`
+  on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
+  `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
+  `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its
+  c2rust surface; rejected: also fencing `App::source`, `Applied::cut`, and
+  `error-matches` `Ok(None)` before `0.22.0`; leaving all fences for the next
+  API cut).
+- ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
+  five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
+  and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
+  and kio's crates.io publish (since dropped: kio moved back into `rs/kio`) to m0 as a direct
+  `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
+  in m2).
 
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
@@ -28,8 +63,7 @@ Non-breaking findings from the same audit live in
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
 Decided 2026-11-23 (maintainer): ✅ the cut waits for a
-[safe on-demand drop](/quest/m2/on-demand-drop.md) and
-[deleting `abort_unwanted`](/quest/m2/abort-unwanted-delete.md), so 0.22 never
+safe on-demand drop and deleting `abort_unwanted`, so 0.22 never
 publishes an API the next release removes (rejected: leaving them in m3,
 cutting first and deleting in the next breaking release).
 
@@ -44,6 +78,19 @@ to `SUBSCRIBE_DROP(OLD)` (rejected: bugfixes only without wire changes; drop).
 This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
 #9538; the non-wire progress and cache-invariant fixes landed separately in
 moq-dev/moq#9564.
+Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
+
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ the cut also waits on
+the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-dev/moq/pull/9720))
+(renaming `Instance` to `Identity` across every wire message, capping it at
+256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
+keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both
+metadata mode on the lite-07 wire, served ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)),
+and its subscriber API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) (reversing the
+2026-11-25 deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD
+indexing is an immediate consumer and `moq_subscription` changes the C ABI;
+rejected: moving only the wire into `m2`, leaving both in `m3`).
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what

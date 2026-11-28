@@ -14,7 +14,7 @@
 //! The two relays share the node's identity for the length of the drain. Each
 //! serves its own sessions on its own origin, so a session is counted and named by
 //! the one that holds it. The new relay holds its stats broadcast back until the old
-//! one exits, so the node's broadcast has one instance at a time and the old one's
+//! one exits, so the node's broadcast has one identity at a time and the old one's
 //! last counters are read before the new one replaces it.
 //!
 //! A relay with a predecessor still serving beside it refuses a successor: the

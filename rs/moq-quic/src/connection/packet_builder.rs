@@ -199,6 +199,9 @@ impl PacketBuilder {
 		// Every packet counted in flight goes through the controller, which also paces it, and
 		// spends the send rate cap.
 		if let Some(cap) = conn.send_rate.as_mut().filter(|_| size != 0) {
+			// Not every packet asked the cap first (a close or ACK-only one), so earn up to now
+			// before charging, or time it sat full would be credited after the charge
+			cap.refill(now);
 			cap.charge(size.into());
 		}
 		let congestion = (size != 0).then(|| {
@@ -219,6 +222,7 @@ impl PacketBuilder {
 			retransmits: sent.retransmits,
 			stream_frames: sent.stream_frames,
 			bandwidth_probe: sent.bandwidth_probe,
+			ecn: conn.path.sending_ecn && !sent.off_path,
 		};
 
 		conn.path.sent(exact_number, packet, &mut conn.spaces[space_id]);

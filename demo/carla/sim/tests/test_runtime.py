@@ -31,11 +31,11 @@ class Revocations:
     def __init__(self) -> None:
         self.revoked_runs: list[tuple[str, str | None]] = []
 
-    def revoke(self, driver: str, instance: str | None) -> None:
-        self.revoked_runs.append((driver, instance))
+    def revoke(self, driver: str, identity: str | None) -> None:
+        self.revoked_runs.append((driver, identity))
 
     def revoked(self, command: Command) -> bool:
-        key = (command.driver_id, command.instance)
+        key = (command.driver_id, command.identity)
         if key not in self.revoked_runs:
             return False
         if command.kind == "driver_left":
@@ -76,7 +76,7 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
     async def scenario() -> None:
         measured = DriveState(steering=-0.3, throttle=0.85, brake=0.0, gear=gear)
         commands = asyncio.Queue()
-        commands.put_nowait(Command(kind="drive", driver_id="driver", instance="driver", sequence=1, state=measured))
+        commands.put_nowait(Command(kind="drive", driver_id="driver", identity="driver", sequence=1, state=measured))
 
         session = runtime.TruckSession.__new__(runtime.TruckSession)
         session._clock = FakeClock()
@@ -117,12 +117,12 @@ def test_only_the_holders_accepted_commands_are_acknowledged_in_status() -> None
         stages = (TimestampEntry(label="received", ts=10.0), TimestampEntry(label="decoded", ts=14.0))
         commands = asyncio.Queue()
         for command in (
-            Command(kind="drive", driver_id="holder", instance="s1", sequence=1, state=DriveState(), timestamps=stages),
+            Command(kind="drive", driver_id="holder", identity="s1", sequence=1, state=DriveState(), timestamps=stages),
             # Another run of the same id is another driver, refused while the lease is held.
-            Command(kind="drive", driver_id="holder", instance="s2", sequence=2, state=DriveState()),
+            Command(kind="drive", driver_id="holder", identity="s2", sequence=2, state=DriveState()),
             # A bystander's e-stop latches, but is not the lease's to acknowledge.
-            Command(kind="estop", driver_id="bystander", instance="s3", sequence=3),
-            Command(kind="estop", driver_id="holder", instance="s1", sequence=4),
+            Command(kind="estop", driver_id="bystander", identity="s3", sequence=3),
+            Command(kind="estop", driver_id="holder", identity="s1", sequence=4),
         ):
             commands.put_nowait(command)
 
@@ -162,10 +162,10 @@ def test_only_the_holders_accepted_commands_are_acknowledged_in_status() -> None
 def test_only_unestopped_lease_holder_can_respawn_truck() -> None:
     async def scenario() -> None:
         commands = asyncio.Queue()
-        commands.put_nowait(Command(kind="respawn", driver_id="bystander", instance="bystander", sequence=2))
-        commands.put_nowait(Command(kind="respawn", driver_id="holder", instance="holder", sequence=3))
-        commands.put_nowait(Command(kind="reset_estop", driver_id="holder", instance="holder", sequence=4))
-        commands.put_nowait(Command(kind="respawn", driver_id="holder", instance="holder", sequence=5))
+        commands.put_nowait(Command(kind="respawn", driver_id="bystander", identity="bystander", sequence=2))
+        commands.put_nowait(Command(kind="respawn", driver_id="holder", identity="holder", sequence=3))
+        commands.put_nowait(Command(kind="reset_estop", driver_id="holder", identity="holder", sequence=4))
+        commands.put_nowait(Command(kind="respawn", driver_id="holder", identity="holder", sequence=5))
         respawns: list[str] = []
         published: list[bool] = []
 
@@ -175,9 +175,9 @@ def test_only_unestopped_lease_holder_can_respawn_truck() -> None:
         session._drive = Drive()
         session._stuck = StuckDetector()
         assert session._drive.apply(
-            Command(kind="drive", driver_id="holder", instance="holder", sequence=1, state=DriveState())
+            Command(kind="drive", driver_id="holder", identity="holder", sequence=1, state=DriveState())
         )
-        assert session._drive.apply(Command(kind="estop", driver_id="bystander", instance="bystander", sequence=2))
+        assert session._drive.apply(Command(kind="estop", driver_id="bystander", identity="bystander", sequence=2))
         session._commands = commands
         session._deadline = None
         session._drivers = Revocations()
@@ -461,24 +461,24 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
         # exercises a genuine manual takeover with the takeover pedal hold.
         await command(
             Command(
-                kind="drive", driver_id="holder", instance="holder", sequence=1, state=DriveState(gear=Gear.FORWARD)
+                kind="drive", driver_id="holder", identity="holder", sequence=1, state=DriveState(gear=Gear.FORWARD)
             )
         )
         await command(
             Command(
                 kind="drive",
                 driver_id="holder",
-                instance="holder",
+                identity="holder",
                 sequence=2,
                 state=DriveState(throttle=0.5, brake=0.0, gear=Gear.FORWARD),
             )
         )
         assert not truck.autonomous
         assert controls[-1].throttle == 0.5
-        await command(Command(kind="estop", driver_id="holder", instance="holder", sequence=3))
+        await command(Command(kind="estop", driver_id="holder", identity="holder", sequence=3))
         assert controls[-1].brake == 1.0 and controls[-1].hand_brake
         if reset_before_handback:
-            await command(Command(kind="reset_estop", driver_id="holder", instance="holder", sequence=4))
+            await command(Command(kind="reset_estop", driver_id="holder", identity="holder", sequence=4))
         if handback == "watchdog_expired":
             assert session._deadline is not None
             clock = session._deadline
@@ -486,7 +486,7 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
             assert expired.kind == "watchdog_expired"
             await command(expired)
         else:
-            await command(Command(kind="driver_left", driver_id="holder", instance="holder"))
+            await command(Command(kind="driver_left", driver_id="holder", identity="holder"))
         assert session._drive.driver is None
         assert session._drive.estopped is not reset_before_handback
         assert truck.autonomous is reset_before_handback
@@ -521,20 +521,20 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
 def holding(drive: Drive) -> None:
     """A driver parked with the brake on."""
     assert drive.apply(
-        Command(kind="drive", driver_id="holder", instance="holder", sequence=1, state=DriveState(brake=1.0))
+        Command(kind="drive", driver_id="holder", identity="holder", sequence=1, state=DriveState(brake=1.0))
     )
 
 
 def estopped_holding(drive: Drive) -> None:
     """A driver who e-stopped and still holds the lease."""
     holding(drive)
-    assert drive.apply(Command(kind="estop", driver_id="holder", instance="holder", sequence=2))
+    assert drive.apply(Command(kind="estop", driver_id="holder", identity="holder", sequence=2))
     assert drive.driver == "holder" and drive.estopped
 
 
 def estopped_by_bystander(drive: Drive) -> None:
     """A bystander's e-stop outlives the lease it never held."""
-    assert drive.apply(Command(kind="estop", driver_id="bystander", instance="bystander", sequence=1))
+    assert drive.apply(Command(kind="estop", driver_id="bystander", identity="bystander", sequence=1))
     assert drive.driver is None and drive.estopped
 
 
@@ -595,10 +595,10 @@ def test_a_revoked_drivers_commands_never_reclaim_the_fresh_spawn() -> None:
         session._publish = lambda: None
         session._commands = asyncio.Queue()
         session._commands.put_nowait(
-            Command(kind="drive", driver_id="holder", instance="holder", sequence=9, state=DriveState(throttle=0.5))
+            Command(kind="drive", driver_id="holder", identity="holder", sequence=9, state=DriveState(throttle=0.5))
         )
-        session._commands.put_nowait(Command(kind="estop", driver_id="holder", instance="holder", sequence=10))
-        session._commands.put_nowait(Command(kind="driver_left", driver_id="holder", instance="holder"))
+        session._commands.put_nowait(Command(kind="estop", driver_id="holder", identity="holder", sequence=10))
+        session._commands.put_nowait(Command(kind="driver_left", driver_id="holder", identity="holder"))
         task = asyncio.create_task(session._loop())
         try:
             while not session._commands.empty():
@@ -689,7 +689,7 @@ def test_a_driver_keeps_the_world_stepping_with_nobody_watching(monkeypatch: pyt
         monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: 0.0)
         commands = asyncio.Queue()
         commands.put_nowait(
-            Command(kind="drive", driver_id="holder", instance="holder", sequence=1, state=DriveState(throttle=0.5))
+            Command(kind="drive", driver_id="holder", identity="holder", sequence=1, state=DriveState(throttle=0.5))
         )
 
         session = runtime.TruckSession.__new__(runtime.TruckSession)
@@ -810,12 +810,12 @@ def test_an_estopped_holder_neither_steps_the_world_nor_keeps_its_lease(
         task = asyncio.create_task(session._loop())
         try:
             session._commands.put_nowait(
-                Command(kind="drive", driver_id="holder", instance="holder", sequence=1, state=DriveState(brake=1.0))
+                Command(kind="drive", driver_id="holder", identity="holder", sequence=1, state=DriveState(brake=1.0))
             )
             await settle(1)
             assert session._clock.held == {"drive:truck1"}
 
-            session._commands.put_nowait(Command(kind="estop", driver_id="holder", instance="holder", sequence=2))
+            session._commands.put_nowait(Command(kind="estop", driver_id="holder", identity="holder", sequence=2))
             await settle(2)
             assert session._drive.driver == "holder"
             assert session._clock.held == set()
@@ -826,9 +826,9 @@ def test_an_estopped_holder_neither_steps_the_world_nor_keeps_its_lease(
             # marks the refused frame as processed.
             now = runtime.COMMAND_TIMEOUT / 2
             session._commands.put_nowait(
-                Command(kind="drive", driver_id="holder", instance="holder", sequence=3, state=DriveState(throttle=0.5))
+                Command(kind="drive", driver_id="holder", identity="holder", sequence=3, state=DriveState(throttle=0.5))
             )
-            session._commands.put_nowait(Command(kind="estop", driver_id="bystander", instance="bystander", sequence=1))
+            session._commands.put_nowait(Command(kind="estop", driver_id="bystander", identity="bystander", sequence=1))
             await settle(3)
             assert session._deadline == runtime.COMMAND_TIMEOUT
             assert session._clock.held == set()

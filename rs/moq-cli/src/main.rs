@@ -615,9 +615,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		let mut stdin = None;
 		let mut stdout = None;
 
-		// Each run publishes its own content and therefore mints its own instance.
-		let instance = moq_net::Instance::random();
-		tracing::info!(%instance, "publisher instance");
+		// Each run publishes its own content and therefore mints its own identity.
+		let identity = moq_net::Identity::random();
+		tracing::info!(%identity, "publisher identity");
 
 		for stage in stages {
 			let name = stage.broadcast(&moq);
@@ -634,7 +634,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						.transpose()?
 						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
-						spawn_import(&origin, import, name, instance.clone(), bandwidth.clone(), &mut tasks)?
+						spawn_import(&origin, import, name, identity.clone(), bandwidth.clone(), &mut tasks)?
 					{
 						// Before `run` declares a track, so the `stats` and `echo` sections ride the
 						// first catalog.
@@ -748,7 +748,7 @@ fn display_name(name: &str) -> &str {
 
 /// Route one stage's source INTO the shared Origin, exposing it to the MoQ network.
 ///
-/// The sources announced once per run take `instance`; the ingest gateways and
+/// The sources announced once per run take `identity`; the ingest gateways and
 /// `ts --program all` mint their own per connection or program.
 ///
 /// Returns the pipeline that has to run on the caller's thread, for the sources
@@ -757,7 +757,7 @@ fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
-	instance: moq_net::Instance,
+	identity: moq_net::Identity,
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
@@ -796,7 +796,7 @@ fn spawn_import(
 			let name = require_broadcast(name, "import ts --program all")?;
 			Publish::ts_programs(origin.clone(), moq_net::Path::new(&name)?, config)
 		} else {
-			Publish::stdin(origin, &name, instance, &format, config)?
+			Publish::stdin(origin, &name, identity, &format, config)?
 		}
 		.with_linger(ingest.linger);
 		publish.announce()?;
@@ -805,7 +805,7 @@ fn spawn_import(
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
-				tasks.spawn(hls::import(target(name), hls, instance));
+				tasks.spawn(hls::import(target(name), hls, identity));
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -841,7 +841,7 @@ fn spawn_import(
 						},
 					));
 				} else if let Some(url) = webrtc.connect {
-					tasks.spawn(webrtc::connect_import(target(name), url, instance));
+					tasks.spawn(webrtc::connect_import(target(name), url, identity));
 				}
 			}
 			ImportSource::Archive(args) => {
@@ -850,7 +850,7 @@ fn spawn_import(
 					import.max_age.is_none(),
 					"`--max-age` does not apply to `import archive`"
 				);
-				tasks.spawn(archive::import(origin.clone(), name, args, instance));
+				tasks.spawn(archive::import(origin.clone(), name, args, identity));
 			}
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
@@ -858,7 +858,7 @@ fn spawn_import(
 				let route = origin
 					.route(
 						&name,
-						moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+						moq_net::origin::RouteOptions::hidden().with_identity(identity, 0),
 					)
 					.context("failed to create broadcast")?;
 				let mut publish = Publish::capture(route, &capture, ingest.bandwidth.clone(), ingest.max_age)?;

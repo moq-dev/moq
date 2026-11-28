@@ -779,11 +779,36 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(Self::receive_window(self))
 	}
+	/// Only raw QUIC: a browser's WebTransport API may discard a reset stream's prefix unread
+	/// even when its QUIC stack negotiated RESET_STREAM_AT, and nothing here tells a browser apart.
+	fn reliable_reset(&self) -> bool {
+		self.web.is_none() && self.conn.reset_stream_at()
+	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
 		let mut quic = super::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Self::set_limits(self, quic).map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
+	}
+	/// The connection's keep-alive, which every WebTransport session on it shares.
+	fn set_keep_alive(
+		&self,
+		keep_alive: moq_net::transport::KeepAlive,
+	) -> Result<(), moq_net::transport::KeepAliveError> {
+		self.conn
+			.set_keep_alive(super::KeepAlive::new(keep_alive.soft, keep_alive.hard))
+			.map_err(|err| moq_net::transport::KeepAliveError::Refused(err.to_string()))
+	}
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.conn.poll_stale(waiter, stale).map(|stale| match stale {
+			true => moq_net::transport::Liveness::Stale,
+			false => moq_net::transport::Liveness::Live,
+		})
 	}
 }
 

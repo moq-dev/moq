@@ -220,9 +220,7 @@ pub unsafe fn opus_repacketizer_out_range_impl(
 		memmove(
 			ptr as *mut core::ffi::c_void,
 			*frames.offset(i as isize) as *const core::ffi::c_void,
-			(*len.offset(i as isize) as u64)
-				.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-				.wrapping_add((0 * ptr.offset_from(*frames.offset(i as isize)) as i64) as u64),
+			(*len.offset(i as isize) as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 		);
 		ptr = ptr.offset(*len.offset(i as isize) as i32 as isize);
 		i += 1;
@@ -271,9 +269,7 @@ pub unsafe fn opus_packet_pad(data: *mut u8, len: i32, new_len: i32) -> i32 {
 	memmove(
 		data.offset(new_len as isize).offset(-(len as isize)) as *mut core::ffi::c_void,
 		data as *const core::ffi::c_void,
-		(len as u64)
-			.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-			.wrapping_add((0 * data.offset(new_len as isize).offset(-(len as isize)).offset_from(data) as i64) as u64),
+		(len as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 	);
 	ret = opus_repacketizer_cat(&mut rp, data.offset(new_len as isize).offset(-(len as isize)), len);
 	if ret != OPUS_OK {

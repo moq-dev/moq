@@ -27,12 +27,21 @@ pub(crate) struct Inner {
 	state: Mutex<State>,
 	/// Updated by the driver, so stats never take the lock.
 	pub(crate) wire: net::Wire,
-	pub(crate) socket_stats: Option<SharedSocketStats>,
 	address: Address,
+}
+
+/// The connection underneath a session, for its metrics
+pub(crate) enum Socket {
+	/// Read through while the driver runs
+	Live(SharedSocketStats),
+	/// Released once the driver ended, so a session handle kept alive holds no descriptor;
+	/// what it last reported, if anything
+	Released { rtt: Option<Duration>, rate: Option<u64> },
 }
 
 pub(crate) struct State {
 	pub(crate) conn: mux::Connection,
+	pub(crate) socket: Socket,
 
 	/// The terminal error, set exactly once. Handles report it in place of the connection's
 	/// own reason once it is set, since it can say more (the transport's I/O error, say).
@@ -180,14 +189,18 @@ impl Session {
 	pub(crate) fn new<T: Transport>(mut transport: T, side: Side, config: Config) -> Result<(Self, Driver<T>), Error> {
 		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		transport.bind(&config);
+		let socket = match transport.socket_stats() {
+			Some(stats) => Socket::Live(stats),
+			None => Socket::Released { rtt: None, rate: None },
+		};
 		let inner = Arc::new(Inner {
 			state: Mutex::new(State {
 				conn,
+				socket,
 				closed: None,
 				closed_waiters: kio::WaiterList::new(),
 			}),
 			wire: net::Wire::new(),
-			socket_stats: transport.socket_stats(),
 			address: transport.address(),
 		});
 		let session = Self {
@@ -344,6 +357,8 @@ impl poll::Session for Session {
 		match state.conn.datagrams().send(payload, to_quic(options)) {
 			Ok(()) => {}
 			Err(send::Error::TooLarge) => return Err(Error::DatagramTooLarge),
+			// Closing: the close goes out, but nothing more may follow it.
+			Err(send::Error::ConnectionLost) => return Err(state.lost()),
 			Err(_) => return Err(Error::DatagramsUnsupported),
 		}
 		Ok(())
@@ -383,10 +398,13 @@ impl poll::Session for Session {
 		let state = self.inner.lock();
 		// The kernel's view of the socket underneath beats a QX_PING sample: it is there
 		// from the first byte and costs no traffic.
-		let socket = self.inner.socket_stats.as_ref();
+		let (rtt, rate) = match &state.socket {
+			Socket::Live(stats) => (stats.rtt(), stats.estimated_send_rate()),
+			Socket::Released { rtt, rate } => (*rtt, *rate),
+		};
 		Metrics {
-			rtt: socket.and_then(|stats| stats.rtt()).or(state.conn.rtt()),
-			rate: socket.and_then(|stats| stats.estimated_send_rate()),
+			rtt: rtt.or(state.conn.rtt()),
+			rate,
 			evicted: state.conn.credit_stats().evicted,
 		}
 	}
@@ -403,10 +421,45 @@ impl poll::Session for Session {
 		))
 	}
 
+	/// Only a qmux-02 peer that advertised RESET_STREAM_AT keeps a reset's prefix for its reader.
+	fn reliable_reset(&self) -> bool {
+		self.inner.lock().conn.reset_stream_at()
+	}
+
 	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
 		let mut quic = moq_quic::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
+	}
+
+	/// QX_PING probes the peer, so draft-00, which has none, refuses it.
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), net::KeepAliveError> {
+		let keep_alive = moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard);
+		let mut inner = self.inner.lock();
+		if !inner.conn.version().uses_records() {
+			return Err(net::KeepAliveError::Unsupported);
+		}
+		// moq-quic wakes the driver to read the new deadline.
+		inner
+			.conn
+			.set_keep_alive(keep_alive)
+			.map_err(|err| net::KeepAliveError::Refused(err.to_string()))
+	}
+
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.inner
+			.lock()
+			.conn
+			.poll_stale(waiter, stale)
+			.map(|stale| match stale {
+				true => moq_net::transport::Liveness::Stale,
+				false => moq_net::transport::Liveness::Live,
+			})
 	}
 }
 
@@ -600,7 +653,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	/// RESET_STREAM_AT toward a peer that accepts it, otherwise a RESET_STREAM once the link
-	/// took the bytes before `offset`.
+	/// took the bytes before `offset`, which lets the peer discard any it has not read.
 	fn reset_at(&mut self, offset: &send::Offset, code: u32) {
 		self.reset_with(Some(*offset), code);
 	}

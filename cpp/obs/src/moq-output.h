@@ -59,8 +59,8 @@ public:
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
-	// The route's instance for this Start(), kept through session reconnects; empty when stopped.
-	std::string GetInstance();
+	// The route's identity for this Start(), kept through session reconnects; empty when stopped.
+	std::string GetIdentity();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
@@ -144,6 +144,8 @@ private:
 		// Whether a frame was written. Until one is, the importer still holds the
 		// init's parameter sets, which a discontinuity would discard.
 		bool started = false;
+		// Audio only: where the open group starts, in microseconds, while one is open.
+		std::optional<int64_t> group_start_us;
 	};
 
 	void VideoInit(obs_encoder_t *encoder);
@@ -197,7 +199,7 @@ private:
 	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	Link link = Link::kPending;
 	std::string url;
-	std::string instance;
+	std::string identity;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
 	std::string token_refusal;

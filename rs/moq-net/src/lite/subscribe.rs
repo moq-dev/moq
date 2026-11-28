@@ -15,9 +15,9 @@ use crate::track::Order;
 pub struct Subscribe<'a> {
 	pub id: u64,
 	pub broadcast: Path,
-	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
+	/// The identity the subscriber expects; see [`crate::origin::RouteInfo::identity`].
 	/// Lite07+ only.
-	pub instance: Option<crate::Instance>,
+	pub identity: Option<crate::Identity>,
 	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
 	pub node: Option<crate::route::NodeId>,
@@ -34,6 +34,10 @@ pub struct Subscribe<'a> {
 	/// Which pending group to send first. Lite07+ only; earlier wires decode as
 	/// [`Order::Descending`] and cannot ask for anything else.
 	pub order: Order,
+	/// Whether each frame is delivered as its header alone, without its payload, for the
+	/// subscription's whole life. Lite07+ only: an earlier wire cannot carry it, so
+	/// encoding one there fails rather than asking for the payload.
+	pub meta: bool,
 }
 
 impl Subscribe<'_> {
@@ -42,13 +46,14 @@ impl Subscribe<'_> {
 		Subscribe {
 			id: self.id,
 			broadcast: self.broadcast,
-			instance: self.instance,
+			identity: self.identity,
 			node: self.node,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
 			ranges: self.ranges,
 			order: self.order,
+			meta: self.meta,
 		}
 	}
 }
@@ -56,10 +61,9 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Either end may
-	/// fall partway through a group. A group's start is its time, so lite-07 sends one at a
-	/// group's first frame as an [`Anchor::Time`], an end as the time just before it, and one
-	/// partway through a group as its Position type.
+	/// A position: a start delivers from it, and an end stops just before it. Matches the
+	/// named group exactly (never falling back to an earlier group whose span contains it).
+	/// Frame may be 0 (whole group from frame 0, or exclusive end before that group's frame 0).
 	Absolute(crate::track::Position),
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
@@ -142,8 +146,8 @@ impl<'a> Message<'a> for Subscribe<'a> {
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
-		let instance = super::instance::decode_pin(r, version)?;
-		let node = super::instance::decode_node(r, version)?;
+		let identity = super::identity::decode_pin(r, version)?;
+		let node = super::identity::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
@@ -155,24 +159,26 @@ impl<'a> Message<'a> for Subscribe<'a> {
 				(order, max_delay, decode_ranges(r, version)?)
 			}
 		};
+		let meta = decode_meta(r, version)?;
 		Ok(Self {
 			id,
 			broadcast,
-			instance,
+			identity,
 			node,
 			track,
 			priority,
 			max_delay,
 			ranges,
 			order,
+			meta,
 		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
-		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node)?;
+		super::identity::encode_pin(w, version, self.identity.as_ref())?;
+		super::identity::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 
@@ -185,9 +191,32 @@ impl<'a> Message<'a> for Subscribe<'a> {
 				encode_ranges(w, version, &self.ranges)?;
 			}
 		}
-
-		Ok(())
+		encode_meta(w, version, self.meta)
 	}
+}
+
+/// Decode SUBSCRIBE's trailing `Meta` byte, lite-07's only: 1 for headers alone, 0 for the
+/// payload, anything else malformed. An earlier wire always asks for the payload.
+fn decode_meta(r: &mut Decoder<'_>, version: Version) -> Result<bool, DecodeError> {
+	if !version.has_meta() {
+		return Ok(false);
+	}
+	match r.u8()? {
+		0 => Ok(false),
+		1 => Ok(true),
+		_ => Err(DecodeError::InvalidValue),
+	}
+}
+
+/// Encode the inverse of [`decode_meta`], failing for a metadata subscription on a wire
+/// that cannot carry one.
+fn encode_meta(w: &mut Encoder<'_>, version: Version, meta: bool) -> Result<(), EncodeError> {
+	if version.has_meta() {
+		w.u8(meta.into());
+	} else if meta {
+		return Err(EncodeError::Version);
+	}
+	Ok(())
 }
 
 /// What lite03-06 send for no `Subscriber Max Age` limit, which their bare milliseconds can't
@@ -338,11 +367,12 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, a start the max age places and the live edge as an end. Type 2 is a position
-/// partway through a group, never at frame 0, which type 1 says. Type 3, a live join's lag then
-/// its max age, each in milliseconds plus one with zero for no limit, is a start only,
-/// so `end` refuses it. So is type 4, a live join already placed: its group's start, a frame
-/// that may be 0, then its max age as type 3 carries it.
+/// anchor, a start the max age places and the live edge as an end. Type 1 is a presentation
+/// time (containment lookup, inclusive as an end). Type 2 is a position (exact group match,
+/// exclusive as an end), whose frame may be 0. Type 3, a live join's lag then its max age,
+/// each in milliseconds plus one with zero for no limit, is a start only, so `end` refuses it.
+/// So is type 4, a live join already placed: its group's start, a frame that may be 0, then
+/// its max age as type 3 carries it.
 fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
@@ -350,9 +380,6 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 		2 => {
 			let group = r.varint()?;
 			let frame = r.varint()?;
-			if frame == 0 {
-				return Err(DecodeError::InvalidValue);
-			}
 			Some(Anchor::Absolute(crate::track::Position { group, frame }))
 		}
 		3 if !end => Some(Anchor::Live {
@@ -372,12 +399,11 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 
 /// The lite-07 type and values of a range's start or `end`, the inverse of [`decode_anchor`].
 ///
-/// An absolute position at a group's first frame goes out as its group's time: a start as
-/// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
-/// nothing a time can say. One partway through a group goes out as a position, its group's
-/// start then the frame: a start from that frame, an end before it. A live join goes out as its
-/// lag then its max age, each in milliseconds rounded up, plus one so zero says no limit, and one already placed as its
-/// position then its max age, each only as a start.
+/// An absolute position always goes out as type 2 (its group's start then its frame, which
+/// may be 0): a start from that exact group/frame, an exclusive end just before it. A time
+/// anchor goes out as type 1 (containment lookup, inclusive as an end). A live join goes out
+/// as its lag then its max age, each in milliseconds rounded up, plus one so zero says no
+/// limit, and one already placed as its position then its max age, each only as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 3]), EncodeError> {
 	// Plus one, so zero says no limit.
 	let millis = |limit: Option<std::time::Duration>| {
@@ -386,21 +412,10 @@ fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 
 	Ok(match anchor {
 		None => (0, [None, None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None, None]),
+		Some(Anchor::Absolute(position)) => (2, [Some(position.group), Some(position.frame), None]),
 		Some(Anchor::Live { .. } | Anchor::Joined { .. }) if end => return Err(EncodeError::InvalidState),
 		Some(Anchor::Live { min, max }) => (3, [Some(millis(min)), Some(millis(max)), None]),
 		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(millis(max))]),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => {
-			(2, [Some(position.group), Some(position.frame), None])
-		}
-		Some(Anchor::Absolute(position)) if end => (
-			1,
-			[
-				Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
-				None,
-				None,
-			],
-		),
-		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None, None]),
 	})
 }
 
@@ -1187,13 +1202,12 @@ impl LiveRanges {
 	}
 }
 
-/// Names groups that existed but will not be delivered: aborted or reset, evicted or
-/// expired with no copy left, or stale. Every drop is final on its subscription, a stale
-/// (OLD) one included: a subscriber that still wants a group asks for it on a request of
-/// its own.
+/// Names groups that will not be delivered: aborted or reset, evicted or expired with no copy
+/// left, stale, or (on lite-07 with [`StreamError::Skip`]) starts the publisher declared it will
+/// never produce. Every drop is final on its subscription, a stale (OLD) one included: a
+/// subscriber that still wants a group asks for it on a request of its own.
 ///
-/// Lite03+; publishers send it on Lite05 and later. Before lite-07 it also names keys
-/// declared skipped, which lite-07 names in [`SubscribeSkip`].
+/// Lite03+; publishers send it on Lite05 and later.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscribeDrop {
 	/// The dropped group keys.
@@ -1231,7 +1245,7 @@ impl SubscribeDrop {
 	}
 }
 
-/// A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: `Group Start` and an exclusive `Group End` past
+/// A SUBSCRIBE_DROP range: `Group Start` and an exclusive `Group End` past
 /// it on lite-07, an inclusive `Group End` before. Either way it ends by the reserved key
 /// `u64::MAX`, so it never names that group.
 fn decode_groups(r: &mut Decoder<'_>, version: Version) -> Result<std::ops::Range<u64>, DecodeError> {
@@ -1287,35 +1301,6 @@ impl<'a> Message<'a> for SubscribeDrop {
 	}
 }
 
-/// Names keys the publisher declared it will never produce (see
-/// `track::Producer::skip_groups`): final, with no error, ending no reader.
-///
-/// Lite07+ only; earlier versions name them in a [`SubscribeDrop`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SubscribeSkip {
-	/// The skipped group keys.
-	pub groups: std::ops::Range<u64>,
-}
-
-impl<'a> Message<'a> for SubscribeSkip {
-	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
-	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_skip() {
-			return Err(DecodeError::Version);
-		}
-		Ok(Self {
-			groups: decode_groups(r, version)?,
-		})
-	}
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if !version.has_skip() {
-			return Err(EncodeError::Version);
-		}
-		encode_groups(w, &self.groups, version)
-	}
-}
-
 /// A response message on the subscribe stream, prefixed with a type discriminator
 /// on Lite03+.
 ///
@@ -1323,15 +1308,14 @@ impl<'a> Message<'a> for SubscribeSkip {
 /// - Lite03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
 /// - Lite05/06: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
 ///   (SUBSCRIBE_OK was removed; acceptance is implicit).
-/// - Lite07+: `0x4` SUBSCRIBE_START, one per range, replaces `0x0`, and `0x3`
-///   SUBSCRIBE_SKIP is added.
+/// - Lite07+: `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP (carrying `SKIP` for declared skips),
+///   and `0x4` SUBSCRIBE_START, one per range.
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),
 	Start(SubscribeStart),
 	End(SubscribeEnd),
 	Drop(SubscribeDrop),
-	Skip(SubscribeSkip),
 }
 
 /// Write a `type` varint followed by the size-prefixed message body.
@@ -1364,7 +1348,6 @@ impl Encode<Version> for SubscribeResponse {
 				Self::Start(start) => encode_typed(w, 0, start, version)?,
 				Self::End(end) => encode_typed(w, 1, end, version)?,
 				Self::Drop(drop) => encode_typed(w, 2, drop, version)?,
-				Self::Skip(skip) => encode_typed(w, 3, skip, version)?,
 				Self::Ok(_) => return Err(EncodeError::Version),
 			},
 		}
@@ -1391,7 +1374,6 @@ impl<'a> Decode<'a, Version> for SubscribeResponse {
 					0 if !version.has_ranges() => Ok(Self::Start(SubscribeStart::decode(buf, version)?)),
 					1 => Ok(Self::End(SubscribeEnd::decode(buf, version)?)),
 					2 => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
-					3 if version.has_skip() => Ok(Self::Skip(SubscribeSkip::decode(buf, version)?)),
 					4 if version.has_ranges() => Ok(Self::Start(SubscribeStart::decode(buf, version)?)),
 					_ => Err(DecodeError::InvalidMessage(typ)),
 				}
@@ -1433,26 +1415,32 @@ mod test {
 	/// Start is malformed, and so is encoding an empty span.
 	#[test]
 	fn spans_on_lite07_name_at_least_one_key() {
+		let skip = u64::from(StreamError::Skip.to_code());
 		for groups in [3..4, 0..u64::MAX, u64::MAX - 1..u64::MAX] {
-			let msg = SubscribeSkip { groups: groups.clone() };
+			let msg = SubscribeDrop {
+				groups: groups.clone(),
+				error: skip,
+			};
 			let data = msg.encode_bytes(Version::Lite07).unwrap();
-			assert_eq!(
-				SubscribeSkip::decode_slice(&data, Version::Lite07).unwrap().0.groups,
-				groups
-			);
+			let decoded = SubscribeDrop::decode_slice(&data, Version::Lite07).unwrap().0;
+			assert_eq!(decoded.groups, groups);
+			assert_eq!(decoded.error, skip);
 		}
 		// Group Start 3, Group End 3 and 2: empty and reversed.
 		for end in [3, 2] {
-			assert!(matches!(
-				SubscribeSkip::decode_slice(&[2, 3, end], Version::Lite07),
-				Err(DecodeError::InvalidValue)
-			));
 			assert!(matches!(
 				SubscribeDrop::decode_slice(&[3, 3, end, 0], Version::Lite07),
 				Err(DecodeError::InvalidValue)
 			));
 		}
-		assert!(SubscribeSkip { groups: 3..3 }.encode_bytes(Version::Lite07).is_err());
+		assert!(
+			SubscribeDrop {
+				groups: 3..3,
+				error: skip,
+			}
+			.encode_bytes(Version::Lite07)
+			.is_err()
+		);
 		for version in [Version::Lite06, Version::Lite07] {
 			let reversed = SubscribeDrop {
 				groups: std::ops::Range { start: 3, end: 1 },
@@ -1599,21 +1587,29 @@ mod test {
 		}
 	}
 
-	/// SUBSCRIBE_SKIP is type 3 on lite-07 and unknown before it.
+	/// Lite-07 carries skips in SUBSCRIBE_DROP with error code SKIP (0x3a); type 3 is unknown.
 	#[test]
-	fn subscribe_skip_is_lite07_only() {
-		let resp = SubscribeResponse::Skip(SubscribeSkip { groups: 1..4 });
+	fn subscribe_drop_skip_and_type_3_unknown() {
+		let skip = u64::from(StreamError::Skip.to_code());
+		let resp = SubscribeResponse::Drop(SubscribeDrop {
+			groups: 1..4,
+			error: skip,
+		});
 		let buf = resp.encode_bytes(Version::Lite07).unwrap();
-		assert_eq!(buf.as_ref(), [3, 2, 1, 4]);
+		assert_eq!(buf.as_ref(), [2, 3, 1, 4, 0x3a]);
 		match SubscribeResponse::decode_slice(&buf, Version::Lite07).unwrap().0 {
-			SubscribeResponse::Skip(skip) => assert_eq!(skip, SubscribeSkip { groups: 1..4 }),
-			other => panic!("expected Skip, got {other:?}"),
+			SubscribeResponse::Drop(drop) => {
+				assert_eq!(drop.groups, 1..4);
+				assert_eq!(drop.error, skip);
+			}
+			other => panic!("expected Drop, got {other:?}"),
 		}
-		assert!(resp.encode_bytes(Version::Lite06).is_err());
-		assert!(matches!(
-			SubscribeResponse::decode_slice(&buf, Version::Lite06),
-			Err(DecodeError::InvalidMessage(3))
-		));
+		for version in [Version::Lite06, Version::Lite07] {
+			assert!(matches!(
+				SubscribeResponse::decode_slice(&[3, 2, 1, 4], version),
+				Err(DecodeError::InvalidMessage(3))
+			));
+		}
 	}
 
 	#[test]
@@ -1650,7 +1646,7 @@ mod test {
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
 			order: crate::track::Order::Descending,
-			instance: None,
+			identity: None,
 			node: None,
 			id: 1,
 			broadcast: Path::from_static("room"),
@@ -1662,6 +1658,7 @@ mod test {
 				start: absolute(7, 0),
 				end: absolute(10, 0),
 			}],
+			meta: false,
 		}
 	}
 
@@ -1873,40 +1870,42 @@ mod test {
 		assert_eq!(resolved, msg.ranges);
 	}
 
-	/// Lite-07 has no absolute anchor: a group's position goes out as its start's time, an
-	/// exclusive end as the inclusive time before it, so the publisher reads the same groups.
+	/// Lite-07 carries `Anchor::Absolute` as Position (type 2), allowing frame 0 and exact
+	/// group 0 without underflow (separate from `Anchor::Time`, type 1).
 	#[test]
-	fn lite07_sends_an_absolute_anchor_as_a_time() {
+	fn lite07_roundtrips_position_at_frame_zero() {
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![Range {
 			start: absolute(7, 0),
 			end: absolute(10, 0),
 		}];
-		assert_eq!(
-			roundtrip(&msg, Version::Lite07).ranges,
-			[Range {
-				start: Some(Anchor::Time(7)),
-				end: Some(Anchor::Time(9)),
-			}]
-		);
-		// Nothing comes before group 0, so an end there is refused, as on the older wires.
-		msg.ranges[0] = Range {
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let wire = encode(&msg, Version::Lite07).unwrap();
+		// Type 2, group 7, frame 0, then type 2, group 10, frame 0, then a payload `Meta`.
+		assert!(wire.ends_with(&[1, 2, 7, 0, 2, 10, 0, 0]), "{wire:?}");
+
+		// Group 0 works cleanly without underflow: [Position(0, 0), Position(1, 0)) and
+		// even an empty [None, Position(0, 0)).
+		msg.ranges = vec![Range {
+			start: absolute(0, 0),
+			end: absolute(1, 0),
+		}];
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		msg.ranges = vec![Range {
 			start: None,
 			end: absolute(0, 0),
-		};
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
+		}];
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 	}
 
-	/// A lite-07 start may fall partway through a group, as its Position type: the group's
-	/// start, then the frame, and so may an end, which stops before that frame. A Position at
-	/// frame 0, which a Time says, is refused.
+	/// A lite-07 start or end may be a Position (type 2), at frame 0 or partway through a group.
 	#[test]
 	fn lite07_starts_and_ends_partway_through_a_group() {
 		let mut msg = framed_sample();
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let framed = encode(&msg, Version::Lite07).unwrap();
 		// Type 2, start 7, frame 4, then type 2, start 9, frame 3, which it stops before.
-		assert!(framed.ends_with(&[1, 2, 7, 4, 2, 9, 3]), "{framed:?}");
+		assert!(framed.ends_with(&[1, 2, 7, 4, 2, 9, 3, 0]), "{framed:?}");
 		assert_eq!(range_size(&msg.ranges[0], Version::Lite07.into()), Some(6));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
@@ -1914,8 +1913,8 @@ mod test {
 		}];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 		let position = encode(&msg, Version::Lite07).unwrap();
-		// Type 2, start 7, frame 4, then no end.
-		assert!(position.ends_with(&[1, 2, 7, 4, 0]), "{position:?}");
+		// Type 2, start 7, frame 4, then no end, then a payload `Meta`.
+		assert!(position.ends_with(&[1, 2, 7, 4, 0, 0]), "{position:?}");
 		assert_eq!(
 			range_size(&msg.ranges[0], Version::Lite07.into()),
 			Some(4),
@@ -1924,14 +1923,15 @@ mod test {
 
 		let decode = |tail: &[u8]| {
 			let mut wire = position.clone();
-			wire.truncate(position.len() - 5);
+			wire.truncate(position.len() - 6);
 			wire.extend_from_slice(tail);
+			wire.push(0);
 			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
 		};
 		assert!(decode(&[1, 2, 7, 4, 0]).is_ok());
-		assert!(matches!(decode(&[1, 2, 7, 0, 0]), Err(DecodeError::InvalidValue)));
+		assert!(decode(&[1, 2, 7, 0, 0]).is_ok());
 		assert!(decode(&[1, 1, 7, 2, 9, 4]).is_ok());
-		assert!(matches!(decode(&[1, 1, 7, 2, 9, 0]), Err(DecodeError::InvalidValue)));
+		assert!(decode(&[1, 1, 7, 2, 9, 0]).is_ok());
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
@@ -2101,9 +2101,9 @@ mod test {
 
 		msg.ranges = vec![Range::OPEN];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last: a count of one, then two anchors of type 0.
-		let at = buf.len() - 3;
-		assert_eq!(&buf[at..], [1, 0, 0]);
+		// The list is last before `Meta`: a count of one, then two anchors of type 0.
+		let at = buf.len() - 4;
+		assert_eq!(&buf[at..], [1, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -2114,8 +2114,9 @@ mod test {
 		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a start
 		// or an end; type 3 is Live and type 4 Joined, each a start only; type 5 is assigned to
 		// nothing, as a start or an end. Each closes the session with a PROTOCOL_VIOLATION.
-		let starts = [5].map(|kind| (2, kind));
-		let ends = [3, 4, 5].map(|kind| (1, kind));
+		// Each anchor's type counts back from the end, past the trailing `Meta`.
+		let starts = [5].map(|kind| (3, kind));
+		let ends = [3, 4, 5].map(|kind| (2, kind));
 		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
 			let at = buf.len() - back;
@@ -2124,6 +2125,25 @@ mod test {
 			assert!(matches!(err, DecodeError::InvalidValue), "{back} {kind}");
 			let session = crate::SessionError::from(&crate::Error::Decode(err));
 			assert!(matches!(session, crate::SessionError::ProtocolViolation));
+		}
+	}
+
+	/// Lite-07's trailing `Meta` byte roundtrips, any value but 0 or 1 is a PROTOCOL_VIOLATION,
+	/// and an older wire, which has none, refuses to carry a metadata subscription.
+	#[test]
+	fn meta_is_lite07s_trailing_byte() {
+		let mut msg = subscribe_sample();
+		msg.meta = true;
+		assert!(roundtrip(&msg, Version::Lite07).meta);
+		let mut buf = encode(&msg, Version::Lite07).unwrap();
+		assert_eq!(buf.last(), Some(&1));
+		*buf.last_mut().unwrap() = 2;
+		let err = crate::coding::decode_from(&mut buf.as_slice(), Version::Lite07, Subscribe::decode_msg).unwrap_err();
+		assert!(matches!(err, DecodeError::InvalidValue));
+		let session = crate::SessionError::from(&crate::Error::Decode(err));
+		assert!(matches!(session, crate::SessionError::ProtocolViolation));
+		for version in [Version::Lite05, Version::Lite06] {
+			assert!(matches!(encode(&msg, version), Err(EncodeError::Version)), "{version}");
 		}
 	}
 
@@ -2271,11 +2291,11 @@ mod test {
 		}
 
 		// The count, the type, group, frame, and max age plus one, then the end's type and time,
-		// 251 and 9000 each in two bytes.
+		// 251 and 9000 each in two bytes, then a payload `Meta`.
 		let mut msg = subscribe_sample();
 		msg.ranges = vec![joined(5, 0, Some(ms(250)))];
 		let buf = encode(&msg, Version::Lite07).unwrap();
-		let tail = [1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28];
+		let tail = [1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28, 0];
 		assert_eq!(&buf[buf.len() - tail.len()..], tail);
 
 		// An end can't be a join, placed or not.

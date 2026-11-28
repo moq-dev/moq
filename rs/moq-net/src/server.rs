@@ -101,6 +101,8 @@ pub struct Server {
 	timeout: Option<Duration>,
 	receive_window: Option<NonZeroU64>,
 	allocator: Option<crate::bandwidth::Allocator>,
+	keep_alive: Option<crate::transport::KeepAlive>,
+	cost: Option<u64>,
 }
 
 impl Default for Server {
@@ -116,6 +118,8 @@ impl Default for Server {
 			timeout: Some(DEFAULT_TIMEOUT),
 			receive_window: None,
 			allocator: None,
+			keep_alive: None,
+			cost: None,
 		}
 	}
 }
@@ -237,6 +241,29 @@ impl Server {
 		self
 	}
 
+	/// Probe a quiet client and report it [`Stale`](crate::transport::Liveness::Stale) through
+	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::transport::KeepAlive).
+	///
+	/// Started once the caller admits the session ([`Handshake::ok`]), which refuses the session
+	/// with [`Error::KeepAlive`] on a transport that cannot run it. A [`Handshake`] can set its
+	/// own with [`Handshake::with_keep_alive`].
+	pub fn with_keep_alive(mut self, keep_alive: crate::transport::KeepAlive) -> Self {
+		self.keep_alive = Some(keep_alive);
+		self
+	}
+
+	/// Price every session this server accepts, as [`Client::with_cost`](crate::Client::with_cost)
+	/// prices a dialed link: added to the route cost of every announcement the client sends,
+	/// and declared in our SETUP so the client adds it to every announcement we send.
+	///
+	/// A price set here wins over the one the client declares. Without one, the client's
+	/// price applies, then `1`. Zero is refused on moq-lite-07. Price one session after
+	/// authorizing it with [`Handshake::with_cost`].
+	pub fn with_cost(mut self, cost: impl Into<crate::origin::Cost>) -> Self {
+		self.cost = Some(cost.into().value());
+		self
+	}
+
 	/// The Implementation our SETUP carries, or `None` to omit it.
 	fn implementation(&self) -> Option<String> {
 		setup::implementation(self.implementation.as_deref().unwrap_or(crate::IMPLEMENTATION))
@@ -269,14 +296,14 @@ impl Server {
 		let (publish, subscribe) = self.stat_tagged_origins();
 
 		// We report what the transport actually measures; a server never
-		// advertises a request Path or Role, and only the dialing side prices a
-		// link. Versions without a Setup Stream have nothing to advertise.
+		// advertises a request Path or Role. Versions without a Setup Stream have
+		// nothing to advertise.
 		let our_setup = if version.has_setup_stream() {
 			lite::Setup {
 				probe: lite::ProbeLevel::detect(&session),
 				path: None,
 				role: None,
-				cost: None,
+				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
 				node: None,
@@ -938,8 +965,7 @@ impl PausedIetf {
 			publish,
 			subscribe,
 			peer_node,
-			// Only the dialing side prices a link.
-			cost: None,
+			cost: server.cost,
 			version,
 			path: None,
 			authority: None,
@@ -1223,6 +1249,19 @@ impl Handshake {
 		self.configure(|server| server.limits = limits)
 	}
 
+	/// Run `keep_alive` on this session. Overrides any value from the [`Server`] builder; see
+	/// [`Server::with_keep_alive`].
+	pub fn with_keep_alive(self, keep_alive: crate::transport::KeepAlive) -> Self {
+		self.configure(|server| server.keep_alive = Some(keep_alive))
+	}
+
+	/// Price this session's link; see [`Server::with_cost`]. Overrides any value from the
+	/// [`Server`] builder, so a server can price a peer once it knows who it is.
+	pub fn with_cost(self, cost: impl Into<crate::origin::Cost>) -> Self {
+		let cost = cost.into().value();
+		self.configure(|server| server.cost = Some(cost))
+	}
+
 	/// Open the receive window to `window` on [`ok`](Self::ok). Overrides any value from the
 	/// [`Server`] builder; see [`Server::with_receive_window`].
 	pub fn with_receive_window(self, window: NonZeroU64) -> Self {
@@ -1351,7 +1390,7 @@ impl Answer {
 			if self.timer.poll(waiter).is_ready() {
 				return Poll::Ready(None);
 			}
-			if let Err(err) = open_window(&server, &paused) {
+			if let Err(err) = open_window(&server, &paused).and_then(|()| start_keep_alive(&server, &paused)) {
 				return Poll::Ready(Some(Err(err)));
 			}
 			let peer_node = Some(self.handshake.assigned_hop);
@@ -1405,6 +1444,19 @@ fn open_window(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
 		Ok(()) | Err(crate::transport::LimitsError::Unsupported) => Ok(()),
 		Err(err) => Err(Error::Transport(err.to_string())),
 	}
+}
+
+/// Start the keep-alive before anything answers SETUP, refusing the session on a transport that
+/// cannot run it.
+fn start_keep_alive(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
+	let Some(keep_alive) = server.keep_alive else {
+		return Ok(());
+	};
+	paused
+		.transport()
+		.0
+		.set_keep_alive(keep_alive)
+		.map_err(Error::KeepAlive)
 }
 
 /// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with

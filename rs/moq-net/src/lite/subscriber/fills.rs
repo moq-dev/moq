@@ -501,7 +501,8 @@ impl RangeFills {
 
 		self.forget_answered();
 
-		// Each run goes out on its own subscription, asked again by the next pass, which polls it.
+		// Before lite-07, and on a finished copy, each run goes out on a subscription of its own:
+		// no active subscription carries fills.
 		if self.per_run && !ask.groups.is_empty() {
 			self.recover = std::mem::take(&mut ask.groups);
 			return self.poll(serve, serving, accounted, read, waiter);
@@ -673,6 +674,8 @@ pub(super) struct Recovery {
 	/// Whether its range is final. Before lite-07 the subscription proves only the keys below
 	/// its start, so it asks open, then caps once at the first group that arrives.
 	capped: bool,
+	/// Lite-07: sent immediate FIN after SUBSCRIBE (one-shot, 1 RTT total).
+	one_shot: bool,
 	/// TEMPORARY MIGRATION, delete at the next version cut with [`Self::walk`]: armed once the
 	/// cap left keys below the first group unaccounted for.
 	stall: Option<Stall>,
@@ -726,24 +729,55 @@ impl Recovery {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
 		}];
+		Self::open(serve, serving, groups, subscription, ranges, !one_start)
+	}
+
+	/// Lite-07: a one-shot time-containment probe `[Time(time), Time(time)]` on a finished copy.
+	pub(super) fn probe(serve: &TrackServe, serving: &track::Producer, time: u64, priority: i8) -> Self {
+		let groups = time..time.saturating_add(1);
+		let subscription = Subscription::default()
+			.with_ranges([track::Range {
+				start: track::Start::Time(time),
+				end: Some(time),
+			}])
+			.with_priority(priority)
+			.with_order(Order::Ascending);
+		let ranges = vec![lite::Range {
+			start: Some(lite::Anchor::Time(time)),
+			end: Some(lite::Anchor::Time(time)),
+		}];
+		Self::open(serve, serving, groups, subscription, ranges, true)
+	}
+
+	fn open(
+		serve: &TrackServe,
+		serving: &track::Producer,
+		groups: Range<u64>,
+		subscription: Subscription,
+		ranges: Vec<lite::Range>,
+		capped: bool,
+	) -> Self {
+		let one_shot = serve.subscriber.version.keeps_subscribe_open();
 		let copy = super::Accepted {
 			producer: serving.clone(),
 			framing: lite::Framing::new(serving.info(), serve.subscriber.version),
 		};
-		tracing::debug!(track = %serve.name, ?groups, "recovering stale groups");
+		tracing::debug!(track = %serve.name, ?groups, one_shot, "recovering groups");
 		// No max age: the groups it recovers are the ones a max age dropped.
 		let request = super::Request {
 			subscription,
 			ranges,
 			max_age: None,
 		};
-		let establish = serve.register(request, Some(copy));
+		let mut establish = serve.register(request, Some(copy));
+		establish.fin = one_shot;
 		Self {
 			serve: serve.clone(),
 			serving: serving.clone(),
 			id: establish.id,
 			groups,
-			capped: !one_start,
+			capped,
+			one_shot,
 			stall: None,
 			walk: RangeSet::new(),
 			state: RecoveryState::Establish(Box::new(establish)),
@@ -780,7 +814,9 @@ impl Recovery {
 	pub(super) fn end(&mut self, err: StreamError) {
 		let state = std::mem::replace(&mut self.state, RecoveryState::Done);
 		let mut owed = RangeSet::new();
-		owed.insert(self.groups.clone());
+		if !self.groups.is_empty() {
+			owed.insert(self.groups.clone());
+		}
 		if let RecoveryState::Active { sub, .. } = &state {
 			for arrived in sub.tail.read().accounted(self.groups.clone()) {
 				owed.remove(arrived);
@@ -800,10 +836,15 @@ impl Recovery {
 		match state {
 			RecoveryState::Establish(est) => est.abort(&Error::Cancel),
 			RecoveryState::Active {
-				sub,
-				finished: false,
+				mut sub,
+				finished,
 				draining: None,
-			} => sub.stream.writer.abort(&Error::Cancel),
+			} => {
+				if !finished {
+					sub.stream.writer.abort(&Error::Cancel);
+				}
+				sub.stream.reader.abort(&Error::Cancel);
+			}
 			_ => {}
 		}
 	}
@@ -817,7 +858,7 @@ impl Recovery {
 					Ok(active) => {
 						self.state = RecoveryState::Active {
 							sub: Box::new(active),
-							finished: false,
+							finished: self.one_shot,
 							draining: None,
 						}
 					}
@@ -848,7 +889,9 @@ impl Recovery {
 						let tail = active.tail.read();
 						if stall.poll(&tail, waiter).is_ready() && !tail.covers(self.groups.clone()) {
 							let mut walk = RangeSet::new();
-							walk.insert(self.groups.clone());
+							if !self.groups.is_empty() {
+								walk.insert(self.groups.clone());
+							}
 							for arrived in tail.accounted(self.groups.clone()) {
 								walk.remove(arrived);
 							}
@@ -946,15 +989,17 @@ impl Recovery {
 							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
-							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
-						}
-						// Never produced, such as the keys between two sparse group starts: the copy
-						// records the skip, as the subscription itself does, and a fill owing one
-						// is answered rather than asked again.
-						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
-							if !skipped.groups.is_empty() {
-								self.serving.skip_received(skipped.groups.clone());
-								given_up(skipped.groups, Refusal::skipped());
+							let error = dropped.error(version);
+							if version.has_skip() && error == StreamError::Skip {
+								// Never produced, such as the keys between two sparse group starts: the copy
+								// records the skip, as the subscription itself does, and a fill owing one
+								// is answered rather than asked again.
+								if !dropped.groups.is_empty() {
+									self.serving.skip_received(dropped.groups.clone());
+									given_up(dropped.groups, Refusal::skipped());
+								}
+							} else {
+								given_up(dropped.groups.clone(), Refusal::dropped(error));
 							}
 						}
 						// Nothing at or past the track's end will be produced.
@@ -971,8 +1016,26 @@ impl Recovery {
 							tracing::warn!(?msg, "unexpected recovery subscribe response");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
-						// The publisher FINs in reply to ours, once the tail settled.
-						Recv::Ended if *finished => self.end(StreamError::NotFound),
+						// The publisher FINs in reply to ours. On one-shot SUBSCRIBE+FIN, QUIC does
+						// not order the bidi FIN behind uni Group Streams, so wait for any stream
+						// still arriving/reading before removing the subscription entry. Lite-07
+						// names every start without a grace timer.
+						Recv::Ended if *finished => {
+							let settled = {
+								let tail = active.tail.read();
+								tail.covers(groups.clone()) && !tail.is_reading()
+							};
+							if settled {
+								self.end(StreamError::NotFound);
+							} else {
+								let settle = Settle::new(&self.serve.subscriber.runtime, active.tail.consume());
+								let settle = match version.has_skip() {
+									true => settle,
+									false => settle.at_most(crate::tail::GRACE),
+								};
+								*draining = Some(Box::new(settle));
+							}
+						}
 						// Or once it finished the track, before every stream it opened landed.
 						Recv::Ended if active.end.is_some() => {
 							// At most the grace: no max delay bounds the tail's own, and before lite-07

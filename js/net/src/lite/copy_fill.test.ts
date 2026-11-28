@@ -14,7 +14,7 @@ import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -847,7 +847,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
 				got.push(dec.decode(frame.payload));
 			expect(got).toEqual(["c0", "c1", "c2", "c3", "c4"]);
-			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual([2n]);
+			// On lite-07, fills go over SUBSCRIBE (no FETCH); on lite-06, single-group fills use FETCH.
+			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual(
+				alpn === Lite.ALPN_07_WIP ? [] : [2n],
+			);
 			bounded.close();
 			open.close();
 		} finally {
@@ -889,8 +892,8 @@ test.each([
 			broadcast = new BroadcastProducer();
 			const source = broadcast;
 			const upstream = new OriginProducer();
-			const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
-			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ instance, cost: 1n }));
+			const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
+			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ identity, cost: 1n }));
 			void (async () => {
 				for await (const request of received.requested()) request.serve(source.consume());
 			})();

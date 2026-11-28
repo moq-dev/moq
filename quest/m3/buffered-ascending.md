@@ -50,7 +50,7 @@ Decided 2026-10-23 by the maintainer:
   Not chosen: m2; wiring it now behind the lite-07 gate.
 
 Decided 2026-11-24 (maintainer, /quest-plan of [audio groups span
-200 ms](/quest/m1/audio-group-200ms.md)): ✅ live audio stays newest-first
+200 ms](https://github.com/moq-dev/moq/pull/9561)): ✅ live audio stays newest-first
 (rejected: always ascending for audio; measure first). With 200 ms groups, the
 race ascending fixes (G-1's retransmitted tail queued behind G) happens only
 once per group boundary. Newest-first is what lets a live player skip a backlog

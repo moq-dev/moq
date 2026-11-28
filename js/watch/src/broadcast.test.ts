@@ -7,7 +7,6 @@ import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { key } from "../../json/src/key.test-util.ts";
-import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 import { defined } from "./defined.test-util.ts";
@@ -359,58 +358,11 @@ describe("relativeBroadcast", () => {
 		}
 	});
 
-	it("reads a reference only from the instance it names, best effort against a minted one", async () => {
-		const owner = new Origin.Producer();
-		const [catalogInstance, siblingInstance, other] = [
-			Moq.Instance.random(),
-			Moq.Instance.random(),
-			Moq.Instance.random(),
-		];
-		const catalogRoute = owner.route(Path.from("a/b"), { instance: { id: catalogInstance, epoch: 0n } });
-		const catalog = catalogRoute.broadcast;
-		const siblingRoute = owner.route(Path.from("a/source"), { instance: { id: siblingInstance, epoch: 0n } });
-		const sibling = siblingRoute.broadcast;
-		// A route over a wire that carries no instance has one its session minted.
-		const plainRoute = owner.route(Path.from("a/plain"), { instance: { id: Mint.fresh(), epoch: 0n } });
-		const plain = plainRoute.broadcast;
-		const source = new Broadcast({
-			origin: owner,
-			name: Path.from("a/b"),
-			enabled: true,
-			follow: false,
-			catalogFormat: "manual",
-		});
-		const effect = new Effect();
-		try {
-			await settle();
-			const rel = Path.normalizeRelative("./source");
-			expect(source.relativeBroadcast(effect, rel)?.instance).toBe(siblingInstance);
-			expect(source.relativeBroadcast(effect, rel, siblingInstance)?.instance).toBe(siblingInstance);
-			const own = source.out.active.peek();
-			expect(own?.instance).toBe(catalogInstance);
-			expect(source.relativeBroadcast(effect, undefined, catalogInstance)).toBe(own);
-			withoutWarnings(() => {
-				expect(source.relativeBroadcast(effect, rel, other)).toBeUndefined();
-				expect(source.relativeBroadcast(effect, undefined, other)).toBeUndefined();
-				expect(source.relativeBroadcast(effect, Path.normalizeRelative("./b"), other)).toBeUndefined();
-			});
-			// A minted instance cannot prove the stream, so the named instance cannot refuse it.
-			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./plain"), other)).toBeDefined();
-		} finally {
-			effect.close();
-			source.close();
-			plain.close();
-			sibling.close();
-			catalog.close();
-			owner.close();
-		}
-	});
-
-	it("follows a replaced sibling only for a reference that names no instance", async () => {
+	it("follows a replaced sibling", async () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
-		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { instance: { id: oldInstance, epoch: 0n } });
+		const [oldIdentity, newIdentity] = [Moq.Identity.random(), Moq.Identity.random()];
+		const oldRoute = owner.route(Path.from("a/source"), { identity: { id: oldIdentity, epoch: 0n } });
 		const old = oldRoute.broadcast;
 		const source = new Broadcast({
 			origin: owner,
@@ -421,59 +373,21 @@ describe("relativeBroadcast", () => {
 		const effect = new Effect();
 		const rel = Path.normalizeRelative("./source");
 		let following: Moq.Broadcast.Consumer | undefined;
-		let pinned: Moq.Broadcast.Consumer | undefined;
 		effect.run((nested) => {
 			following = source.relativeBroadcast(nested, rel);
 		});
-		effect.run((nested) => {
-			pinned = withoutWarnings(() => source.relativeBroadcast(nested, rel, oldInstance));
-		});
 		try {
 			await settle();
-			expect(following?.instance).toBe(oldInstance);
-			expect(pinned?.instance).toBe(oldInstance);
+			expect(following?.identity).toBe(oldIdentity);
 
-			// The announcement is the online signal: the plain reference follows the restart,
-			// while one naming the old instance never reads the new one.
-			const replacementRoute = owner.route(Path.from("a/source"), { instance: { id: newInstance, epoch: 0n } });
+			// The announcement is the online signal: the reference follows the restart.
+			const replacementRoute = owner.route(Path.from("a/source"), { identity: { id: newIdentity, epoch: 0n } });
 			const replacement = replacementRoute.broadcast;
 			await settle();
-			expect(following?.instance).toBe(newInstance);
-			expect(pinned).toBeUndefined();
+			expect(following?.identity).toBe(newIdentity);
 			replacement.close();
 		} finally {
 			effect.close();
-			source.close();
-			old.close();
-			main.close();
-			owner.close();
-		}
-	});
-
-	it("drops a rendition from the catalog while its broadcast proves another instance", async () => {
-		const owner = new Origin.Producer();
-		const main = publish(owner, Path.from("a/b"));
-		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { instance: { id: oldInstance, epoch: 0n } });
-		const old = oldRoute.broadcast;
-		const named = { ...video("avc1.64001f", "./source"), instance: oldInstance } as Catalog.VideoConfig;
-		const source = new Broadcast({
-			origin: owner,
-			name: Path.from("a/b"),
-			enabled: true,
-			catalogFormat: "manual",
-			catalog: { video: { renditions: { plain: video("avc1.64001f", "./source"), named } } } as Catalog.Root,
-		});
-		try {
-			await settle();
-			expect(videoRenditions(source)).toEqual(["named", "plain"]);
-
-			const replacementRoute = owner.route(Path.from("a/source"), { instance: { id: newInstance, epoch: 0n } });
-			const replacement = replacementRoute.broadcast;
-			await withoutWarnings(settle);
-			expect(videoRenditions(source)).toEqual(["plain"]);
-			replacement.close();
-		} finally {
 			source.close();
 			old.close();
 			main.close();
@@ -541,7 +455,7 @@ describe("blind resolution", () => {
 	});
 });
 
-it("a blind broadcast does not follow another publisher instance", async () => {
+it("a blind broadcast does not follow another publisher identity", async () => {
 	const owner = new Origin.Producer();
 	const name = Path.from("blind.hang");
 	const first = publish(owner, name);
@@ -567,7 +481,7 @@ describe("restart", () => {
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
 
-		// A republish replaces the old instance, which ends the request on it; the restart
+		// A republish replaces the old identity, which ends the request on it; the restart
 		// announcement is what requests the new one.
 		const second = publish(owner, name);
 		await settle();
@@ -626,7 +540,7 @@ describe("restart", () => {
 		owner.close();
 	});
 
-	it("moves to a more specific announcement of another instance", async () => {
+	it("moves to a more specific announcement of another identity", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
 		const pool = owner.claim(Path.from("pool"));
@@ -657,7 +571,7 @@ describe("restart", () => {
 		await settle();
 	});
 
-	it("plays a claim's job on the instance it resolved", async () => {
+	it("plays a claim's job on the identity it resolved", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
 		const pool = owner.claim(Path.from("pool"));
@@ -669,9 +583,9 @@ describe("restart", () => {
 		});
 		await settle();
 		const active = source.out.active.peek();
-		expect(active?.instance).toBe(pool.instance);
+		expect(active?.identity).toBe(pool.identity);
 
-		// The job's exact route carries the pool's instance, so the player never restarts.
+		// The job's exact route carries the pool's identity, so the player never restarts.
 		for (let i = 0; i < 5; i++) await settle();
 		expect(handed).toEqual([active]);
 		expect(source.out.error.peek()).toBeUndefined();
@@ -754,7 +668,7 @@ describe("refusal", () => {
 		await settle();
 		expect(source.out.active.peek()).toBeDefined();
 
-		// The publisher restarts, and refuses with the same code an ended instance reports.
+		// The publisher restarts, and refuses with the same code an ended identity reports.
 		first.close();
 		for (const answer of answers) answer.close();
 		const second = owner.claim(Path.from("room"));
@@ -945,7 +859,7 @@ describe("cross-broadcast renditions", () => {
 			const old = resolved.at(-1);
 			expect(old).toBeDefined();
 
-			// The republish ends the request on the old instance; its restart requests the new one.
+			// The republish ends the request on the old identity; its restart requests the new one.
 			publish(owner, Path.from("private/source"));
 			await settle();
 			const restarted = resolved.at(-1);
@@ -980,7 +894,7 @@ describe("cross-broadcast renditions", () => {
 			const old = resolved.at(-1);
 			expect(old).toBeDefined();
 
-			// An end then a start, delivered back to back: a new instance all the same.
+			// An end then a start, delivered back to back: a new identity all the same.
 			first.close();
 			const second = publish(owner, Path.from("private/source"));
 			await settle();

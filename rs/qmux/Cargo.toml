@@ -26,11 +26,13 @@ moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true }
 rustls = { version = "0.23", default-features = false }
-rustls-native-certs = { workspace = true }
+# The OS trust store for `wss://` dials given no TLS config, as moq-tokio verifies.
+rustls-platform-verifier = "0.7"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net"] }
 tokio-rustls = { workspace = true }
-tokio-tungstenite = { workspace = true, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+# Only rustls itself: `ws::Client` always passes its own config, so tungstenite loads no roots.
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake", "__rustls-tls"] }
 # `poll_read_buf`, which reads into a `BytesMut` without zeroing it first.
 tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }

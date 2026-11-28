@@ -3775,7 +3775,7 @@ dependencies = [
  "kio",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
  "test-env",
  "trybuild",
 ]
@@ -4748,6 +4748,7 @@ dependencies = [
  "hex",
  "num-complex",
  "num-traits",
+ "thiserror 2.0.21",
  "workspace-hack",
 ]
 
@@ -5084,6 +5085,7 @@ dependencies = [
  "hang",
  "kio",
  "libc",
+ "moq-json",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6837,7 +6839,7 @@ dependencies = [
  "rcgen",
  "rind-rcgen",
  "rustls",
- "rustls-native-certs",
+ "rustls-platform-verifier",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -9000,7 +9002,6 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
@@ -9323,9 +9324,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "trybuild"
-version = "1.0.122"
+version = "1.0.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62db9c92d704393fbf2132041720cc80b689f2d3f28521015c2ac866223c11b8"
+checksum = "9838b494ee14d28f1eeea490e8f4f10248fa6dd371d4bc874b635de499408245"
 dependencies = [
  "glob",
  "serde",
@@ -10652,6 +10653,7 @@ dependencies = [
  "foldhash",
  "form_urlencoded",
  "fs-err",
+ "futures",
  "futures-channel",
  "futures-core",
  "futures-executor",
@@ -10709,7 +10711,6 @@ dependencies = [
  "reqwest",
  "rustix 1.1.6",
  "rustls",
- "security-framework-sys",
  "semver",
  "serde",
  "serde_core",

@@ -13,6 +13,9 @@ public typealias Timestamp = MoqFFI.MoqTimestamp
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
+/// A frame's header without its payload, as a metadata subscription reads it: the declared
+/// payload `size` in bytes (0 for an empty frame) and its timestamp.
+public typealias FrameHeader = MoqFFI.MoqFrameHeader
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
@@ -52,10 +55,10 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// A datagram payload with its own sequence and timestamp.
 public typealias Datagram = MoqFFI.MoqDatagram
-/// Names one continuous stream at a path: `Instance.parse(text:)` names one, only a session mints
-/// one, and `==` also compares `isMinted()`, so pin a reported stream with the instance, not its text.
-public typealias Instance = MoqFFI.MoqInstance
-/// The read-only facts on a received route: the `Instance` of the stream it serves, its static
+/// Names one continuous stream at a path: `Identity.parse(text:)` names one, only a session mints
+/// one, and `==` also compares `isMinted()`, so pin a reported stream with the identity, not its text.
+public typealias Identity = MoqFFI.MoqIdentity
+/// The read-only facts on a received route: the `Identity` of the stream it serves, its static
 /// production and link cost, lower wins, and whether a usable path reaches it.
 public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// A route over a prefix: the origin-relative `prefix`, what each filter
@@ -64,7 +67,7 @@ public typealias RouteInfo = MoqFFI.MoqRouteInfo
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields, each carrying an `Announce`: `.present` once a route
 /// covers the path, and `.absent` once none does, whether its origin withdrew it or this side
-/// let go of it. Another publisher instance taking a path over keeps it present: hold a
+/// let go of it. Another publisher identity taking a path over keeps it present: hold a
 /// `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to

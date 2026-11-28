@@ -374,7 +374,7 @@ const MOVE: u64 = 75;
 
 /// `P` publishes `live` to `A` and `B`, and the relay `R` pulls both, preferring `A`. A
 /// reader on `D`, one hop past `R`, follows `live` while `R`'s route to `P` moves four
-/// times between next hops, each a move to a usable route with the same instance:
+/// times between next hops, each a move to a usable route with the same identity:
 ///
 /// 1. `C` joins, cheaper than `A`, though its own upstream to `P` lags 150 ms each way,
 ///    so its ROUTE reaches `R` well after `A`'s;
@@ -926,10 +926,10 @@ async fn a_move_overlaps_the_routes_until_the_new_one_delivers() {
 
 /// Pins a duplicate subscription, a decision on moq-dev/moq#8881. A worker `W` claims
 /// `pool` and answers a request for `pool/p` with the exact route, under the claim's
-/// instance; `R` pulls `W`, and `E1`, `E2`, and `E3` pull `R`. `E1` asks for `pool/p`
+/// identity; `R` pulls `W`, and `E1`, `E2`, and `E3` pull `R`. `E1` asks for `pool/p`
 /// through the claim, a request naming `W`'s route at depth 1; once the answer's route
 /// arrives, `E1` moves onto it, now naming depth 2, and `R` serves that from another front,
-/// which asks `W` again: one Instance and track, two subscriptions on the one link,
+/// which asks `W` again: one Identity and track, two subscriptions on the one link,
 /// differing only in depth, and `E2` and `E3`, asking after the answer, join the second.
 ///
 /// `W` sends the route and its answer to the first subscription at once, on two streams,
@@ -1042,7 +1042,7 @@ async fn a_request_into_a_routing_loop_follows_the_routes_out() {
 }
 
 /// A moq-transport relay that announces back a name it learned from us, which is
-/// unsupported (the multicast epic's item 10): its wire carries no path or Instance, so the
+/// unsupported (the multicast epic's item 10): its wire carries no path or Identity, so the
 /// name looks like a nearer publisher. `R` pulls `live` from its publisher `P` over a link
 /// it ranks below the moq-transport ones, and publishes to `M`, which `N` pulls. `O`, a
 /// relay of another make, claims `live` toward `R` and answers by reading it from `N`,

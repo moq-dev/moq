@@ -130,7 +130,7 @@ impl PathData {
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
-			mtud: prev.mtud.clone(),
+			mtud: prev.mtud.fork(),
 			first_packet_after_rtt_sample: prev.first_packet_after_rtt_sample,
 			in_flight: InFlight::new(),
 			first_packet: None,

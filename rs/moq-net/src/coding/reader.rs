@@ -604,7 +604,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		S: Pause,
 	{
-		self.frame = header.info.size;
+		self.frame = group.payload(header);
 		let window = self.stream.window();
 		let paced = group.poll_admit(waiter, header, window);
 		self.poll_pace(waiter, paced, || group.room(window), 0)
@@ -660,6 +660,23 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			return Poll::Ready(Err(DecodeError::Short.into()));
 		}
 
+		Poll::Ready(Ok(()))
+	}
+
+	/// Discard `*remaining` bytes from the stream without copying or allocating.
+	pub(crate) fn poll_skip(&mut self, waiter: &kio::Waiter, remaining: &mut u64) -> Poll<Result<(), Error>> {
+		self.want = 0;
+		while *remaining > 0 {
+			let mut lease = ready!(self.poll_lease(waiter, 1))?;
+			let available = lease.remaining() as u64;
+			if available == 0 {
+				return Poll::Ready(Err(DecodeError::Short.into()));
+			}
+			let take = (*remaining).min(available) as usize;
+			lease.advance(take);
+			lease.release();
+			*remaining -= take as u64;
+		}
 		Poll::Ready(Ok(()))
 	}
 

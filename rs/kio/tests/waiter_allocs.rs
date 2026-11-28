@@ -91,8 +91,8 @@ fn a_spilled_list_allocates_once_per_wake() {
 	assert_eq!(cycle_allocs(&waiters(INLINE_WAITERS + 1), 100), 100);
 }
 
-/// A task parked on several lists that only one of them wakes, as a relay's group
-/// stream parks on its frames, its priority, and its subscription. Its park re-polls
+/// A task parked on several lists that only one of them wakes, such as a stream
+/// parked on its data, its priority, and its subscription. Its park re-polls
 /// with the same waiter, so a poll that re-registers everywhere allocates nothing.
 #[test]
 fn a_partial_wake_reuses_the_parked_waiter() {

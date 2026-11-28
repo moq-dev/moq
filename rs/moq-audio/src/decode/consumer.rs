@@ -28,6 +28,7 @@ const CONCEAL_MAX: Duration = Duration::from_millis(100);
 /// `moq_video::decode::Read` has, so a player handles loss and ends alike for
 /// every media type.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Read {
 	/// Decoded PCM.
 	Frame(Frame),
@@ -40,6 +41,7 @@ pub enum Read {
 	/// reads as no gap at all. A loss across a declared [`Read::End`] is never concealed.
 	///
 	/// The span is an upper bound, in the scale of the frame that follows.
+	#[non_exhaustive]
 	Gap {
 		/// The furthest presentation point already read.
 		timestamp: moq_net::Timestamp,
@@ -51,6 +53,7 @@ pub enum Read {
 	/// Frames that follow and start before `end` are the stopped encoder's remaining
 	/// media: its codec drain, trimmed at `end`, and the resampler's tail. The first frame
 	/// at or past `end` comes from a fresh encoder, since a timeline only moves forward.
+	#[non_exhaustive]
 	End {
 		/// Where the stopped encoder's media stops.
 		end: moq_net::Timestamp,

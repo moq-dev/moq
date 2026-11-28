@@ -1119,6 +1119,11 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(self.conn.receive_window())
 	}
+	/// Only raw QUIC: a browser's WebTransport API may discard a reset stream's prefix unread
+	/// even when its QUIC stack negotiated RESET_STREAM_AT, and nothing here tells a browser apart.
+	fn reliable_reset(&self) -> bool {
+		matches!(self.mode, Mode::Raw { .. }) && self.conn.reset_stream_at()
+	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
 		let mut quic = moq_quic::Limits::default();
@@ -1126,6 +1131,22 @@ impl moq_net::transport::poll::Session for Session {
 		self.conn
 			.set_limits(quic)
 			.map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
+	}
+	/// The connection's keep-alive, which every WebTransport session on it shares.
+	fn set_keep_alive(
+		&self,
+		keep_alive: moq_net::transport::KeepAlive,
+	) -> Result<(), moq_net::transport::KeepAliveError> {
+		self.conn
+			.set_keep_alive(moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard))
+			.map_err(|err| moq_net::transport::KeepAliveError::Refused(err.to_string()))
+	}
+	fn poll_liveness(&self, waiter: &Waiter, last: moq_net::transport::Liveness) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.conn.poll_stale(waiter, stale).map(|stale| match stale {
+			true => moq_net::transport::Liveness::Stale,
+			false => moq_net::transport::Liveness::Live,
+		})
 	}
 }
 
@@ -1354,6 +1375,21 @@ mod tests {
 			async { crate::quic::web::Request::accept(server).await.unwrap().ok().await },
 		);
 		(client.unwrap(), server.unwrap())
+	}
+
+	/// Both ends advertise RESET_STREAM_AT, so a raw QUIC reset keeps its prefix for the peer's
+	/// reader, which lets a lite-07 publisher account for a reset group by its header alone.
+	/// WebTransport never claims it, since a browser's API may drop that prefix anyway.
+	#[tokio::test]
+	async fn only_raw_quic_resets_are_reliable() {
+		use moq_net::transport::poll::Session as _;
+
+		for framed in [false, true] {
+			let (client, server, _endpoints) = pair().await;
+			let (client, server) = sessions(framed, client, server).await;
+			assert_eq!(client.reliable_reset(), !framed, "framed: {framed}");
+			assert_eq!(server.reliable_reset(), !framed, "framed: {framed}");
+		}
 	}
 
 	/// Out of connection flow control, an open still returns its stream at once and the

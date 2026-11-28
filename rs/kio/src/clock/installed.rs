@@ -5,7 +5,7 @@
 //! runtime (a foreign test loop) decides exactly when native time passes.
 
 use std::{
-	collections::{BTreeMap, HashMap, hash_map::Entry},
+	collections::{HashMap, hash_map::Entry},
 	sync::{
 		Arc, LazyLock, Mutex,
 		atomic::{AtomicBool, Ordering},
@@ -14,7 +14,10 @@ use std::{
 	time::Duration,
 };
 
-use crate::clock::{Instant, Manual, Wall};
+use crate::clock::{
+	Instant, Manual, Wall,
+	manual::{Key, Timers},
+};
 
 /// Installed clocks by runtime. Never pruned: one entry per runtime a test installs on.
 static CLOCKS: LazyLock<Mutex<HashMap<tokio::runtime::Id, Installed>>> = LazyLock::new(Default::default);
@@ -27,15 +30,7 @@ static ANY: AtomicBool = AtomicBool::new(false);
 /// [`wall`](crate::clock::wall) read this clock and timers fire only once
 /// [`advance`](Self::advance) reaches them. Clones share the clock.
 #[derive(Clone)]
-pub struct Installed(Arc<Mutex<State>>);
-
-struct State {
-	clock: Manual,
-	anchor: Option<(Instant, Wall)>,
-	/// Orders timers armed for the same instant by when they were armed.
-	next: u64,
-	timers: BTreeMap<(Instant, u64), Waker>,
-}
+pub struct Installed(Arc<Mutex<Timers>>);
 
 impl Manual {
 	/// Make this clock the ambient clock of `runtime`, from its current instant and wall time.
@@ -47,12 +42,7 @@ impl Manual {
 	///
 	/// When `runtime` already has an installed clock.
 	pub fn install(self, runtime: &tokio::runtime::Handle) -> Installed {
-		let installed = Installed(Arc::new(Mutex::new(State {
-			clock: self,
-			anchor: None,
-			next: 0,
-			timers: BTreeMap::new(),
-		})));
+		let installed = Installed(Arc::new(Mutex::new(Timers::new(self))));
 		// Checked after the lock is released, so the panic leaves it unpoisoned.
 		let fresh = match CLOCKS.lock().unwrap().entry(runtime.id()) {
 			Entry::Occupied(_) => false,
@@ -100,15 +90,7 @@ impl Installed {
 			let mut state = self.0.lock().unwrap();
 			let now = state.clock.now().checked_add(duration)?;
 			state.clock.wall().checked_add(duration)?;
-			state.clock.advance(duration);
-			let mut due = Vec::new();
-			while let Some(entry) = state.timers.first_entry() {
-				if entry.key().0 > now {
-					break;
-				}
-				due.push(entry.remove());
-			}
-			(now, due)
+			(now, state.advance(duration))
 		};
 		// Outside the lock: a woken task may run inline and read the clock.
 		due.into_iter().for_each(Waker::wake);
@@ -131,13 +113,7 @@ impl Installed {
 	}
 
 	pub(crate) fn anchor(&self) -> (Instant, Wall) {
-		let mut state = self.0.lock().unwrap();
-		if let Some(anchor) = state.anchor {
-			return anchor;
-		}
-		let anchor = (state.clock.now(), state.clock.wall());
-		state.anchor = Some(anchor);
-		anchor
+		self.0.lock().unwrap().anchor()
 	}
 }
 
@@ -160,7 +136,7 @@ pub(crate) fn current() -> Option<Installed> {
 pub(crate) struct Timer {
 	clock: Installed,
 	at: Instant,
-	key: Option<(Instant, u64)>,
+	key: Option<Key>,
 }
 
 impl Timer {
@@ -185,24 +161,11 @@ impl Timer {
 	/// Remove the armed entry, returning the waker parked on it.
 	fn disarm(&mut self) -> Option<Waker> {
 		let key = self.key.take()?;
-		self.clock.0.lock().unwrap().timers.remove(&key)
+		self.clock.0.lock().unwrap().disarm(key)
 	}
 
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-		let mut state = self.clock.0.lock().unwrap();
-		if state.clock.now() >= self.at {
-			if let Some(key) = self.key.take() {
-				state.timers.remove(&key);
-			}
-			return Poll::Ready(());
-		}
-		let key = *self.key.get_or_insert_with(|| {
-			let id = state.next;
-			state.next += 1;
-			(self.at, id)
-		});
-		state.timers.insert(key, cx.waker().clone());
-		Poll::Pending
+		self.clock.0.lock().unwrap().poll(self.at, &mut self.key, cx.waker())
 	}
 }
 
@@ -382,6 +345,34 @@ mod tests {
 		assert!(other.block_on(async { crate::clock::now() }) > host);
 		assert!(crate::clock::now() > host);
 		assert_eq!(installed.block_on(async { crate::clock::now() }), Instant::ZERO);
+	}
+
+	/// A queue made on the runtime keeps reading that clock's wall time and origin when
+	/// entered on a thread outside it, and a capture there is that clock.
+	#[test]
+	fn an_entered_queue_keeps_the_installed_clock() {
+		let runtime = runtime(false);
+		let clock = Manual::new().install(runtime.handle());
+		let (deadlines, captured) = runtime.block_on(async {
+			(
+				crate::clock::Deadlines::new(crate::clock::now()),
+				crate::clock::Clock::current(),
+			)
+		});
+		clock.advance(Duration::from_secs(5));
+		let five = Instant::ZERO.saturating_add(Duration::from_secs(5));
+		std::thread::scope(|scope| {
+			scope.spawn(|| {
+				let _entered = deadlines.enter();
+				assert_eq!(crate::clock::now(), Instant::ZERO, "the queue moves only as advanced");
+				assert_eq!(crate::clock::wall(), Manual::WALL_START + Duration::from_secs(5));
+				assert_eq!(
+					crate::clock::origin(),
+					(five, Manual::WALL_START + Duration::from_secs(5))
+				);
+				assert_eq!(crate::clock::Clock::current(), captured);
+			});
+		});
 	}
 
 	/// An advance past the range is refused whole, leaving the clock where it was.

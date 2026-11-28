@@ -502,6 +502,12 @@ impl Connection {
 		self.0.state.lock().inner.stats()
 	}
 
+	/// Whether a reset still delivers its prefix to the peer's reader: the peer accepts
+	/// RESET_STREAM_AT.
+	pub(crate) fn reset_stream_at(&self) -> bool {
+		self.0.state.lock().inner.reset_stream_at()
+	}
+
 	/// The receive windows now in force: the connection's, and the most one stream holds.
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
@@ -564,6 +570,16 @@ impl Connection {
 	/// See [`moq_quic::connection::Connection::set_limits`]
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
 		self.0.state.lock().inner.set_limits(limits)
+	}
+
+	/// See [`moq_quic::connection::Connection::set_keep_alive`]
+	pub fn set_keep_alive(&self, keep_alive: moq_quic::KeepAlive) -> Result<(), moq_quic::KeepAliveError> {
+		self.0.state.lock().inner.set_keep_alive(keep_alive)
+	}
+
+	/// See [`moq_quic::connection::Connection::poll_stale`]
+	pub fn poll_stale(&self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		self.0.state.lock().inner.poll_stale(waiter, stale)
 	}
 }
 

@@ -8,9 +8,8 @@ complexity, holds its stated contract, is tested and documented, and should
 ship as is. Each line that needs work has a follow-up quest that lands before
 the cut, or a recorded decision to ship it as is.
 
-What remains is the delta pass: the work that landed after the first pass's
-base (`ce616b52c`, 2026-11-14), m2's included, and the lines the first pass
-covered only lightly.
+What remains is the delta pass: the work that landed after the 2026-11-16
+pre-cut audit's base (`6ac78b68ee`), m2's included.
 
 ## Plan
 
@@ -56,9 +55,9 @@ first pass would ship as is, some left (YIELDED continuations, socket
 endpoints, video `warmup`, the vendored WebRTC stack, the unused exports)
 and more were renamed or reshaped.
 
-The delta pass now starts from `6ac78b68ee`, and its second bullet below is
-done: the gateway lifecycles, CLI flags, JSON snapshots, the codec split,
-and moqsink were read in full by that audit.
+The delta pass now starts from `6ac78b68ee`: the 2026-11-16 audit already read
+the gateway lifecycles, CLI flags, JSON snapshots, the codec split, and moqsink
+in full.
 
 What the 2026-11-16 audit learned, beyond the first pass's list below:
 
@@ -78,18 +77,11 @@ What the 2026-11-16 audit learned, beyond the first pass's list below:
 
 The delta pass:
 
-- Inventory `git log --first-parent ce616b52c..origin/main` by area, and the
-  quests deleted in that range, the same way. It includes
-  [moq-dev/moq#8741](https://github.com/moq-dev/moq/pull/8741) (byte streams
-  and the TCP pump) and [moq-dev/moq#8721](https://github.com/moq-dev/moq/pull/8721)
-  (`@moq/obs`), open at the first pass.
-- Give a full pass to what the first pass read lightly: the RTMP, RTSP, and
-  SRT gateway lifecycles, CLI flag changes, JSON snapshot budgets and
-  broadcast-clock timestamps, the codec submission/receive split
-  ([moq-dev/moq#8372](https://github.com/moq-dev/moq/pull/8372)) and its drain
-  lifecycle, and moqsink's restart and completion lifecycle (three fixes and
-  two quarantines in the window).
-- Confirm each first-pass decision landed as picked.
+- Inventory `git log --first-parent 6ac78b68ee..origin/main` by area, and the
+  quests deleted in that range, the same way (byte streams in `#8741` already
+  left moq for Kixel, and the gateway lifecycles, CLI flags, JSON snapshots,
+  codec split, and moqsink were covered in full by the 2026-11-16 audit).
+- Confirm each 2026-11-14 and 2026-11-16 decision landed as picked.
 
 What the first pass learned:
 

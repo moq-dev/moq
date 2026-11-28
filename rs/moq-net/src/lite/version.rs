@@ -59,10 +59,16 @@ impl Version {
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
-	/// This is the common feature boundary for TRACK_INFO, FETCH streams,
+	/// This is the common feature boundary for TRACK_INFO,
 	/// SUBSCRIBE_START/END, and per-frame timestamp prefixes.
 	pub(crate) fn has_track_stream(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
+	}
+
+	/// Whether the session supports the FETCH control stream (0x3). Present in lite-05 and
+	/// lite-06 only; lite-07 removes FETCH in favor of bounded SUBSCRIBE ranges.
+	pub(crate) fn has_fetch(self) -> bool {
+		matches!(self, Self::Lite05 | Self::Lite06)
 	}
 
 	/// Whether the PROBE message carries the RTT field. Added in lite-04; lite-03
@@ -284,9 +290,10 @@ impl Version {
 		)
 	}
 
-	/// Whether a publisher resets an opened Group Stream reliably, still delivering its GROUP
-	/// header, which then accounts for the group, so no SUBSCRIBE_DROP names it. Added in
-	/// lite-07; earlier versions name every group whose stream failed in SUBSCRIBE_DROP.
+	/// Whether a publisher over a transport with RESET_STREAM_AT resets an opened Group Stream
+	/// reliably, still delivering its GROUP header, which then accounts for the group, so no
+	/// SUBSCRIBE_DROP names it. Added in lite-07; earlier versions, and any transport without
+	/// it, name every group whose stream failed in SUBSCRIBE_DROP.
 	#[cfg(feature = "async")]
 	pub(crate) fn has_reliable_reset(self) -> bool {
 		!matches!(
@@ -295,7 +302,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and an exclusive
+	/// Whether SUBSCRIBE_DROP carries `Group Start` and an exclusive
 	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
 	pub(crate) fn has_group_span(self) -> bool {
 		!matches!(
@@ -304,9 +311,8 @@ impl Version {
 		)
 	}
 
-	/// Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
-	/// SUBSCRIBE_DROP, for groups that existed. Added in lite-07; earlier versions name every
-	/// hole in SUBSCRIBE_DROP.
+	/// Whether SUBSCRIBE_DROP distinguishes keys declared never produced (`SKIP`) from
+	/// groups that existed. Added in lite-07; earlier versions carry no skip code.
 	pub(crate) fn has_skip(self) -> bool {
 		!matches!(
 			self,
@@ -323,10 +329,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements carry their instance and epoch, and track requests the
-	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
-	/// receiving session mints an instance for each announcement.
-	pub(crate) fn has_instance(self) -> bool {
+	/// Whether announcements carry their identity and epoch, and track requests the
+	/// identity they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an identity for each announcement.
+	pub(crate) fn has_identity(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -394,6 +400,15 @@ impl Version {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05
+		)
+	}
+
+	/// Whether SUBSCRIBE carries a `Meta` byte, and a metadata subscription's FRAMEs their
+	/// header alone. Added in lite-07; an earlier subscription always carries the payload.
+	pub(crate) fn has_meta(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
 		)
 	}
 

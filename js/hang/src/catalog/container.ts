@@ -1,7 +1,7 @@
 import * as z from "zod/mini";
 
 /** The container kinds this build knows how to decode. */
-const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
+const KNOWN_KINDS = ["legacy", "cmaf", "loc", "raw", "cts"];
 
 /**
  * A container this build does not recognize, preserved verbatim.
@@ -36,6 +36,10 @@ export const UnknownContainerSchema = z.pipe(
  *           The init segment (ftyp+moov) is base64-encoded in the catalog.
  * - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame has a small
  *          property block followed by the codec payload.
+ * - "raw": No container header. Each frame is the raw codec payload and its PTS is
+ *          the MoQ transport timestamp (requires a timed track).
+ * - "cts": QUIC VarInt composition time offset (in the track's timescale) followed
+ *          by the raw codec payload; PTS = transport timestamp + CTS (requires a timed track).
  *
  * Anything else parses as {@link UnknownContainerSchema} instead of throwing, so one rendition
  * using a future container does not take down the rest of the catalog.
@@ -52,6 +56,10 @@ export const ContainerSchema = z._default(
 			}),
 			// Low Overhead Container.
 			z.object({ kind: z.literal("loc") }),
+			// Zero-byte header container (PTS = transport timestamp).
+			z.object({ kind: z.literal("raw") }),
+			// CTS varint (in track timescale) + raw codec payload (PTS = transport timestamp + CTS).
+			z.object({ kind: z.literal("cts") }),
 		]),
 		UnknownContainerSchema,
 	]),

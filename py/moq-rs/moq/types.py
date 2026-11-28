@@ -30,7 +30,7 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
-    MoqInstance as Instance,
+    MoqIdentity as Identity,
 )
 from moq_ffi import (
     MoqOrder as Order,
@@ -76,6 +76,7 @@ from ._records import (
     Datagram,
     Delay,
     Frame,
+    FrameHeader,
     Grant,
     QuicConfig,
     Range,
@@ -102,9 +103,10 @@ __all__ = [
     "Delay",
     "ErrorScope",
     "Frame",
+    "FrameHeader",
     "FetchGroupOptions",
     "Grant",
-    "Instance",
+    "Identity",
     "Order",
     "Position",
     "ProtocolError",

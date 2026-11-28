@@ -88,6 +88,89 @@ impl Default for Manual {
 	}
 }
 
+/// Where an armed timer sits in [`Timers`]: its instant, then the order it was armed in.
+#[cfg(any(feature = "sim", feature = "manual"))]
+pub(crate) type Key = (Instant, u64);
+
+/// A [`Manual`] clock and the timers armed on it: the time the simulator and an
+/// installed clock both keep.
+#[cfg(any(feature = "sim", feature = "manual"))]
+pub(crate) struct Timers {
+	pub(crate) clock: Manual,
+	anchor: Option<(Instant, Wall)>,
+	/// Orders timers armed for the same instant by when they were armed.
+	serial: u64,
+	armed: std::collections::BTreeMap<Key, std::task::Waker>,
+}
+
+#[cfg(any(feature = "sim", feature = "manual"))]
+impl Timers {
+	pub(crate) fn new(clock: Manual) -> Self {
+		Self {
+			clock,
+			anchor: None,
+			serial: 0,
+			armed: Default::default(),
+		}
+	}
+
+	/// The instant and wall time at the first call, fixed from then on.
+	pub(crate) fn anchor(&mut self) -> (Instant, Wall) {
+		*self.anchor.get_or_insert_with(|| (self.clock.now(), self.clock.wall()))
+	}
+
+	/// Let `duration` pass, returning the wakers of every timer due by then, for the
+	/// caller to wake once it no longer holds the clock.
+	pub(crate) fn advance(&mut self, duration: Duration) -> Vec<std::task::Waker> {
+		self.clock.advance(duration);
+		let now = self.clock.now();
+		let mut due = Vec::new();
+		while let Some(entry) = self.armed.first_entry() {
+			if entry.key().0 > now {
+				break;
+			}
+			due.push(entry.remove());
+		}
+		due
+	}
+
+	/// The earliest armed timer's instant.
+	#[cfg(feature = "sim")]
+	pub(crate) fn next(&self) -> Option<Instant> {
+		self.armed.first_key_value().map(|((at, _), _)| *at)
+	}
+
+	/// `Ready` once the clock reaches `at`; otherwise arm `key`, once, to wake `waker`.
+	pub(crate) fn poll(&mut self, at: Instant, key: &mut Option<Key>, waker: &std::task::Waker) -> std::task::Poll<()> {
+		if self.clock.now() >= at {
+			if let Some(key) = key.take() {
+				self.armed.remove(&key);
+			}
+			return std::task::Poll::Ready(());
+		}
+		let key = *key.get_or_insert_with(|| {
+			// Arming a timer is progress a simulator probe watches for.
+			#[cfg(feature = "sim")]
+			crate::clock::sim::event();
+			self.serial += 1;
+			(at, self.serial - 1)
+		});
+		self.armed.insert(key, waker.clone());
+		std::task::Poll::Pending
+	}
+
+	/// Remove an armed timer, returning the waker parked on it.
+	pub(crate) fn disarm(&mut self, key: Key) -> Option<std::task::Waker> {
+		self.armed.remove(&key)
+	}
+
+	/// Forget every armed timer.
+	#[cfg(feature = "sim")]
+	pub(crate) fn clear(&mut self) {
+		self.armed.clear();
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

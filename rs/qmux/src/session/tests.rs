@@ -132,6 +132,18 @@ async fn every_version_establishes_and_negotiates_in_band() {
 	}
 }
 
+/// Only qmux-02 negotiates RESET_STREAM_AT, so only its resets keep their prefix for the
+/// peer's reader; an earlier draft's plain RESET_STREAM may discard it.
+#[tokio::test(start_paused = true)]
+async fn only_qmux_02_resets_reliably() {
+	for &version in Version::ALL {
+		let (client, server) = pair(config(version), config(version)).await;
+		let reliable = version == Version::QMux02;
+		assert_eq!(client.reliable_reset(), reliable, "{version:?}");
+		assert_eq!(server.reliable_reset(), reliable, "{version:?}");
+	}
+}
+
 /// A transfer many times the receive windows completes only if reading returns credit:
 /// MAX_STREAM_DATA for the stream and MAX_DATA for the connection.
 #[tokio::test(start_paused = true)]
@@ -274,6 +286,102 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 		assert!(
 			matches!(acked(&send, &held), Poll::Ready(Err(_))),
 			"{version:?}: the reset discarded the rest"
+		);
+	}
+}
+
+/// A byte stream whose flush a test holds, as a TLS or WebSocket buffer holds what it was
+/// handed until the socket takes it.
+struct Gated {
+	inner: Stream<DuplexStream>,
+	gate: Arc<Gate>,
+}
+
+#[derive(Default)]
+struct Gate {
+	closed: std::sync::atomic::AtomicBool,
+	flush: Mutex<Option<std::task::Waker>>,
+}
+
+impl Gate {
+	fn set(&self, closed: bool) {
+		self.closed.store(closed, std::sync::atomic::Ordering::Release);
+		if let Some(waker) = self.flush.lock().unwrap().take() {
+			waker.wake();
+		}
+	}
+}
+
+impl Transport for Gated {
+	fn bind(&mut self, config: &Config) {
+		self.inner.bind(config);
+	}
+
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		self.inner.poll_recv(waiter)
+	}
+
+	fn poll_ready(&mut self, _waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		Poll::Ready(Ok(()))
+	}
+
+	fn send(&mut self, record: Bytes) -> Result<(), Error> {
+		self.inner.send(record)
+	}
+
+	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.gate.closed.load(std::sync::atomic::Ordering::Acquire) {
+			*self.gate.flush.lock().unwrap() = Some(waiter.waker().clone());
+			return Poll::Pending;
+		}
+		self.inner.poll_flush(waiter)
+	}
+
+	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.inner.poll_close(waiter)
+	}
+}
+
+/// What the transport only buffered is not yet sent: a stream's bytes and its finish count as
+/// acknowledged once a flush pushed them out, not when the transport took them.
+#[tokio::test(start_paused = true)]
+async fn bytes_count_as_sent_once_flushed() {
+	for &version in Version::ALL {
+		let gate = Arc::new(Gate::default());
+		let (client, server) = tokio::io::duplex(PIPE);
+		let client = Session::connect(
+			Gated {
+				inner: Stream::new(client),
+				gate: gate.clone(),
+			},
+			config(version),
+		);
+		let server = Session::accept(Stream::new(server), config(version));
+		let (client, server) = tokio::join!(client, server);
+		let client = spawn(client.expect("client handshake"));
+		let _server = spawn(server.expect("server handshake"));
+
+		gate.set(true);
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		write_all(&mut send, payload(100, 1)).await;
+		send.finish().unwrap();
+		let end = send.offset();
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert!(acked(&send, &end).is_pending(), "{version:?}: only buffered");
+		let mut closed = std::pin::pin!(send.closed());
+		assert!(
+			futures_poll_once(&mut closed).await.is_none(),
+			"{version:?}: FIN only buffered"
+		);
+
+		gate.set(false);
+		kio::clock::timeout(Duration::from_secs(1), closed)
+			.await
+			.expect("the flush acknowledged the FIN")
+			.unwrap();
+		assert!(
+			matches!(acked(&send, &end), Poll::Ready(Ok(()))),
+			"{version:?}: flushed"
 		);
 	}
 }
@@ -1006,6 +1114,61 @@ async fn a_session_without_a_socket_counts_no_wire_bytes() {
 
 	let wire = client.wire().unwrap();
 	assert_eq!((wire.sent_bytes(), wire.received_bytes()), (0, 0));
+}
+
+/// Socket statistics that report a fixed round trip and note when they are dropped, as
+/// `TcpStats` closes its duplicate descriptor.
+struct Dropped {
+	dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::SocketStats for Dropped {
+	fn rtt(&self) -> Option<Duration> {
+		Some(Duration::from_millis(42))
+	}
+}
+
+impl Drop for Dropped {
+	fn drop(&mut self) {
+		self.dropped.store(true, std::sync::atomic::Ordering::Release);
+	}
+}
+
+/// A session handle kept past its driver holds no socket statistics, which would keep the
+/// connection's descriptor open, yet still reports what they last measured.
+#[tokio::test(start_paused = true)]
+async fn a_finished_driver_releases_the_socket_stats() {
+	for finish in ["close", "drop"] {
+		let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let stats = Arc::new(Dropped {
+			dropped: dropped.clone(),
+		}) as crate::SharedSocketStats;
+		let (client, server) = tokio::io::duplex(PIPE);
+		let client = Session::connect(Stream::new(client).with_socket_stats(stats), config(Version::QMux02));
+		let server = Session::accept(Stream::new(server), config(Version::QMux02));
+		let (client, server) = tokio::join!(client, server);
+		let (client, driver) = client.expect("client handshake");
+		let _server = spawn(server.expect("server handshake"));
+		let clone = client.clone();
+
+		match finish {
+			"close" => {
+				let driver = tokio::spawn(driver);
+				client.close(0, "done");
+				driver.await.unwrap();
+			}
+			_ => drop(driver),
+		}
+		assert!(
+			dropped.load(std::sync::atomic::Ordering::Acquire),
+			"{finish}: still held"
+		);
+		assert_eq!(
+			moq_net::transport::Metrics::rtt(&clone.metrics()),
+			Some(Duration::from_millis(42)),
+			"{finish}"
+		);
+	}
 }
 
 /// A local close keeps reading the peer until it finishes, since closing a TCP socket with

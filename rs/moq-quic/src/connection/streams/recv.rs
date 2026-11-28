@@ -43,14 +43,17 @@ impl Stream<'_> {
 		let stream = get_or_insert_recv(entry.get_mut(), self.state.initial_stream_receive_window);
 
 		// An eviction already discarded the buffer, leaving the peer and the bytes the reader
-		// took to this stop.
-		let evicted = stream.reader == Reader::Evicted;
-		let (read_credits, stop_sending) = match evicted {
-			true => {
+		// took to this stop. Send STOP_SENDING if the final size is still unknown or if gaps
+		// existed before the evicted high-water mark (so the peer is still retransmitting).
+		let (evicted, read_credits, stop_sending) = match stream.reader {
+			Reader::Evicted { has_gaps } => {
 				stream.reader = Reader::Stopped;
-				(0, stream.final_offset_unknown())
+				(true, 0, stream.final_offset_unknown() || has_gaps)
 			}
-			false => stream.stop()?,
+			_ => {
+				let (read_credits, stop_sending) = stream.stop()?;
+				(false, read_credits, stop_sending)
+			}
 		};
 		let mut lease = std::mem::take(&mut stream.lease);
 		if stop_sending {
@@ -123,7 +126,7 @@ impl Stream<'_> {
 		};
 		match s.reader {
 			Reader::Reading => Ok(s.reset_code()),
-			Reader::Evicted => Err(Error::Evicted),
+			Reader::Evicted { .. } => Err(Error::Evicted),
 			Reader::Stopped => Err(Error::Closed),
 		}
 	}
@@ -172,10 +175,19 @@ pub(super) enum Reader {
 	#[default]
 	Reading,
 	/// Discarded to free a stuck window, with the reader and the peer yet to hear of it from a
-	/// stop; it keeps no data meanwhile, but its lease keeps the credit of bytes the reader took
-	Evicted,
+	/// stop; it keeps no data meanwhile, but its lease keeps the credit of bytes the reader took.
+	/// `has_gaps` records whether the assembler had missing bytes before its high-water mark
+	/// when evicted (e.g. a reordered FIN with missing earlier packets), so `stop()` still sends
+	/// `STOP_SENDING` to halt peer retransmissions even when `final_offset` is known.
+	Evicted { has_gaps: bool },
 	/// The application stopped the stream, which keeps no data
 	Stopped,
+}
+
+impl Reader {
+	pub(super) fn is_evicted(self) -> bool {
+		matches!(self, Self::Evicted { .. })
+	}
 }
 
 impl Recv {
@@ -332,7 +344,7 @@ impl Recv {
 		match self.reader {
 			Reader::Reading => limit.saturating_sub(self.end) + self.unread_credit() + self.lease.held,
 			// It keeps no data, and the peer's further bytes return their credit as they arrive.
-			Reader::Evicted | Reader::Stopped => self.lease.held,
+			Reader::Evicted { .. } | Reader::Stopped => self.lease.held,
 		}
 	}
 
@@ -615,6 +627,12 @@ impl<'a> Chunks<'a> {
 		let max_data = self.streams.add_read_credits(self.read);
 		self.pending.max_data |= max_data;
 		should_transmit |= max_data;
+		// The credit may only have paid a shrunk window's debt, and the leasing readers that
+		// would rerun the stuck pass may all be waiting on this read.
+		if let Some(max_data) = self.streams.evict_if_stuck() {
+			self.pending.max_data |= max_data;
+			should_transmit = true;
+		}
 		if should_transmit {
 			self.streams.waits.wake_transmit();
 		}

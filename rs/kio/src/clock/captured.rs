@@ -133,7 +133,10 @@ impl PartialEq for Clock {
 			(Source::Installed(a), Source::Installed(b)) => a.same(b),
 			#[cfg(feature = "sim")]
 			(Source::Sim(a), Source::Sim(b)) => a == b,
-			#[allow(unreachable_patterns, reason = "only the host clock exists without features")]
+			#[cfg_attr(
+				not(any(feature = "runtime", feature = "sim")),
+				expect(unreachable_patterns, reason = "only the host clock exists without features")
+			)]
 			_ => false,
 		}
 	}
@@ -268,5 +271,18 @@ mod tests {
 			};
 			assert_eq!(clock, Clock::current());
 		});
+	}
+
+	/// A queue entered on a runtime with no installed clock, as an io_uring worker
+	/// enters one, is advanced from the host's clock, so that is its capture.
+	#[test]
+	fn an_entered_queue_on_a_runtime_captures_the_host() {
+		let host = Clock::current();
+		let runtime = paused();
+		let _runtime = runtime.enter();
+		assert_ne!(Clock::current(), host, "a paused runtime is a clock of its own");
+		let deadlines = crate::clock::Deadlines::new(crate::clock::now());
+		let _entered = deadlines.enter();
+		assert_eq!(Clock::current(), host);
 	}
 }

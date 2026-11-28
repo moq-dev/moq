@@ -892,7 +892,7 @@ struct Size {
 /// of a region peered, then full drone meshes. `MOQ_WARMTH_GROWTH` caps the
 /// broadcasts.
 #[test]
-#[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_warmth_growth() {
 	let most: usize = std::env::var("MOQ_WARMTH_GROWTH").map_or(4096, |most| most.parse().expect("MOQ_WARMTH_GROWTH"));
 	println!(
@@ -1334,7 +1334,7 @@ fn mean(values: &[usize]) -> f64 {
 /// summed over every phase; the copies left at the end; messages; the wait for a
 /// first frame; and cycles and unfed readers while it moved.
 #[test]
-#[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_warmth_cases() {
 	println!(
 		"case,arm,phases,tree_cost,path_cost,cheapest_cost,uplinks,max_copies,carriers,messages,warm_messages,messages_per_reader_change,warm_per_reader_change,first_frame_ms,cycle_steps,longest_cycle,unfed_reader_rounds,advert_messages,query_messages,chain_messages,rank_messages,right"
@@ -1386,7 +1386,7 @@ fn benchmark_warmth_cases() {
 /// Per arm, random meshes, drone meshes, and CDN regions under churn: cycles, unfed readers, and
 /// standing races while it churned, and whether each settled right once it stopped.
 #[test]
-#[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_warmth_churn() {
 	println!(
 		"mesh,arm,cases,deliveries,cycle_deliveries,starved_deliveries,merge_cycle_deliveries,longest_cycle,unfed_reader_hops,extra_uplink_hops,reader_changes,messages,warm_messages,advert_messages,query_messages,chain_messages,rank_messages,settle_rounds,settled_tree_cost,settled_cheapest_cost,failed"
@@ -1668,7 +1668,7 @@ const EXAMPLE: &str = include_str!("warmth.mesh");
 ///
 /// `MOQ_WARMTH_MESH=/path/to/mesh just rs test -p moq-net --release --run-ignored only --no-capture -E 'test(=route::tests::warmth::benchmark_warmth_mesh)'`
 #[test]
-#[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_warmth_mesh() {
 	let text = match std::env::var("MOQ_WARMTH_MESH") {
 		Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}")),

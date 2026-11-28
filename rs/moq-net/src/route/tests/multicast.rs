@@ -28,9 +28,9 @@ enum Spot {
 	Relay(Box<Router>),
 	/// A publisher: an endpoint that never forwards.
 	Endpoint {
-		/// The Instance its next claim serves.
+		/// The Identity its next claim serves.
 		id: Option<Id>,
-		/// Its claims, each with the Instance it serves.
+		/// Its claims, each with the Identity it serves.
 		claims: BTreeSet<(Path, Id)>,
 		/// What each relay asked it for.
 		asked: BTreeMap<Node, BTreeSet<Path>>,
@@ -223,7 +223,7 @@ impl RelaySim {
 		&self.up
 	}
 
-	/// The claims the publisher at `node` makes now, each with its Instance.
+	/// The claims the publisher at `node` makes now, each with its Identity.
 	pub fn claims(&self, node: Node) -> &BTreeSet<(Path, Id)> {
 		match &self.spots[node] {
 			Spot::Endpoint { claims, .. } => claims,
@@ -1463,7 +1463,7 @@ fn a_relay_that_leaves_for_good_takes_its_floors() {
 /// other half, which never restarts, holds on average after each round of restarts. A
 /// restart clears a relay's own table, so a restarted relay's says nothing about growth.
 #[test]
-#[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
+#[ignore = "a benchmark; Nightly runs it from test/route-bench.sh"]
 fn benchmark_relay_floor_growth() {
 	println!("shape,relays,links,replaced,floors_per_lasting_relay");
 	for relays in [12, 32] {

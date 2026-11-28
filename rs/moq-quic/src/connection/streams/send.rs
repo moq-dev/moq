@@ -84,6 +84,10 @@ impl Send {
 		if self.stopped.is_some() {
 			return Err(Error::Stopped);
 		}
+		// Nothing to queue, so neither flow control nor an empty STREAM frame is involved
+		if !data.has_remaining() {
+			return Ok(Some(0));
+		}
 		let budget = self.max_data - self.pending.offset();
 		if budget == 0 || limit == 0 {
 			return Ok(None);
@@ -119,10 +123,10 @@ impl Send {
 	/// Update stream state due to a reset sent by the local application
 	///
 	/// Data below `reliable_size` is still delivered; everything after it is abandoned. Returns
-	/// the Reliable Size of the reset to send now, or `None` while a peer without RESET_STREAM_AT
-	/// (`!at`) still has data below `reliable_size` to acknowledge, after which
+	/// the Reliable Size of the reset to send now, or `None` while a reset that may not go ahead
+	/// of its data (`!ahead`) still has data below `reliable_size` to acknowledge, after which
 	/// [`take_held_reset`](Self::take_held_reset) releases it.
-	pub(super) fn reset(&mut self, error_code: VarInt, reliable_size: u64, at: bool) -> Option<u64> {
+	pub(super) fn reset(&mut self, error_code: VarInt, reliable_size: u64, ahead: bool) -> Option<u64> {
 		use SendState::*;
 		let (DataSent { .. } | Ready) = self.state else {
 			return None;
@@ -133,7 +137,7 @@ impl Send {
 		let held = match self.stopped {
 			// A quiesce sends its streams' resets together, once everything written to them arrived.
 			Some(Stop::Quiesce(_)) => Held::UntilQuiesced,
-			_ if at || self.pending.is_fully_acked() => Held::Sent,
+			_ if ahead || self.pending.is_fully_acked() => Held::Sent,
 			_ => Held::UntilAcked,
 		};
 		self.state = ResetSent {
@@ -285,12 +289,17 @@ impl Send {
 
 	/// Whether the peer acknowledged everything before `offset`, noting to report it if not
 	pub(super) fn acked(&mut self, offset: u64) -> Result<bool, Error> {
-		// An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
-		if self.peer_stopped() || offset > self.pending.offset() {
+		// An acknowledgment no longer means the peer reads the data
+		if self.peer_stopped() {
 			return Err(Error::Closed);
 		}
-		if offset <= self.pending.acked() {
+		// Includes data acknowledged before a reset truncated it
+		if offset <= self.acked_len() {
 			return Ok(true);
+		}
+		// A reset dropped the rest
+		if offset > self.pending.offset() {
+			return Err(Error::Closed);
 		}
 		self.notify = Some(self.notify.map_or(offset, |notify| notify.min(offset)));
 		Ok(false)
@@ -499,6 +508,9 @@ impl<'a> Stream<'a> {
 			}
 			return Ok(None);
 		};
+		if written == 0 {
+			return Ok(Some(0));
+		}
 		self.state.data_sent += written as u64;
 		self.state.buffered_data += written as u64;
 		trace!(stream = %self.id, "wrote {} bytes", written);
@@ -692,7 +704,8 @@ impl<'a> Stream<'a> {
 	/// Abandon the stream, but still deliver the bytes before `offset`
 	///
 	/// Nothing past `offset` is sent or retransmitted. A peer that accepts RESET_STREAM_AT gets
-	/// it at once, and reads the data before the error. Otherwise the data keeps being
+	/// it at once, or on QMux once the data before `offset` went out ahead of it, and reads the
+	/// data before the error. Otherwise the data keeps being
 	/// retransmitted, and a plain RESET_STREAM follows once the peer has acknowledged all of it, a
 	/// round trip later. An acknowledgment only means the peer's QUIC stack holds the data:
 	/// RFC 9000 lets it discard data its application has not read yet on RESET_STREAM, so this
@@ -718,7 +731,7 @@ impl<'a> Stream<'a> {
 	}
 
 	fn reset_to(&mut self, offset: u64, error_code: VarInt) -> Result<(), Error> {
-		let at = self.state.peer_reset_stream_at;
+		let ahead = self.state.reset_ahead();
 		let max_data = self.state.max_send_data(self.id);
 		let stream = StreamsState::send_mut(&mut self.state.send, self.id, max_data)?;
 		if stream.is_reset() {
@@ -740,7 +753,7 @@ impl<'a> Stream<'a> {
 		// send. We leave flow control alone because the peer's responsible for issuing additional
 		// credit based on the final offset communicated in the RESET_STREAM frame we send.
 		let buffered = stream.pending.buffered();
-		let send = stream.reset(error_code, reliable_size, at);
+		let send = stream.reset(error_code, reliable_size, ahead);
 		self.state.connection_blocked.swap_remove(&self.id);
 		self.state.buffered_data -= buffered - stream.pending.buffered();
 		// The reset may drop the last of what the peer had yet to acknowledge, which a quiesce

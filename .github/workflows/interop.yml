@@ -276,8 +276,6 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Delete a Pages artifact left by an earlier run attempt.
-      actions: write
       contents: write
       pages: write
       id-token: write
@@ -302,16 +300,17 @@ jobs:
       - name: Commit report
         run: just gh pages-publish interop "$RUNNER_TEMP/interop-report" "$RUNNER_TEMP/pages"
 
-      - name: Drop a stale Pages artifact
-        run: just gh pages-clean
-        env:
-          GH_TOKEN: ${{ github.token }}
-
+      # Each Pages publisher names its own artifact: a run's names must be unique.
       - name: Upload site
+        id: pages
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: pages-interop
           path: ${{ runner.temp }}/pages
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        run: just gh pages-deploy "$ARTIFACT"
+        env:
+          ARTIFACT: ${{ steps.pages.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}

@@ -174,7 +174,7 @@ async fn a_sibling_resolves_through_a_client_session() {
 		let source = moq_mux::Source::new(origin, broadcast);
 		let sibling = kio::clock::timeout(
 			TIMEOUT,
-			source.resolve(Some(&moq_net::path::Relative::new("./source").unwrap()), None),
+			source.resolve(Some(&moq_net::path::Relative::new("./source").unwrap())),
 		)
 		.await
 		.expect("sibling resolve timed out")

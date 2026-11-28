@@ -34,7 +34,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Only `main` writes the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
-    timeout-minutes: 120
+    # A full count takes over 3 hours: swole counts each CodSpeed bench five
+    # times, since it cannot see their threads (quest/m5/bench-harness.md).
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +58,8 @@ jobs:
           args=(run --jobs 1 --out kixel-metrics/metrics.json)
           if [ -n "$BENCHMARKS" ]; then
             printf '%s\n' "$BENCHMARKS" > "$RUNNER_TEMP/benchmarks"
-            args+=(--benchmarks "$RUNNER_TEMP/benchmarks")
+            # A suspect this commit lacks is named in the job summary, not a failure.
+            args+=(--benchmarks "$RUNNER_TEMP/benchmarks" --allow-missing)
           fi
           nix develop --command just rs instructions "${args[@]}"
 

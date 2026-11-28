@@ -313,7 +313,7 @@ enum PublishCatalog {
 	Media(Box<moq_mux::catalog::Producer>),
 	/// `import ts --passthrough`'s, with the `mpegts` extension that names its track.
 	Passthrough(Box<moq_mux::catalog::Producer<ts::Ext>>),
-	/// A TS import's: each instance's or program's, with the `mpegts` extension, finished by
+	/// A TS import's: each identity's or program's, with the `mpegts` extension, finished by
 	/// [`ts::Republish::finish`] or [`ts::Programs::finish`].
 	Ts,
 }
@@ -382,7 +382,7 @@ pub struct Publish {
 	report: Option<crate::report::Stats>,
 	// How long a stdin import keeps its broadcast up after EOF; see [`Self::with_linger`].
 	linger: std::time::Duration,
-	// What a stdin TS import sets on each instance it republishes; see [`Self::stdin`].
+	// What a stdin TS import sets on each identity it republishes; see [`Self::stdin`].
 	sections: Sections,
 }
 
@@ -437,7 +437,7 @@ impl Publish {
 			// `mpegts` section names.
 			let config = config.with_catalog(hang::Catalog::<ts::Ext>::default());
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-			let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.timebase().reserve())?;
+			let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.reserve())?;
 			if let Some(pid) = pcr_pid {
 				passthrough = passthrough.with_pcr_pid(pid);
 			}
@@ -460,16 +460,14 @@ impl Publish {
 				}
 			}
 			PublishFormat::Fmp4 { cmaf } => {
-				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } | PublishFormat::TsPassthrough { .. } => unreachable!("handled above"),
 			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
 			// so it takes no era.
 			PublishFormat::Flv => {
-				let timebase = catalog.timebase();
-				let flv = flv::Import::new(broadcast.clone(), timebase.reserve());
+				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
 				PublishDecoder::Flv(Box::new(flv))
 			}
 		};
@@ -495,21 +493,21 @@ impl Publish {
 	}
 
 	/// Build a publisher decoding `format` from stdin into a new broadcast at `name` on
-	/// `origin` under `instance`, retaining its route alongside the decoder's fill handle.
+	/// `origin` under `identity`, retaining its route alongside the decoder's fill handle.
 	///
 	/// A TS import whose source changes, such as a changeover between two encoders whose clocks
 	/// were never locked or whose PATs name another program, finishes the broadcast and republishes
-	/// the rest of the input at `name` under a new instance ([`ts::Republish`]). Its first
-	/// instance is `instance`.
+	/// the rest of the input at `name` under a new identity ([`ts::Republish`]). Its first
+	/// identity is `identity`.
 	pub(super) fn stdin(
 		origin: &moq_net::origin::Producer,
 		name: &str,
-		instance: moq_net::Instance,
+		identity: moq_net::Identity,
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
 		if let PublishFormat::Ts { program } = *format {
-			let mut republish = ts::Republish::new(origin.clone(), moq_net::Path::new(name)?, instance, config)?;
+			let mut republish = ts::Republish::new(origin.clone(), moq_net::Path::new(name)?, identity, config)?;
 			if let Some(program) = program {
 				republish = republish.with_program(program);
 			}
@@ -527,7 +525,7 @@ impl Publish {
 			});
 		}
 		let route = origin
-			.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
+			.route(name, moq_net::origin::RouteOptions::hidden().with_identity(identity, 0))
 			.context("failed to create broadcast")?;
 		let mut result = Self::new(route.broadcast().clone(), format, config)?;
 		result.route = Some(route);
@@ -900,11 +898,11 @@ struct Publication {
 	report: Option<crate::report::Stats>,
 	/// How long the finished broadcasts stay up after EOF.
 	linger: std::time::Duration,
-	/// What a TS import sets on each instance it republishes.
+	/// What a TS import sets on each identity it republishes.
 	sections: Sections,
 }
 
-/// The catalog sections a stdin TS import sets again on each instance it republishes.
+/// The catalog sections a stdin TS import sets again on each identity it republishes.
 #[derive(Clone, Default)]
 struct Sections {
 	/// The connection `--report` measures, when the import reports.
@@ -913,7 +911,7 @@ struct Sections {
 }
 
 impl Sections {
-	/// Set these sections on the instance `republish` just opened, before it declares a track so
+	/// Set these sections on the identity `republish` just opened, before it declares a track so
 	/// they ride its first catalog, returning its report.
 	fn apply(&self, republish: &ts::Republish) -> anyhow::Result<Option<crate::report::Stats>> {
 		if let Some(echo) = &self.echo {
@@ -929,7 +927,7 @@ impl Sections {
 	}
 }
 
-/// A `--report` track on the current instance of `republish`.
+/// A `--report` track on the current identity of `republish`.
 fn report(
 	republish: &ts::Republish,
 	connection: Option<moq_tokio::connection::Monitor>,
@@ -937,9 +935,9 @@ fn report(
 	crate::report::Stats::new(&mut republish.broadcast().clone(), republish.catalog(), connection)
 }
 
-/// One publisher instance of a stdin import: the decoder filling its broadcast, and what
+/// One publisher identity of a stdin import: the decoder filling its broadcast, and what
 /// announces and reports it.
-struct Instance {
+struct Identity {
 	decoder: PublishDecoder,
 	catalog: PublishCatalog,
 	control: Option<moq_net::origin::Route>,
@@ -967,8 +965,8 @@ struct Reader<R> {
 /// The finished broadcasts then stay servable for the linger, so a subscriber that saw the
 /// final catalog only at EOF can still request them.
 ///
-/// A change of source ([`ts::Republished`]) ends a TS import's instance there, and the rest of the
-/// input publishes a new instance on the same path.
+/// A change of source ([`ts::Republished`]) ends a TS import's identity there, and the rest of the
+/// input publishes a new identity on the same path.
 async fn decode(
 	decoder: PublishDecoder,
 	catalog: PublishCatalog,
@@ -983,7 +981,7 @@ async fn decode(
 		linger,
 		sections,
 	} = publication;
-	let mut instance = Instance {
+	let mut identity = Identity {
 		decoder,
 		catalog,
 		control,
@@ -1003,21 +1001,21 @@ async fn decode(
 	};
 
 	let result = loop {
-		let republished = match instance.read(&mut reader).await {
+		let republished = match identity.read(&mut reader).await {
 			Ok(Some(republished)) => republished,
 			Ok(None) => break Ok(()),
 			Err(err) => break Err(err),
 		};
-		if let Err(err) = instance.republished(&sections, republished, &mut reader.log) {
+		if let Err(err) = identity.republished(&sections, republished, &mut reader.log) {
 			break Err(err);
 		}
 	};
-	instance.end(result, &mut reader.log, linger).await
+	identity.end(result, &mut reader.log, linger).await
 }
 
-impl Instance {
+impl Identity {
 	/// Read and decode until EOF, returning `None`, or until a change of source ends the
-	/// instance.
+	/// identity.
 	async fn read<R: tokio::io::AsyncRead + Unpin>(
 		&mut self,
 		reader: &mut Reader<R>,
@@ -1062,8 +1060,8 @@ impl Instance {
 		}
 	}
 
-	/// The source changed, and the importer republished: end this instance's report, and set the
-	/// sections on the new instance before it reads the rest of the input.
+	/// The source changed, and the importer republished: end this identity's report, and set the
+	/// sections on the new identity before it reads the rest of the input.
 	fn republished(
 		&mut self,
 		sections: &Sections,
@@ -1075,7 +1073,7 @@ impl Instance {
 			let PublishDecoder::Ts(republish) = &self.decoder else {
 				unreachable!("only a TS import republishes");
 			};
-			tracing::warn!(step = %republished.step, instance = %republish.instance(), "the source changed; republishing");
+			tracing::warn!(step = %republished.step, identity = %republish.identity(), "the source changed; republishing");
 			report_mpegts(&self.report, &republished.stats);
 			log.finish(&republished.stats);
 			if let Some(report) = &mut self.report {
@@ -1177,7 +1175,7 @@ fn fail(catalog: PublishCatalog, report: Option<crate::report::Stats>, err: anyh
 }
 
 /// Decode `chunk` into `decoder`, announcing `pending` once its catalog goes out, or return the
-/// change of source that ended the instance.
+/// change of source that ended the identity.
 fn feed(
 	decoder: &mut PublishDecoder,
 	pending: &mut Option<Pending>,
@@ -1705,7 +1703,7 @@ pub(crate) mod tests {
 		.await
 	}
 
-	/// A stdin TS import of `demo` on an origin of its own, and a reader of its first instance's
+	/// A stdin TS import of `demo` on an origin of its own, and a reader of its first identity's
 	/// broadcast.
 	fn ts_stdin() -> (Publish, moq_net::broadcast::Consumer) {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -1718,7 +1716,7 @@ pub(crate) mod tests {
 		let publish = Publish::stdin(
 			&origin,
 			"demo",
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			&PublishFormat::Ts { program: None },
 			Default::default(),
 		)
@@ -1773,7 +1771,7 @@ pub(crate) mod tests {
 		let publish = Publish::stdin(
 			&origin,
 			"cli",
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			&PublishFormat::Ts { program: None },
 			Default::default(),
 		)
@@ -1977,7 +1975,7 @@ pub(crate) mod tests {
 			let publish = Publish::stdin(
 				&origin,
 				"pt.hang",
-				moq_net::Instance::random(),
+				moq_net::Identity::random(),
 				&PublishFormat::TsPassthrough { pcr_pid: None },
 				Default::default(),
 			)
@@ -2441,7 +2439,7 @@ pub(crate) mod tests {
 			let publish = Publish::stdin(
 				&origin,
 				"demo",
-				moq_net::Instance::random(),
+				moq_net::Identity::random(),
 				&format,
 				Default::default(),
 			)
@@ -2535,12 +2533,12 @@ pub(crate) mod tests {
 		);
 	}
 
-	/// A source whose clock steps back republishes the path under a new instance, announced once
-	/// its catalog goes out, with the sections the first instance's catalog carried. The new
-	/// catalog reuses the first instance's mux rate, so an export of it needn't wait on a fresh
+	/// A source whose clock steps back republishes the path under a new identity, announced once
+	/// its catalog goes out, with the sections the first identity's catalog carried. The new
+	/// catalog reuses the first identity's mux rate, so an export of it needn't wait on a fresh
 	/// measurement window.
 	#[tokio::test(start_paused = true)]
-	async fn a_clock_step_republishes_under_a_new_instance() {
+	async fn a_clock_step_republishes_under_a_new_identity() {
 		// 5 s of H.264 and AAC at a constant 400 kb/s, its clock on PID 0x100.
 		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 		// Its first 1.5 s: short of a measurement window, so only a reused rate is in the catalog.
@@ -2550,7 +2548,7 @@ pub(crate) mod tests {
 
 		let origin = moq_tokio::origin::spawn();
 		let mut announced = origin.consume().announced();
-		let first = moq_net::Instance::random();
+		let first = moq_net::Identity::random();
 		let publish = Publish::stdin(
 			&origin,
 			"demo",
@@ -2580,19 +2578,19 @@ pub(crate) mod tests {
 		let (mut stdin, input_end) = tokio::io::duplex(2 * CLIP.len() + flag.len());
 		let mut import = std::pin::pin!(decode(decoder, catalog, input_end, publication));
 
-		// The instance of the next instance announced on the path.
+		// The identity of the next identity announced on the path.
 		let mut next = async |import: &mut std::pin::Pin<&mut _>| {
 			tokio::select! {
 				res = import => panic!("the import returned before its input ended: {res:?}"),
 				_ = kio::clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
-				instance = async {
+				identity = async {
 					loop {
 						use moq_net::announce::Event;
 						if let Event::Present(announce) = announced.next().await.unwrap() {
-							break announce.route.instance().clone();
+							break announce.route.identity().clone();
 						}
 					}
-				} => instance,
+				} => identity,
 			}
 		};
 		tokio::io::AsyncWriteExt::write_all(&mut stdin, CLIP).await.unwrap();
@@ -2604,22 +2602,22 @@ pub(crate) mod tests {
 			.ext
 			.mpegts
 			.mux_rate
-			.expect("the first instance measured its rate");
+			.expect("the first identity measured its rate");
 		drop(catalogs);
 
 		// The encoder restarts its clock and plays the clip again: a rewind, flagged.
 		tokio::io::AsyncWriteExt::write_all(&mut stdin, &[&flag[..], HEAD].concat())
 			.await
 			.unwrap();
-		assert_ne!(next(&mut import).await, first, "the new instance has its own instance");
+		assert_ne!(next(&mut import).await, first, "the new identity has its own identity");
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
 		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
-		assert!(catalog.echo.is_some(), "the new instance solicits feedback too");
+		assert!(catalog.echo.is_some(), "the new identity solicits feedback too");
 		assert_eq!(
 			catalog.ext.mpegts.mux_rate,
 			Some(rate),
-			"the new instance reuses the rate"
+			"the new identity reuses the rate"
 		);
 		// Its first group is already out with the catalog.
 		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
@@ -2628,7 +2626,7 @@ pub(crate) mod tests {
 			.recv_group()
 			.await
 			.unwrap()
-			.expect("the new instance's first group");
+			.expect("the new identity's first group");
 		drop(stdin);
 		import.await.unwrap();
 	}
@@ -2649,7 +2647,7 @@ pub(crate) mod tests {
 		let publish = Publish::stdin(
 			&origin,
 			"demo",
-			moq_net::Instance::random(),
+			moq_net::Identity::random(),
 			&PublishFormat::Ts { program: None },
 			Default::default(),
 		)
@@ -2661,7 +2659,7 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("a stream source");
 		};
-		let mut instance = Instance {
+		let mut identity = Identity {
 			decoder,
 			catalog,
 			pending: None,
@@ -2674,8 +2672,8 @@ pub(crate) mod tests {
 		let mut listed = false;
 		let mut output = [Vec::new(), Vec::new()];
 		for chunk in CLIP.iter().chain(CLIP).copied().collect::<Vec<_>>().chunks(8 * 188) {
-			if let Some(republished) = feed(&mut instance.decoder, &mut instance.pending, chunk).unwrap() {
-				instance
+			if let Some(republished) = feed(&mut identity.decoder, &mut identity.pending, chunk).unwrap() {
+				identity
 					.republished(&Sections::default(), republished, &mut log)
 					.unwrap();
 			}
@@ -2710,14 +2708,14 @@ pub(crate) mod tests {
 			}
 			tokio::time::advance(Duration::from_micros(30_080)).await;
 		}
-		let Instance {
+		let Identity {
 			decoder,
 			mut catalog,
 			control,
 			broadcast,
 			pending,
 			report,
-		} = instance;
+		} = identity;
 		let decoder = decoder.finish().unwrap();
 		catalog.finish().unwrap();
 		drop((decoder, catalog, control, broadcast, pending, report));
@@ -2793,7 +2791,7 @@ pub(crate) mod tests {
 			let publish = Publish::stdin(
 				&origin,
 				"demo",
-				moq_net::Instance::random(),
+				moq_net::Identity::random(),
 				&format,
 				Default::default(),
 			)

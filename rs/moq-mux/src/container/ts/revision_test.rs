@@ -28,6 +28,9 @@ const KLV: &[u8] = &[0x26, 0x09, 0x01, 0x00, 0xff, b'K', b'L', b'V', b'A', 0x0f,
 /// How long the export holds each frame.
 const DELAY: Duration = Duration::from_secs(2);
 
+/// How many PCR intervals the first span runs for: three seconds.
+const OPENING: u64 = 75;
+
 /// A PMT the export wrote: its program number, `version_number`, PCR PID, program descriptors,
 /// and each stream as `(stream_type, PID, descriptor bytes)`.
 #[derive(Debug, PartialEq)]
@@ -51,12 +54,12 @@ struct Span<'a> {
 /// after the last. Returns every PMT it wrote, each run of repeats once.
 async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
 	let spans: Vec<_> = spans.iter().map(|span| (PMT_PID, span)).collect();
-	tables(&reexport_frames(&spans, intervals, None).await, PMT_PID)
+	tables(&reexport_frames(&spans, OPENING, intervals, None).await, PMT_PID)
 }
 
-/// [`reexport`], each span's PAT naming its PMT on the PID beside it, at `rate` if given. Returns
-/// every frame the export wrote.
-async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64, rate: Option<u64>) -> Vec<Frame> {
+/// [`reexport`], each span's PAT naming its PMT on the PID beside it and the first running for
+/// `opening` intervals, at `rate` if given. Returns every frame the export wrote.
+async fn reexport_frames(spans: &[(u16, &Span<'_>)], opening: u64, intervals: u64, rate: Option<u64>) -> Vec<Frame> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -76,7 +79,7 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64, rate: Optio
 		mux.pat(&[(1, pmt_pid)])
 			.pmt_at(version as u8 % 32, pmt_pid, 1, CLOCK_PID, span.streams, 0);
 		// The import publishes its catalog once it has measured the multiplex rate.
-		let intervals = if version == 0 { 75 } else { intervals };
+		let intervals = if version == 0 { opening } else { intervals };
 		for _ in 0..intervals {
 			mux.packet(CLOCK_PID, Flags::pcr(ticks));
 			let (start, end) = (ticks / 300 + 9_000, (ticks + 40 * MS) / 300 + 9_000);
@@ -393,7 +396,7 @@ async fn a_descriptor_change_revises_the_entry_and_keeps_the_clock() {
 	let fra = Span {
 		streams: &[(AUDIO, AUDIO_PID, FRA)],
 	};
-	let frames = reexport_frames(&[(PMT_PID, &eng), (PMT_PID, &fra)], 25, None).await;
+	let frames = reexport_frames(&[(PMT_PID, &eng), (PMT_PID, &fra)], OPENING, 25, None).await;
 	let clocks: Vec<u16> = packets(&frames)
 		.filter(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0)
 		.map(pid)
@@ -1521,7 +1524,10 @@ async fn a_pmt_moved_before_its_tables_go_out_moves_every_copy() {
 	};
 	// The slow multiplex its span measures: the audio's own floor lets the first copies out before
 	// the move lands.
-	let frames = reexport_frames(&[(PMT_PID, &span), (MOVED_PMT_PID, &span)], 25, Some(75_200)).await;
+	// Whether the first unit out already leads with the tables depends on where its pack starts
+	// against the join, so the first assert checks the opening leaves them queued behind it.
+	let frames = reexport_frames(&[(PMT_PID, &span), (MOVED_PMT_PID, &span)], OPENING, 25, Some(75_200)).await;
+	assert!(pats(&frames[..1]).is_empty(), "the tables went out before the move");
 	assert_eq!(pats(&frames), [(0, MOVED_PMT_PID)]);
 	assert_eq!(
 		layouts(&tables(&frames, MOVED_PMT_PID)),
