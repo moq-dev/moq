@@ -119,7 +119,7 @@ impl Topology {
 		let a_to_r = link(version, &relay_a, &subscriber, None).await;
 		crate::support::announced(&subscriber.consume(), "live").await;
 
-		let topology = Self {
+		Self {
 			version,
 			publisher,
 			relay_a,
@@ -132,8 +132,7 @@ impl Topology {
 			_broadcast: broadcast,
 			_track: track,
 			written: vec!["snapshot".to_string()],
-		};
-		topology
+		}
 	}
 
 	fn write(&mut self, payload: &str) {
