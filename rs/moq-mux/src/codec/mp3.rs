@@ -169,12 +169,6 @@ impl Import {
 		self.track.discontinuity()
 	}
 
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
-
 	/// Publish one MP3 frame, stamping `pts` or a wall clock when absent.
 	///
 	/// MP3 is independently decodable, so the frame is marked a keyframe only when it starts a group

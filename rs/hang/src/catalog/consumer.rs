@@ -151,8 +151,7 @@ mod test {
 				.unwrap();
 			let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
 			let published = serde_json::json!({ "echo": { "path": reference } }).to_string();
-			let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-			group.write_frame(moq_net::Timestamp::ZERO, published).unwrap();
+			let group = track.append_group(moq_net::Timestamp::ZERO, published).unwrap();
 			group.finish().unwrap();
 			let result = consumer.next().await;
 			if accepted {
@@ -177,8 +176,7 @@ mod test {
 				crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, channels),
 			);
 			let at = moq_net::Timestamp::from_millis(ms).unwrap();
-			let mut group = track.append_group(at).unwrap();
-			group.write_frame(at, published.to_json().unwrap()).unwrap();
+			let group = track.append_group(at, published.to_json().unwrap()).unwrap();
 			group.finish().unwrap();
 			assert_eq!(
 				consumer.next().await.unwrap(),
@@ -210,11 +208,8 @@ mod test {
 			for ms in [1_000, 2_000, 3_000] {
 				let mut catalog = Catalog::<()>::default();
 				catalog.sync.interval = Some(std::time::Duration::from_millis(ms));
-				let mut group = track
-					.append_group(moq_net::Timestamp::from_millis(ms).unwrap())
-					.unwrap();
-				group
-					.write_frame(moq_net::Timestamp::from_millis(ms).unwrap(), catalog.to_json().unwrap())
+				let group = track
+					.append_group(moq_net::Timestamp::from_millis(ms).unwrap(), catalog.to_json().unwrap())
 					.unwrap();
 				group.finish().unwrap();
 			}
@@ -249,9 +244,8 @@ mod test {
 			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
 			.unwrap();
 		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
+		let group = track
+			.append_group(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
 			.unwrap();
 		group.finish().unwrap();
 		assert!(matches!(

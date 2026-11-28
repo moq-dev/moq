@@ -652,21 +652,25 @@ impl<T: Serialize> Snapshot<T> {
 			if let Some(group) = self.group.take() {
 				group.finish()?;
 			}
-			if self.fresh && self.largest.is_none() {
-				self.track.skip_groups(0..start);
-			}
-			self.group = Some(self.track.append_group(timestamp)?);
+			// Appending the first group skips every start below it, which only a fresh name may
+			// claim; otherwise it is created, and later appends skip from it.
+			let group = match self.fresh || self.largest.is_some() {
+				true => self.track.append_group(timestamp, frame.payload.clone())?,
+				false => self.track.create_group(timestamp, frame.payload.clone())?,
+			};
+			self.group = Some(group);
 			self.largest = Some(start);
 			self.opened = Some(stamp.group);
 			#[cfg(feature = "bench")]
 			{
 				self.held = len;
 			}
-		}
-		let group = self.group.as_mut().expect("a delta follows a snapshot");
-		if let Err(err) = group.write_frame(timestamp, frame.payload.clone()) {
-			let _ = self.group.take().unwrap().finish();
-			return Err(err.into());
+		} else {
+			let group = self.group.as_mut().expect("a delta follows a snapshot");
+			if let Err(err) = group.write_frame(timestamp, frame.payload.clone()) {
+				let _ = self.group.take().unwrap().finish();
+				return Err(err.into());
+			}
 		}
 		if !self.deltas {
 			self.group.take().unwrap().finish()?;
@@ -1888,8 +1892,7 @@ mod tests {
 				link(&middle, &edge, version).await,
 			];
 			let at = |secs| Timestamp::from_secs(secs).unwrap();
-			let mut first = track.append_group(at(1)).unwrap();
-			first.write_frame(at(1), b"{}".to_vec()).unwrap();
+			let mut first = track.append_group(at(1), b"{}".to_vec()).unwrap();
 
 			let consumer = edge.consume().with_hidden(true);
 			let remote = consumer.request(".stats/node", None).await.unwrap();
@@ -1913,8 +1916,7 @@ mod tests {
 				b"{\"a\":1}".as_slice()
 			);
 
-			let mut second = track.append_group(at(3)).unwrap();
-			second.write_frame(at(3), b"{\"a\":1}".to_vec()).unwrap();
+			let second = track.append_group(at(3), b"{\"a\":1}".to_vec()).unwrap();
 			// A latest-only reader at the edge sees the next group arrive there.
 			let mut latest = remote.track("t.json").unwrap().subscribe(None).await.unwrap();
 			while latest.recv_group().await.unwrap().unwrap().start != second.start {}
@@ -2076,9 +2078,9 @@ mod tests {
 
 			if frames > 0 {
 				let mut group = producer
-					.append_group(Timestamp::from_millis(0).unwrap())
+					.append_group(Timestamp::ZERO, vec![0u8; frame_size])
 					.expect("group");
-				for _ in 0..frames {
+				for _ in 1..frames {
 					group
 						.write_frame(Timestamp::ZERO, vec![0u8; frame_size])
 						.expect("write");
@@ -2536,12 +2538,12 @@ mod tests {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let mut group = video
-				.append_group(Timestamp::from_millis(video.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+			let group = video
+				.append_group(
+					Timestamp::from_millis(video.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+					vec![0u8; size],
+				)
 				.expect("group");
-			group
-				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; size])
-				.expect("write");
 			group.finish().expect("close");
 			let mut group = sub.recv_group().await.expect("recv").expect("group");
 			while group.read_frame().await.expect("read").is_some() {}
@@ -3130,8 +3132,7 @@ mod tests {
 			subs.push(track.subscribe(None).await.expect("subscribe"));
 		}
 		{
-			let mut group = video.append_group(Timestamp::from_millis(0).unwrap()).expect("group");
-			group.write_frame(Timestamp::ZERO, vec![0u8; 10]).expect("write");
+			let group = video.append_group(Timestamp::ZERO, vec![0u8; 10]).expect("group");
 			group.finish().expect("close");
 		}
 		drive_tick().await;

@@ -130,12 +130,6 @@ impl Import {
 	pub fn set_enabled(&mut self, enabled: bool) -> crate::Result<()> {
 		self.catalog.set_enabled(&mut self.track, enabled)
 	}
-
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
 }
 
 #[cfg(test)]

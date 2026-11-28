@@ -25,6 +25,7 @@ mod source;
 pub(crate) mod test_util;
 mod text;
 mod ttml;
+mod writer;
 
 pub mod cts;
 pub mod flv;
@@ -42,6 +43,7 @@ pub(crate) use input::Input;
 pub use join::Join;
 pub use producer::{Finished, Guard, Producer};
 pub(crate) use source::{ExportSource, Resume};
+pub use writer::Writer;
 
 /// The media role that determines how a container represents frame durations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +209,7 @@ pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
 /// A non-keyframe frame arrived with no open group.
 ///
 /// A track must open with a keyframe (and so must the frame after
-/// [`cut`](Producer::cut) / [`seek`](Producer::seek)).
+/// [`cut`](Producer::cut)).
 /// [`Producer::write`] returns this so a caller joining mid-stream can skip
 /// frames until the first keyframe instead of treating it as fatal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -219,8 +221,7 @@ pub struct MissingKeyframe;
 #[error("group endpoint precedes a frame of its own")]
 pub struct InvalidEnd;
 
-/// A group starts before the previous group did, or a seek before what the track holds: the source
-/// restarted, which is a new broadcast.
+/// A group starts before the previous group did: the source restarted, which is a new broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
 	"frame timestamp {} is below the previous group's start {}",
@@ -230,7 +231,7 @@ pub struct InvalidEnd;
 pub struct TimestampRewind {
 	/// The refused frame's timestamp.
 	pub timestamp: moq_net::Timestamp,
-	/// The lowest allowed timestamp: the previous group's start, or the lowest start a seek allows.
+	/// The lowest allowed timestamp: the previous group's start.
 	pub floor: moq_net::Timestamp,
 }
 
@@ -252,8 +253,9 @@ pub trait Container {
 		+ From<InvalidEnd>
 		+ From<TimestampRewind>;
 
-	/// Encode one or more frames into a single moq-lite frame appended to `group`.
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error>;
+	/// Encode one or more frames into moq-lite frames written to `group`, whose first frame
+	/// creates it on the track.
+	fn write(&self, group: &mut Writer<'_>, frames: &[Frame]) -> Result<(), Self::Error>;
 
 	/// Decode one moq-lite frame read from a group into media frames.
 	///
@@ -306,7 +308,7 @@ pub trait Container {
 	/// Write any format-specific endpoint before the producer closes the group.
 	fn finish_group(
 		&self,
-		_group: &mut moq_net::group::Producer,
+		_group: &mut crate::container::Writer<'_>,
 		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
 		Ok(())

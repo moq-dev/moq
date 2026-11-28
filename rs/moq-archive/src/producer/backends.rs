@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Method, Uri};
 use bytes::Bytes;
 use futures::TryStreamExt;
-use moq_net::{Timescale, Timestamp, broadcast, group, track};
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use object_store::aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut};
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -32,22 +32,20 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 		)
 		.unwrap();
 	for sequence in 0..groups {
-		let mut group = video.create_group(group::Info { start: sequence }).unwrap();
-		for frame in 0..2 {
-			let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
-			group.write_frame(pts, format!("v{sequence}.{frame}")).unwrap();
-		}
+		let pts = |frame: u64| Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
+		let mut group = video.create_group(pts(0), format!("v{sequence}.0")).unwrap();
+		group.write_frame(pts(1), format!("v{sequence}.1")).unwrap();
 		group.finish().unwrap();
 	}
 	let text = source
 		.create_track(CHAT, track::Info::default().with_max_age(None))
 		.unwrap();
 	for (sequence, frames) in chat {
-		let mut group = text.create_group(group::Info { start: *sequence }).unwrap();
-		for frame in *frames {
-			group
-				.write_frame(moq_net::Timestamp::unscaled(*sequence), frame.to_string())
-				.unwrap();
+		let at = moq_net::Timestamp::unscaled(*sequence);
+		let (first, rest) = frames.split_first().expect("a group holds a frame");
+		let mut group = text.create_group(at, first.to_string()).unwrap();
+		for frame in rest {
+			group.write_frame(at, frame.to_string()).unwrap();
 		}
 		group.finish().unwrap();
 	}
@@ -102,7 +100,7 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 		store,
 		&[
 			path(store, VIDEO, "0000000000000000000-0000000000000000000"),
-			path(store, VIDEO, "0000000000000000002-0000000000000000000"),
+			path(store, VIDEO, "0000000000000002000-0000000000000000000"),
 			path(store, CHAT, "0000000000000000000-0000000000000000000"),
 		],
 	)
@@ -111,12 +109,12 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	assert_eq!(
 		decode(
 			&first_objects,
-			"video%2F1080p/0000000000000000002-0000000000000000000",
+			"video%2F1080p/0000000000000002000-0000000000000000000",
 			true,
 		),
 		[
-			(2, vec!["v2.0".into(), "v2.1".into()]),
-			(3, vec!["v3.0".into(), "v3.1".into()]),
+			(2000, vec!["v2.0".into(), "v2.1".into()]),
+			(3000, vec!["v3.0".into(), "v3.1".into()]),
 		],
 		"the first run stores both groups before it is cancelled",
 	);
@@ -181,8 +179,8 @@ async fn recordings_are_byte_identical_on_every_backend() {
 			"chat%2Ejson/end",
 			"video%2F1080p/.info",
 			"video%2F1080p/0000000000000000000-0000000000000000000",
-			"video%2F1080p/0000000000000000002-0000000000000000000",
-			"video%2F1080p/0000000000000000004-0000000000000000000",
+			"video%2F1080p/0000000000000002000-0000000000000000000",
+			"video%2F1080p/0000000000000004000-0000000000000000000",
 			"video%2F1080p/end",
 		]
 	);
@@ -196,10 +194,10 @@ async fn recordings_are_byte_identical_on_every_backend() {
 		"the resumed group continues in its own object"
 	);
 	assert_eq!(
-		decode(&expected, "video%2F1080p/0000000000000000004-0000000000000000000", true),
+		decode(&expected, "video%2F1080p/0000000000000004000-0000000000000000000", true),
 		[
-			(4, vec!["v4.0".into(), "v4.1".into()]),
-			(5, vec!["v5.0".into(), "v5.1".into()])
+			(4000, vec!["v4.0".into(), "v4.1".into()]),
+			(5000, vec!["v5.0".into(), "v5.1".into()])
 		],
 		"the resumed timed track continues after its last stored group"
 	);

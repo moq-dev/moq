@@ -192,12 +192,6 @@ impl Import {
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
-
 	/// Publish one whole frame, stamping `pts` or a wall clock when absent.
 	///
 	/// Legacy frames are self-describing and independently decodable, so the frame is marked a

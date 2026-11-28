@@ -26,6 +26,8 @@ const PACKET: usize = 188;
 pub(super) struct Object {
 	pub group: u64,
 	pub micros: u64,
+	/// The transport timestamp it was published at, which keys the group it opens.
+	pub transport: moq_net::Timestamp,
 	pub payload: Bytes,
 }
 

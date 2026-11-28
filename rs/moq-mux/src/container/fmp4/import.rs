@@ -95,7 +95,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	dropped_metadata: u64,
 
-	// A seek or discontinuity waiting for the fragment still publishing.
+	// A rejoin or discontinuity waiting for the fragment still publishing.
 	deferred: Deferred,
 }
 
@@ -194,9 +194,6 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	// `container::Producer`), so it reports what its estimator measured itself.
 	member: Option<crate::catalog::interval::Member>,
 
-	// Start to key the next group with instead of its fragment's timestamp, set by `Import::seek`.
-	pending_start: Option<u64>,
-
 	// Measures the track's catalog jitter and bitrate from the fragments; the descriptor's own
 	// bitrate, when it declares one, still wins over what this measures.
 	estimator: Estimator,
@@ -220,7 +217,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.rendition.estimate(reading)
 	}
 
-	/// Close the open group, so the next fragment opens one at `pending_start` or its own timestamp.
+	/// Close the open group, so the next fragment opens one at its own timestamp.
 	/// `end` is where its media stops, when known, which the bitrate estimate divides by.
 	fn close(&mut self, end: Option<Timestamp>) -> crate::Result<()> {
 		self.open = false;
@@ -424,7 +421,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// size accepts, is refused before they are planned, and a `moov` declaring more than 256
 	/// tracks before any is created.
 	///
-	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
+	/// A decode error is terminal: later decodes, cuts, rejoins and discontinuities return the same
 	/// error without reading input or changing the tracks.
 	/// The refusing call may leave bytes unread, so even box-aligned callers must replace the
 	/// importer to resume. [`finish`](Self::finish) still ends the tracks with what was accepted.
@@ -707,7 +704,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			keyframe: None,
 			tainted: false,
 			member,
-			pending_start: None,
 			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
 		})
@@ -1242,7 +1238,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					let land = output.plan(&mut run, placement, track.kind)?;
 					// A group the plan opened belongs to the segment, so a later run of this track in
 					// the same moof continues it.
-					if leads || matches!(land, Some(Land::Opens { .. })) {
+					if leads || matches!(land, Some(Land::Opens)) {
 						track.segment = Some(self.segment);
 					}
 					match land {
@@ -1467,8 +1463,8 @@ enum ChunkOutput {
 enum Land {
 	/// In the open group.
 	Continues,
-	/// In a new group, keyed `start` when a seek named one, else by its own timestamp.
-	Opens { start: Option<u64> },
+	/// In a new group, keyed by its own timestamp.
+	Opens,
 }
 
 /// Where a fragment lands on its track.
@@ -1728,12 +1724,12 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			opens = false;
 		}
 
-		// A group is keyed by its earliest sample past the newest, which `at` already passes, or by
-		// a seek's start, and the key has to pass the latest group's. A fragment whose key doesn't
-		// continues the open group, decided before trimming so that it keeps the samples only the
-		// groups before it bound; with none open it is refused.
+		// A group is keyed by its earliest sample past the newest, which `at` already passes, and
+		// the key has to pass the latest group's. A fragment whose key doesn't continues the open
+		// group, decided before trimming so that it keeps the samples only the groups before it
+		// bound; with none open it is refused.
 		let mut key = None;
-		if opens && self.pending_start.is_none() {
+		if opens {
 			let mut first = at;
 			for sample in &run.samples {
 				let timestamp = placement.offset.apply(sample.timestamp)?;
@@ -1815,19 +1811,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 		let earliest = placement.offset.apply(run.earliest)?;
 		let land = match opens {
-			true => match self.pending_start.take() {
-				Some(start) => {
-					self.key = Some(start);
-					Land::Opens { start: Some(start) }
-				}
-				None => {
-					self.key = key;
-					Land::Opens { start: None }
-				}
-			},
+			true => {
+				self.key = key;
+				Land::Opens
+			}
 			false => Land::Continues,
 		};
-		if let Land::Opens { .. } = land {
+		if let Land::Opens = land {
 			self.start = Some(earliest);
 			self.ceiling = self.newest;
 		}
@@ -1853,31 +1843,29 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
 		let timestamp = placement.offset.apply(run.earliest)?;
-		let group = match land {
-			Land::Opens { start } => {
+		let size = prefix
+			.len()
+			.checked_add(run.samples.iter().map(|sample| sample.range.len()).sum())
+			.ok_or(Error::InvalidDataOffset)?;
+		let info = moq_net::frame::Info {
+			timestamp,
+			size: size as u64,
+		};
+		let mut writer = match land {
+			Land::Opens => {
 				if let Some(prev) = self.group.take() {
 					prev.finish()?;
 				}
 				// Close the previous group for the bitrate estimator (used only when the
 				// descriptor didn't declare a bitrate).
 				self.estimator.cut(Some(timestamp));
-				match start {
-					Some(start) => self.track.create_group(moq_net::group::Info { start })?,
-					None => self.track.append_group(timestamp)?,
-				}
+				// The fragment is the group's first frame, which creates it keyed by its timestamp.
+				self.track.append_frame(info)?
 			}
-			Land::Continues => self.group.take().ok_or(Error::NoKeyframe)?,
+			Land::Continues => self.group.take().ok_or(Error::NoKeyframe)?.create_frame(info)?,
 		};
-		let size = prefix
-			.len()
-			.checked_add(run.samples.iter().map(|sample| sample.range.len()).sum())
-			.ok_or(Error::InvalidDataOffset)?;
-		let mut writer = group.create_frame(moq_net::frame::Info {
-			timestamp,
-			size: size as u64,
-		})?;
 		writer.write(prefix)?;
-		Ok((writer, matches!(land, Land::Opens { .. })))
+		Ok((writer, matches!(land, Land::Opens)))
 	}
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {
@@ -1968,7 +1956,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		// No input follows, so the buffer that waited for the rest of an atom is done.
 		self.buffer = BytesMut::new();
-		// A seek or discontinuity waiting on the truncated fragment has no fragment left to land on.
+		// A rejoin or discontinuity waiting on the truncated fragment has no fragment left to land on.
 		self.deferred = Deferred::default();
 		let truncated = match self.body.take() {
 			Some(Body::Media(mut mdat)) if !mdat.chunks.is_empty() => {
@@ -2024,65 +2012,34 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 	}
 
-	/// Close the current group on every track and open the next one at `start`, in each track's timescale.
-	///
-	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
-	/// control is intentionally not exposed. Skipping ahead is not a new timeline, so the
-	/// next fragment must still advance past the last decode time; see
-	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
-	/// is already past `start` continues from its own next start instead. Video resumes at its
-	/// next sync sample, dropping the samples before it.
-	///
-	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
-	/// seek waits for it to finish publishing.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.reposition(Seek::Start(start))
-	}
-
-	/// Close the current group on every track, as [`seek`](Self::seek) does, but key the groups
-	/// after it at their own times: for a source that lost what came between and can't name where
-	/// it resumes until it reads it, such as an HLS reader that fell behind its playlist.
+	/// Close the current group on every track, keying the groups after it at their own times: for
+	/// a source that lost what came between and can't name where it resumes until it reads it,
+	/// such as an HLS reader that fell behind its playlist. Video resumes at its next sync sample,
+	/// dropping the samples before it.
 	///
 	/// Each group closes without an end, so a reader sees the gap rather than a group that seems to
-	/// run up to the media after it.
+	/// run up to the media after it. A fragment whose samples are still arriving owns its groups
+	/// until its last sample, so the rejoin waits for it to finish publishing.
 	pub fn rejoin(&mut self) -> Result<()> {
-		self.reposition(Seek::Own)
-	}
-
-	fn reposition(&mut self, seek: Seek) -> Result<()> {
 		self.input.check()?;
 		if self.publishing() {
-			self.deferred.seek = Some(seek);
+			self.deferred.rejoin = true;
 			return Ok(());
 		}
-		self.apply_seek(seek)
+		self.apply_rejoin()
 	}
 
-	fn apply_seek(&mut self, seek: Seek) -> Result<()> {
+	fn apply_rejoin(&mut self) -> Result<()> {
 		self.reset_audio();
 		for track in self.text.values_mut() {
-			match seek {
-				Seek::Start(start) => {
-					let next = track.producer.next_start();
-					track.producer.seek(start.max(next))?;
-				}
-				Seek::Own => track.producer.cut(None)?,
-			}
+			track.producer.cut(None)?;
 		}
 		for track in self.tracks.values_mut() {
 			// The next group opens on a sync sample, so video drops the samples before one.
 			if track.kind == Kind::Video {
 				track.orphaned = true;
 			}
-			media!(&mut track.output, producer => match seek {
-				Seek::Start(start) => producer.seek(start)?,
-				Seek::Own => producer.cut(None)?,
-			}, passthrough => {
-				passthrough.close(None)?;
-				if let Seek::Start(start) = seek {
-					passthrough.pending_start = Some(start);
-				}
-			});
+			media!(&mut track.output, producer => producer.cut(None)?, passthrough => passthrough.close(None)?);
 		}
 		Ok(())
 	}
@@ -2091,7 +2048,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// fragment's decode time is not compared with the last one on each track. A timeline that
 	/// restarts below where it was still fails with
 	/// [`TimestampRewind`](crate::container::TimestampRewind): a track refuses a group that
-	/// rewinds, before publishing any of it. Like [`seek`](Self::seek), it waits for a fragment
+	/// rewinds, before publishing any of it. Like [`rejoin`](Self::rejoin), it waits for a fragment
 	/// still arriving to finish publishing.
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.input.check()?;
@@ -2148,12 +2105,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				media!(&mut track.output, producer => producer.cut(end)?, passthrough => passthrough.close(end)?);
 			}
 		}
-		let Deferred { seek, discontinuity } = std::mem::take(&mut self.deferred);
+		let Deferred { rejoin, discontinuity } = std::mem::take(&mut self.deferred);
 		if discontinuity {
 			self.apply_discontinuity();
 		}
-		if let Some(seek) = seek {
-			self.apply_seek(seek)?;
+		if rejoin {
+			self.apply_rejoin()?;
 		}
 		Ok(())
 	}
@@ -2162,17 +2119,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 /// Controls called while a fragment was still publishing, applied once it has.
 #[derive(Default)]
 struct Deferred {
-	seek: Option<Seek>,
+	rejoin: bool,
 	discontinuity: bool,
-}
-
-/// Where the groups after a [`seek`](Import::seek) or [`rejoin`](Import::rejoin) start.
-#[derive(Clone, Copy)]
-enum Seek {
-	/// The next group starts here, in each track's timescale.
-	Start(u64),
-	/// Each group starts at its own first sample.
-	Own,
 }
 
 /// An fMP4 import that [finished](Import::finish): every track has ended, and they can still be
@@ -2390,7 +2338,7 @@ mod tests {
 				"split: {split}"
 			);
 			assert_eq!(import.cut().unwrap_err().to_string(), first);
-			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
+			assert_eq!(import.rejoin().unwrap_err().to_string(), first);
 			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
 			// The accepted media still ends cleanly.
 			let _import = import.finish().unwrap();
@@ -2749,7 +2697,7 @@ mod tests {
 	}
 
 	#[test]
-	fn seek_waits_for_the_publishing_fragment() {
+	fn rejoin_waits_for_the_publishing_fragment() {
 		const SIZE: usize = 64;
 		for passthrough in [false, true] {
 			let (mut import, id, _) = initialized(passthrough);
@@ -2761,7 +2709,7 @@ mod tests {
 			import.decode(&sample[..SIZE / 2]).unwrap();
 			// The open frame holds group 0, so neither control may close it underneath the sample.
 			import.discontinuity().unwrap();
-			import.seek(100).unwrap();
+			import.rejoin().unwrap();
 			import.decode(&sample[SIZE / 2..]).unwrap();
 			assert_eq!(groups(&mut consumer), [(0, Some(1))], "passthrough: {passthrough}");
 			// The discontinuity lets the next fragment restate a decode time inside the last
@@ -2771,7 +2719,10 @@ mod tests {
 				.unwrap();
 			import.decode(&sample).unwrap();
 			let _finished = import.finish().unwrap();
-			assert_eq!(groups(&mut consumer), [(100, Some(1))], "passthrough: {passthrough}");
+			// The rejoined group is keyed by its own fragment: 512 ticks of the 22.05 kHz track
+			// passed through, or that in the unwrapped track's microseconds.
+			let start = if passthrough { 512 } else { 23_219 };
+			assert_eq!(groups(&mut consumer), [(start, Some(1))], "passthrough: {passthrough}");
 		}
 	}
 

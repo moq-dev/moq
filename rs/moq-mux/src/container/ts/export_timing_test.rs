@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Wake, Waker};
 use std::time::Duration;
 
+use crate::container::test_util::Lazy;
+
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
 use kio::clock::Instant;
@@ -77,10 +79,10 @@ struct Live {
 	catalog: crate::catalog::Producer,
 	/// Written group by group, so a group can be left open: see [`Self::run`].
 	video: moq_net::track::Producer,
-	group: Option<moq_net::group::Producer>,
+	group: Option<Lazy>,
 	/// Whether the open group has stalled, and the stalled groups, kept open.
 	stalling: bool,
-	stalled: Vec<moq_net::group::Producer>,
+	stalled: Vec<Lazy>,
 	audio: Producer<HangContainer>,
 	source: crate::Source,
 	/// Media time per unit of the receivers' clock: above 1 the source runs fast.
@@ -287,8 +289,7 @@ impl Live {
 					}
 				}
 				if keyframe {
-					let start = video.strict_add_signed(self.offset);
-					self.group = Some(self.video.append_group(Timestamp::from_micros(start).unwrap()).unwrap());
+					self.group = Some(Lazy::appending(&self.video));
 				}
 				if stall(tick) {
 					self.stalling = true;
@@ -358,7 +359,7 @@ impl Live {
 				self.tick += 1;
 			}
 		}
-		let boundary = boundary.expect("the stall crosses one group boundary");
+		assert!(boundary.is_some(), "the stall crosses one group boundary");
 		assert!(!tail.is_empty(), "the stall starts within a group");
 		self.advance(resume, legs);
 
@@ -368,8 +369,7 @@ impl Live {
 			self.send_audio();
 		}
 		self.audio_index = end;
-		let start = (boundary * VIDEO_US).strict_add_signed(self.offset);
-		let mut group = self.video.append_group(Timestamp::from_micros(start).unwrap()).unwrap();
+		let mut group = Lazy::appending(&self.video);
 		for frame in newer {
 			write_video(&mut group, frame);
 		}
@@ -482,9 +482,9 @@ impl Live {
 }
 
 /// Write one video frame to `group`.
-fn write_video(group: &mut moq_net::group::Producer, frame: Frame) {
+fn write_video(group: &mut Lazy, frame: Frame) {
 	HangContainer::Legacy(crate::container::Kind::Video)
-		.write(group, &[frame])
+		.write(&mut group.writer(), &[frame])
 		.unwrap();
 }
 
@@ -1102,9 +1102,12 @@ async fn a_successor_settles_held_video_across_a_skip_or_restart() {
 				live.group.take().unwrap().finish().unwrap();
 				// A microsecond before the keyframe that resumes: group starts strictly increase.
 				let at = live.tick * VIDEO_US - 1;
-				let mut marker = live.video.append_group(Timestamp::from_micros(at).unwrap()).unwrap();
+				let mut marker = Lazy::appending(&live.video);
 				HangContainer::Legacy(crate::container::Kind::Video)
-					.write(&mut marker, &[crate::container::test_util::raw_frame(at, b"", true)])
+					.write(
+						&mut marker.writer(),
+						&[crate::container::test_util::raw_frame(at, b"", true)],
+					)
 					.unwrap();
 				marker.finish().unwrap();
 			} else {

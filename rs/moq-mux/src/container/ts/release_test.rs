@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use crate::container::test_util::Lazy;
+
 use bytes::Bytes;
 use kio::clock::Instant;
 
@@ -74,14 +76,17 @@ async fn import(data: &[u8]) -> Imported {
 				objects.push(Object {
 					group: group.start,
 					micros,
+					transport: frame.timestamp,
 					payload: Bytes::new(),
 				});
 				continue;
 			}
+			let transport = frame.timestamp;
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
 				group: group.start,
 				micros: frame.timestamp.as_micros().unwrap() as u64,
+				transport,
 				payload: frame.payload,
 			});
 		}
@@ -180,7 +185,7 @@ fn publish(
 	let start = Instant::now();
 	let task = tokio::spawn(async move {
 		let _keep = (&broadcast, &keep);
-		let mut group: Option<(u64, moq_net::group::Producer)> = None;
+		let mut group: Option<(u64, Lazy)> = None;
 		let mut skips = skips.into_iter().peekable();
 		let mut due = Duration::ZERO;
 		for (i, object) in objects.into_iter().enumerate() {
@@ -193,20 +198,24 @@ fn publish(
 				while let Some(run) = skips.next_if(|run| run.end <= object.group) {
 					track.skip_groups(run);
 				}
-				let info = moq_net::group::Info { start: object.group };
-				group = Some((object.group, track.create_group(info).unwrap()));
+				group = Some((object.group, Lazy::new(&track)));
 			}
 			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
 			let group = &mut group.as_mut().unwrap().1;
 			if object.payload.is_empty() {
-				group.write_frame(timestamp, Bytes::new()).unwrap();
+				group.write_frame(object.transport, Bytes::new()).unwrap();
 				continue;
 			}
-			let frame = hang::container::Frame {
+			let mut buf = bytes::BytesMut::new();
+			hang::container::Frame {
 				timestamp,
 				payload: object.payload,
-			};
-			frame.write_to(group).unwrap();
+			}
+			.encode(&mut buf)
+			.unwrap();
+			group.write_frame(object.transport, buf.freeze()).unwrap();
+			// The importer keyed each group by its first frame, which recreates it at the same start.
+			assert_eq!(group.start, object.group);
 		}
 		if let Some((sequence, group)) = group {
 			end(sequence, group, &cut);
@@ -231,7 +240,7 @@ fn publish(
 }
 
 /// Finish `group`, or abort it as evicted if it is one of the `cut`.
-fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
+fn end(sequence: u64, group: Lazy, cut: &[u64]) {
 	match cut.contains(&sequence) {
 		true => group.abort(moq_net::Error::Old).unwrap(),
 		false => {
@@ -784,8 +793,9 @@ async fn a_backlog_stays_in_the_source_until_due() {
 	let mut objects = import(KYRION).await.objects;
 	// Keep the capture in one retained group: joining newer groups is a separate
 	// live-edge policy, while this regression bounds an unread group itself.
+	let first = objects[0].group;
 	for object in &mut objects {
-		object.group = 0;
+		object.group = first;
 	}
 	let origin = objects[0].micros;
 	for delay in [Duration::ZERO, Duration::from_millis(100)] {
@@ -882,6 +892,12 @@ async fn follow(
 		let rewind = tail[0].micros - head.last().unwrap().micros + back.as_micros() as u64;
 		for object in &mut tail {
 			object.micros -= rewind;
+			// The track counts microseconds, so its keys and transport times rewind with it.
+			object.group -= rewind;
+			object.transport = object
+				.transport
+				.checked_sub(moq_net::Timestamp::from_micros(rewind).unwrap())
+				.unwrap();
 		}
 	}
 

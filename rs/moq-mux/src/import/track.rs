@@ -209,7 +209,7 @@ macro_rules! import {
 ///
 /// Video groups by its own keyframes. Audio is independently decodable per frame, so it has no
 /// boundary of its own and accumulates into the current group until the caller draws one with
-/// [`cut`](Self::cut) or [`seek`](Self::seek). Cut once a group holds about
+/// [`cut`](Self::cut). Cut once a group holds about
 /// [`Join::DEFAULT`](crate::container::Join::DEFAULT) of audio: frames forward as they are written
 /// either way, and each group costs a QUIC stream, so cutting per frame spends one per packet. An
 /// audio track that is never cut is one unbounded group, which strands late subscribers and the
@@ -354,7 +354,7 @@ impl Track {
 			tracing::warn!(
 				name = self.name(),
 				after = ?AUDIO_GROUP_WARN_AFTER,
-				"audio group is still open; call cut() or seek() to bound it"
+				"audio group is still open; call cut() to bound it"
 			);
 		}
 	}
@@ -509,13 +509,6 @@ impl Track {
 			TrackKind::Flac(_) => return Err(not_video(AudioFormat::Flac)),
 		}
 		Ok(())
-	}
-
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.group_start = None;
-		self.reset_split();
-		import!(&mut self.kind, import => import.seek(start))
 	}
 
 	/// Drop the partial access unit of a format split from a byte stream.
@@ -817,14 +810,6 @@ impl TrackStream {
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		stream!(&mut self.kind, _, import => import.cut(end))
-	}
-
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		stream!(&mut self.kind, split, import => {
-			split.reset();
-			import.seek(start)
-		})
 	}
 
 	/// A watch-only handle to the track's subscriber demand.
@@ -1242,7 +1227,7 @@ mod tests {
 	}
 
 	/// Driven directly (not through the facade), the codec importer accumulates audio frames into the
-	/// current group until an explicit `seek`/`cut`, marking only the first frame of each group a
+	/// current group until an explicit `cut`, marking only the first frame of each group a
 	/// keyframe. This is how a caller drives its own audio grouping.
 	#[tokio::test(start_paused = true)]
 	async fn codec_import_accumulates_until_boundary() {
@@ -1253,7 +1238,7 @@ mod tests {
 		import
 			.decode(b"b", Some(Timestamp::from_micros(10_000).unwrap()))
 			.unwrap();
-		import.seek(1).unwrap();
+		import.cut(None).unwrap();
 		import
 			.decode(b"c", Some(Timestamp::from_micros(20_000).unwrap()))
 			.unwrap();
@@ -1572,61 +1557,29 @@ mod tests {
 	}
 
 	async fn headers_survive_reset(format: VideoFormat, init: Vec<u8>, keyframe: Vec<u8>) {
-		for seek in [false, true] {
-			let (broadcast, catalog) = new_broadcast();
-			let consumer = broadcast.consume();
-			let mut import = Track::video(
-				broadcast.reserve_track("video").unwrap(),
-				catalog.reserve(),
-				VideoInit::new(format, init.clone()),
-			)
-			.unwrap();
-			// Repeated timeline breaks must retain the init until a picture uses it.
-			for _ in 0..2 {
-				if seek {
-					import.seek(7).unwrap();
-				} else {
-					import.discontinuity().unwrap();
-				}
-			}
-			let timestamp = Timestamp::from_micros(1_000).unwrap();
-			import.decode(&keyframe, Some(timestamp)).unwrap();
-			let _finished = import.finish().unwrap();
-			let frame = first_frame(&consumer, "video").await;
-			assert!(frame.keyframe, "{format}, seek={seek}");
-			assert_eq!(frame.timestamp, timestamp, "{format}, seek={seek}");
-			assert_eq!(
-				frame.payload.as_ref(),
-				[init.as_slice(), &keyframe].concat(),
-				"{format}, seek={seek}"
-			);
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(format, init.clone()),
+		)
+		.unwrap();
+		// Repeated timeline breaks must retain the init until a picture uses it.
+		for _ in 0..2 {
+			import.discontinuity().unwrap();
 		}
-
-		for buffered in [false, true] {
-			let (broadcast, catalog) = new_broadcast();
-			let consumer = broadcast.consume();
-			let mut stream = TrackStream::video(
-				broadcast.reserve_track("video").unwrap(),
-				catalog.reserve(),
-				VideoInit::new(format, init.clone()),
-			)
-			.unwrap();
-			if buffered {
-				stream.decode(&keyframe).unwrap();
-			}
-			for _ in 0..2 {
-				stream.seek(7).unwrap();
-			}
-			stream.decode(&keyframe).unwrap();
-			let _finished = stream.finish().unwrap();
-			let frame = first_frame(&consumer, "video").await;
-			assert!(frame.keyframe, "{format}: streaming seek");
-			assert_eq!(
-				frame.payload.as_ref(),
-				[init.as_slice(), &keyframe].concat(),
-				"{format}: streaming seek"
-			);
-		}
+		let timestamp = Timestamp::from_micros(1_000).unwrap();
+		import.decode(&keyframe, Some(timestamp)).unwrap();
+		let _finished = import.finish().unwrap();
+		let frame = first_frame(&consumer, "video").await;
+		assert!(frame.keyframe, "{format}");
+		assert_eq!(frame.timestamp, timestamp, "{format}");
+		assert_eq!(
+			frame.payload.as_ref(),
+			[init.as_slice(), &keyframe].concat(),
+			"{format}"
+		);
 	}
 
 	/// A picture an init carries is published at finish when no decode follows it.
@@ -1725,7 +1678,7 @@ mod tests {
 		);
 	}
 
-	/// A keyframe after a pre-picture seek carries the retained init header ahead of its own. The
+	/// A keyframe after a pre-picture discontinuity carries the retained init header ahead of its own. The
 	/// keyframe's own, which the decoder applies, configures the catalog.
 	#[tokio::test(start_paused = true)]
 	async fn av01_keyframe_header_supersedes_retained_init() {
@@ -1751,7 +1704,7 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(codecs(&catalog), ["av01.0.08M"]);
-		import.seek(7).unwrap();
+		import.discontinuity().unwrap();
 		import
 			.decode(&keyframe, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();

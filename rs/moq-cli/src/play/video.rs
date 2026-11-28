@@ -837,9 +837,10 @@ mod tests {
 			.await
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
+		let raw = track;
 		let track = moq_mux::container::Consumer::new(
 			subscriber,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
@@ -852,8 +853,19 @@ mod tests {
 		tokio::time::advance(delay).await;
 		tokio::task::yield_now().await;
 		assert_eq!(decoded.lock().unwrap().len(), 1, "old picture held inside decoder");
-		producer.seek(2).unwrap();
-		producer.write(frame(500, true)).unwrap();
+		// Created rather than appended, so nothing declares the starts before it skipped: a hole.
+		let next = frame(500, true);
+		let mut buf = bytes::BytesMut::new();
+		hang::container::Frame {
+			timestamp: next.timestamp,
+			payload: next.payload,
+		}
+		.encode(&mut buf)
+		.unwrap();
+		raw.create_group(next.timestamp, buf.freeze())
+			.unwrap()
+			.finish()
+			.unwrap();
 		let _finished = producer.finish().unwrap();
 		let restarted = Instant::now();
 		tokio::task::yield_now().await;
@@ -896,21 +908,31 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let write = |sequence, stamps: Vec<u64>| {
-			let mut group = published
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap();
-			let frames: Vec<_> = stamps
-				.into_iter()
-				.enumerate()
-				.map(|(index, ms)| frame(ms, index == 0))
-				.collect();
-			format.write(&mut group, &frames).unwrap();
+		// Appending says nothing starts since the previous group; after a `hole`, a created group
+		// leaves the starts before it unproduced.
+		let write = |stamps: Vec<u64>, hole: bool| {
+			let mut frames = stamps.into_iter().map(|ms| {
+				let frame = frame(ms, false);
+				hang::container::Frame {
+					timestamp: frame.timestamp,
+					payload: frame.payload,
+				}
+			});
+			let first = frames.next().unwrap();
+			let mut buf = bytes::BytesMut::new();
+			first.encode(&mut buf).unwrap();
+			let mut group = match hole {
+				true => published.create_group(first.timestamp, buf.freeze()),
+				false => published.append_group(first.timestamp, buf.freeze()),
+			}
+			.unwrap();
+			for frame in frames {
+				frame.write_to(&mut group).unwrap();
+			}
 			group.finish().unwrap();
 		};
-		write(10, vec![100, 80, 90, 110]);
-		write(11, vec![200, 180, 190, 210]);
+		write(vec![100, 80, 90, 110], false);
+		write(vec![200, 180, 190, 210], false);
 		let track = moq_mux::container::Consumer::new(
 			subscriber,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
@@ -928,7 +950,7 @@ mod tests {
 			6,
 			"continuous media reached the codec before the later delivery hole"
 		);
-		write(13, vec![400, 380, 390, 410]);
+		write(vec![400, 380, 390, 410], true);
 		let _published = published.finish().unwrap();
 		for _ in 0..1300 {
 			tokio::task::yield_now().await;
@@ -1368,11 +1390,14 @@ mod tests {
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
 		// One keyframe group per 100 ms of media.
 		let write = |sequence: u64| {
-			let mut group = published
-				.create_group(moq_net::group::Info { start: sequence })
+			let mut group = None;
+			format()
+				.write(
+					&mut moq_mux::container::Writer::new(&published, &mut group),
+					&[frame(sequence * 100, true)],
+				)
 				.unwrap();
-			format().write(&mut group, &[frame(sequence * 100, true)]).unwrap();
-			group.finish().unwrap();
+			group.unwrap().finish().unwrap();
 		};
 		let mut shown = Vec::new();
 		// Groups 0 to 4 arrive live. Group 5 is lost, and from 6 on the path holds video 300 ms.

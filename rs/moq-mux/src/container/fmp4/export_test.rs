@@ -4,6 +4,8 @@ use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use crate::container::test_util::Lazy;
+
 use bytes::{Bytes, BytesMut};
 use mp4_atom::{DecodeMaybe, Encode};
 
@@ -2529,9 +2531,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	};
 	let fragment = super::encode_fragment(info, &samples).unwrap();
 
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(10_000).unwrap())
-		.unwrap();
+	let mut group = Lazy::appending(&track);
 	group
 		.write_frame(moq_net::Timestamp::from_secs(10).unwrap(), fragment)
 		.unwrap();

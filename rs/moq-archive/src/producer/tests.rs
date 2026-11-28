@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use kio::clock::sleep;
 use moq_net::track::Position;
-use moq_net::{Timescale, Timestamp, broadcast, group, track};
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use object_store::ObjectStoreExt;
 use tokio::task::JoinHandle;
 
@@ -40,10 +40,11 @@ fn ms(ms: u64) -> Timestamp {
 	Timestamp::from_millis(ms).unwrap()
 }
 
-/// Write a whole group of `(pts, payload)` frames.
-fn group(track: &track::Producer, sequence: u64, frames: &[(u64, &str)]) {
-	let mut group = track.create_group(group::Info { start: sequence }).unwrap();
-	for (pts, payload) in frames {
+/// Write a whole group of `(pts, payload)` frames, which starts at its first frame's pts.
+fn group(track: &track::Producer, frames: &[(u64, &str)]) {
+	let ((pts, payload), rest) = frames.split_first().expect("a group holds a frame");
+	let mut group = track.create_group(ms(*pts), payload.to_string()).unwrap();
+	for (pts, payload) in rest {
 		group.write_frame(ms(*pts), payload.to_string()).unwrap();
 	}
 	group.finish().unwrap();
@@ -157,7 +158,7 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	let video = broadcast.create_track("video", timed()).unwrap();
 	for sequence in 0..5 {
 		let pts = sequence * 1000;
-		group(&video, sequence, &[(pts, "a"), (pts + 500, "b")]);
+		group(&video, &[(pts, "a"), (pts + 500, "b")]);
 	}
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
@@ -169,18 +170,21 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0), key(2, 0), key(4, 0)]
+		[key(0, 0), key(2000, 0), key(4000, 0)]
 	);
 	assert_eq!(
 		contents(&objects)[0],
 		[
 			(0, vec!["0/a".to_string(), "500/b".to_string()]),
-			(1, vec!["1000/a".to_string(), "1500/b".to_string()]),
+			(1000, vec!["1000/a".to_string(), "1500/b".to_string()]),
 		]
 	);
 	let info = Info::decode(&get(&store, "video/.info").await.unwrap()).unwrap();
 	assert_eq!(info.timescale, Some(1000));
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 5, frame: 0 })));
+	assert_eq!(
+		end(&store, "video").await,
+		Some(End::Finish(At { group: 4001, frame: 0 }))
+	);
 	assert!(complete(&store).await);
 }
 
@@ -195,27 +199,30 @@ async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	let task = spawn(&store, &broadcast, config);
 	subscribed(&video).await;
 
-	group(&video, 0, &[(0, "a")]);
-	group(&video, 2, &[(2000, "c")]);
-	group(&video, 3, &[(3000, "d")]);
+	group(&video, &[(0, "a")]);
+	group(&video, &[(2000, "c")]);
+	group(&video, &[(3000, "d")]);
 	settle().await;
-	// Nothing waits on 1, so every group is stored within the flush.
+	// Nothing waits on 1000, so every group is stored within the flush.
 	sleep(SECOND + SECOND / 2).await;
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(2, 0)]);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(2000, 0)]);
 	assert_eq!(
 		contents(&stored)[1],
-		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
+		[(2000, vec!["2000/c".to_string()]), (3000, vec!["3000/d".to_string()]),]
 	);
 
 	// A group below the stored ones arrives too late and stays a gap.
-	group(&video, 1, &[(1000, "b")]);
+	group(&video, &[(1000, "b")]);
 	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(stored.len(), 2);
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 4, frame: 0 })));
+	assert_eq!(
+		end(&store, "video").await,
+		Some(End::Finish(At { group: 3001, frame: 0 }))
+	);
 }
 
 #[tokio::test(start_paused = true)]
@@ -233,7 +240,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 		(4000, "5"),
 		(4000, "6"),
 	];
-	group(&video, 0, &frames);
+	group(&video, &frames);
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	settle().await;
@@ -266,8 +273,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
-	open.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
+	let mut open = data.create_group(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	let head = key(0, 0);
@@ -303,18 +309,21 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
-	for payload in ["a", "b", "c", "d", "e"] {
-		open.write_frame(moq_net::Timestamp::unscaled(0), payload).unwrap();
+	let mut open = data.create_group(moq_net::Timestamp::unscaled(0), "a").unwrap();
+	for payload in ["b", "c", "d", "e"] {
 		settle().await;
 		sleep(SECOND / 2).await;
+		open.write_frame(moq_net::Timestamp::unscaled(0), payload).unwrap();
 	}
+	settle().await;
+	sleep(SECOND / 2).await;
 	open.finish().unwrap();
 	settle().await;
 	sleep(2 * SECOND).await;
-	let mut next = data.create_group(group::Info { start: 1 }).unwrap();
-	next.write_frame(moq_net::Timestamp::unscaled(1), "f").unwrap();
-	next.finish().unwrap();
+	data.create_group(moq_net::Timestamp::unscaled(1), "f")
+		.unwrap()
+		.finish()
+		.unwrap();
 	settle().await;
 	let _data = data.finish().unwrap();
 	broadcast.close();
@@ -344,8 +353,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
 
-	let mut open = video.create_group(group::Info { start: 0 }).unwrap();
-	open.write_frame(ms(0), "a").unwrap();
+	let mut open = video.create_group(ms(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND / 2).await;
 	assert!(objects(&store, "video", true).await.is_empty());
@@ -379,14 +387,10 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	subscribed(&video).await;
 	subscribed(&data).await;
 
-	let mut timed_group = video.create_group(group::Info { start: 0 }).unwrap();
-	let mut untimed_group = data.create_group(group::Info { start: 0 }).unwrap();
-	for (pts, payload) in [(0, "a"), (100, "b")] {
-		timed_group.write_frame(ms(pts), payload).unwrap();
-		untimed_group
-			.write_frame(moq_net::Timestamp::unscaled(0), payload)
-			.unwrap();
-	}
+	let mut timed_group = video.create_group(ms(0), "a").unwrap();
+	let mut untimed_group = data.create_group(moq_net::Timestamp::unscaled(0), "a").unwrap();
+	timed_group.write_frame(ms(100), "b").unwrap();
+	untimed_group.write_frame(moq_net::Timestamp::unscaled(0), "b").unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	task.abort();
@@ -428,55 +432,12 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	assert!(complete(&store).await);
 }
 
-/// A later group that starts past frame 0, its head held elsewhere, opens its own object: an
-/// entry after the first has no frame start, so a resume would otherwise rewind into it.
-#[tokio::test(start_paused = true)]
-async fn a_partial_group_resumes_after_its_last_stored_frame() {
-	let store = store();
-	let broadcast = broadcast::Info::new().produce();
-	let video = broadcast.create_track("video", timed()).unwrap();
-	let config = config().with_flush(SECOND);
-	let task = spawn(&store, &broadcast, config.clone());
-	subscribed(&video).await;
-
-	group(&video, 0, &[(0, "a")]);
-	let mut partial = video.create_group(group::Info { start: 1 }).unwrap();
-	partial.start_at(2).unwrap();
-	partial.write_frame(ms(500), "c").unwrap();
-	settle().await;
-	sleep(SECOND).await;
-	task.abort();
-	assert!(task.await.unwrap_err().is_cancelled());
-
-	let task = spawn(&store, &broadcast, config);
-	settle().await;
-	partial.write_frame(ms(600), "d").unwrap();
-	partial.finish().unwrap();
-	settle().await;
-	let _video = video.finish().unwrap();
-	broadcast.close();
-	finished(task).await;
-
-	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0), key(1, 2), key(1, 3)]
-	);
-	let frames: Vec<String> = contents(&stored)
-		.into_iter()
-		.flatten()
-		.flat_map(|(_, frames)| frames)
-		.collect();
-	assert_eq!(frames, ["0/a", "500/c", "600/d"]);
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 2, frame: 0 })));
-}
-
 #[tokio::test(start_paused = true)]
 async fn changed_properties_fail_the_resume() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
-	group(&video, 0, &[(0, "a")]);
+	group(&video, &[(0, "a")]);
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	let video = video.finish().unwrap();
@@ -550,9 +511,11 @@ async fn track_names_stay_one_segment_through_a_resume() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	for track in &tracks {
 		subscribed(track).await;
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(moq_net::Timestamp::unscaled(0), "x").unwrap();
-		group.finish().unwrap();
+		track
+			.create_group(moq_net::Timestamp::unscaled(0), "x")
+			.unwrap()
+			.finish()
+			.unwrap();
 	}
 	settle().await;
 	sleep(SECOND).await;
@@ -590,26 +553,26 @@ async fn a_dvr_prunes_superseded_objects_after_its_window_and_grace() {
 
 	// Each group is its own object, closed when the next group starts.
 	for sequence in 0..4 {
-		group(&video, sequence, &[(sequence * 1000, "x")]);
+		group(&video, &[(sequence * 1000, "x")]);
 		settle().await;
 		sleep(SECOND).await;
 	}
 	// Object 0 was superseded when object 1 was stored, at 2s: it stays through 5s.
 	let names =
 		|objects: BTreeMap<String, Object>| objects.values().map(|o| o.start().unwrap().group).collect::<Vec<_>>();
-	assert_eq!(names(objects(&store, "video", true).await), [0, 1, 2]);
+	assert_eq!(names(objects(&store, "video", true).await), [0, 1000, 2000]);
 	sleep(SECOND).await;
 	settle().await;
-	assert_eq!(names(objects(&store, "video", true).await), [1, 2]);
+	assert_eq!(names(objects(&store, "video", true).await), [1000, 2000]);
 	sleep(3 * SECOND).await;
 	settle().await;
 	// The newest stored object is always kept.
-	assert_eq!(names(objects(&store, "video", true).await), [2]);
+	assert_eq!(names(objects(&store, "video", true).await), [2000]);
 
 	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
-	assert_eq!(names(objects(&store, "video", true).await), [2, 3]);
+	assert_eq!(names(objects(&store, "video", true).await), [2000, 3000]);
 	assert!(end(&store, "video").await.is_some());
 }
 
@@ -620,12 +583,12 @@ async fn a_track_added_mid_recording_is_recorded() {
 	let video = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
-	group(&video, 0, &[(0, "v")]);
+	group(&video, &[(0, "v")]);
 	settle().await;
 
 	let audio = broadcast.create_track("audio", timed()).unwrap();
 	subscribed(&audio).await;
-	group(&audio, 0, &[(0, "a")]);
+	group(&audio, &[(0, "a")]);
 	settle().await;
 	let _video = video.finish().unwrap();
 	let _audio = audio.finish().unwrap();
@@ -653,7 +616,7 @@ async fn a_datagram_track_is_not_recorded() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	datagrams.append(ms(0), "datagram").unwrap();
-	group(&video, 0, &[(0, "a")]);
+	group(&video, &[(0, "a")]);
 	settle().await;
 	datagrams.finish();
 	let _video = video.finish().unwrap();
@@ -675,12 +638,11 @@ async fn markers_wait_for_the_listing_to_end() {
 	subscribed(&video).await;
 	subscribed(&audio).await;
 
-	group(&video, 0, &[(0, "a")]);
-	let mut last = video.create_group(group::Info { start: 1 }).unwrap();
-	last.write_frame(ms(1000), "b").unwrap();
+	group(&video, &[(0, "a")]);
+	let mut last = video.create_group(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
-	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position::new(1, 2)).unwrap();
+	// A mid-group end: frames 0 and 1 of group 1000.
+	video.finish_at(Position::new(1000, 2)).unwrap();
 	last.finish().unwrap();
 	settle().await;
 	sleep(SECOND).await;
@@ -694,7 +656,10 @@ async fn markers_wait_for_the_listing_to_end() {
 
 	broadcast.close();
 	finished(task).await;
-	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 1, frame: 2 })));
+	assert_eq!(
+		end(&store, "video").await,
+		Some(End::Finish(At { group: 1000, frame: 2 }))
+	);
 	// An error end is recorded, and the broadcast still completes.
 	assert_eq!(end(&store, "audio").await, Some(End::Error(64 + 7)));
 	assert!(complete(&store).await);
@@ -708,8 +673,8 @@ async fn an_errored_end_records_its_error() {
 	let video = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
-	group(&video, 0, &[(0, "a")]);
-	group(&video, 1, &[(1000, "b")]);
+	group(&video, &[(0, "a")]);
+	group(&video, &[(1000, "b")]);
 	let _video = video.fail(moq_net::Error::App(7)).unwrap();
 	settle().await;
 	broadcast.close();
@@ -731,8 +696,8 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	let first = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&first).await;
-	group(&first, 0, &[(0, "a")]);
-	group(&first, 1, &[(1000, "b")]);
+	group(&first, &[(0, "a")]);
+	group(&first, &[(1000, "b")]);
 	let first = first.finish().unwrap();
 	settle().await;
 	drop(first);
@@ -740,7 +705,7 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 
 	let second = broadcast.create_track("video", timed()).unwrap();
 	subscribed(&second).await;
-	group(&second, 2, &[(2000, "c")]);
+	group(&second, &[(2000, "c")]);
 	settle().await;
 	second.abort(moq_net::Error::App(3)).unwrap();
 	settle().await;
@@ -766,17 +731,17 @@ async fn a_re_added_track_holding_the_last_stored_group_stores_it_once() {
 	let first = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&first).await;
-	group(&first, 0, &[(0, "a")]);
-	group(&first, 1000, &[(1000, "b")]);
+	group(&first, &[(0, "a")]);
+	group(&first, &[(1000, "b")]);
 	let first = first.finish().unwrap();
 	settle().await;
 	drop(first);
 	settle().await;
 
 	let second = broadcast.create_track("video", timed()).unwrap();
-	group(&second, 1000, &[(1000, "b")]);
+	group(&second, &[(1000, "b")]);
 	subscribed(&second).await;
-	group(&second, 2000, &[(2000, "c")]);
+	group(&second, &[(2000, "c")]);
 	settle().await;
 	let _second = second.finish().unwrap();
 	broadcast.close();
@@ -804,7 +769,7 @@ async fn a_re_added_track_is_stored_under_its_own_properties() {
 	settle().await;
 
 	let second = broadcast.create_track("video", timed().with_priority(2)).unwrap();
-	group(&second, 0, &[(0, "x")]);
+	group(&second, &[(0, "x")]);
 	store.inner().release();
 	settle().await;
 	sleep(SECOND).await;
@@ -838,7 +803,7 @@ async fn a_stopped_producer_writes_no_marker() {
 	let video = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
-	group(&video, 0, &[(0, "a")]);
+	group(&video, &[(0, "a")]);
 	settle().await;
 	sleep(SECOND).await;
 	task.abort();
@@ -861,7 +826,7 @@ async fn a_completed_broadcast_records_nothing() {
 		.unwrap();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
-	group(&video, 0, &[(0, "a")]);
+	group(&video, &[(0, "a")]);
 	finished(spawn(&store, &broadcast, config())).await;
 	assert_eq!(keys(&store).await, [".end"]);
 	assert!(video.subscription().is_none());
@@ -876,7 +841,7 @@ async fn a_track_that_ended_unseen_leaves_the_broadcast_open() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
 	subscribed(&audio).await;
-	group(&audio, 0, &[(0, "a")]);
+	group(&audio, &[(0, "a")]);
 	settle().await;
 	sleep(SECOND).await;
 	task.abort();
@@ -901,7 +866,7 @@ async fn a_failed_put_fails_the_recording() {
 	store.inner().fail_puts("video/0");
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
-	group(&video, 0, &[(0, "a")]);
+	group(&video, &[(0, "a")]);
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	let err = task.await.unwrap().unwrap_err();
 	assert!(matches!(err, Error::Store(_)), "{err}");
@@ -935,7 +900,7 @@ async fn a_failed_prune_fails_the_dvr() {
 	let task = spawn(&store, &broadcast, config().with_duration(SECOND).with_dvr(dvr));
 	subscribed(&video).await;
 	for sequence in 0..3 {
-		group(&video, sequence, &[(sequence * 1000, "x")]);
+		group(&video, &[(sequence * 1000, "x")]);
 	}
 	settle().await;
 	sleep(2 * SECOND).await;
@@ -953,8 +918,8 @@ async fn a_stalled_put_holds_only_its_track() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
 	subscribed(&audio).await;
-	group(&video, 0, &[(0, "v")]);
-	group(&audio, 0, &[(0, "a")]);
+	group(&video, &[(0, "v")]);
+	group(&audio, &[(0, "a")]);
 	settle().await;
 	sleep(SECOND).await;
 	settle().await;

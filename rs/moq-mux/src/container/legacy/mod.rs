@@ -14,6 +14,19 @@ pub struct Wire(
 );
 
 impl Wire {
+	/// Write `frame` to `group` at the newest presentation time so far, so a B-frame never takes
+	/// the transport backwards, while its prefix keeps its own.
+	fn write_frame(group: &mut crate::container::Writer<'_>, frame: hang::container::Frame) -> crate::Result<()> {
+		let mut buf = bytes::BytesMut::with_capacity(8 + frame.payload.len());
+		frame.encode(&mut buf)?;
+		let transport = match group.latest() {
+			Some(latest) if frame.timestamp < latest => latest,
+			_ => frame.timestamp,
+		};
+		group.write_frame(transport, buf.freeze())?;
+		Ok(())
+	}
+
 	/// The bytes preceding a frame's payload: its varint timestamp.
 	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<bytes::Bytes> {
 		let mut prefix = bytes::BytesMut::new();
@@ -39,29 +52,30 @@ impl Container for Wire {
 
 	fn finish_group(
 		&self,
-		group: &mut moq_net::group::Producer,
+		group: &mut crate::container::Writer<'_>,
 		end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
 		if self.0 == Kind::Video
 			&& let Some(timestamp) = end
 		{
-			hang::container::Frame {
-				timestamp,
-				payload: bytes::Bytes::new(),
-			}
-			.write_to(group)?;
+			Self::write_frame(
+				group,
+				hang::container::Frame {
+					timestamp,
+					payload: bytes::Bytes::new(),
+				},
+			)?;
 		}
 		Ok(())
 	}
 
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut crate::container::Writer<'_>, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			let hang_frame = hang::container::Frame {
 				timestamp: frame.timestamp,
 				payload: frame.payload.clone(),
 			};
-			// The prefix carries the presentation time, and the transport the newest so far.
-			hang_frame.write_to(group)?;
+			Self::write_frame(group, hang_frame)?;
 		}
 		Ok(())
 	}

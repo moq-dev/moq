@@ -61,19 +61,20 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, identity: &Identity, 
 
 fn frames(track: &track::Producer, first: u64) {
 	for sequence in first..first + 3 {
-		// Keyed by its first frame's pts, in the track's microseconds.
-		let mut group = track.create_group((sequence * 2_000_000).into()).unwrap();
+		// Keyed by its first frame's pts.
+		let timestamp = Timestamp::from_secs(sequence * 2).unwrap();
+		let mut buf = bytes::BytesMut::new();
 		hang::container::Frame {
-			timestamp: Timestamp::from_secs(sequence * 2).unwrap(),
+			timestamp,
 			payload: bytes::Bytes::from_static(if track.name() == "audio" {
 				&[0xf8, 0xff, 0xfe]
 			} else {
 				&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]
 			}),
 		}
-		.write_to(&mut group)
+		.encode(&mut buf)
 		.unwrap();
-		group.finish().unwrap();
+		track.create_group(timestamp, buf.freeze()).unwrap().finish().unwrap();
 	}
 }
 

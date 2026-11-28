@@ -1358,7 +1358,8 @@ mod tests {
 		DeclaredGap,
 	}
 
-	/// Decodes `first` packets, then six more a second later, past a `cut` in the timeline.
+	/// Decodes `first` packets, then six more a second later, past a `cut` in the timeline. The
+	/// first run starts a second in, joined mid-stream.
 	async fn warmup_output(cut: Break, first: u64) -> (Vec<u128>, usize) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1367,30 +1368,41 @@ mod tests {
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(80));
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
-		// Joined mid-stream: the track's first packet needs no warmup.
-		producer.seek(1).unwrap();
-		for epoch in 0..2 {
-			if epoch != 0 {
+		let payload = Bytes::from(vec![0; 960 * size_of::<f32>()]);
+		// Joined during a pause: the reader's first group is the end marker of what came before.
+		if first == 0 {
+			create_packet(&track, Timestamp::from_micros(1_000_000).unwrap(), Bytes::new());
+		}
+		for epoch in 1..3 {
+			// Created rather than appended, so nothing declares the starts below it skipped: the
+			// run's first packet is joined mid-stream, and one after a cut follows lost groups.
+			let mut created = epoch == 1 && first > 0;
+			if epoch != 1 {
 				match cut {
 					Break::Declared => producer.discontinuity().unwrap(),
-					Break::Lost => producer.seek(1_000_000).unwrap(),
+					Break::Lost => created = true,
 					Break::Undeclared => {}
 					Break::DeclaredGap => {
 						producer.discontinuity().unwrap();
-						producer.seek(1_000_000).unwrap();
+						created = true;
 					}
 				}
 			}
-			for packet in 0..if epoch == 0 { first } else { 6 } {
+			for packet in 0..if epoch == 1 { first } else { 6 } {
+				let timestamp = Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap();
+				if std::mem::take(&mut created) {
+					create_packet(&track, timestamp, payload.clone());
+					continue;
+				}
 				producer
 					.write(moq_mux::container::Frame {
-						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
+						timestamp,
 						decode: None,
 						duration: None,
-						payload: vec![0; 960 * size_of::<f32>()].into(),
+						payload: payload.clone(),
 						keyframe: true,
 					})
 					.unwrap();
@@ -1419,6 +1431,24 @@ mod tests {
 			frames += frame.data.len() / size_of::<f32>();
 		}
 		(stamps, frames)
+	}
+
+	/// Publish one Legacy audio packet as its own group, created rather than appended so the
+	/// starts below it stay unproduced: a reader joins it mid-stream, or reads what lies between
+	/// as lost. An empty `payload` is an end marker.
+	fn create_packet(track: &moq_net::track::Producer, timestamp: Timestamp, payload: Bytes) {
+		let mut buf = bytes::BytesMut::new();
+		hang::container::Frame { timestamp, payload }.encode(&mut buf).unwrap();
+		track.create_group(timestamp, buf.freeze()).unwrap().finish().unwrap();
+	}
+
+	/// [`create_packet`] of a 20 ms packet at `micros`, saying no group starts between it and the
+	/// packet before it when `follows`, so only a packet that never arrives is a hole.
+	fn create_spaced(track: &moq_net::track::Producer, micros: u64, follows: bool, payload: Bytes) {
+		if follows {
+			track.skip_groups(micros - 19_999..micros);
+		}
+		create_packet(track, Timestamp::from_micros(micros).unwrap(), payload);
 	}
 
 	/// An origin, its driver spawned.
@@ -1567,25 +1597,27 @@ mod tests {
 			.unwrap();
 		broadcast.announce().unwrap();
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
-		// Joined mid-stream: the track's first packet needs no warmup.
-		producer.seek(1).unwrap();
-		// One 20 ms packet per group.
+		// One 20 ms packet per group, a second in.
+		let at = |packet: u64| Timestamp::from_micros(1_000_000 + packet * 20_000).unwrap();
+		let payload = Bytes::from(vec![0; 960 * size_of::<f32>()]);
+		// Joined mid-stream: created rather than appended, so it isn't the track's first packet,
+		// which needs no warmup.
+		create_packet(&track, at(0), payload.clone());
 		let mut write = |packet: u64| {
 			producer
 				.write(moq_mux::container::Frame {
-					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					timestamp: at(packet),
 					decode: None,
 					duration: None,
-					payload: vec![0; 960 * size_of::<f32>()].into(),
+					payload: payload.clone(),
 					keyframe: true,
 				})
 				.unwrap();
 			producer.cut(None).unwrap();
 		};
-		write(0);
 
 		let subscriber = origin();
 		let _link = link(&publisher, &subscriber).await;
@@ -1630,7 +1662,7 @@ mod tests {
 				Read::End { .. } => {}
 			}
 		}
-		let expected: Vec<u128> = (4..=20).map(|packet| packet * 20_000).collect();
+		let expected: Vec<u128> = (4..=20).map(|packet| 1_000_000 + packet * 20_000).collect();
 		assert_eq!(stamps, expected, "the burst reached the decoder whole");
 	}
 
@@ -1643,19 +1675,20 @@ mod tests {
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_secs(3600));
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
-		producer.seek(1).unwrap();
 		let ceiling = moq_mux::container::DELAY_MAX.as_micros() as u64;
-		// Contiguous, so no gap re-arms the warmup.
-		for micros in (0..=ceiling).step_by(20_000) {
+		let payload = Bytes::from(vec![0; 960 * size_of::<f32>()]);
+		// Joined mid-stream, a second in, then contiguous, so no gap re-arms the warmup.
+		create_packet(&track, Timestamp::from_micros(1_000_000).unwrap(), payload.clone());
+		for micros in (20_000..=ceiling).step_by(20_000) {
 			producer
 				.write(moq_mux::container::Frame {
-					timestamp: Timestamp::from_micros(micros).unwrap(),
+					timestamp: Timestamp::from_micros(1_000_000 + micros).unwrap(),
 					decode: None,
 					duration: None,
-					payload: vec![0; 960 * size_of::<f32>()].into(),
+					payload: payload.clone(),
 					keyframe: true,
 				})
 				.unwrap();
@@ -1678,7 +1711,7 @@ mod tests {
 		}
 		assert_eq!(
 			stamps,
-			[ceiling as u128],
+			[1_000_000 + ceiling as u128],
 			"an hour of warmup trims only up to the ceiling"
 		);
 	}
@@ -1689,7 +1722,7 @@ mod tests {
 		assert_eq!(
 			stamps,
 			[
-				80_000, 100_000, 1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000
+				1_080_000, 1_100_000, 2_000_000, 2_020_000, 2_040_000, 2_060_000, 2_080_000, 2_100_000
 			]
 		);
 		assert_eq!(frames, 8 * 960);
@@ -1703,7 +1736,7 @@ mod tests {
 			let (stamps, frames) = warmup_output(cut, 0).await;
 			assert_eq!(
 				stamps,
-				[1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000],
+				[2_000_000, 2_020_000, 2_040_000, 2_060_000, 2_080_000, 2_100_000],
 				"{cut:?}"
 			);
 			assert_eq!(frames, 6 * 960, "{cut:?}");
@@ -1715,13 +1748,13 @@ mod tests {
 	async fn a_gap_trims_the_warmup_the_history_leaves() {
 		for cut in [Break::Lost, Break::Undeclared] {
 			let (stamps, frames) = warmup_output(cut, 2).await;
-			assert_eq!(stamps, [1_040_000, 1_060_000, 1_080_000, 1_100_000], "{cut:?}");
+			assert_eq!(stamps, [2_040_000, 2_060_000, 2_080_000, 2_100_000], "{cut:?}");
 			assert_eq!(frames, 4 * 960, "{cut:?}");
 			// A primed decoder trims nothing after the gap.
 			let (stamps, _) = warmup_output(cut, 6).await;
 			assert_eq!(
 				stamps[2..],
-				[1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000],
+				[2_000_000, 2_020_000, 2_040_000, 2_060_000, 2_080_000, 2_100_000],
 				"{cut:?}"
 			);
 		}
@@ -1794,22 +1827,13 @@ mod tests {
 			.unwrap();
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(80));
-		let mut producer = moq_mux::container::Producer::new(
-			track,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
-		);
 		// Joined mid-stream: the track's first packet needs no warmup.
-		producer.seek(1).unwrap();
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(1_000_000).unwrap(),
-				decode: None,
-				duration: None,
-				payload: [0, 0, 0x80, 0x3e].repeat(7680).into(),
-				keyframe: true,
-			})
-			.unwrap();
-		let _finished = producer.finish().unwrap();
+		create_packet(
+			&track,
+			Timestamp::from_micros(1_000_000).unwrap(),
+			[0, 0, 0x80, 0x3e].repeat(7680).into(),
+		);
+		let _finished = track.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -1837,10 +1861,10 @@ mod tests {
 		);
 	}
 
-	/// Decodes a finished track of `packets` 20 ms Opus packets starting at group `group`,
-	/// keeping the encoder's declared warmup, and returns the first frame's stamp and the
-	/// frames decoded.
-	async fn opus_track_output(group: u64, packets: u64) -> (Option<u128>, usize) {
+	/// Decodes a finished track of `packets` 20 ms Opus packets in one group, from the track's
+	/// start or `joined` mid-stream a second in, keeping the encoder's declared warmup, and
+	/// returns the first frame's stamp and the frames decoded.
+	async fn opus_track_output(joined: bool, packets: u64) -> (Option<u128>, usize) {
 		let mut encoder = Encoder::new(&EncodeConfig::new(48_000, Layout::Mono)).unwrap();
 		let catalog = encoder.catalog();
 		assert_eq!(catalog.warmup, Some(Duration::from_millis(80)));
@@ -1849,24 +1873,29 @@ mod tests {
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let mut producer = moq_mux::container::Producer::new(
-			track,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
-		);
-		producer.seek(group).unwrap();
 		let pcm = vec![0.25f32; encoder.frame_size()];
+		let base = if joined { 48_000 } else { 0 };
+		let mut group: Option<moq_net::group::Producer> = None;
 		for packet in 0..packets {
-			producer
-				.write(moq_mux::container::Frame {
-					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
-					decode: None,
-					duration: None,
-					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
-					keyframe: true,
-				})
-				.unwrap();
+			let frame = hang::container::Frame {
+				timestamp: Timestamp::from_scale(base + packet * encoder.frame_size() as u64, 48_000).unwrap(),
+				payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+			};
+			match group.as_mut() {
+				Some(group) => frame.write_to(group).unwrap(),
+				None => {
+					let mut buf = bytes::BytesMut::new();
+					frame.encode(&mut buf).unwrap();
+					// Appending declares nothing below it, the track's start; a join is created.
+					group = Some(match joined {
+						true => track.create_group(frame.timestamp, buf.freeze()).unwrap(),
+						false => track.append_group(frame.timestamp, buf.freeze()).unwrap(),
+					});
+				}
+			}
 		}
-		let _finished = producer.finish().unwrap();
+		group.unwrap().finish().unwrap();
+		let _finished = track.finish().unwrap();
 
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
@@ -1895,13 +1924,16 @@ mod tests {
 	/// warmup still decodes.
 	#[tokio::test(start_paused = true)]
 	async fn the_tracks_first_packet_keeps_all_but_pre_skip() {
-		assert_eq!(opus_track_output(0, 2).await, (Some(0), 2 * 960 - 312));
+		assert_eq!(opus_track_output(false, 2).await, (Some(0), 2 * 960 - 312));
 	}
 
 	/// A join past the track's first group still drops its warmup after the pre-skip.
 	#[tokio::test(start_paused = true)]
 	async fn a_mid_stream_join_drops_its_warmup() {
-		assert_eq!(opus_track_output(1, 6).await, (Some(80_000), 6 * 960 - 312 - 3_840));
+		assert_eq!(
+			opus_track_output(true, 6).await,
+			(Some(1_080_000), 6 * 960 - 312 - 3_840)
+		);
 	}
 
 	/// How [`opus_loss`] loses its packets.
@@ -1933,7 +1965,7 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 		let frames = encoder.frame_size() as u64;
@@ -1942,14 +1974,19 @@ mod tests {
 				.map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5)
 				.collect();
 			let payload = crate::single(encoder.encode_all(&pcm).unwrap()).payload;
+			let timestamp = Timestamp::from_scale(packet * frames, 48_000).unwrap();
+			// The end marker a unit before the live edge, as the producer's discontinuity places it.
 			if matches!(loss, Loss::Declared) && packet == lost.start {
-				producer.discontinuity().unwrap();
+				let edge = timestamp.convert(hang::container::TIMESCALE).unwrap().value();
+				create_packet(&track, Timestamp::from_micros(edge - 1).unwrap(), Bytes::new());
 			}
 			if lost.contains(&packet) {
 				continue;
 			}
+			// Created rather than appended, so nothing declares the lost starts skipped.
 			if !matches!(loss, Loss::Stamps) {
-				producer.seek(packet * frames * 1_000_000 / 48_000).unwrap();
+				create_packet(&track, timestamp, payload);
+				continue;
 			}
 			producer
 				.write(moq_mux::container::Frame {
@@ -3150,31 +3187,29 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 		let pcm = vec![0.25f32; encoder.frame_size()];
-		for epoch in 0..2u64 {
-			if epoch == 1 {
-				if declared {
-					producer.discontinuity().unwrap();
-					encoder = Encoder::new(&config).unwrap();
-				}
-				producer.seek(1_000_000).unwrap();
-			}
-			for packet in 0..if epoch == 0 { 2 } else { 1 } {
-				producer
-					.write(moq_mux::container::Frame {
-						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
-						decode: None,
-						duration: None,
-						payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
-						keyframe: true,
-					})
-					.unwrap();
-				producer.cut(None).unwrap();
-			}
+		for packet in 0..2 {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					decode: None,
+					duration: None,
+					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
 		}
+		if declared {
+			producer.discontinuity().unwrap();
+			encoder = Encoder::new(&config).unwrap();
+		}
+		// Created rather than appended, so nothing declares the starts before it skipped.
+		let payload = crate::single(encoder.encode_all(&pcm).unwrap()).payload;
+		create_packet(&track, Timestamp::from_micros(1_000_000).unwrap(), payload);
 		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
@@ -3232,7 +3267,7 @@ mod tests {
 			.unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(
-			track,
+			track.clone(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 
@@ -3266,24 +3301,25 @@ mod tests {
 					Some(Read::End { .. }) => {}
 					other => panic!("packet {index} is preceded by {other:?}, not its end"),
 				}
-				// A seek creates the group without appending it, so nothing declares the starts
-				// before it skipped.
-				if hole {
-					producer.seek(micros).unwrap();
-				}
 			}
 			// On tokio's paused clock, which moq-net's landing times follow.
 			tokio::time::advance(duration(arrival).saturating_sub(origin.elapsed())).await;
-			producer
-				.write(moq_mux::container::Frame {
-					timestamp: Timestamp::from_micros(micros).unwrap(),
-					decode: None,
-					duration: None,
-					payload: payload.clone(),
-					keyframe: true,
-				})
-				.unwrap();
-			producer.cut(None).unwrap();
+			let timestamp = Timestamp::from_micros(micros).unwrap();
+			if hole && case.ends.contains(&index) {
+				// Created rather than appended, so nothing declares the starts before it skipped.
+				create_packet(&track, timestamp, payload.clone());
+			} else {
+				producer
+					.write(moq_mux::container::Frame {
+						timestamp,
+						decode: None,
+						duration: None,
+						payload: payload.clone(),
+						keyframe: true,
+					})
+					.unwrap();
+				producer.cut(None).unwrap();
+			}
 
 			next_frame(&mut consumer)
 				.await
@@ -3381,9 +3417,7 @@ mod tests {
 				if events[sequence].0 != at {
 					break;
 				}
-				let mut group = track
-					.create_group(moq_net::group::Info { start: sequence as u64 })
-					.unwrap();
+				let mut group = None;
 				let frame = moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(media * 1000).unwrap(),
 					decode: None,
@@ -3391,8 +3425,10 @@ mod tests {
 					payload: payload.clone(),
 					keyframe: true,
 				};
-				container.write(&mut group, &[frame]).unwrap();
-				group.finish().unwrap();
+				container
+					.write(&mut moq_mux::container::Writer::new(&track, &mut group), &[frame])
+					.unwrap();
+				group.unwrap().finish().unwrap();
 				newest = media;
 				next = sequence + 1;
 			}
@@ -3459,8 +3495,6 @@ mod tests {
 	/// does. Returns the delay once they have all landed, and whether the container reported a
 	/// backlog.
 	async fn play(events: &[(u64, u64, u64)], read: impl Fn(u64) -> bool) -> (f64, bool) {
-		use moq_mux::container::Container as _;
-
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
@@ -3479,21 +3513,12 @@ mod tests {
 		};
 		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
 
-		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
 		let start = kio::clock::now();
+		let first = events.iter().map(|&(_, _, media)| media).min();
 		for &(at, sequence, media) in events {
 			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-			let frame = moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(media * 1000).unwrap(),
-				decode: None,
-				duration: None,
-				payload: payload.clone(),
-				keyframe: true,
-			};
-			container.write(&mut group, &[frame]).unwrap();
-			group.finish().unwrap();
+			create_spaced(&track, media * 1000, Some(media) != first, payload.clone());
 			if read(sequence) {
 				next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
 			}
@@ -3545,8 +3570,6 @@ mod tests {
 	/// they were read, so the wait reads as no jitter.
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_waited_out_to_the_max_delay_leaves_the_estimate() {
-		use moq_mux::container::Container as _;
-
 		let publisher = origin();
 		let route = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
@@ -3556,20 +3579,8 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		route.announce().unwrap();
-		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
-		let write = |sequence: u64| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
-			let frame = moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
-				decode: None,
-				duration: None,
-				payload: payload.clone(),
-				keyframe: true,
-			};
-			container.write(&mut group, &[frame]).unwrap();
-			group.finish().unwrap();
-		};
+		let write = |sequence: u64| create_spaced(&track, sequence * 20_000, sequence > 0, payload.clone());
 
 		// A received copy: its feed owes the missing group, so the reader waits for it.
 		let relay = origin();

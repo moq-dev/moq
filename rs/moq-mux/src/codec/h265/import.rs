@@ -221,12 +221,6 @@ impl Import {
 		self.track.report_bitrate(bitrate);
 	}
 
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
-
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.

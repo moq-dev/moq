@@ -1180,42 +1180,8 @@ async fn a_newer_sequence_header_supersedes_a_held_record() {
 	assert!(matches!(codecs[..], [VideoCodec::AV1(_)]), "{codecs:?}");
 }
 
-/// A seek made while a record waits for its keyframe keys the group that keyframe opens, even when
-/// the sequence header repeats in between.
-#[tokio::test(start_paused = true)]
-async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
-	let (headers, keyframe) = avc_session(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut importer = Import::new(broadcast, catalog.reserve());
-	importer.decode(&headers).unwrap();
-	importer.seek(100).unwrap();
-	// The same sequence headers again, past the FLV file header.
-	importer.decode(&headers[flv_header(0).len()..]).unwrap();
-	importer.decode(&keyframe).unwrap();
-	let _finished = importer.finish().unwrap();
-
-	let snapshot = catalog.snapshot();
-	let name = snapshot.video.renditions.keys().next().unwrap();
-	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-		moq_net::track::Start::Live {
-			min: Some(Duration::from_secs(3600)),
-			max: Some(Duration::from_secs(3600)),
-		},
-	)]);
-	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
-	let mut starts = Vec::new();
-	while let Some(group) = track.recv_group().await.unwrap() {
-		starts.push(group.start);
-	}
-	assert_eq!(starts, [100]);
-}
-
 /// A changed sequence header on a live track skips the deltas before its keyframe, which can't
-/// decode against the old record and whose timestamps the old track never checks, and a seek in
-/// between keys the group that keyframe opens.
+/// decode against the old record and whose timestamps the old track never checks.
 #[tokio::test(start_paused = true)]
 async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	let video = |frame_type: u8, nalus: &[u8], ms: u32, cts: i32| {
@@ -1270,7 +1236,6 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	// Presented before the old track's 80 ms group, the floor a delta is checked against, which
 	// would refuse it as a rewind.
 	importer.decode(&video(2, &delta, 133, -60)).unwrap();
-	importer.seek(200).unwrap();
 	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 200, 0)).unwrap();
 	let _finished = importer.finish().unwrap();
 
@@ -1289,7 +1254,7 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	while let Some(group) = track.recv_group().await.unwrap() {
 		starts.push(group.start);
 	}
-	assert_eq!(starts, [200]);
+	assert_eq!(starts, [200_000]);
 }
 
 /// An audio-only FLV of raw AAC frames at `timestamps` (ms).
@@ -1458,52 +1423,6 @@ async fn groups_end_only_where_their_audio_is_known_to() {
 	// 21.333 ms AAC-LC packets, the last ending at 85 ms, not one 64 ms spacing past it.
 	let groups = audio_groups(&aac_tags_with(&ASC_48K, &[0, 64])).await;
 	assert_eq!(groups, [(0, Some(85_000))]);
-}
-
-/// A seek closes the open audio group as a gap does: where its stated audio ends, capped at the
-/// seek, or with no declared end when a packet's duration is unknown.
-#[tokio::test]
-async fn a_seek_declares_only_known_audio_ends() {
-	for (asc, ends) in [(&ASC_LD[..], [None, None]), (&ASC_48K, [Some(106_000), Some(321_000)])] {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut importer = Import::new(broadcast, catalog.reserve());
-		let tags = aac_tags_with(asc, &[0, 85]);
-		importer.decode(&tags).unwrap();
-		importer.seek(300_000).unwrap();
-		let mut tag = Vec::new();
-		write_tag(
-			&mut tag,
-			super::TAG_AUDIO,
-			300,
-			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0xde, 0xad],
-		);
-		importer.decode(&tag).unwrap();
-		let _finished = importer.finish().unwrap();
-
-		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let groups = groups_of(&consumer, &name).await;
-		assert_eq!(groups, [(0, ends[0]), (300_000, ends[1])], "{asc:x?}");
-	}
-}
-
-/// A seek caps the open group only past its highest packet: one between reordered packets, or at
-/// the last one's own time, leaves the group ending where its audio does.
-#[tokio::test]
-async fn a_seek_caps_only_past_the_newest_packet() {
-	for (tags, seek, end) in [(&[0, 60, 40][..], 50_000, 80_000), (&[0, 20, 40], 40_000, 60_000)] {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut importer = Import::new(broadcast, catalog.reserve());
-		importer.decode(&opus_tags(tags)).unwrap();
-		importer.seek(seek).unwrap();
-		let _finished = importer.finish().unwrap();
-
-		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		assert_eq!(groups_of(&consumer, &name).await, [(0, Some(end))], "{tags:?}");
-	}
 }
 
 /// HE-AAC signaling 960-sample core frames plays 40 ms a packet, so a group closing before the

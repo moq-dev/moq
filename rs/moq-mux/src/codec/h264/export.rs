@@ -85,6 +85,7 @@ impl annexb::Codec for Codec {
 
 #[cfg(test)]
 mod tests {
+	use crate::container::test_util::Lazy;
 	use std::task::Poll;
 
 	use bytes::Bytes;
@@ -130,7 +131,7 @@ mod tests {
 
 	/// Write a length-prefixed (4-byte) NAL frame onto a moq-net group via
 	/// the Legacy wire codec.
-	fn write_length_prefixed(group: &mut moq_net::group::Producer, timestamp_us: u64, nals: &[&[u8]]) {
+	fn write_length_prefixed(group: &mut Lazy, timestamp_us: u64, nals: &[&[u8]]) {
 		let mut payload = bytes::BytesMut::new();
 		for nal in nals {
 			payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
@@ -145,7 +146,7 @@ mod tests {
 		};
 		<crate::catalog::hang::Container as crate::container::Container>::write(
 			&crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
-			group,
+			&mut group.writer(),
 			&[frame],
 		)
 		.unwrap();
@@ -219,14 +220,14 @@ mod tests {
 			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.
-		let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut g0 = Lazy::new(&track);
 		write_length_prefixed(&mut g0, 0, &[idr]);
 		g0.finish().unwrap();
 
 		// Group 1 (next group): one P-slice. Consumer marks the first frame
 		// of every group as keyframe by protocol invariant, so the exporter
 		// MUST treat both group-starts as keyframes and inject SPS+PPS twice.
-		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		let mut g1 = Lazy::new(&track);
 		write_length_prefixed(&mut g1, 33_000, &[p_slice]);
 		g1.finish().unwrap();
 		let _track = track.finish().unwrap();
@@ -363,7 +364,7 @@ mod tests {
 			let track = broadcast
 				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
-			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+			let mut group = Lazy::new(&track);
 			let nals: &[&[u8]] = &[&[0x67, 0x42, 0, 0x1f], &[0x68, 0xce], &[0x65, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
 			group.finish().unwrap();

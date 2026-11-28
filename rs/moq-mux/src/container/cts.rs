@@ -36,14 +36,14 @@ impl Container for Wire {
 
 	fn finish_group(
 		&self,
-		_group: &mut moq_net::group::Producer,
+		_group: &mut crate::container::Writer<'_>,
 		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
 		// Refused for the reasons on `writable`.
 		Err(moq_net::Error::Unsupported.into())
 	}
 
-	fn write(&self, _group: &mut moq_net::group::Producer, _frames: &[Frame]) -> Result<(), Self::Error> {
+	fn write(&self, _group: &mut crate::container::Writer<'_>, _frames: &[Frame]) -> Result<(), Self::Error> {
 		// Refused for the reasons on `writable`.
 		Err(moq_net::Error::Unsupported.into())
 	}
@@ -90,6 +90,7 @@ pub(crate) fn decode_audio(audio: &legacy::Audio, frame: moq_net::frame::Frame) 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::container::test_util::Lazy;
 	use bytes::{Bytes, BytesMut};
 	use moq_net::{Timescale, Timestamp};
 
@@ -171,7 +172,7 @@ mod tests {
 				moq_net::track::Info::default().with_timescale(Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = Lazy::appending(&track);
 		let frame = Frame {
 			timestamp: Timestamp::from_millis(33).unwrap(),
 			decode: None,
@@ -181,12 +182,12 @@ mod tests {
 		};
 		assert!(
 			Wire(Kind::Video)
-				.write(&mut group, std::slice::from_ref(&frame))
+				.write(&mut group.writer(), std::slice::from_ref(&frame))
 				.is_err()
 		);
 		assert!(
 			Wire(Kind::Video)
-				.finish_group(&mut group, Some(frame.timestamp))
+				.finish_group(&mut group.writer(), Some(frame.timestamp))
 				.is_err()
 		);
 	}

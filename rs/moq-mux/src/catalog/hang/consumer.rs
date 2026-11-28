@@ -58,6 +58,7 @@ impl<E: CatalogExt> From<moq_net::track::Consumer> for Consumer<E> {
 
 #[cfg(test)]
 mod test {
+	use crate::container::test_util::Lazy;
 	use std::task::Poll;
 
 	use super::*;
@@ -117,9 +118,7 @@ mod test {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 		let mut consumer = Consumer::new(track.consume());
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("catalog group should append");
+		let mut group = Lazy::appending(&track);
 
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
 		group
@@ -174,9 +173,7 @@ mod test {
 			.expect("catalog track should resolve");
 		let mut consumer = Consumer::new(catalog_track);
 
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("catalog group should append");
+		let mut group = Lazy::appending(&track);
 		let payload = serde_json::to_string(&published).expect("catalog should serialize");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, payload)
@@ -351,13 +348,23 @@ mod test {
 		}
 	}
 
+	/// A group whose first frame, `payload` at `timestamp`, is still streaming in.
+	fn streaming(
+		track: &moq_net::track::Producer,
+		timestamp: moq_net::Timestamp,
+		payload: &impl AsRef<[u8]>,
+	) -> moq_net::frame::Producer {
+		let size = payload.as_ref().len() as u64;
+		track
+			.append_frame(moq_net::frame::Info { timestamp, size })
+			.expect("catalog frame should open")
+	}
+
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.consume());
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("catalog group should append");
+		let mut group = Lazy::appending(&track);
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
@@ -375,9 +382,7 @@ mod test {
 	fn a_newer_version_is_a_typed_refusal() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer: Consumer = Consumer::new(track.consume());
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("catalog group should append");
+		let mut group = Lazy::appending(&track);
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
 			.expect("catalog frame should write");
@@ -393,20 +398,16 @@ mod test {
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
 		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.consume());
-		let mut group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("catalog group should append");
+		let (catalog, payload) = catalog_payload("finished");
+		let mut frame = streaming(&track, moq_net::Timestamp::ZERO, &payload);
 
 		let _track = track.finish().expect("catalog track should finish");
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
-		let (catalog, payload) = catalog_payload("finished");
-		group
-			.write_frame(moq_net::Timestamp::ZERO, payload)
-			.expect("catalog frame should write");
-		group.finish().expect("catalog group should finish");
+		frame.write(payload).expect("catalog frame should write");
+		frame.finish().unwrap().finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
 	}
@@ -420,17 +421,13 @@ mod test {
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
 
-		let mut old_group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("old catalog group should append");
+		let mut old_group = Lazy::appending(&track);
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
-		let mut latest_group = track
-			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
-			.expect("latest catalog group should append");
+		let mut latest_group = Lazy::appending(&track);
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
@@ -450,24 +447,24 @@ mod test {
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
 
-		let mut old_group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("old catalog group should append");
+		let mut old_group = Lazy::appending(&track);
 		old_group
 			.write_frame(moq_net::Timestamp::ZERO, old_payload)
 			.expect("old catalog frame should write");
 		old_group.finish().expect("old catalog group should finish");
 
-		let mut latest_group = track
-			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
-			.expect("latest catalog group should append");
+		let mut latest_frame = streaming(&track, moq_net::Timestamp::from_millis(1).unwrap(), &latest_payload);
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
-		latest_group
-			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
+		latest_frame
+			.write(latest_payload)
 			.expect("latest catalog frame should write");
-		latest_group.finish().expect("latest catalog group should finish");
+		latest_frame
+			.finish()
+			.unwrap()
+			.finish()
+			.expect("latest catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 	}
@@ -481,15 +478,11 @@ mod test {
 		let (_old, old_payload) = catalog_payload("old");
 		let (latest, latest_payload) = catalog_payload("latest");
 
-		let mut old_group = track
-			.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-			.expect("old catalog group should append");
+		let mut old_frame = streaming(&track, moq_net::Timestamp::ZERO, &old_payload);
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Pending));
 
-		let mut latest_group = track
-			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
-			.expect("latest catalog group should append");
+		let mut latest_group = Lazy::appending(&track);
 		latest_group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), latest_payload)
 			.expect("latest catalog frame should write");
@@ -498,10 +491,12 @@ mod test {
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), latest);
 
-		old_group
-			.write_frame(moq_net::Timestamp::ZERO, old_payload)
-			.expect("old catalog frame should write");
-		old_group.finish().expect("old catalog group should finish");
+		old_frame.write(old_payload).expect("old catalog frame should write");
+		old_frame
+			.finish()
+			.unwrap()
+			.finish()
+			.expect("old catalog group should finish");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
 	}

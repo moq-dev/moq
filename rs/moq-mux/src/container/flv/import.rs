@@ -131,14 +131,6 @@ impl VideoStream {
 		}
 	}
 
-	fn seek(&mut self, start: u64) -> crate::Result<()> {
-		match self {
-			Self::H264 { import, .. } => import.seek(start),
-			Self::H265 { import, .. } => import.seek(start),
-			Self::Plain(plain) => plain.track.seek(start),
-		}
-	}
-
 	/// End the track for a successor or a drop, leaving a record no keyframe followed unpublished.
 	fn end(&mut self) -> crate::Result<()> {
 		match self {
@@ -850,29 +842,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(self
 			.broadcast
 			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio)))
-	}
-
-	/// Close the current group on every track and reopen at `start`.
-	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
-		self.input.check()?;
-		for stream in self.video.values_mut() {
-			stream.seek(start)?;
-		}
-		for stream in self.audio.values_mut() {
-			// Closed as a gap closes it, never past the seek, so the producer doesn't estimate its end
-			// from the spacing of its last frames.
-			// Compared in the track's timescale, where the seek counts, and only past the group's
-			// highest frame, which the cut can't fall below.
-			let cap = stream.track.track().info().timescale.and_then(|scale| {
-				let past = stream
-					.newest
-					.is_some_and(|newest| newest.as_scale(scale).is_ok_and(|newest| u128::from(start) > newest));
-				past.then(|| Timestamp::new(start, scale).ok()).flatten()
-			});
-			stream.close(cap)?;
-			stream.track.seek(start)?;
-		}
-		Ok(())
 	}
 
 	/// Finish every track, flushing the current group, and return the [`Finished`] import.

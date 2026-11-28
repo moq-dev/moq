@@ -206,15 +206,17 @@ pub fn catalog(data: &[u8]) -> bool {
 		Box::new(move || consumer.poll_next(&waiter))
 	};
 
-	let mut group = track
-		.append_group(moq_net::Timestamp::from_millis(0).unwrap())
-		.expect("a fresh track takes a group");
+	let mut group: Option<moq_net::group::Producer> = None;
 	let mut accepted = false;
 	for frame in data.split(|&byte| byte == 0) {
-		if group
-			.write_frame(moq_net::Timestamp::ZERO, Bytes::copy_from_slice(frame))
-			.is_err()
-		{
+		let frame = Bytes::copy_from_slice(frame);
+		let written = match &mut group {
+			Some(group) => group.write_frame(moq_net::Timestamp::ZERO, frame),
+			None => track
+				.append_group(moq_net::Timestamp::ZERO, frame)
+				.map(|created| group = Some(created)),
+		};
+		if written.is_err() {
 			return false;
 		}
 		match next() {

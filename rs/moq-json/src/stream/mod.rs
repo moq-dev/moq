@@ -295,29 +295,23 @@ mod test {
 		);
 	}
 
-	/// A timed track whose first group starts at 0 but whose first frame is at ten seconds, so a
-	/// group a frame at [`rewound`] opens is published by `append_group` and then refused by
-	/// `write_frame` for starting before that frame. That stands in for any post-`append_group`
-	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
-	/// allocating 32 MB to provoke it.
-	fn rejecting_track() -> moq_net::track::Producer {
+	/// A producer on a timed track whose log opened at ten seconds, so a record at [`rewound`]
+	/// lands in the published group and is refused there for presenting before the record ahead
+	/// of it. That stands in for any write failure inside the log's group (the reported one is a
+	/// frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
+	fn rejecting_producer() -> Producer<Value> {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-		group
-			.write_frame(
-				moq_net::Timestamp::from_millis(10_000).unwrap(),
-				bytes::Bytes::from_static(b"{}"),
-			)
+		let mut producer = Producer::<Value>::new(track, Config::default());
+		producer
+			.append(&json!({ "n": 0 }), moq_net::Timestamp::from_millis(10_000).unwrap())
 			.unwrap();
-		group.finish().unwrap();
-		track
+		producer
 	}
 
-	/// Past [`rejecting_track`]'s first group start but before its first frame, so an append at it
-	/// gets as far as a published group before it fails.
+	/// Before [`rejecting_producer`]'s first record, so an append at it fails inside the group.
 	fn rewound() -> moq_net::Timestamp {
 		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
@@ -327,9 +321,8 @@ mod test {
 	/// indistinguishable from a whole one.
 	#[test]
 	fn a_failed_write_aborts_the_track() {
-		let track = rejecting_track();
-		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::<Value>::new(track, Config::default());
+		let mut producer = rejecting_producer();
+		let mut subscriber = producer.consume();
 
 		assert!(matches!(
 			producer.append(&json!({ "n": 1 }), rewound()),
@@ -345,8 +338,7 @@ mod test {
 	/// The track ends with the group, so nothing opens a second one and splits the log.
 	#[test]
 	fn a_failed_write_ends_the_track() {
-		let track = rejecting_track();
-		let mut producer = Producer::<Value>::new(track, Config::default());
+		let mut producer = rejecting_producer();
 
 		assert!(matches!(
 			producer.append(&json!({ "n": 1 }), rewound()),
@@ -407,13 +399,11 @@ mod test {
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.
-		let mut first = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
-		first
-			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), br#"{"n":0}"#.as_slice())
+		let mut first = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap(), br#"{"n":0}"#.as_slice())
 			.unwrap();
-		let mut second = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
-		second
-			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), br#"{"n":1}"#.as_slice())
+		let _second = track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap(), br#"{"n":1}"#.as_slice())
 			.unwrap();
 
 		let mut consumer = consume(subscriber);

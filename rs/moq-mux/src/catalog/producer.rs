@@ -388,10 +388,9 @@ impl<E: CatalogExt> Outputs<E> {
 		let Some(msf) = msf.render(catalog, &self.msf_track.broadcast().path)? else {
 			return Ok(());
 		};
-		let mut group = self.msf_track.append_group(at)?;
+		let group = self.msf_track.append_group(at, msf)?;
 		#[cfg(test)]
 		self.published[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-		group.write_frame(at, msf)?;
 		group.finish()?;
 
 		Ok(())

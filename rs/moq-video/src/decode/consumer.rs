@@ -862,9 +862,8 @@ mod tests {
 		assert!(track.subscription().is_some());
 
 		// A truncated varint where the legacy frame's timestamp belongs.
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
-		group
-			.write_frame(Timestamp::from_micros(0).unwrap(), Bytes::from_static(&[0xFF]))
+		let group = track
+			.create_group(Timestamp::from_micros(0).unwrap(), Bytes::from_static(&[0xFF]))
 			.unwrap();
 		let _group = group.finish().unwrap();
 
@@ -987,8 +986,8 @@ mod tests {
 		.await
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+		let write = |stamps: &[u64]| {
+			let mut group = None;
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -1000,11 +999,12 @@ mod tests {
 					keyframe: index == 0,
 				})
 				.collect();
-			wire.write(&mut group, &frames).unwrap();
-			group.finish().unwrap();
+			wire.write(&mut moq_mux::container::Writer::new(&track, &mut group), &frames)
+				.unwrap();
+			group.unwrap().finish().unwrap();
 		};
-		write(10, &[1000, 800, 900, 1100]);
-		write(11, &[2000, 1800, 1900, 2100]);
+		write(&[1000, 800, 900, 1100]);
+		write(&[2000, 1800, 1900, 2100]);
 		let mut got = Vec::new();
 		for _ in 0..5 {
 			got.push(
@@ -1024,8 +1024,8 @@ mod tests {
 			"join trims, continuous delivery keeps every leading picture"
 		);
 		consumer.reader().track.set_delay(Delay::default());
-		write(12, &[3000]);
-		write(13, &[4000, 3800, 3900, 4100]);
+		write(&[3000]);
+		write(&[4000, 3800, 3900, 4100]);
 		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
@@ -1149,12 +1149,12 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = None;
 		let mut landed = std::collections::BTreeMap::new();
 		for (index, frame) in [0u64, 3, 1, 2].into_iter().enumerate() {
 			landed.insert(frame, Instant::now());
 			wire.write(
-				&mut group,
+				&mut moq_mux::container::Writer::new(&track, &mut group),
 				&[moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(frame * 33_333).unwrap(),
 					decode: None,
@@ -1166,7 +1166,7 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.finish().unwrap();
+		group.unwrap().finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = Vec::new();
@@ -1203,7 +1203,7 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = None;
 		let frames: Vec<_> = (0..FRAMES)
 			.map(|index| moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
@@ -1213,8 +1213,9 @@ mod tests {
 				keyframe: index == 0,
 			})
 			.collect();
-		wire.write(&mut group, &frames).unwrap();
-		group.finish().unwrap();
+		wire.write(&mut moq_mux::container::Writer::new(&track, &mut group), &frames)
+			.unwrap();
+		group.unwrap().finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut sourced = Vec::new();
@@ -1408,8 +1409,8 @@ mod tests {
 		.await
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+		let write = |stamps: &[u64]| {
+			let mut group = None;
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -1421,16 +1422,17 @@ mod tests {
 					keyframe: index == 0,
 				})
 				.collect();
-			wire.write(&mut group, &frames).unwrap();
-			group.finish().unwrap();
+			wire.write(&mut moq_mux::container::Writer::new(&track, &mut group), &frames)
+				.unwrap();
+			group.unwrap().finish().unwrap();
 		};
-		write(10, &[1000, 1100]);
+		write(&[1000, 1100]);
 		let first = consumer.next_frame().await.unwrap().unwrap();
 		assert_eq!(first.timestamp.as_micros().unwrap(), 1000);
 
 		consumer.reader().track.set_delay(Delay::default());
-		write(11, &[2000]);
-		write(12, &[3000, 2800, 2900, 3100]);
+		write(&[2000]);
+		write(&[3000, 2800, 2900, 3100]);
 		assert!(consumer.read().await.is_err(), "the drain did not fail");
 		// A codec error leaves the subscription reading, and its priority adjustable.
 		consumer.set_priority(-20);
@@ -1707,11 +1709,9 @@ mod tests {
 		let mut landed = Vec::new();
 		for (sequence, payload) in [probe::CORRUPT, b"access unit".as_slice()].into_iter().enumerate() {
 			landed.push(Instant::now());
-			let mut group = track
-				.create_group(moq_net::group::Info { start: sequence as u64 })
-				.unwrap();
+			let mut group = None;
 			wire.write(
-				&mut group,
+				&mut moq_mux::container::Writer::new(&track, &mut group),
 				&[moq_mux::container::Frame {
 					decode: None,
 					// Group starts strictly increase, so each access unit presents a second later.
@@ -1722,7 +1722,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-			group.finish().unwrap();
+			group.unwrap().finish().unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
 		let _track = track.finish().unwrap();
@@ -1765,10 +1765,10 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = None;
 		for keyframe in [true, false] {
 			wire.write(
-				&mut group,
+				&mut moq_mux::container::Writer::new(&track, &mut group),
 				&[moq_mux::container::Frame {
 					timestamp: Timestamp::ZERO,
 					decode: None,
@@ -1780,7 +1780,7 @@ mod tests {
 			.unwrap();
 			tokio::time::advance(std::time::Duration::from_millis(10)).await;
 		}
-		group.finish().unwrap();
+		group.unwrap().finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut shown = 0;

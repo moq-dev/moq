@@ -2064,7 +2064,8 @@ mod tests {
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut producer =
+			moq_mux::container::Producer::new(track.clone(), Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
 		options.delay = moq_audio::decode::Delay {
 			min: Some(delay),
@@ -2103,18 +2104,29 @@ mod tests {
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		producer.discontinuity().unwrap();
-		// A seek creates the press's first group without appending it, so nothing declares the
-		// starts between it and the marker skipped: a group there may have been lost.
-		if lost {
-			producer
-				.seek(packet(110, 0.5).timestamp.as_micros().unwrap() as u64)
-				.unwrap();
-		}
 		// Two seconds muted, with the timeline running on through it.
 		kio::clock::sleep(Duration::from_secs(2)).await;
 		let pressed = Instant::now();
 		for index in 110..120 {
-			producer.write(packet(index, 0.5)).unwrap();
+			let packet = packet(index, 0.5);
+			if lost && index == 110 {
+				// Created rather than appended, so nothing declares the starts between it and the
+				// marker skipped: a group there may have been lost.
+				let mut buf = bytes::BytesMut::new();
+				hang::container::Frame {
+					timestamp: packet.timestamp,
+					payload: packet.payload,
+				}
+				.encode(&mut buf)
+				.unwrap();
+				track
+					.create_group(packet.timestamp, buf.freeze())
+					.unwrap()
+					.finish()
+					.unwrap();
+			} else {
+				producer.write(packet).unwrap();
+			}
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		let _finished = producer.finish().unwrap();

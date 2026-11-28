@@ -154,10 +154,6 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 
 		for n in 0..4u64 {
 			let start = n * 20_000;
-			// Appending declares every start since the previous group skipped, before the packet.
-			let mut group = track
-				.append_group(moq_net::Timestamp::from_micros(start).unwrap())
-				.unwrap();
 			let early = kio::clock::timeout(Duration::from_millis(50), reader.read()).await;
 			assert!(early.is_err(), "{version}: read {early:?} before packet {n} landed");
 			let packet = Frame {
@@ -167,8 +163,12 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 				keyframe: true,
 				duration: None,
 			};
-			container.write(&mut group, &[packet]).unwrap();
-			group.finish_at(start + 20_000).unwrap();
+			// The packet appends its group, declaring every start since the previous one skipped.
+			let mut group = None;
+			container
+				.write(&mut moq_mux::container::Writer::new(&track, &mut group), &[packet])
+				.unwrap();
+			group.unwrap().finish_at(start + 20_000).unwrap();
 			let read = kio::clock::timeout(TIMEOUT, reader.read())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: packet {n} never read"))
@@ -216,7 +216,7 @@ async fn an_old_publishers_marker_group_reads_as_an_end() {
 		// A packet, the marker at its end, then speech a second later.
 		for (start, payload) in [(0, &PACKET[..]), (20_000, &[][..]), (1_000_000, &PACKET[..])] {
 			let timestamp = moq_net::Timestamp::from_micros(start).unwrap();
-			let mut group = track.append_group(timestamp).unwrap();
+			let mut group = None;
 			let frame = Frame {
 				timestamp,
 				decode: None,
@@ -224,8 +224,10 @@ async fn an_old_publishers_marker_group_reads_as_an_end() {
 				keyframe: true,
 				duration: None,
 			};
-			container.write(&mut group, &[frame]).unwrap();
-			group.finish().unwrap();
+			container
+				.write(&mut moq_mux::container::Writer::new(&track, &mut group), &[frame])
+				.unwrap();
+			group.unwrap().finish().unwrap();
 		}
 
 		// These wires report the run the pause skipped as dropped, so a gap may follow the end.

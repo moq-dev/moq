@@ -185,14 +185,8 @@ impl<T: Serialize> Inner<T> {
 			}
 		};
 
-		let opened = track.open(at);
-		let published = opened.is_ok();
-		let result = match opened {
-			Ok(()) => track.write(at, record.payload()),
-			Err(err) => Err(err),
-		};
-
-		if let Err(err) = result {
+		let published = track.group.is_some();
+		if let Err(err) = track.write(at, record.payload()) {
 			// The record never reached the wire either way.
 			drop(record);
 
@@ -201,9 +195,9 @@ impl<T: Serialize> Inner<T> {
 			// consumers that gap dressed up as a complete log. End the track, which is what keeps "a
 			// stream is one group" a real invariant rather than the usual case.
 			//
-			// An `open` failure published nothing (it only runs when there is no group), so a later
-			// append opens a fresh group. That path also catches an append
-			// onto a track already ended this way, which keeps reporting the error it was aborted with.
+			// The first record's failure published nothing, since a refused frame 0 leaves no group,
+			// so a later append opens a fresh group. That path also catches an append onto a track
+			// already ended this way, which keeps reporting the error it was aborted with.
 			if published {
 				track.abort(err.clone());
 			}
@@ -230,22 +224,20 @@ struct Track {
 }
 
 impl Track {
-	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
-	fn open(&mut self, timestamp: moq_net::Timestamp) -> std::result::Result<(), moq_net::Error> {
-		if self.group.is_none() {
-			self.group = Some(self.inner.append_group(timestamp)?);
-		}
-		Ok(())
-	}
-
-	/// Append one encoded record to the log's group at `timestamp`.
+	/// Append one encoded record to the log's group at `timestamp`, opening the group with it
+	/// when it is the first.
 	fn write(
 		&mut self,
 		timestamp: moq_net::Timestamp,
 		payload: &bytes::Bytes,
 	) -> std::result::Result<(), moq_net::Error> {
-		let group = self.group.as_mut().expect("a group is open");
-		group.write_frame(crate::frame_time(group, timestamp), payload.clone())
+		match self.group.as_mut() {
+			Some(group) => group.write_frame(crate::frame_time(group, timestamp), payload.clone()),
+			None => {
+				self.group = Some(self.inner.append_group(timestamp, payload.clone())?);
+				Ok(())
+			}
+		}
 	}
 
 	/// End the track with an error, so a consumer sees the failure rather than a clean end.

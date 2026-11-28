@@ -523,10 +523,11 @@ impl Track {
 	/// Write a snapshot as the first frame of a new group starting at `timestamp`, then close the
 	/// previous group.
 	///
-	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
-	/// before the previous group closes.
+	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], and a
+	/// frame too large [`moq_net::Error::FrameTooLarge`]: both are refused before the previous
+	/// group closes, leaving no group behind.
 	fn write_snapshot(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
-		let mut group = self.inner.append_group(timestamp)?;
+		let group = self.inner.append_group(timestamp, payload)?;
 		self.largest = Some(group.start);
 
 		// The previous group is complete; no more frames will be appended to it. One that can't
@@ -536,14 +537,6 @@ impl Track {
 			&& let Err(err) = previous.finish()
 		{
 			let _ = group.abort(err.clone());
-			return Err(err.into());
-		}
-
-		if let Err(err) = group.write_frame(timestamp, payload) {
-			// `append_group` already published this group, and a rejected frame (too large) doesn't
-			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
-			// any subscriber that advanced into it with nothing to read and no end.
-			let _ = group.finish();
 			return Err(err.into());
 		}
 
@@ -610,7 +603,9 @@ mod tests {
 			.produce()
 			.create_track("other", moq_net::track::Info::default())
 			.unwrap();
-		let aborted = other.append_group(moq_net::Timestamp::unscaled(1)).unwrap();
+		let aborted = other
+			.append_group(moq_net::Timestamp::unscaled(1), b"{}".as_slice())
+			.unwrap();
 		other.abort(moq_net::Error::GroupTooLarge).unwrap();
 		let open = inner.track.group.replace(aborted).expect("an open group");
 		let _finished = open.finish().unwrap();

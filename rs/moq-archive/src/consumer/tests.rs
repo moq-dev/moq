@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use kio::clock::{sleep, timeout};
 use moq_net::track::{Order, Position, Subscription};
-use moq_net::{Timescale, Timestamp, broadcast, group, track};
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use object_store::ObjectStoreExt;
 use tokio::task::JoinHandle;
 
@@ -79,10 +79,11 @@ impl Archive {
 	}
 }
 
-/// Frame `index` of `sequence`, its timestamp and payload naming both.
+/// Frame `index` of `sequence`, its payload naming both. A timed one is `index` ticks past its
+/// group's start, which is its key.
 fn frame(timed: bool, sequence: u64, index: u64) -> Frame {
 	Frame {
-		timestamp: timed.then_some(sequence * 1000 + index),
+		timestamp: timed.then_some(sequence + index),
 		payload: Bytes::from(format!("{sequence}/{index}")),
 	}
 }
@@ -209,19 +210,19 @@ async fn a_recording_round_trips() {
 		sleep(Duration::from_millis(1)).await;
 	}
 	for sequence in 0..6 {
-		let mut group = video.create_group(group::Info { start: sequence }).unwrap();
-		for index in 0..3 {
-			let pts = Timestamp::from_millis(sequence * 10_000 + index).unwrap();
-			group
-				.write_frame(pts, Bytes::from(vec![sequence as u8, index as u8, 0xff]))
-				.unwrap();
+		let pts = |index: u64| Timestamp::from_millis(sequence * 10_000 + index).unwrap();
+		let payload = |index: u64| Bytes::from(vec![sequence as u8, index as u8, 0xff]);
+		let mut group = video.create_group(pts(0), payload(0)).unwrap();
+		for index in 1..3 {
+			group.write_frame(pts(index), payload(index)).unwrap();
 		}
 		group.finish().unwrap();
 		sleep(Duration::from_millis(10)).await;
 	}
-	let mut group = log.create_group(group::Info { start: 0 }).unwrap();
-	group.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
-	group.finish().unwrap();
+	log.create_group(moq_net::Timestamp::unscaled(0), "a")
+		.unwrap()
+		.finish()
+		.unwrap();
 	sleep(Duration::from_millis(10)).await;
 	let _video = video.finish().unwrap();
 	let _log = log.finish().unwrap();
@@ -239,7 +240,7 @@ async fn a_recording_round_trips() {
 	let mut reader = subscribe(&broadcast, "video").await;
 	for sequence in 0..6 {
 		let mut group = reader.next_group().await.unwrap().unwrap();
-		assert_eq!(group.start, sequence);
+		assert_eq!(group.start, sequence * 10_000);
 		for index in 0..3 {
 			let frame = group.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.timestamp.value(), sequence * 10_000 + index);
@@ -248,7 +249,7 @@ async fn a_recording_round_trips() {
 		assert!(group.read_frame().await.unwrap().is_none());
 	}
 	assert!(reader.next_group().await.unwrap().is_none());
-	assert_eq!(reader.finished().await.unwrap(), Position::group(6));
+	assert_eq!(reader.finished().await.unwrap(), Position::group(50_001));
 
 	let info = broadcast.consume().track("log").unwrap().info().await.unwrap();
 	assert_eq!((info.priority, info.timescale), (9, None));
@@ -335,29 +336,28 @@ async fn a_decreasing_stored_group_is_refused() {
 	assert_eq!(reader.finished().await.unwrap(), Position::group(4001));
 }
 
-/// A timed live group whose head was pruned can't be shown never to decrease, so it reads as
-/// gone, as a fill reads it. An untimed one's frames all share its key, so its tail stands.
+/// A live group whose head was pruned has no frame 0 to create it from, so it reads as gone.
 #[tokio::test(start_paused = true)]
-async fn a_live_group_with_a_pruned_head_is_served_only_untimed() {
+async fn a_live_group_with_a_pruned_head_is_dropped() {
 	for timed in [true, false] {
 		let archive = Archive::new();
 		archive.track("video", 0, timed).await;
 		archive.object("video", 2, vec![frames(timed, 5, 2..4)]).await;
-		archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+		archive.object("video", 0, vec![frames(timed, 6, 0..2)]).await;
+		archive.end("video", End::Finish(At { group: 7, frame: 0 })).await;
 		archive.complete().await;
 
+		// A group is created from its frame 0, so one without it reads as missing and the reader
+		// moves on past it.
 		let (broadcast, _run) = serve(&archive.store).await;
 		let mut reader = subscribe(&broadcast, "video").await;
-		let mut group = group(&mut reader).await.unwrap();
-		assert_eq!(group.start, 5);
-		let read = timeout(Duration::from_secs(10), group.read_frame()).await.unwrap();
-		// A reader from frame 0 finds the untimed head evicted rather than the group gone.
-		match timed {
-			true => assert!(matches!(read, Err(moq_net::Error::NotFound)), "{read:?}"),
-			false => assert!(matches!(read, Err(moq_net::Error::Evicted)), "{read:?}"),
-		}
-		assert!(next(&mut reader).await.is_none());
-		assert_eq!(reader.finished().await.unwrap(), Position::group(6));
+		assert_eq!(
+			next(&mut reader).await,
+			Some((6, expected(timed, 6, 0..2))),
+			"timed {timed}"
+		);
+		assert!(next(&mut reader).await.is_none(), "timed {timed}");
+		assert_eq!(reader.finished().await.unwrap(), Position::group(7));
 	}
 }
 
@@ -697,10 +697,12 @@ async fn a_re_added_track_replays_both_runs() {
 			sleep(Duration::from_millis(1)).await;
 		}
 		for sequence in sequences {
-			let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
-			group.write_frame(pts, format!("run{run}/{sequence}")).unwrap();
-			group.finish().unwrap();
+			track
+				.create_group(pts, format!("run{run}/{sequence}"))
+				.unwrap()
+				.finish()
+				.unwrap();
 		}
 		let track = track.finish().unwrap();
 		sleep(Duration::from_secs(2)).await;
@@ -816,10 +818,7 @@ fn at(millis: u64) -> Option<u64> {
 /// Group `sequence`'s frames `frames` on a timed track, keyed by its first frame's time:
 /// `sequence` seconds.
 fn timed(sequence: u64, frames: std::ops::Range<u64>) -> Entry {
-	Entry {
-		sequence: sequence * 1000,
-		..self::frames(true, sequence, frames)
-	}
+	self::frames(true, sequence * 1000, frames)
 }
 
 /// Groups `sequences` of a timed track, two to an object, each group starting at its
@@ -1020,10 +1019,10 @@ async fn a_continuation_does_not_bound_a_group_start() {
 	assert_eq!(read_range(&broadcast, "video", range).await, [500]);
 }
 
-/// A group starts at its key even when its first frame comes later, as one a seek opened, so
-/// the archive resolves a time to the group the live cache would.
+/// A group starts at its frame 0, so a stored group whose first frame is elsewhere, as an
+/// earlier release's seek recorded one, is refused rather than served under the wrong key.
 #[tokio::test(start_paused = true)]
-async fn a_time_resolves_by_key_not_first_frame() {
+async fn a_group_whose_first_frame_is_not_at_its_key_is_refused() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
 	let frame = |sequence: u64, pts: u64| Frame {
@@ -1037,13 +1036,13 @@ async fn a_time_resolves_by_key_not_first_frame() {
 		};
 		archive.object("video", 0, vec![entry]).await;
 	}
+	archive.end("video", End::Finish(At { group: 3_001, frame: 0 })).await;
+	archive.complete().await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	let range = track::Range {
-		start: track::Start::Time(2_200),
-		end: at(2_300),
-	};
-	assert_eq!(read_range(&broadcast, "video", range).await, [2_000]);
+	assert_eq!(fetch(&broadcast, "video", 1_000).await.unwrap(), ["1000@1000"]);
+	assert!(refused(&fetch(&broadcast, "video", 2_000).await));
+	assert_eq!(fetch(&broadcast, "video", 3_000).await.unwrap(), ["3000@3000"]);
 }
 
 /// A scale-less track's times are bare starts, which the archive looks up by key.
@@ -1233,10 +1232,12 @@ async fn a_reader_follows_a_real_dvr_through_its_rotations() {
 		sleep(Duration::from_millis(1)).await;
 	}
 	let write = |sequence: u64| {
-		let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 		let pts = Timestamp::from_millis(sequence * 1000).unwrap();
-		group.write_frame(pts, Bytes::from(format!("{sequence}"))).unwrap();
-		group.finish().unwrap();
+		video
+			.create_group(pts, Bytes::from(format!("{sequence}")))
+			.unwrap()
+			.finish()
+			.unwrap();
 	};
 	// Each group is its own object, stored once the next one starts.
 	for sequence in 0..2 {

@@ -123,8 +123,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	block: Option<Block>,
 	/// The hvcC CodecPrivate streaming in.
 	hvcc: Option<HvccFilter>,
-	/// A seek waiting for the streaming block to end, since its later frames continue its group.
-	seek: Option<u64>,
 	/// Whether input is still accepted. A refused chunk was never read to its end, so later input
 	/// cannot continue it.
 	input: crate::container::Input,
@@ -206,13 +204,6 @@ impl Media {
 		match self {
 			Self::Video(track) => track.cut(timestamp),
 			Self::Audio(track) => track.cut(timestamp),
-		}
-	}
-
-	fn seek(&mut self, start: u64) -> crate::Result<()> {
-		match self {
-			Self::Video(track) => track.seek(start),
-			Self::Audio(track) => track.seek(start),
 		}
 	}
 
@@ -357,7 +348,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			ended: None,
 			block: None,
 			hvcc: None,
-			seek: None,
 			input: crate::container::Input::Open,
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
@@ -1005,8 +995,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// The last block's duration is known: close its audio group if it fills a join, then run a
-	/// seek that waited for it.
+	/// The last block's duration is known: close its audio group if it fills a join.
 	fn settle(&mut self) -> Result<()> {
 		if let Some(ended) = self.ended.take()
 			&& let Some(track) = self.tracks.get_mut(&ended.track)
@@ -1031,27 +1020,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				let end = duration.map(|_| self.timebase.shift(end)).transpose()?;
 				track.track.cut(end)?;
 			}
-		}
-		if let Some(start) = self.seek.take() {
-			self.seek(start)?;
-		}
-		Ok(())
-	}
-
-	/// Close the current group on every track and open the next one at `start`.
-	///
-	/// Broadcast-wide: every track inside this MKV import advances together; per-track
-	/// control is intentionally not exposed. While a block streams in, the seek waits for it to end,
-	/// since its later frames continue its group.
-	pub fn seek(&mut self, start: u64) -> Result<()> {
-		self.input.check()?;
-		// A seek already waiting runs at that boundary, so a later one waits with it and replaces it.
-		if self.block.is_some() || self.ended.is_some() || self.seek.is_some() {
-			self.seek = Some(start);
-			return Ok(());
-		}
-		for track in self.tracks.values_mut() {
-			track.track.seek(start)?;
 		}
 		Ok(())
 	}

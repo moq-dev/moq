@@ -97,17 +97,9 @@ mod tests {
 		let route = origin.route(PATH, moq_net::origin::RouteOptions::default()).unwrap();
 		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
 		let track = route.broadcast().create_track("video", info).unwrap();
-		for _ in 0..3 {
-			let mut group = track
-				.append_group(moq_net::Timestamp::unscaled(
-					track.largest().map_or(0, |largest| largest.group + 1),
-				))
-				.unwrap();
-			group
-				.write_frame(
-					moq_net::Timestamp::unscaled(group.start),
-					bytes::Bytes::from_static(b"frame"),
-				)
+		for start in 0..3 {
+			let group = track
+				.append_group(moq_net::Timestamp::unscaled(start), bytes::Bytes::from_static(b"frame"))
 				.unwrap();
 			group.finish().unwrap();
 		}

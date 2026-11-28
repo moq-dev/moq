@@ -643,3 +643,83 @@ pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
 		})])
 		.with_order(moq_net::track::Order::Ascending)
 }
+
+/// A group a test writes, created on its track by its first frame and keyed by that frame's
+/// timestamp: out of order with [`Self::new`], or skipping what it passes with [`Self::appending`].
+pub(crate) struct Lazy {
+	track: moq_net::track::Producer,
+	group: Option<moq_net::group::Producer>,
+	open: crate::container::writer::Open,
+}
+
+impl Lazy {
+	/// A group on `track` that `create_group` makes with its first frame.
+	pub(crate) fn new(track: &moq_net::track::Producer) -> Self {
+		Self {
+			track: track.clone(),
+			group: None,
+			open: crate::container::writer::Open::Create,
+		}
+	}
+
+	/// A group on `track` that `append_group` makes with its first frame.
+	pub(crate) fn appending(track: &moq_net::track::Producer) -> Self {
+		Self {
+			open: crate::container::writer::Open::Append,
+			..Self::new(track)
+		}
+	}
+
+	/// A group on `track` that follows the newest group with nothing between, created out of order.
+	pub(crate) fn following(track: &moq_net::track::Producer) -> Self {
+		Self {
+			open: crate::container::writer::Open::Follow,
+			..Self::new(track)
+		}
+	}
+
+	/// Where a container writes this group's frames.
+	pub(crate) fn writer(&mut self) -> crate::container::Writer<'_> {
+		crate::container::Writer::opening(&self.track, &mut self.group, self.open)
+	}
+
+	/// Write a frame, creating the group with it when it is the first.
+	pub(crate) fn write_frame<B: moq_net::IntoBytes>(
+		&mut self,
+		timestamp: moq_net::Timestamp,
+		data: B,
+	) -> moq_net::Result<()> {
+		self.writer().write_frame(timestamp, data)
+	}
+
+	/// The group, once its first frame created it.
+	pub(crate) fn into_inner(self) -> moq_net::group::Producer {
+		self.group.expect("a group is created by its first frame")
+	}
+
+	pub(crate) fn finish(self) -> moq_net::Result<moq_net::group::Finished> {
+		self.into_inner().finish()
+	}
+
+	pub(crate) fn finish_at(self, end: u64) -> moq_net::Result<moq_net::group::Finished> {
+		self.into_inner().finish_at(end)
+	}
+
+	pub(crate) fn abort(self, err: moq_net::Error) -> moq_net::Result<()> {
+		self.into_inner().abort(err)
+	}
+}
+
+impl std::ops::Deref for Lazy {
+	type Target = moq_net::group::Producer;
+
+	fn deref(&self) -> &Self::Target {
+		self.group.as_ref().expect("a group is created by its first frame")
+	}
+}
+
+impl std::ops::DerefMut for Lazy {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.group.as_mut().expect("a group is created by its first frame")
+	}
+}

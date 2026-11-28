@@ -82,12 +82,6 @@ impl Import {
 		Ok(())
 	}
 
-	/// Close the current group and open the next one at `start`.
-	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
-		self.track.seek(start)?;
-		Ok(())
-	}
-
 	/// Publish one Opus packet, stamping `pts` or a wall clock when absent.
 	///
 	/// Opus is independently decodable, so the packet is marked a keyframe only when it starts a group

@@ -152,11 +152,14 @@ impl Recording {
 		for &frames in groups {
 			let mut group = source
 				.media
-				.append_group(Timestamp::from_micros(frames[0]).unwrap())
+				.append_group(
+					Timestamp::from_micros(frames[0]).unwrap(),
+					legacy(track, frames[0], true),
+				)
 				.unwrap();
-			for (index, &micros) in frames.iter().enumerate() {
+			for &micros in &frames[1..] {
 				let timestamp = Timestamp::from_micros(micros).unwrap();
-				group.write_frame(timestamp, legacy(track, micros, index == 0)).unwrap();
+				group.write_frame(timestamp, legacy(track, micros, false)).unwrap();
 			}
 			group.finish().unwrap();
 		}

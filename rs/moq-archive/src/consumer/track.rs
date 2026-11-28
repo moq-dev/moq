@@ -24,12 +24,28 @@ pub(super) struct Live {
 }
 
 struct Open {
-	/// `None` once refused, its stored timestamps having gone down or its head been pruned,
-	/// and the rest of it is skipped.
-	group: Option<group::Producer>,
+	feed: Feed,
 	sequence: u64,
 	/// The index of the next frame it takes.
 	next: u64,
+}
+
+/// Where the newest stored group stands in the live feed.
+enum Feed {
+	/// Its frame 0, which creates the group, has yet to be read.
+	Unopened,
+	Open(group::Producer),
+	/// Refused, its head pruned or its stored timestamps unusable, so the rest of it is skipped.
+	Refused,
+}
+
+impl Feed {
+	fn take(&mut self) -> Option<group::Producer> {
+		match std::mem::replace(self, Self::Refused) {
+			Self::Open(group) => Some(group),
+			Self::Unopened | Self::Refused => None,
+		}
+	}
 }
 
 impl Live {
@@ -74,6 +90,12 @@ impl Live {
 		if self.open.as_ref().is_some_and(|open| open.sequence != sequence) {
 			self.close()?;
 		}
+		let producer = &self.producer;
+		let drop = |err: moq_net::Error| -> Result<()> {
+			let end = sequence.checked_add(1).ok_or(Error::Overflow)?;
+			producer.drop_groups(sequence..end, moq_net::StreamError::from(&err));
+			Ok(())
+		};
 		// The group stays in `open` while it is written, so a failure aborts it with the track
 		// rather than dropping it.
 		let open = match &mut self.open {
@@ -84,22 +106,17 @@ impl Live {
 				open
 			}
 			None => {
-				let mut group = self.producer.create_group(group::Info { start: sequence })?;
-				// A head pruned from a timed group leaves its timestamps unable to be shown never
-				// to decrease, so it is gone, as a fill reads it; an untimed one's all share its key.
-				let group = match (first, self.timescale) {
-					(0, _) => Some(group),
-					(_, None) => {
-						group.start_at(first)?;
-						Some(group)
-					}
-					(_, Some(_)) => {
-						let _ = group.abort(moq_net::Error::NotFound);
-						None
+				// A group is created from its frame 0, so one whose head was pruned is gone, as a
+				// fill reads it.
+				let feed = match first {
+					0 => Feed::Unopened,
+					_ => {
+						drop(moq_net::Error::NotFound)?;
+						Feed::Refused
 					}
 				};
 				self.open.insert(Open {
-					group,
+					feed,
 					sequence,
 					next: first,
 				})
@@ -107,24 +124,34 @@ impl Live {
 		};
 		for frame in &entry.frames {
 			open.next += 1;
-			let Some(group) = &mut open.group else {
-				continue;
+			let timestamp = match open.feed {
+				Feed::Refused => continue,
+				_ => timestamp(frame.timestamp, self.timescale, entry.sequence)?,
 			};
-			let timestamp = timestamp(frame.timestamp, self.timescale, entry.sequence)?;
-			if decreases(timestamp, group.latest()) {
-				tracing::warn!(sequence, "archived group's timestamps decrease, refusing it");
-				if let Some(group) = open.group.take() {
-					let _ = group.abort(moq_net::Error::TimestampMismatch);
+			match &mut open.feed {
+				Feed::Refused => {}
+				// A group starts at its frame 0, so one stored under another key can't be served
+				// under the key the archive indexes it by.
+				Feed::Unopened if timestamp.value() != sequence => {
+					tracing::warn!(sequence, "archived group's first frame is not at its key, refusing it");
+					drop(moq_net::Error::TimestampMismatch)?;
+					open.feed = Feed::Refused;
 				}
-				continue;
+				Feed::Unopened => open.feed = Feed::Open(producer.create_group(timestamp, frame.payload.clone())?),
+				Feed::Open(group) if decreases(timestamp, group.latest()) => {
+					tracing::warn!(sequence, "archived group's timestamps decrease, refusing it");
+					if let Some(group) = open.feed.take() {
+						let _ = group.abort(moq_net::Error::TimestampMismatch);
+					}
+				}
+				Feed::Open(group) => group.write_frame(timestamp, frame.payload.clone())?,
 			}
-			group.write_frame(timestamp, frame.payload.clone())?;
 		}
 		Ok(())
 	}
 
 	fn close(&mut self) -> Result<()> {
-		if let Some(group) = self.open.take().and_then(|open| open.group) {
+		if let Some(group) = self.open.take().and_then(|mut open| open.feed.take()) {
 			group.finish()?;
 		}
 		Ok(())
@@ -133,7 +160,7 @@ impl Live {
 	/// End the feed with `err` when serving the archive failed, the open group included, so
 	/// readers see why rather than a dropped producer.
 	pub fn abort(self, err: moq_net::Error) {
-		if let Some(group) = self.open.and_then(|open| open.group) {
+		if let Some(group) = self.open.and_then(|mut open| open.feed.take()) {
 			let _ = group.abort(err.clone());
 		}
 		let _ = self.producer.abort(err);
@@ -372,12 +399,18 @@ async fn serve_group<S: ObjectStore>(
 		return;
 	}
 	// Checked from the group's first stored frame on, skipped ones included, so a read
-	// starting mid-group refuses what a whole read does.
+	// starting mid-group refuses what a whole read does, as the live feed does: a group starts
+	// at its frame 0, and its timestamps never decrease.
 	let mut latest = None;
-	for (_, stored) in &stored {
+	for (index, stored) in &stored {
 		let Ok(timestamp) = timestamp(stored.timestamp, timescale, sequence) else {
 			break;
 		};
+		if *index == 0 && timestamp.value() != sequence {
+			tracing::warn!(sequence, "archived group's first frame is not at its key, refusing it");
+			fill.refuse_groups(key..key + 1, moq_net::Error::TimestampMismatch);
+			return;
+		}
 		if decreases(timestamp, latest) {
 			tracing::warn!(sequence, "archived group's timestamps decrease, refusing it");
 			fill.refuse_groups(key..key + 1, moq_net::Error::TimestampMismatch);
