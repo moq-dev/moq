@@ -37,11 +37,13 @@ esac
 # Cargo's home differs by host, and its registry paths land in the binaries' panic locations,
 # which shifts their data and so the instructions they count. Remapped, the same code builds the
 # same binary on every host. Cargo ignores RUSTFLAGS when CARGO_ENCODED_RUSTFLAGS is set.
-if [[ -n ${CARGO_ENCODED_RUSTFLAGS:-} ]]; then
+# Exported RUSTFLAGS also replaces any rustflags a Cargo config sets, so a count builds what CI's does.
+if [[ -n ${CARGO_ENCODED_RUSTFLAGS+set} ]]; then
     echo "instructions.sh: set RUSTFLAGS instead of CARGO_ENCODED_RUSTFLAGS" >&2
     exit 1
 fi
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${cargo_home%/}=/cargo"
 
 # Only single-threaded targets without I/O, and not targets made only of `iter_custom`, which
 # CodSpeed's Criterion skips; some still read the wall clock, so their counts move with the host's
