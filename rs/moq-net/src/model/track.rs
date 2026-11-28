@@ -36599,7 +36599,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn disjoint_wire_publisher_does_not_fold_unreported_skip_bridge() {
-		let (producer, pool) = pooled_producer(1);
+		let (producer, _pool) = pooled_producer(1);
 		producer.received();
 		let mut g0 = producer.create_group(group::Info { start: 0 }).unwrap();
 		g0.write_frame(Timestamp::from_millis(0).unwrap(), &b"x"[..]).unwrap();
@@ -36623,8 +36623,14 @@ mod test {
 		assert_eq!(drain_groups(&mut sub), [10, 0]);
 		sub.record_mut().tell(0..1, Report::Final);
 		sub.record_mut().tell(10..11, Report::Final);
-		// Force pool pressure and a poll that settles the record.
-		let _ = pool.recorded();
+		// Owe the reader debt, so the poll that settles the record folds it.
+		sub.settle_record(None);
+		let mut debt = 1 << 20;
+		producer.state.read().cache.owe_readers(&mut debt);
+		assert!(
+			matches!(&sub.inner, Inner::Plain(cursor) if cursor.record.owes()),
+			"reader must owe debt before folding"
+		);
 		assert!(drained_drops(&mut sub).is_empty());
 		assert!(
 			!sub.record_mut().told(5),
