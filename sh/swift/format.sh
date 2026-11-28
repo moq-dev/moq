@@ -17,9 +17,18 @@ case "${1:-}" in
 esac
 
 # The dev shell's swift-format, rather than the toolchain's `swift format`, so
-# the check runs on Linux too and every host formats with the same version.
-# The dev shell has none on aarch64-linux (see flake.nix).
-if ! command -v swift-format >/dev/null 2>&1; then
+# the check runs on Linux too. Only x86_64-linux dev shells carry one (see
+# flake.nix); macOS uses Xcode's through Apple's xcrun (the dev shell's is
+# xcbuild's), after dropping the dev shell's nixpkgs SDK as
+# check.sh does, and aarch64-linux skips.
+xcode=(env)
+[[ "${SDKROOT:-}" != /nix/store/* ]] || xcode+=(-u SDKROOT)
+[[ "${DEVELOPER_DIR:-}" != /nix/store/* ]] || xcode+=(-u DEVELOPER_DIR)
+if command -v swift-format >/dev/null 2>&1; then
+    swift_format=(swift-format)
+elif [[ "$(uname -s)" == Darwin ]] && "${xcode[@]}" /usr/bin/xcrun --find swift-format >/dev/null 2>&1; then
+    swift_format=("${xcode[@]}" /usr/bin/xcrun swift-format)
+else
     echo "swift format: no swift-format on PATH, skipping" >&2
     exit 0
 fi
@@ -31,7 +40,7 @@ while IFS= read -r -d '' file; do
 done < <(git ls-files -z --cached --others --exclude-standard -- '*.swift')
 
 if [[ -z "$check" ]]; then
-    swift-format format --in-place --parallel "${files[@]}"
+    "${swift_format[@]}" format --in-place --parallel "${files[@]}"
     exit
 fi
 
@@ -39,7 +48,7 @@ fi
 # formatter's own output instead.
 unformatted=()
 for file in "${files[@]}"; do
-    swift-format format "$file" | cmp -s - "$file" || unformatted+=("$file")
+    "${swift_format[@]}" format "$file" | cmp -s - "$file" || unformatted+=("$file")
 done
 if ((${#unformatted[@]})); then
     echo "swift format: run 'just swift fix' on these files:" >&2
