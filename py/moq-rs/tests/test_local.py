@@ -197,11 +197,7 @@ def test_publish_media_lifecycle():
 
 
 def test_publish_media_cut_and_seek():
-    """Audio has no keyframes, so `cut` is the only thing that bounds its groups.
-
-    Without it every packet lands in one group that never closes, which strands
-    late subscribers and the timeline alike.
-    """
+    """Audio closes its own groups at 100 ms; `cut` and `seek` still close one early."""
     broadcast = moq.BroadcastProducer()
     media = moq.media.TrackProducer.audio(
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())

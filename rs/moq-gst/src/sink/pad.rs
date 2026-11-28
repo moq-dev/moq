@@ -107,10 +107,8 @@ pub(super) struct Closed {
 /// An audio or video pad, published through a codec importer.
 struct Media {
 	track: import::Track,
-	/// Audio is independently decodable, so its groups roll by media time instead of keyframes.
+	/// Audio resumes on any frame, since the importer rolls its groups by media time.
 	audio: bool,
-	/// Where the current audio group closes.
-	join: moq_mux::container::Join,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
 	/// Video can start or resume mid-GOP, so deltas drop until a keyframe opens a group. Stays set:
@@ -124,14 +122,10 @@ struct Media {
 impl Media {
 	/// Publish one frame at `micros` on the media clock. Returns false when a frame is dropped while
 	/// waiting for a keyframe at or beyond the live edge.
-	///
-	/// An audio buffer's `duration`, when it states one, lets the buffer that fills its group close
-	/// it at once; without one, the group closes on the first buffer starting a join past it.
-	fn write(&mut self, data: &Bytes, micros: u64, duration: Option<gst::ClockTime>) -> Result<bool> {
+	fn write(&mut self, data: &Bytes, micros: u64) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
 			self.keyframe = !self.audio;
-			self.join.reset();
 		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		match self.track.decode(data, ts) {
@@ -140,21 +134,9 @@ impl Media {
 				// A rejected delta leaves its group open; later deltas cannot decode across that gap.
 				self.track.cut(None)?;
 				self.keyframe = !self.audio;
-				self.join.reset();
 				return Ok(false);
 			}
 			result => result?,
-		}
-		if self.audio
-			&& let Some(start) = ts
-		{
-			let end = duration
-				.map(|duration| hang::container::Timestamp::from_micros(micros.saturating_add(duration.useconds())))
-				.transpose()?;
-			if let Some(reach) = self.join.fill(start, end.unwrap_or(start)) {
-				// The group ends past its furthest media, which a rewound buffer's own end can fall below.
-				self.track.cut(end.map(|_| reach))?;
-			}
 		}
 		Ok(true)
 	}
@@ -665,7 +647,6 @@ impl Pad {
 		let media = Media {
 			track,
 			audio,
-			join: moq_mux::container::Join::default(),
 			discontinuity: false,
 			keyframe: !audio,
 			pre_skip,
@@ -924,7 +905,7 @@ impl Pad {
 				let result: Result<()> = match shifted.map(|micros| (micros, &mut publishing.track)) {
 					Err(err) => Err(err),
 					Ok((micros, track)) => match track {
-						Sink::Media(media) => match media.write(&data, micros, duration) {
+						Sink::Media(media) => match media.write(&data, micros) {
 							Ok(false) => {
 								gst::debug!(
 									CAT,
@@ -1783,14 +1764,14 @@ mod tests {
 		builder.build()
 	}
 
-	/// The buffer that brings a group to 100 ms closes it when buffers state their duration, and
-	/// otherwise the first buffer starting 100 ms past the group's start does.
+	/// The buffer that brings a group to 100 ms closes it, timed by the packet itself whether or not
+	/// the buffer states its duration.
 	#[tokio::test(start_paused = true)]
 	async fn audio_groups_carry_one_hundred_milliseconds() {
 		gst::init().unwrap();
 		for (duration, expected) in [
 			(Some(gst::ClockTime::from_useconds(2_500)), [40, 40, 10]),
-			(None, [41, 41, 8]),
+			(None, [40, 40, 10]),
 		] {
 			let (broadcast, catalog) = producers();
 			let consumer = broadcast.consume();

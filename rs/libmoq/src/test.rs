@@ -4152,9 +4152,8 @@ fn double_close_all_resource_types() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
-/// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
-/// what a live publisher does, and `_seek` does the same with a chosen start.
+/// `moq_publish_media_cut` closes an audio group early, here one per packet, and `_seek` does the
+/// same with a chosen start.
 #[test]
 fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
@@ -4169,7 +4168,7 @@ fn media_cut_bounds_audio_groups() {
 			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(i * 20_000)) },
 			0
 		);
-		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
+		assert_eq!(moq_publish_media_cut(media), 0);
 	}
 
 	// The same boundary, with the next group explicitly started past the last.
