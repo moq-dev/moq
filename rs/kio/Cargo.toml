@@ -66,7 +66,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 # Bench-only: the FuturesUnordered comparison in benches/tasks.rs.
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 futures = { workspace = true }
 # Enable the async wrappers, the simulator, and the installed manual clock so the
 # tests that await them run in the merge gate.

@@ -45,7 +45,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 # `join_all`, so the ladder bench feeds every rung at once like the rung tasks do.
 futures = { workspace = true }
 kio = { workspace = true, features = ["manual", "runtime", "sim"] }

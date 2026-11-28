@@ -42,7 +42,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 kio = { path = "../kio", features = ["sim"] }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }

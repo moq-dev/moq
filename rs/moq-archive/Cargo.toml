@@ -28,7 +28,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 kio = { path = "../kio", features = ["manual"] }
 moq-crypto = { workspace = true, features = ["provider"] }
 object_store = { workspace = true, features = ["fs", "aws-base", "reqwest"] }

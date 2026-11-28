@@ -59,7 +59,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 kio = { path = "../kio", features = ["manual", "runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
 tempfile = { workspace = true }

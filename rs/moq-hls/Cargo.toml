@@ -43,7 +43,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
 # Compile the gateways for the tests, with or without the `server` feature.

@@ -98,7 +98,7 @@ libc = { workspace = true }
 anyhow = "1"
 bytes = "1"
 chrono = "0.4"
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"

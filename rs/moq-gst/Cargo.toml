@@ -39,7 +39,7 @@ url = { workspace = true }
 gst-plugin-version-helper = "0.8"
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 futures = { workspace = true }
 # A test clock for synced sinks, so lateness checks hold however loaded the machine is.
 gst-check = { package = "gstreamer-check", version = "0.25", features = ["v1_16"] }

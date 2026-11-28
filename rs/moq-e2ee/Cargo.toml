@@ -32,7 +32,7 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 hex = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # Compile the generated wrappers used by the tests and benches.

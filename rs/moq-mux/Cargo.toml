@@ -54,7 +54,7 @@ webm-iterable = "0.7"
 
 [dev-dependencies]
 anyhow = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 futures = { workspace = true }
 # The tests await hang's catalog subscription.
 hang = { path = "../hang", features = ["async"] }

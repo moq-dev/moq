@@ -58,7 +58,7 @@ web-transport-proto = { workspace = true }
 [dev-dependencies]
 anyhow = "1"
 bytes = { workspace = true }
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 moq-net = { path = "../moq-net" }
 pem = { workspace = true }
 thiserror = { workspace = true }

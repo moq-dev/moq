@@ -57,7 +57,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 # Runs the group log's deferred frees before the backing bench reads the live heap.
 crossbeam-epoch = "0.9.21"
 futures = { workspace = true }

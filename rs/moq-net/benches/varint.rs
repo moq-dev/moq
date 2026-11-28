@@ -1,43 +1,66 @@
-//! Lite-07 leading-ones varints against lite-06 QUIC varints: the bytes and the CPU to
-//! encode and decode what a publisher writes per frame, per group, and per request.
+//! Lite-07 leading-ones varints against lite-06 QUIC varints: the CPU to encode and decode
+//! what a publisher writes per frame, per group, and per request.
 //!
 //! The two versions share these layouts, so the only difference is the varint codec.
-//! The byte counts print once before the timings.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench varint`.
 
-use std::hint::black_box;
+use std::fmt;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::{Version, fuzz::LiteSample};
 
-fn versions() -> [(&'static str, Version); 2] {
-	["moq-lite-06", "moq-lite-07-wip"].map(|name| (name, name.parse().unwrap()))
+/// One sample encoded with one version, named `<sample>/<version>`.
+#[derive(Clone, Copy)]
+struct Case {
+	sample: LiteSample,
+	version: &'static str,
 }
 
-fn bench(c: &mut Criterion) {
-	println!("{:<10} {:>8} {:>8}", "sample", "lite-06", "lite-07");
-	for sample in LiteSample::ALL {
-		let [lite06, lite07] = versions().map(|(_, version)| sample.encode(version).len());
-		println!("{:<10} {lite06:>8} {lite07:>8}", format!("{sample:?}"));
+impl Case {
+	fn version(&self) -> Version {
+		self.version.parse().unwrap()
 	}
-
-	let mut group = c.benchmark_group("lite_varint");
-	for sample in LiteSample::ALL {
-		for (name, version) in versions() {
-			let id = format!("{sample:?}/{name}");
-			group.bench_function(BenchmarkId::new("encode", &id), |b| {
-				b.iter(|| black_box(sample.encode(black_box(version))))
-			});
-
-			let wire = sample.encode(version);
-			group.bench_function(BenchmarkId::new("decode", &id), |b| {
-				b.iter(|| black_box(sample.decode(black_box(version), black_box(&wire))))
-			});
-		}
-	}
-	group.finish();
 }
 
-criterion_group!(benches, bench);
-criterion_main!(benches);
+impl fmt::Display for Case {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{:?}/{}", self.sample, self.version)
+	}
+}
+
+fn cases() -> Vec<Case> {
+	LiteSample::ALL
+		.into_iter()
+		.flat_map(|sample| ["moq-lite-06", "moq-lite-07-wip"].map(|version| Case { sample, version }))
+		.collect()
+}
+
+mod lite_varint {
+	use moq_net::{Version, fuzz::LiteSample};
+	use swole::bench;
+
+	use super::{Case, cases};
+
+	fn version(case: Case) -> (LiteSample, Version) {
+		(case.sample, case.version())
+	}
+
+	#[bench(args = cases(), setup = version, bytes = |case: Case| case.sample.encode(case.version()).len())]
+	fn encode((sample, version): (LiteSample, Version)) -> Vec<u8> {
+		sample.encode(version)
+	}
+
+	fn wire(case: Case) -> (LiteSample, Version, Vec<u8>) {
+		(case.sample, case.version(), case.sample.encode(case.version()))
+	}
+
+	#[bench(args = cases(), setup = wire, bytes = |case: Case| case.sample.encode(case.version()).len())]
+	fn decode(input: &(LiteSample, Version, Vec<u8>)) -> usize {
+		let (sample, version, wire) = input;
+		sample.decode(*version, wire)
+	}
+}
+
+fn main() {
+	swole::main();
+}

@@ -52,7 +52,7 @@ tracing = { version = "0.1.10", default-features = false, features = ["std"] }
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 cpu-time = "1.0.0"
-criterion = { package = "bench-harness", path = "../bench-harness" }
+swole = { workspace = true }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 kio = { path = "../kio", features = ["runtime", "sim"] }
