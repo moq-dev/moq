@@ -12380,10 +12380,15 @@ impl Cursor {
 					self.filter.arrived = arrived.into_inner();
 					self.index = index.get();
 					// A moved window moved the servable edge `drift` was judged against. A feed found
-					// ended settles the window first: the end may have landed since the sync above, and a
-					// join waiting on its upstream places only once it has, maybe over a group the walk
-					// passed.
-					if matches!(polled, Poll::Pending | Poll::Ready(Ok(false))) && self.watch_time() {
+					// ended settles the window first: the end may have landed since the read's sync,
+					// and a join waiting on its upstream places only once it has, maybe over a group
+					// the walk passed or at a time start whose lookup the read has yet to ask. So
+					// the read starts over.
+					let ended = matches!(polled, Poll::Ready(Ok(false)));
+					if (ended || polled.is_pending()) && self.watch_time() {
+						if ended {
+							return self.poll_peek_recv(waiter);
+						}
 						self.admit();
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 						self.expire_heads(&drift, waiter);
@@ -12773,8 +12778,13 @@ impl Cursor {
 					.map_ok(|group| (group, state.cached))
 			});
 			// A moved window moved the servable edge `drift` was judged against. A feed found ended
-			// settles the window first, as the arrival read does.
-			if matches!(polled, Poll::Pending | Poll::Ready(Ok((None, _)))) && self.watch_time() {
+			// settles the window first and starts over from the next key, as the arrival read does:
+			// the window may now reach below groups this walk stepped over.
+			let ended = matches!(polled, Poll::Ready(Ok((None, _))));
+			if (ended || polled.is_pending()) && self.watch_time() {
+				if ended {
+					return self.poll_peek_next(waiter);
+				}
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
 			}
