@@ -286,9 +286,12 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            self.swole_cargo(calls),
-            [["--locked", "-p", "moq-net", "--features", "fuzz", "--benches"], ["--locked", "-p", "kio", "--benches"]],
+            [run[:5] for run in self.swole_cargo(calls)],
+            [["--locked", "-p", "moq-net", "--features", "fuzz"], ["--locked", "-p", "kio", "--benches"]],
         )
+        (net, _) = self.swole_cargo(calls)
+        self.assertNotIn("session", net)
+        self.assertNotIn("track", net)
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -307,7 +310,15 @@ class NightlyTest(unittest.TestCase):
     def test_every_cargo_bench_target_runs_nightly(self):
         covered = set()
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
-        for group in ("rust-bench", "rust-shared", "rust-relay", "rust-extra", "rust-uring"):
+        for group in (
+            "rust-bench",
+            "rust-session",
+            "rust-track",
+            "rust-shared",
+            "rust-relay",
+            "rust-extra",
+            "rust-uring",
+        ):
             self.assertIn(f"recipe: gh nightly {group}\n", workflow)
             result, calls = self.run_group(group)
             self.assertEqual(result.returncode, 0, result.stderr)

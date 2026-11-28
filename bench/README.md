@@ -902,8 +902,8 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 
 ### Paired comparison
 
-Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
-`rust-extra` and `rust-uring`) run `swole bench` paired with the previous
+Each Nightly's Rust bench groups (`rust-bench`, `rust-session`, `rust-track`,
+`rust-shared`, `rust-relay`, `rust-extra` and `rust-uring`) run `swole bench` paired with the previous
 scheduled Nightly's commit, on the same runner, so night-to-night runner
 variance drops out. swole builds the base in its own worktree, then times each
 benchmark both sides have in two processes alive together, alternating which

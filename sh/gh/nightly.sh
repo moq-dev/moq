@@ -2,7 +2,7 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-test-apps|rust-bench|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
+usage='usage: just gh nightly rust-test|rust-test-apps|rust-bench|rust-session|rust-track|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
@@ -11,7 +11,7 @@ fi
 # rust2 measures them (see bench/README.md).
 case "$1" in
     bindings) report= ;;
-    rust-bench | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
+    rust-bench | rust-session | rust-track | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
     rust-test | rust-test-apps) report=rust-test ;;
     js) report=js ;;
     *)
@@ -108,10 +108,24 @@ case "$1" in
         ;;
     # Cargo bench targets of swole's harness. A paired run builds and times each group
     # twice, so the groups split across jobs to fit an hour each.
+    # moq-net's session and track targets hold most of its benchmarks, many with setups of
+    # seconds that each side's process runs, so each takes a job of its own.
     rust-bench)
         # Fuzz exposes moq-net's codec benches, and moq-quic's plaintext crypto in rust-shared.
-        swole net -p moq-net --features fuzz --benches
+        swole net -p moq-net --features fuzz \
+            --bench origin --bench viewers --bench announce --bench synced --bench interests \
+            --bench routes --bench codec --bench parameters --bench varint --bench frame --bench ranges \
+            --bench backing --bench group --bench tracks --bench demand --bench tail --bench publisher \
+            --bench priority --bench schedule --bench stats --bench admission --bench refresh \
+            --bench bandwidth --bench retirement --bench auth --bench memory --bench path --bench canonical \
+            --bench edges
         swole kio -p kio --benches
+        ;;
+    rust-session)
+        swole net-session -p moq-net --features fuzz --bench session
+        ;;
+    rust-track)
+        swole net-track -p moq-net --features fuzz --bench track
         ;;
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates

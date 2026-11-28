@@ -173,6 +173,18 @@ jobs:
             artifact-path: target/bench/nightly/rust-bench
             benchmark: true
             paired: true
+          - name: moq-net session benchmarks
+            recipe: gh nightly rust-session
+            artifact: bench-rust-session
+            artifact-path: target/bench/nightly/rust-session
+            benchmark: true
+            paired: true
+          - name: moq-net track benchmarks
+            recipe: gh nightly rust-track
+            artifact: bench-rust-track
+            artifact-path: target/bench/nightly/rust-track
+            benchmark: true
+            paired: true
           - name: Rust shared bench targets
             recipe: gh nightly rust-shared
             artifact: bench-rust-shared
