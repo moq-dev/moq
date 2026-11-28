@@ -711,8 +711,9 @@ uses one fixture against every checkout's allocator, sweeping connections,
 reservations, priority tiers, idle reservations and observers. It times an estimate
 change, a demand change and a ceiling change until the allocator republishes, and a
 peek of every reservation, checking every grant against a reference division. Its
-Rust counterpart is `just bench -- -p moq-net --features fuzz --bench bandwidth`, whose
-`BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
+Rust counterpart is `just bench -- -p moq-net --features fuzz --bench bandwidth`, and
+`BANDWIDTH_COUNTS=<iterations> cargo bench -p moq-net --features fuzz --bench bandwidth`
+prints allocations and wakes per operation instead of timing.
 `pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
 the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
 compared against a previous grant, up to a whole `AUTH_OK`, plus the prefix grant `AUTH_OK` carries now.
@@ -833,7 +834,9 @@ re-running its job in place deploys that attempt's upload.
 The table includes these measurements:
 
 - Each Rust bench target's benchmarks, timed by swole: the median wall-clock
-  nanoseconds per call at this commit, named `rust/<label>/<benchmark>`, such
+  nanoseconds per call at this commit (a self-timed benchmark's is the
+  duration it returns, which moq-quic's `receive` and `receive_bursts` targets
+  measure as the server's thread CPU), named `rust/<label>/<benchmark>`, such
   as `rust/net/rs/moq-net/benches/varint.rs::varint::encode[1]`. The label is
   the group's swole run, so a workspace of its own (`qmux`, `auth`) stays
   apart. A label that times no benchmark at this commit fails its group. The
@@ -913,9 +916,12 @@ benchmark whose whole interval is more than 10% slower is a regression and
 fails its job after the upload, so the Alert workflow posts the failed Nightly;
 one whose whole interval is more than 10% faster is listed as faster, and the
 rest as unchanged. A benchmark only one side has is reported as new or
-removed, as is every benchmark of a base from before swole's harness, which
-swole times as none. A base that cannot build or run fails the job, rather
-than passing uncompared.
+removed, as is every benchmark of a base target from before swole's harness
+written with Criterion, which swole times as none. A base target that runs
+neither harness, such as one with a plain `main`, fails its pair. A pair that
+fails, as when the base cannot build or run, fails the job rather than passing
+uncompared, but its head is then timed alone, so the night keeps its trend
+points.
 
 Pairing cancels load common to both samples of a pair, but not load that slows
 one side more, which a hosted runner's neighbors can; the 10% bar leaves room

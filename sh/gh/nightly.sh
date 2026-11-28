@@ -51,11 +51,19 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
 # Time one label's benchmarks with swole, paired with the base when there is one, keeping
-# every measure in its report (see bench/README.md).
+# every measure in its report (see bench/README.md). A failed pair, as when the base's
+# benchmark panics, still fails the run, but the head is timed alone so tonight keeps its
+# trend point.
 swole() {
     local label=$1
     shift
-    run nix run --inputs-from "$root" swole -- bench ${base:+"$base"} --report "$out/swole/$label.json" -- --locked "$@"
+    local bench=(nix run --inputs-from "$root" swole -- bench)
+    local args=(--report "$out/swole/$label.json" -- --locked "$@")
+    if [[ -n $base ]]; then
+        "${bench[@]}" "$base" "${args[@]}" && return
+        failed+=("$label paired with $base")
+    fi
+    run "${bench[@]}" "${args[@]}"
 }
 
 javascript() {
@@ -205,8 +213,12 @@ case "$1" in
         ;;
 esac
 
-finish
+# The report covers whatever finished, so one failed run doesn't cost the rest their trend
+# points; the failure still fails the job after it.
+status=0
+finish || status=$?
 
 if [[ -n $report ]]; then
     just gh benchmark-report "$report" "$out" "$out/report.json"
 fi
+exit "$status"

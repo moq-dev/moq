@@ -37,7 +37,9 @@ esac
 # Only single-threaded targets without I/O, since a count holds what other threads ran beside a
 # call, which swole counts five times over, and none of a syscall's kernel work. Some still read
 # the wall clock, so their counts move with the host's load
-# (quest/m0/repeatable-instruction-counts.md). Nightly still times them all.
+# (quest/m0/repeatable-instruction-counts.md). Nightly still times them all. A self-timed
+# benchmark's count covers its whole call, such as moq-quic's client side beside the server
+# work its timing keeps.
 targets=(
     "kio tasks" "kio waiter"
     "moq-audio bus"

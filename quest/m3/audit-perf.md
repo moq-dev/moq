@@ -31,7 +31,7 @@ what the cut ships. Pair it with the last cut, keeping the evidence outside
 the checkout, and record `/proc/loadavg` around each run:
 
 ```bash
-BENCH_ARTIFACTS=<scratch> just bench origin/release
+BENCH_ARTIFACTS=<scratch> just bench-relay origin/release
 bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<release> current=. aa=.
 ```
 

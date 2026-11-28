@@ -23,7 +23,7 @@ Guidance:
   - Zero per-call heap allocations.
   - Return the count sent; since `sendmmsg` returns an error only when 0 transmits were sent, errors map cleanly to `transmits[0]`, and `EIO`/`EINVAL` falls back through `send` so the GSO halt and `sendmsg_einval` fallback stay intact.
 - Wire it into `moq-tokio`'s single-loop I/O pass once `quic-sansio-driver` lands, draining ready transmits across connections into one batch per turn.
-- Verify with a loopback test (many peers, GSO train, ECN, mid-batch oversized transmit pinning which call reports the error), a micro-bench vs `try_send`, and `just bench BASE` on chat/fanout workloads confirming lower CPU/syscalls with no p50/p99 latency regression.
+- Verify with a loopback test (many peers, GSO train, ECN, mid-batch oversized transmit pinning which call reports the error), a micro-bench vs `try_send`, and `just bench-relay BASE` on chat/fanout workloads confirming lower CPU/syscalls with no p50/p99 latency regression.
 
 Public API: additive (`moq_sock::udp::UdpSocketState` batched send method). Wire: none.
 

@@ -639,7 +639,7 @@ fn rotate_key(dir: &Path, version: usize) {
 			return;
 		}
 	};
-	let staged = dir.join(format!("{version}.tmp"));
+	let staged = dir.join(format!("{}-{version}.tmp", std::process::id()));
 	std::fs::copy(dir.parent().unwrap().join(source), &staged).unwrap();
 	std::fs::rename(&staged, &live).unwrap();
 }

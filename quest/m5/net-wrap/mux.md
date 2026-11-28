@@ -27,7 +27,7 @@ exporter reads one, without knowing.
   hand them an encrypted broadcast. Make both generic the same way.
 - Demand gating stays as it is: importers and `Source` read
   `track::Demand` and preferences through the trait.
-- No behavior change with the defaults. Keep the `containers` Criterion
+- No behavior change with the defaults. Keep the `containers` swole
   bench flat before and after.
 - Test an import and export round trip (fMP4 and TS) through the moq-net
   pass-through test wrapper, plus one through moq-e2ee's wrappers once
