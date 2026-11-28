@@ -1,12 +1,28 @@
-# m1: additive work for this cycle
+# m1: additive work the cut needs
 
 ## Goal
 
-Improvements, fixes, and checks that need no semver-breaking release: each
-lands on `main` and ships with the next cut, or as a `release` patch when it
-is backported. Breaking work for the same cut lives in m2.
+Improvements, fixes, and checks that need no semver-breaking release but that
+the `0.22.0` cut or lite-07 finalization requires. Breaking work for the same
+cut lives in m2; other additive work lives in m3 and ships in a patch version.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ m0 to m2 focus on the lite-07
+freeze and the `0.22.0` cut. A quest stays in m0 to m2 only when the
+[cut](/quest/m3/release/cut.md)'s `Required` (all of m2, rind-adapters, and the
+interop-green and nightly epics) or [lite-07 finalization](/quest/m2/lite07-finalize.md)
+needs it, directly or transitively, or when it makes a semver-breaking API or
+wire change. The rest moved to [m3](/quest/m3/README.md) and ships later in a
+patch version; additive API (a new field on a `#[non_exhaustive]` struct, a new
+flag or function) moves too. (Rejected: moving only m1; keeping all of m0 as an
+ops bucket.) A quest an open PR claims stays where it is, since `quest mv`
+refuses to move a claimed quest; once its claim ends, move what remains with
+`quest mv`.
+
+Every unclaimed m1 quest moved, since the cut does not require m1. What
+remains is in-flight work an open PR claims; it lands when its PR does, and a
+PR that leaves work moves the remainder to m3 once its claim ends.
 
 Decided 2026-11-05 (maintainer, milestone re-cut): m1 is the additive half
 of what was "everything before the cut" (2026-10-20). A quest stays here when

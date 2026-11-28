@@ -3,12 +3,29 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`. The
+after the next cut of `main` into `release`, and what
+[lite-07 finalization](/quest/m2/lite07-finalize.md) requires. The
 [release cut](/quest/m3/release/cut.md) and its pre-cut reviews wait on this
 milestone (plus `cut.md`'s m0 blockers, not m1); complete it before cutting
 main into release.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ m0 to m2 focus on the lite-07
+freeze and the `0.22.0` cut. A quest stays in m0 to m2 only when the
+[cut](/quest/m3/release/cut.md)'s `Required` (all of m2, rind-adapters, and the
+interop-green and nightly epics) or [lite-07 finalization](/quest/m2/lite07-finalize.md)
+needs it, directly or transitively, or when it makes a semver-breaking API or
+wire change. The rest moved to [m3](/quest/m3/README.md) and ships later in a
+patch version; additive API (a new field on a `#[non_exhaustive]` struct, a new
+flag or function) moves too. (Rejected: moving only m1; keeping all of m0 as an
+ops bucket.) A quest an open PR claims stays where it is, since `quest mv`
+refuses to move a claimed quest; once its claim ends, move what remains with
+`quest mv`.
+
+Here, [hls-group-end-timing](/quest/m3/hls-group-end-timing.md) moved: it
+rechecks HLS timing after lite-07 is finalized and changes no API. The
+typed superseded group end (additive) stays only while its PR claims it.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 

@@ -4,10 +4,30 @@
 
 Work that follows the next breaking release and has someone waiting on it:
 release execution after the cut, quests a named consumer needs, including downstream deployments, and bug fixes in
-shipped code. Additive, API, and wire work mix here; the cut after m2's sorts
-them by kind into m1, m2, and m3.
+shipped code, plus every m0 to m2 quest that need not block the `0.22.0`
+cut, which ships later in a patch version. Additive, API, and wire work mix
+here; the cut after m2's sorts them by kind into m1, m2, and m3.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ m0 to m2 focus on the lite-07
+freeze and the `0.22.0` cut. A quest stays in m0 to m2 only when the
+[cut](/quest/m3/release/cut.md)'s `Required` (all of m2, rind-adapters, and the
+interop-green and nightly epics) or [lite-07 finalization](/quest/m2/lite07-finalize.md)
+needs it, directly or transitively, or when it makes a semver-breaking API or
+wire change. The rest moved to [m3](/quest/m3/README.md) and ships later in a
+patch version; additive API (a new field on a `#[non_exhaustive]` struct, a new
+flag or function) moves too. (Rejected: moving only m1; keeping all of m0 as an
+ops bucket.) A quest an open PR claims stays where it is, since `quest mv`
+refuses to move a claimed quest; once its claim ends, move what remains with
+`quest mv`.
+
+Moved here: audit-instructions, front-drop-with-next-group, go-module-proxy,
+mediacodec-resume-after-flush, owed-group-pass-over,
+quic-ack-packing-and-pto-duplication, quic-path-return, split-moq-net-tests,
+tracks-limit, ts-unpadded-audio-buffer, and vr-demo-try from m1;
+js-listing-synced-order and release-attest-backport from m0; and
+hls-group-end-timing from m2.
 
 Decided 2026-11-05 (maintainer, milestone re-cut): the old m2 ("later work")
 split in half by priority into m3 and m4. A quest joined m3 when a named
