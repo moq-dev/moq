@@ -125,6 +125,7 @@ export class Consumer<T> {
 				// A failed group is that group's gap. Resync from the next group, which begins with
 				// a fresh snapshot (frame 0), so no partial state is presented; only the track's own
 				// error, from the next group read, ends the consumer.
+				group.close();
 				this.#group = undefined;
 				continue;
 			}
@@ -145,6 +146,7 @@ export class Consumer<T> {
 					try {
 						more = group.tryReadFrame();
 					} catch {
+						group.close();
 						this.#group = undefined;
 						break;
 					}

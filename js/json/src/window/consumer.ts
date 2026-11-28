@@ -70,6 +70,7 @@ export class Consumer<T> {
 				// A failed group is that group's gap: the next group starts with a checkpoint that
 				// accounts for everything missed. Only the track's own error, from the next group
 				// read, ends the consumer.
+				this.#group.close();
 				this.#group = undefined;
 				this.#codec = undefined;
 				continue;
