@@ -452,7 +452,8 @@ class Drivers:
         log.info("driver %s connected (run %s)", driver, identity)
         try:
             control = await broadcast.subscribe_track(
-                "control", moq.Subscription(delay=moq.Delay(max=CONTROL_DELAY), order=moq.Order.ASCENDING)
+                "control",
+                moq.Subscription(delay=moq.Delay(max=CONTROL_DELAY), ranges=[moq.Range(order=moq.Order.ASCENDING)]),
             )
             while (frame := await control.read_frame()) is not None:
                 if key in self._revoked:

@@ -108,6 +108,8 @@ export interface FillAsk {
 	groups: Run[];
 	/** The most urgent priority a held fill asks with, which the subscription takes if higher. */
 	priority: number;
+	/** Oldest first, unless a held fill reads newest first. */
+	order: track.Order;
 }
 
 /**
@@ -142,7 +144,7 @@ export class RangeFills {
 	readonly #recover: (groups: Run, priority: number) => RecoveryHandle;
 	#held: track.FillGroups[] = [];
 	/** What the subscription asks for the fills now. */
-	ask: FillAsk = { groups: [], priority: NO_PRIORITY };
+	ask: FillAsk = { groups: [], priority: NO_PRIORITY, order: "ascending" };
 	// Bumped on every input `poll` reads that no other signal reports.
 	readonly #bumped = new Signal(0);
 	// Asked groups no fill owes any more whose stream is still arriving, and how each ends.
@@ -313,7 +315,7 @@ export class RangeFills {
 		// again rather than counted recovered.
 		if (this.#perRun) this.#recovered = [...this.#recovering];
 
-		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
+		const ask: FillAsk = { groups: [], priority: NO_PRIORITY, order: "ascending" };
 		// Every run a held fill still owes, recovered or not.
 		const owed: Run[] = [];
 		const held: track.FillGroups[] = [];
@@ -339,6 +341,7 @@ export class RangeFills {
 				insertRun(owed, run.start, run.end);
 				for (const gap of runGaps(waiting, run.start, run.end)) insertRun(ask.groups, gap.start, gap.end);
 				ask.priority = Math.max(ask.priority, fill.priority);
+				if (fill.order === "descending") ask.order = "descending";
 				held.push(fill);
 				break;
 			}
@@ -406,9 +409,12 @@ export class RangeFills {
 		// dropped it for good, so asking it there again would never be answered.
 		const remaining = this.#recovering.reduce((runs, run) => removeRun(runs, run.start, run.end), groups);
 		// What finishes a stream still asks with what its fills asked.
-		if (this.#held.length === 0 && remaining.length > 0) ask.priority = this.ask.priority;
+		if (this.#held.length === 0 && remaining.length > 0) {
+			ask.priority = this.ask.priority;
+			ask.order = this.ask.order;
+		}
 		ask.groups = remaining;
-		if (ask.priority === this.ask.priority && sameRuns(ask.groups, this.ask.groups))
+		if (ask.priority === this.ask.priority && ask.order === this.ask.order && sameRuns(ask.groups, this.ask.groups))
 			return this.isEmpty() !== empty;
 		this.ask = ask;
 		return true;
@@ -440,7 +446,7 @@ export class RangeFills {
 		for (const fill of this.#held.splice(0)) fill.close();
 		for (const recovery of this.#recoveries) recovery.handle.cancel();
 		this.#recoveries.clear();
-		this.ask = { groups: [], priority: NO_PRIORITY };
+		this.ask = { groups: [], priority: NO_PRIORITY, order: "ascending" };
 		this.#bump();
 	}
 

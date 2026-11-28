@@ -20,6 +20,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { everyRange } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Range, Subscriber, Subscription } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -71,7 +72,7 @@ function subscription(ask: Ask): Subscription {
 					: { live: { min: Duration.millis(range.start.live), max: null } },
 		end: range.end === undefined ? undefined : BigInt(range.end),
 	}));
-	return { order: "ascending", ranges };
+	return everyRange({ ranges }, { order: "ascending" });
 }
 
 // The origin, holding every group it writes for good, and its empty track.
@@ -465,7 +466,7 @@ test("range table chain: a placed range is served before older history", async (
 		// groups that arrive before its answer, while it answers the TRACK from the copy it holds.
 		warmCopy.server.hold();
 		const read = subscription({ ranges: [{ start: 1000, end: 2000 }, held] });
-		const reader = remote.track("data").subscribe({ ...read, order: "descending" });
+		const reader = remote.track("data").subscribe(everyRange({ ...read }, { order: "descending" }));
 		cleanup.push(() => reader.close());
 		await got.read(clock, reader, 0);
 		const starts = got.starts().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));

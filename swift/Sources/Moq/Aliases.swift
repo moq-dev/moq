@@ -69,8 +69,8 @@ public typealias Announce = MoqFFI.MoqAnnounce
 /// let go of it. Another publisher identity taking a path over keeps it present: hold a
 /// `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
-/// Per-subscription delivery preferences: priority, delay, the ranges of the track to
-/// deliver, and group ordering.
+/// Per-subscription delivery preferences: delay, and the ranges of the track to deliver, each
+/// with its own priority and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
 /// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, and once
 /// stated, zero included, a range with no start is a live join that far behind the live edge; `nil`
@@ -157,11 +157,13 @@ extension Subscription {
     /// is refused). Every end includes its whole group. A `nil` `start` is no start, which the
     /// subscription's `delay` places: a stated `min` is a live join that far behind the live edge
     /// (zero is the latest group), and an unstated one reaches back as far as `max` allows. A
-    /// `nil` `end` keeps following the live edge.
+    /// `nil` `end` keeps following the live edge. `priority` is how urgently its groups go out,
+    /// higher first, and `order` which of them comes first, `nil` for newest first. Before
+    /// moq-lite-07 the publisher sends every range at the highest priority any asks, newest first.
     public typealias Range = MoqFFI.MoqRange
-    /// Which group comes first, as the publisher sends them and `recvGroup` returns those held:
-    /// `.ascending` or `.descending`. Before moq-lite-07 the publisher sends newest first whatever
-    /// this asks.
+    /// Which of a range's groups comes first, as the publisher sends them and `recvGroup` returns
+    /// those held: `.ascending` or `.descending`. Before moq-lite-07 the publisher sends newest
+    /// first whatever this asks.
     public typealias Order = MoqFFI.MoqOrder
 
     /// moq-net's defaults, whose `delay` (no `min`, a zero `max`) starts at the newest group and

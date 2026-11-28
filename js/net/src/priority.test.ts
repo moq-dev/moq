@@ -4,6 +4,7 @@ import { defined } from "./defined.test-util.ts";
 import { Version } from "./lite/version.ts";
 import { Priority, sendOrder } from "./priority.ts";
 import { type SendStream, Writer } from "./stream.ts";
+import { everyRange } from "./subscription.test-util.ts";
 import { Timescale } from "./time.ts";
 import type { Subscription } from "./track.ts";
 
@@ -89,7 +90,7 @@ function ranking(options: Subscription = {}) {
 // the subscriber is still waiting on. Stranding them at the position they held when the track
 // ended would let an equal-priority live subscription preempt them until they complete.
 test("groups still draining are promoted after the subscription closes", () => {
-	const { priority, open, streams, broadcast } = ranking({ priority: 7 });
+	const { priority, open, streams, broadcast } = ranking(everyRange({}, { priority: 7 }));
 
 	const older = open();
 	const newer = open();
@@ -112,7 +113,9 @@ test("groups still draining are promoted after the subscription closes", () => {
 // An ascending subscription drains its backlog oldest first, and changing the order re-ranks
 // the groups already on the wire rather than only the ones opened after.
 test("the subscription's order picks which group goes first", async () => {
-	const { priority, subscriber, open, streams, broadcast } = ranking({ priority: 7, order: "ascending" });
+	const { priority, subscriber, open, streams, broadcast } = ranking(
+		everyRange({}, { priority: 7, order: "ascending" }),
+	);
 
 	const writers = [5n, 1n, 10n].map((key) => {
 		const writer = open();
@@ -125,7 +128,7 @@ test("the subscription's order picks which group goes first", async () => {
 	expect(streams.map((stream) => stream.sendOrder)).toEqual(at(1, 0, 2));
 
 	const changed = subscriber.subscription.changed();
-	subscriber.update({ priority: 7, order: "descending" });
+	subscriber.update(everyRange({}, { priority: 7, order: "descending" }));
 	await changed;
 	expect(streams.map((stream) => stream.sendOrder)).toEqual(at(1, 2, 0));
 
@@ -136,7 +139,7 @@ test("the subscription's order picks which group goes first", async () => {
 
 // A joining fill starts earlier in the same group, even when the live rest opened first.
 test.each(["ascending", "descending"] as const)("a fill outranks its group's live rest in %s order", (order) => {
-	const { priority, open, streams, broadcast } = ranking({ priority: 7, order });
+	const { priority, open, streams, broadcast } = ranking(everyRange({}, { priority: 7, order }));
 	const rest = open();
 	const fill = open();
 	const other = open();
@@ -161,7 +164,7 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 // a stream about to open there, so identical starts share a position and the next one skips
 // past both. Covers duplicates, fills within one group, and removals in both orders.
 test.each(["ascending", "descending"] as const)("re-ranking matches rank for every stream in %s order", (order) => {
-	const { priority, open, streams, broadcast } = ranking({ priority: 7, order });
+	const { priority, open, streams, broadcast } = ranking(everyRange({}, { priority: 7, order }));
 	const starts: [bigint, number][] = [
 		[5n, 0],
 		[3n, 0],

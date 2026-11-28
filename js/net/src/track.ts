@@ -74,6 +74,7 @@ import {
 	joinsLive,
 	placedAsTimes,
 	rangesOf,
+	rangesPolicy,
 	UNHELD,
 	Window,
 	wireHeld,
@@ -321,12 +322,36 @@ export interface Groups {
  * delivers every group from the one containing time 2 through the one containing time 6. An end
  * before a time start is empty. Each end resolves at the hop that serves it, once, when the range
  * is placed.
+ *
+ * Each range carries its own priority and group order, so one subscription can ask for the live
+ * edge urgently and backfill history in the background. Changing only those on a range already
+ * live keeps where it started, both here and upstream.
  */
 export interface Range {
 	/** Where delivery starts; see {@link Start}. Omitted for the oldest group. */
 	start?: Start;
 	/** Where delivery stops, as a time including its group, or onward when omitted. */
 	end?: bigint;
+	/**
+	 * Delivery priority relative to this session's other ranges (`-128..=127`, higher first).
+	 * Defaults to `0`.
+	 *
+	 * A group several ranges ask for goes out at the highest of their priorities. moq-lite before
+	 * 07 and moq-transport carry one priority per subscription: the highest among its ranges.
+	 */
+	priority?: number;
+	/**
+	 * Which of this range's groups comes first, as the publisher sends them. Defaults to
+	 * `"descending"`. {@link Subscriber.recvGroup} returns the groups it holds in the order of its
+	 * most urgent ranges: newest first if any range at the highest priority asks for it.
+	 *
+	 * Carried by moq-lite 07 and moq-transport (fixed at subscribe time there, which takes the order
+	 * of the most urgent ranges); older moq-lite versions are served newest first whatever this
+	 * says. A relay serving ranges of both orders at one priority from one upstream subscription asks
+	 * newest first, keeping its live subscribers fresh, and still serves each subscriber in its own
+	 * order.
+	 */
+	order?: Order;
 }
 
 /**
@@ -397,8 +422,6 @@ export interface Live {
  * {@link Live.max} replaces them.
  */
 export interface Subscription {
-	/** Delivery priority relative to this session's other subscriptions (`-128..=127`, higher first). Defaults to `0`. */
-	priority?: number;
 	/**
 	 * The spans of the track to deliver; see {@link Range}.
 	 *
@@ -414,18 +437,6 @@ export interface Subscription {
 	 * reads further.
 	 */
 	ranges?: Range[];
-	/**
-	 * Which group comes first, as the publisher sends them and {@link Subscriber.recvGroup} returns
-	 * those held. Defaults to `"descending"`.
-	 *
-	 * Carried by moq-lite 07 and moq-transport (fixed at subscribe time there); older
-	 * moq-lite versions are served newest first whatever this says.
-	 *
-	 * Aggregated across every live subscriber: any descending subscriber makes the aggregate
-	 * descending, so a relay fanning one upstream request out keeps its live subscribers
-	 * fresh. Each subscriber's own publisher still serves it in its own order.
-	 */
-	order?: Order;
 	/**
 	 * The group each live join among {@link ranges} was already placed at, by its index there: a
 	 * route switch asks a new copy for a join an earlier copy placed, which starts at that group as a
@@ -453,14 +464,13 @@ export type Order = "ascending" | "descending";
 /** Constructors for {@link Subscription}. */
 export const Subscription: {
 	/**
-	 * The default subscription, used when none is passed: priority `0`, descending order, and one
-	 * range joining at the latest group, which skips a superseded group at once. Mirrors the Rust
-	 * `Subscription::default()`. Spread it to change one field and keep the rest:
-	 * `{ ...Subscription.default(), priority: 2 }`.
+	 * The default subscription, used when none is passed: one range joining at the latest group at
+	 * priority `0`, newest first, which skips a superseded group at once. Mirrors the Rust
+	 * `Subscription::default()`.
 	 */
 	default(): Subscription;
 } = {
-	default: () => ({ priority: DEFAULT_PRIORITY, ranges: [latest()], order: "descending" }),
+	default: () => ({ ranges: [latest()] }),
 };
 
 // The default range: a live join at the latest group, skipping each the moment a newer one
@@ -476,20 +486,14 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 		throw new TypeError("Subscription delay, maxAge, and maxDelay are unsupported; use a live range's max");
 	}
 	if ("groups" in subscription) throw new TypeError("Subscription groups is unsupported; use ranges");
+	// Refused rather than ignored, so a caller still setting them learns they moved onto each range.
+	if ("priority" in subscription || "order" in subscription)
+		throw new TypeError("Subscription priority and order are unsupported; set them on each range");
 	const out: Subscription = {
-		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
-		order: orderOf(subscription.order),
 		ranges: subscription.ranges === undefined ? [latest()] : rangesOf(subscription.ranges),
 	};
 	if (subscription.placed !== undefined && subscription.placed.size > 0) out.placed = subscription.placed;
 	return out;
-}
-
-// A plain JS caller can pass anything, and silently serving a typo as descending would hide it.
-function orderOf(order: Order | undefined): Order {
-	if (order === undefined) return "descending";
-	if (order !== "ascending" && order !== "descending") throw new TypeError(`unknown order: ${String(order)}`);
-	return order;
 }
 
 /**
@@ -537,9 +541,9 @@ export class Request {
 		return hooks.requested(this.#producer).peek() ?? subscriptionDefaults();
 	}
 
-	/** The subscriber's priority for this track. */
+	/** The subscriber's priority for this track: the highest any range asks. */
 	get priority(): number {
-		return this.subscription.priority ?? 0;
+		return rangesPolicy(this.subscription.ranges ?? []).priority;
 	}
 
 	/**
@@ -2488,7 +2492,7 @@ export class Producer {
 	// publisher applies its own, as each reader's budget does, so the demand asked upstream is the
 	// same before and after the info lands.
 	#join(sink: TrackState): void {
-		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: sink.update.held() }, true);
+		this.#moved(sink, { after: sink.update.given(), gone: [], came: sink.update.held() }, true);
 		sink.update.watch = (change) => this.#moved(sink, change);
 		this.#subscribed();
 	}
@@ -2497,7 +2501,7 @@ export class Producer {
 	#leave(sink: TrackState): void {
 		sink.update.watch = undefined;
 		this.#countAsks(sink, [], []);
-		this.#moved(sink, { before: sink.update.contribution(), gone: sink.update.held(), came: [] });
+		this.#moved(sink, { before: sink.update.given(), gone: sink.update.held(), came: [] });
 		this.#counted.delete(sink);
 		this.#subscribed();
 	}
@@ -2527,7 +2531,7 @@ export class Producer {
 	// Take a sink that became a fetch out of the live aggregate, before anyone sees it there.
 	#unlive(sink: TrackState): void {
 		if (!this.#counted.delete(sink)) return;
-		this.#live.replace({ before: sink.update.contribution(), gone: sink.update.held(), came: [] });
+		this.#live.replace({ before: sink.update.given(), gone: sink.update.held(), came: [] });
 		this.#subscribed();
 	}
 
@@ -4053,9 +4057,17 @@ export class Subscriber {
 		});
 		hooks.expireGroup(group, {
 			expired: () => this.#staleAt(group.start, this.#drift(), true, held),
+			budget: () => this.#drift().budget.at(group.start),
+			aged: (budget) => this.#agedPast(group.start, this.#drift(), budget, held),
 			changed: this.#expiryChanged(),
 		});
 		return group;
+	}
+
+	// Whether group `key` aged past `budget` milliseconds, held to the track's max age, as `drift`
+	// judges it otherwise. Mirrors the Rust `GroupExpiry::aged`.
+	#agedPast(key: bigint, drift: Drift, budget: number, held: Superseded): boolean {
+		return this.#staleAt(key, { ...drift, budget: Budget.uniform(budget).clamped(drift.bound) }, true, held);
 	}
 
 	// What can change a drift verdict.
@@ -4310,11 +4322,10 @@ export class Subscriber {
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
 		const update = this.#state.update;
-		const scalars = update.scalars();
 		this.#refusal = undefined;
 		// By the keys the ranges hold, which an edit's Range IDs set, as the Rust `Change::All` has it.
 		this.#window = Window.keyed(
-			scalars ? update.entries() : [[0n, {}]],
+			update.given() ? update.entries() : [[0n, {}]],
 			this.#latestGroup(),
 			this.#holdings(),
 			(key) => update.joining(key),
@@ -4751,8 +4762,8 @@ export class Subscriber {
 	#askerOf(): Asker {
 		this.#state.asker ??= {
 			wants: (start, end) => this.#wants(start, end),
-			priority: () => this.#state.update.scalars()?.priority ?? 0,
-			order: () => this.#state.update.scalars()?.order ?? "descending",
+			priority: () => this.#state.update.policy().priority,
+			order: () => this.#state.update.policy().order,
 			refuse: (start, end, error) => {
 				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, own: true }));
 			},
@@ -5487,6 +5498,19 @@ export class Subscriber {
 			subscriber.#settle();
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
+		hooks.servingCovering = (subscriber, key) => {
+			const resumed = subscriber.#resume?.covering(key);
+			if (resumed) {
+				// A reader following route copies keys its ranges by position, in key order.
+				const keys = [...subscriber.#state.update.entries()].map(([held]) => held);
+				return resumed.flatMap(([index, budget]) => {
+					const held = keys[Number(index)];
+					return held === undefined ? [] : [[held, budget] as [bigint, number]];
+				});
+			}
+			subscriber.#settle();
+			return subscriber.#window.covering(key);
+		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
 		hooks.restateSubscriber = (subscriber, subscription) => subscriber.#update(subscription, false);
 		hooks.stampSubscriber = (subscriber, since) => subscriber.#stamp(since);
@@ -5574,6 +5598,8 @@ export class Subscriber {
 			}
 			return {
 				expired: () => subscriber.#staleAt(key, drift(), true, held),
+				budget: () => drift().budget.at(key),
+				aged: (budget) => subscriber.#agedPast(key, drift(), budget, held),
 				changed,
 			};
 		};
@@ -5732,7 +5758,7 @@ export class Subscriber {
 			subscriber.#resolve();
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
 			if (subscriber.#state.producer) unlive(subscriber.#state.producer, subscriber.#state);
-			if (subscriber.#state.update.scalars()) subscriber.#state.update.touch();
+			if (subscriber.#state.update.given()) subscriber.#state.update.touch();
 		};
 		// The key cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
@@ -6132,7 +6158,7 @@ export class Subscriber {
 		this.#reoffer(drift.budget);
 		// Newest first, the stale groups at the oldest end are written off before one is picked,
 		// as the Rust `write_off_oldest` does, so their verdicts settle first.
-		const ascending = this.#state.update.scalars()?.order === "ascending";
+		const ascending = this.#state.update.policy().order === "ascending";
 		if (!ascending) {
 			const dropped = this.#writeOffOldest(groups, start, end, drift, dispositions);
 			if (dropped) return dropped;
@@ -7015,7 +7041,7 @@ export class Subscriber {
 			!this.#delivered.has(group.start) &&
 			!this.#staleAt(group.start, drift) &&
 			(ordered || !this.#lacksHead(group));
-		if (!ordered && this.#state.update.scalars()?.order !== "ascending") {
+		if (!ordered && this.#state.update.policy().order !== "ascending") {
 			let index = timelineIndex(groups, cursor.end ?? UNBOUNDED) - 1;
 			while (index >= 0 && groups[index].start >= start) {
 				const group = groups[index];
@@ -7289,35 +7315,28 @@ export class Subscriber {
 	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and
 	// every other stays where it resolved. Mirrors the Rust `Subscriber::edit`.
 	#edit(edit: Edit): void {
-		const {
-			ranges: _,
-			placed: __,
-			...scalars
-		} = subscriptionDefaults({
-			priority: edit.priority,
-			order: edit.order,
-			ranges: [],
-		}) as Required<Subscription>;
 		const add = edit.add.map(([key, range]) => [key, rangesOf([range])[0]] as const);
-		const reordered = scalars.order !== this.#state.update.scalars()?.order;
-		const moved = this.#state.update.edit({ retire: edit.retire, add, placed: edit.placed, ...scalars });
+		const order = this.#state.update.policy().order;
+		const moved = this.#state.update.edit({ retire: edit.retire, add, placed: edit.placed });
+		const reordered = order !== this.#state.update.policy().order;
 		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
 		if (moved && this.#refusal) this.#resolve();
-		else if (moved) {
+		else if (
+			moved &&
 			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings(), (key) =>
 				this.#state.update.joining(key),
-			);
+			)
+		) {
 			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
 			if (this.#lookups.length > 0) this.#lookUp();
 			this.#moved();
-		} else {
-			this.#ask();
-			if (reordered) this.#fillsMoved();
-		}
+		} else this.#ask();
+		// A fill's order follows its readers, so its handler wakes to serve the new first group.
+		if (reordered) this.#fillsMoved();
 	}
 
 	/**
-	 * Update this subscription's options (e.g. priority), triggering a SUBSCRIBE_UPDATE to the
+	 * Update this subscription's options (e.g. a range's priority), triggering a SUBSCRIBE_UPDATE to the
 	 * publisher. Replacing the ranges resolves them again, without redelivering a group read
 	 * while they held it throughout; ranges replaced off a group may forget it, so ranges holding
 	 * it again may hand it out again, as a new subscription would. An arrival reader can receive
@@ -7333,18 +7352,21 @@ export class Subscriber {
 	// `Subscriber::replace`.
 	#update(options: Subscription, retune: boolean): void {
 		const subscription = subscriptionDefaults(options);
-		const reordered = subscription.order !== this.#state.update.scalars()?.order;
+		const order = this.#state.update.policy().order;
 		const replaced = this.#state.update.set(subscription, retune);
+		const reordered = order !== this.#state.update.policy().order;
 		if (replaced === "replaced" || (replaced && this.#refusal)) this.#resolve();
-		else if (replaced) {
-			// Only a live join's max changed: each keeps where it joined.
+		else if (
+			// Only a policy or a live join's max changed: each keeps where it resolved.
+			replaced &&
 			this.#window.edit([], replaced, this.#latestGroup(), this.#holdings(), (key) =>
 				this.#state.update.joining(key),
-			);
+			)
+		)
 			this.#moved();
-		} else this.#ask();
+		else this.#ask();
 		// A fill's order follows its readers, so its handler wakes to serve the new first group.
-		if (!replaced && reordered) this.#fillsMoved();
+		if (reordered) this.#fillsMoved();
 	}
 }
 

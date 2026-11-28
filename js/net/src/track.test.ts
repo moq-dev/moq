@@ -14,9 +14,9 @@ import { type DropRun, hooks, NO_MAX_DELAY, sameHole, skipHole, staleHole } from
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
-import { withMax } from "./subscription.test-util.ts";
+import { everyRange, topPolicy, withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { authoredInfo, type Order, type Range, Subscription, Producer as TrackProducer } from "./track.ts";
+import { authoredInfo, type Range, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { rangesStart, union } from "./window.ts";
 
@@ -1016,11 +1016,14 @@ test("priority -128..=127 is accepted and anything outside is refused", () => {
 	const producer = new TrackProducer("video");
 	producer.accept({ priority: 127 });
 	expect(producer.priority).toBe(127);
-	expect(new TrackProducer("audio").subscribe({ priority: -128 }).subscription.peek()?.priority).toBe(-128);
+	expect(
+		topPolicy(new TrackProducer("audio").subscribe(everyRange({}, { priority: -128 })).subscription.peek())
+			?.priority,
+	).toBe(-128);
 	expect(() => producer.accept({ priority: 128 })).toThrow(RangeError);
 	expect(() => producer.accept({ priority: -129 })).toThrow(RangeError);
 	expect(() => producer.accept({ priority: 1.5 })).toThrow(RangeError);
-	expect(() => producer.subscribe({ priority: 128 })).toThrow(RangeError);
+	expect(() => producer.subscribe(everyRange({}, { priority: 128 }))).toThrow(RangeError);
 });
 
 test("authoredInfo re-validates timescale and the safe maxAge bound", () => {
@@ -1084,26 +1087,27 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	const join = (min: number, max: number) => ({
 		start: { live: { min: Duration.millis(min), max: Duration.millis(max) } },
 	});
-	const bounded = producer.subscribe({ priority: 2, order: "ascending", ranges: [{ start: 10n, end: 19n }] });
-	const live = producer.subscribe({ priority: 7, ranges: [join(50, 250)] });
+	const history = { start: 10n, end: 19n, priority: 2, order: "ascending" } as const;
+	const bounded = producer.subscribe({ ranges: [history] });
+	const live = producer.subscribe({ ranges: [{ ...join(50, 250), priority: 7 }] });
 	const joining = producer.subscribe({ ranges: [join(20, 0)] });
 	// One starting at the oldest group, as a legacy peer's, reaches back furthest of all.
 	const legacy = producer.subscribe({ ranges: [{}] });
 
-	// One descending subscriber makes the aggregate descending, so a live reader is never held
-	// behind another's backlog. A range from the oldest group with no end covers every other.
-	expect(producer.subscription.peek()).toEqual({ priority: 7, order: "descending", ranges: [{}] });
+	// A range from the oldest group with no end covers every other range at its own priority and
+	// order, but none more urgent, nor one oldest first at its priority: each keeps its own policy.
+	expect(producer.subscription.peek()).toEqual({ ranges: [{}, history, { ...join(50, 250), priority: 7 }] });
 
 	// Each live join is a range of its own by its lag, under its own max, beside the time ranges,
 	// so an upstream answers each reader's join as the origin would.
 	const stated = producer.subscription.changed();
 	legacy.close();
-	expect((await stated)?.ranges).toEqual([{ start: 10n, end: 19n }, join(20, 0), join(50, 250)]);
+	expect((await stated)?.ranges).toEqual([history, join(20, 0), { ...join(50, 250), priority: 7 }]);
 
 	joining.close();
 	const narrowed = producer.subscription.changed();
 	live.close();
-	expect(await narrowed).toEqual({ priority: 2, order: "ascending", ranges: [{ start: 10n, end: 19n }] });
+	expect(await narrowed).toEqual({ ranges: [history] });
 
 	const none = producer.subscription.changed();
 	bounded.close();
@@ -1217,10 +1221,12 @@ test("a bounded read on a subscribed copy ends once its feed stops owing a hole"
 	const clock = manualTime(0);
 	try {
 		const producer = receivedTrack();
-		const reader = producer.subscribe({
-			order: "ascending",
-			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(1000) } }, end: 2n }],
-		});
+		const reader = producer.subscribe(
+			everyRange(
+				{ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(1000) } }, end: 2n }] },
+				{ order: "ascending" },
+			),
+		);
 		putGroup(producer, 0n);
 		putGroup(producer, 2n);
 		expect(reader.tryRecvGroup()?.start).toBe(0n);
@@ -1982,7 +1988,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 
 test("the default joins live under a zero max, and history sets no limit", async () => {
 	const latest = { start: { live: { min: Duration.ZERO, max: Duration.ZERO } } };
-	expect(Subscription.default()).toEqual({ priority: 0, order: "descending", ranges: [latest] });
+	expect(Subscription.default()).toEqual({ ranges: [latest] });
 
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(5000) });
 	const explicit = producer.subscribe(Subscription.default());
@@ -2981,10 +2987,9 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 
 	// A join reaching back past every group under a zero max: the aborted group is no live edge, so
 	// the older one is the newest it judges by.
-	const track = producer.subscribe({
-		order: "ascending",
-		ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }],
-	});
+	const track = producer.subscribe(
+		everyRange({ ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }] }, { order: "ascending" }),
+	);
 	expect((await track.recvGroup())?.start).toBe(1n);
 	track.close();
 });
@@ -2996,7 +3001,7 @@ test.each([
 ] as const)("subscription bounds stay reader-local for %s reads, %s", async (mode, order) => {
 	const producer = new TrackProducer("test");
 	const everything = producer.subscribe({ ranges: [{}] });
-	const subscription = (range: { start?: bigint; end?: bigint }) => ({ ranges: [range], order });
+	const subscription = (range: { start?: bigint; end?: bigint }) => ({ ranges: [{ ...range, order }] });
 	const subscriber = producer.subscribe(subscription({ start: 1n, end: 2n }));
 	const ordered = mode === "ordered" ? subscriber.ordered() : undefined;
 	const read = () => (ordered ? ordered.nextGroup() : subscriber.recvGroup());
@@ -3364,8 +3369,8 @@ test.each([
 		[3n, 5n],
 	]) {
 		const producer = new TrackProducer("test");
-		const ordered = producer.subscribe({ ranges: [{}], order }).ordered();
-		const arrival = producer.subscribe({ ranges: [{}], order });
+		const ordered = producer.subscribe(everyRange({ ranges: [{}] }, { order })).ordered();
+		const arrival = producer.subscribe(everyRange({ ranges: [{}] }, { order }));
 		for (const key of arrivals) producer.createGroup(key);
 		expect((await ordered.nextGroup())?.start).toBe(3n);
 		expect((await arrival.recvGroup())?.start).toBe(first);
@@ -6750,9 +6755,6 @@ function foldSubscriptions(subscriptions: Iterable<Subscription | undefined>): S
 			combined = { ...subscription };
 			continue;
 		}
-		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
-		combined.order =
-			combined.order === "ascending" && subscription.order === "ascending" ? "ascending" : "descending";
 		combined.ranges = [...(combined.ranges ?? []), ...(subscription.ranges ?? [])];
 	}
 	if (!combined) return undefined;
@@ -6777,9 +6779,12 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 		if (start !== undefined) out.start = start;
 		const end = random(3) === 0 ? undefined : anchor();
 		if (end !== undefined) out.end = end;
+		// Each range at its own policy, the defaults left out as the model holds them.
+		const priority = random(4);
+		if (priority !== 0) out.priority = priority;
+		if (random(2) === 0) out.order = "ascending";
 		return out;
 	};
-	const order = (): Order => (random(2) === 0 ? "ascending" : "descending");
 	type Held = {
 		subscriber: ReturnType<TrackProducer["subscribe"]>;
 		keys: Map<bigint, Range>;
@@ -6794,7 +6799,7 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 			const pick = held[random(held.length)];
 			if (op === 0 && held.length < 6) {
 				const ranges = Array.from({ length: random(6) }, range);
-				const subscriber = producer.subscribe({ priority: random(4), order: order(), ranges });
+				const subscriber = producer.subscribe({ ranges });
 				held.push({
 					subscriber,
 					keys: new Map(ranges.map((r, i) => [BigInt(i), r])),
@@ -6804,7 +6809,7 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 			} else if (op === 1 && !pick.fetch) {
 				const ranges = Array.from({ length: random(6) }, range);
 				const before = [...pick.keys.values()];
-				pick.subscriber.update({ priority: random(4), order: order(), ranges });
+				pick.subscriber.update({ ranges });
 				// A whole replacement rekeys by position only when the ranges change.
 				if (!Bun.deepEquals(before, ranges)) {
 					pick.keys = new Map(ranges.map((r, i) => [BigInt(i), r]));
@@ -6819,12 +6824,7 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 				const readded = new Set(add.map(([key]) => key));
 				for (const key of retire) if (!readded.has(key)) pick.keys.delete(key);
 				for (const [key, r] of add) pick.keys.set(key, r);
-				hooks.editSubscriber(pick.subscriber, {
-					retire,
-					add,
-					priority: random(4),
-					order: order(),
-				});
+				hooks.editSubscriber(pick.subscriber, { retire, add });
 			} else if (op === 5 && !pick.fetch) {
 				hooks.fetchFrom(pick.subscriber);
 				pick.fetch = true;
@@ -7279,13 +7279,17 @@ test("disjoint ranges on a proven copy settle at end without waiting on unasked 
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 		hooks.receiveTrack(producer);
 		hooks.proveTrack(producer);
-		const sub = producer.subscribe({
-			order: "ascending",
-			ranges: [
-				{ start: 0n, end: 2n },
-				{ start: 10n, end: 12n },
-			],
-		});
+		const sub = producer.subscribe(
+			everyRange(
+				{
+					ranges: [
+						{ start: 0n, end: 2n },
+						{ start: 10n, end: 12n },
+					],
+				},
+				{ order: "ascending" },
+			),
+		);
 		try {
 			hooks.startTrack(producer, { requested: 0n, start: 0n });
 			for (const key of [0n, 1n, 10n, 11n]) {

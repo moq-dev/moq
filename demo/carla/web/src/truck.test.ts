@@ -448,7 +448,7 @@ describe("Truck control", () => {
 		while (!broadcast) broadcast = await request.active.changed();
 		const track = broadcast.track("control");
 		const reader = track
-			.subscribe({ order: "ascending", ranges: [{ start: { live: { min: HEARTBEAT, max: HEARTBEAT } } }] })
+			.subscribe({ ranges: [{ start: { live: { min: HEARTBEAT, max: HEARTBEAT } }, order: "ascending" }] })
 			.ordered();
 		const read = async () => {
 			const frame = await reader.readFrame();

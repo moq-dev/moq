@@ -1763,10 +1763,10 @@ impl Fetch {
 					let range = moq_net::track::Range {
 						start: moq_net::track::Start::Time(first),
 						end: Some(last),
+						order: moq_net::track::Order::Ascending,
+						..Default::default()
 					};
-					let subscription = moq_net::track::Subscription::default()
-						.with_ranges([range])
-						.with_order(moq_net::track::Order::Ascending);
+					let subscription = moq_net::track::Subscription::default().with_ranges([range]);
 					let span = Span::Subscribing(track.subscribe(subscription).into_inner());
 					self.state = Fetching::Groups {
 						_binding: binding.clone(),

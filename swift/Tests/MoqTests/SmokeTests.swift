@@ -101,8 +101,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try track.consume(
             subscription: Subscription(
                 delay: Delay(min: 0, max: 10),
-                ranges: [Subscription.Range(start: .unscaled(0))],
-                order: .ascending
+                ranges: [Subscription.Range(start: .unscaled(0), order: .ascending)]
             ))
         var starts: [UInt64] = []
         for _ in 0..<3 {

@@ -9,6 +9,7 @@
 
 use super::route_change::{Delivery, link, payload, priced_link, produce_origin, read, settle, timed};
 use crate::WithMax as _;
+use crate::support::EveryRange;
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -77,7 +78,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	// the newest first left to age.
 	let prefs = track::Subscription::default()
 		.with_max(budget)
-		.with_order(track::Order::Ascending);
+		.ordered(track::Order::Ascending);
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
 	settle().await;

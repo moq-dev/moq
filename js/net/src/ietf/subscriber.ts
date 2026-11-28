@@ -40,7 +40,7 @@ import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/dem
 import { min } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { bounded, placedAsTimes, wireHeld, wireSpan } from "../window.ts";
+import { bounded, latestAt, placedAsTimes, rangesPolicy, wireHeld, wireSpan } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -1445,7 +1445,7 @@ export class Subscriber {
 			// With no subscriber left there is nothing to follow: the subscription is ending, or
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = hooks.requested(producer).peek();
-			const wanted = toWire(subscription?.priority ?? 0);
+			const wanted = toWire(rangesPolicy(subscription?.ranges ?? []).priority);
 			if (!subscription || wanted === sent || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
@@ -1615,7 +1615,7 @@ export class Subscriber {
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
-			groupOrder: request.subscription.order,
+			groupOrder: rangesPolicy(request.subscription.ranges ?? []).order,
 			// A known start is absolute, except group 0, which joins live with no filter. A Next
 			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
 			// the subscription's life.
@@ -2455,8 +2455,8 @@ export class Subscriber {
 			if (priority === undefined) {
 				held?.close();
 				held = undefined;
-			} else if (held) held.update({ priority });
-			else held = hooks.parked(track.subscribe({ priority }));
+			} else if (held) held.update(latestAt(priority));
+			else held = hooks.parked(track.subscribe(latestAt(priority)));
 		};
 		const dispose = producer.priority.subscribe(sync);
 		sync();
@@ -2482,9 +2482,9 @@ export class Subscriber {
 		}
 		const entry = { request, accepted: new Once<true>() };
 		pending.set(request.name, entry);
-		const subscriber = wireOf(source).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
+		const subscriber = wireOf(source).subscribe(request.name, latestAt(request.priority.peek() ?? 0));
 		const dispose = request.priority.subscribe((priority) => {
-			if (priority !== undefined) subscriber.update({ priority });
+			if (priority !== undefined) subscriber.update(latestAt(priority));
 		});
 		try {
 			await untilAborted(

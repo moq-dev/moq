@@ -100,6 +100,7 @@ async fn position_zero_and_exact_group_match() {
 					.with_ranges([Range {
 						start: Start::Time(500),
 						end: Some(500),
+						..Default::default()
 					}])
 					.with_max(None),
 			)
@@ -441,6 +442,7 @@ async fn relay_exact_position_fetch_past_live_edge_reaches_fill_handler() {
 					.with_ranges([Range {
 						start: Start::Time(66),
 						end: None,
+						..Default::default()
 					}])
 					.with_max(None),
 			)

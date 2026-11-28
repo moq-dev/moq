@@ -7,6 +7,7 @@
 //! group first: no group below it ever existed, so no relay may start the reader below it, nor
 //! report the keys under it as lost.
 
+use crate::support::EveryRange;
 use std::time::Duration;
 
 use moq_net::track::{Item, Order, Range, Start, Subscription};
@@ -66,8 +67,9 @@ async fn first_item(links: u64, early: bool) -> String {
 			.with_ranges([Range {
 				start: Start::Oldest,
 				end: None,
+				..Default::default()
 			}])
-			.with_order(Order::Ascending);
+			.ordered(Order::Ascending);
 		let mut ordered = remote
 			.track("text")
 			.unwrap()

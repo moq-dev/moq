@@ -14,7 +14,7 @@ use super::FillAsk;
 use crate::{
 	EncodeError,
 	coding::{Form, varint},
-	lite::{self, Anchor, Range, message::MAX_MESSAGE_SIZE},
+	lite::{self, Anchor, Policy, Range, message::MAX_MESSAGE_SIZE},
 	track::Position,
 };
 
@@ -22,9 +22,9 @@ use crate::{
 /// varints of at most nine bytes, and the priority byte.
 const UPDATE_FIELDS: usize = 9 * 9 + 1;
 
-/// The most one range takes besides its Range ID: each end's type, then at most three varints
-/// of nine bytes for a start and two for an end.
-const RANGE_FIELDS: usize = 2 + 5 * 9;
+/// The most one range takes besides its Range ID: its priority and order, each end's type,
+/// then at most three varints of nine bytes for a start and two for an end.
+const RANGE_FIELDS: usize = 2 + 2 + 5 * 9;
 
 /// What ranges may take on the wire.
 #[derive(Clone, Copy, Debug)]
@@ -42,7 +42,9 @@ impl Budget {
 	///
 	/// Half a message, so that the ranges sent last, retired by Range ID, and the ranges
 	/// replacing them fit one SUBSCRIBE_UPDATE however little the two share: a relay never
-	/// narrows its ask in between, which would reset group streams still arriving. Never more
+	/// narrows its ask in between, which would reset group streams still arriving. A range
+	/// retuned in place costs no more than it does as it now reads, so retunes fit the same
+	/// half as the ranges replacing the old ones. Never more
 	/// than leaves room in a SUBSCRIBE for one range past it, which [`Self::fit_after`] takes.
 	pub fn new(version: lite::Version, fields: usize, next: u64, count: usize) -> Self {
 		let form = version.into();
@@ -89,6 +91,7 @@ fn span(start: Position, end: Option<Position>) -> Range {
 	Range {
 		start: Some(Anchor::Absolute(start)),
 		end: end.map(Anchor::Absolute),
+		..Range::OPEN
 	}
 }
 
@@ -97,6 +100,7 @@ fn make_span(start: Position, end: Option<Position>, time: bool) -> Range {
 		true => Range {
 			start: Some(Anchor::Time(start.group)),
 			end: end.map(|end| Anchor::Time(end.group)),
+			..Range::OPEN
 		},
 		false => span(start, end),
 	}
@@ -114,12 +118,19 @@ pub(super) fn fit(
 	avoid: &RangeSet<u64>,
 	budget: Budget,
 ) -> Result<(Vec<Range>, RangeSet<u64>), EncodeError> {
-	let fill = |groups: &std::ops::Range<u64>| (Position::group(groups.start), Some(Position::group(groups.end)));
+	// Fills take their policy where they go out, so the one here only keeps the spans' shape.
+	let fill = |groups: &std::ops::Range<u64>| {
+		(
+			Position::group(groups.start),
+			Some(Position::group(groups.end)),
+			Policy::default(),
+		)
+	};
 	let costs: Option<Vec<usize>> = demand
 		.iter()
 		.copied()
 		.chain(fills.iter().map(|groups| {
-			let (start, end) = fill(groups);
+			let (start, end, _) = fill(groups);
 			span(start, end)
 		}))
 		.map(|range| budget.cost(&range))
@@ -136,18 +147,19 @@ pub(super) fn fit(
 	let mut pos_spans = Vec::new();
 	let mut others = Vec::new();
 	for range in demand {
+		let policy = range.policy();
 		match (range.start, range.end) {
 			(Some(Anchor::Time(start)), Some(Anchor::Time(end))) => {
-				time_spans.push((Position::group(start), Some(Position::group(end))));
+				time_spans.push((Position::group(start), Some(Position::group(end)), policy));
 			}
 			(Some(Anchor::Time(start)), None) => {
-				time_spans.push((Position::group(start), None));
+				time_spans.push((Position::group(start), None, policy));
 			}
 			(Some(Anchor::Absolute(start)), Some(Anchor::Absolute(end))) => {
-				pos_spans.push((start, Some(end)));
+				pos_spans.push((start, Some(end), policy));
 			}
 			(Some(Anchor::Absolute(start)), None) => {
-				pos_spans.push((start, None));
+				pos_spans.push((start, None, policy));
 			}
 			_ => others.push(range),
 		}
@@ -204,19 +216,24 @@ pub(super) fn fit(
 	let [time_spans, pos_spans, fills] = lists;
 	let mut ranges: Vec<Range> = time_spans
 		.ranges()
-		.map(|(start, end)| make_span(start, end, true))
-		.chain(pos_spans.ranges().map(|(start, end)| make_span(start, end, false)))
+		.map(|(start, end, policy)| make_span(start, end, true).with_policy(policy))
+		.chain((pos_spans.ranges()).map(|(start, end, policy)| make_span(start, end, false).with_policy(policy)))
 		.collect();
 	ranges.extend(others);
 	let groups = fills
 		.ranges()
-		.map(|(start, end)| start.group..end.expect("fills are bounded").group);
+		.map(|(start, end, _)| start.group..end.expect("fills are bounded").group);
 	Ok((ranges, groups.collect()))
 }
 
 /// Disjoint spans in order, each the run of the input spans from one start to its chain's end.
+///
+/// A span merged from several goes out at the most urgent policy among them, so each still
+/// gets its groups at least as soon as it asked: a policy costs the same bytes whatever it is.
 struct Spans {
 	spans: Vec<(Position, Option<Position>)>,
+	/// The policy each span goes out at.
+	policies: Vec<Policy>,
 	/// Whether these spans carry inclusive Time anchors rather than exclusive Position anchors.
 	time: bool,
 	/// The last span of the chain starting at each chain's first, and the first of the chain
@@ -231,7 +248,7 @@ struct Spans {
 
 impl Spans {
 	fn new(
-		mut input: Vec<(Position, Option<Position>)>,
+		mut input: Vec<(Position, Option<Position>, Policy)>,
 		time: bool,
 		budget: Budget,
 		last: impl Fn(std::ops::Range<u64>) -> bool,
@@ -239,20 +256,25 @@ impl Spans {
 		input.sort_unstable();
 		// Spans that overlap or touch cost less as one, and ask for nothing more.
 		let mut spans: Vec<(Position, Option<Position>)> = Vec::with_capacity(input.len());
-		for (start, end) in input {
+		let mut policies: Vec<Policy> = Vec::with_capacity(input.len());
+		for (start, end, policy) in input {
 			let touches = |last: Option<Position>| match (last, time) {
 				(None, _) => true,
 				(Some(last), true) => last.group.saturating_add(1) >= start.group,
 				(Some(last), false) => last >= start,
 			};
-			match spans.last_mut() {
-				Some((_, last)) if touches(*last) => {
+			match (spans.last_mut(), policies.last_mut()) {
+				(Some((_, last)), Some(top)) if touches(*last) => {
 					*last = match (*last, end) {
 						(Some(last), Some(end)) => Some(last.max(end)),
 						_ => None,
 					};
+					*top = Policy::top([*top, policy]);
 				}
-				_ => spans.push((start, end)),
+				_ => {
+					spans.push((start, end));
+					policies.push(policy);
+				}
 			}
 		}
 		let last = spans
@@ -269,6 +291,7 @@ impl Spans {
 			end: (0..spans.len()).collect(),
 			start: (0..spans.len()).collect(),
 			spans,
+			policies,
 			last,
 			total,
 			budget,
@@ -311,20 +334,21 @@ impl Spans {
 		self.start[last] = first;
 	}
 
-	/// Each chain as the one span covering it.
-	fn ranges(&self) -> impl Iterator<Item = (Position, Option<Position>)> + '_ {
+	/// Each chain as the one span covering it, at the most urgent policy along it.
+	fn ranges(&self) -> impl Iterator<Item = (Position, Option<Position>, Policy)> + '_ {
 		let mut index = 0;
 		std::iter::from_fn(move || {
 			let first = index;
 			let last = *self.end.get(first)?;
 			index = last + 1;
-			Some((self.spans[first].0, self.spans[last].1))
+			let policy = Policy::top(self.policies[first..=last].iter().copied());
+			Some((self.spans[first].0, self.spans[last].1, policy))
 		})
 	}
 }
 
 /// One range per kind of start covering every range of that kind: from the earliest start
-/// to the latest end.
+/// to the latest end, at the most urgent policy among them.
 fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 	let kind = |range: &Range| match range.start {
 		None => 0,
@@ -361,6 +385,7 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 			// Ends of different kinds can't be ordered without the latest group: follow the edge.
 			_ => None,
 		};
+		*cover = cover.with_policy(Policy::top([cover.policy(), range.policy()]));
 	}
 	kinds
 }
@@ -379,7 +404,7 @@ mod tests {
 	}
 
 	fn total(budget: Budget, ranges: &[Range], groups: &RangeSet<u64>) -> usize {
-		let fills = FillAsk::wire(groups);
+		let fills = FillAsk::default().wire(groups);
 		ranges
 			.iter()
 			.copied()
@@ -388,7 +413,8 @@ mod tests {
 			.sum()
 	}
 
-	/// Whether `outer` asks for everything `inner` does, judged without the latest group.
+	/// Whether `outer` asks for everything `inner` does, at least as urgently, judged without
+	/// the latest group.
 	fn covers(outer: &Range, inner: &Range) -> bool {
 		let start = match (outer.start, inner.start) {
 			(None, _) => true,
@@ -402,7 +428,7 @@ mod tests {
 			(Some(Anchor::Time(outer)), Some(Anchor::Time(inner))) => outer >= inner,
 			_ => false,
 		};
-		start && end
+		start && end && outer.policy().covers(&inner.policy())
 	}
 
 	fn random(rng: &mut rand::rngs::StdRng) -> (Vec<Range>, RangeSet<u64>, RangeSet<u64>) {
@@ -415,12 +441,23 @@ mod tests {
 				0 => Range {
 					start: Some(Anchor::Time(rng.random_range(0..20))),
 					end: end.map(Anchor::Absolute),
+					..Range::OPEN
 				},
 				1 => Range {
 					start: None,
 					end: end.map(Anchor::Absolute),
+					..Range::OPEN
 				},
 				_ => span(Position::group(start), end),
+			});
+		}
+		for range in &mut demand {
+			*range = range.with_policy(Policy {
+				priority: rng.random_range(-1..=1),
+				order: match rng.random_bool(0.5) {
+					true => crate::track::Order::Ascending,
+					false => crate::track::Order::Descending,
+				},
 			});
 		}
 		let mut fills = RangeSet::new();
@@ -507,6 +544,57 @@ mod tests {
 		}
 	}
 
+	/// An update retuning every live range it keeps, each to another priority and order and
+	/// each live join to the widest max age, fits one message beside the ranges it adds: a
+	/// retune takes no more than the range it names as it now reads, which the half message
+	/// for the new ranges already counts, so retunes need no budget of their own.
+	#[test]
+	fn an_edit_retuning_every_live_range_fits_one_message() {
+		use crate::coding::Encode as _;
+		let version = lite::Version::Lite07;
+		let widest = |ranges| lite::SubscribeUpdate {
+			wanted_group: Some(u64::MAX - 1),
+			priority: i8::MIN,
+			max_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
+			ranges,
+			order: crate::track::Order::Descending,
+		};
+		let join = |lag: u64| Range {
+			start: Some(Anchor::Live {
+				min: Some(std::time::Duration::from_millis(lag)),
+				max: Some(std::time::Duration::ZERO),
+			}),
+			..Range::OPEN
+		};
+		let urgent = Policy {
+			priority: i8::MIN,
+			order: crate::track::Order::Ascending,
+		};
+		// The policy alone, so every live range is kept, then the max age too, so each kept one
+		// grows and fewer fit.
+		for widen in [false, true] {
+			let old: Vec<Range> = (0..20_000).map(join).collect();
+			let old = Budget::new(version, 0, 0, old.len()).fit_after([], old);
+			let mut live = lite::LiveRanges::new(version, &old);
+			let retuned = old.iter().map(|range| {
+				let mut range = range.with_policy(urgent);
+				if let (true, Some(Anchor::Live { max, .. })) = (widen, &mut range.start) {
+					*max = Some(std::time::Duration::from_millis(u64::MAX - 1));
+				}
+				range
+			});
+			let next: Vec<Range> = retuned.chain((20_000..40_000).map(join)).collect();
+			let next = Budget::new(version, 0, live.next(), next.len()).fit_after([], next);
+			let edit = live.edit(&next).unwrap();
+			let lite::RangeEdit::Edit { retune, .. } = &edit else {
+				panic!("lite-07 edits ranges");
+			};
+			assert!(retune.len() * 2 >= old.len(), "widen {widen}: most live ranges retuned");
+			let size = widest(edit).encode_bytes(version).unwrap().len();
+			assert!(size <= MAX_MESSAGE_SIZE, "widen {widen}: {size}");
+		}
+	}
+
 	/// The range [`Budget::fit_after`] takes past a full budget still fits the message beside
 	/// the fields a SUBSCRIBE carries, however much of it those take.
 	#[test]
@@ -536,6 +624,7 @@ mod tests {
 			.map(|back| Range {
 				start: Some(Anchor::Time(1_000 - back)),
 				end: Some(Anchor::Absolute(Position::group(1_000 + back))),
+				..Range::OPEN
 			})
 			.collect();
 		let (ranges, _) = fit(times.clone(), &RangeSet::new(), &RangeSet::new(), budget(100)).unwrap();
@@ -544,6 +633,7 @@ mod tests {
 			[Range {
 				start: Some(Anchor::Time(801)),
 				end: Some(Anchor::Absolute(Position::group(1_199))),
+				..Range::OPEN
 			}]
 		);
 		assert!(matches!(

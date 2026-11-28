@@ -1,5 +1,5 @@
-import type * as Moq from "@moq/net";
 import type { Timed } from "@moq/net";
+import * as Moq from "@moq/net";
 import { race } from "@moq/signals";
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
@@ -57,7 +57,9 @@ export class Consumer<T> {
 		// broken publisher opens is caught as Rolled rather than read ahead of the first. Mirrors
 		// the Rust `Consumer::new`.
 		const subscription = this.#track.subscription.peek();
-		if (subscription?.order !== "ascending") this.#track.update({ ...subscription, order: "ascending" });
+		const ranges = subscription?.ranges ?? Moq.Track.Subscription.default().ranges ?? [];
+		if (ranges.some((range) => range.order !== "ascending"))
+			this.#track.update({ ...subscription, ranges: ranges.map((range) => ({ ...range, order: "ascending" })) });
 		this.#decoder = new Decoder({ schema: config.schema });
 	}
 

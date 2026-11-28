@@ -492,7 +492,7 @@ def test_a_late_control_never_blocks_a_newer_one() -> None:
         run = await relay.following("abc").run({"type": "reset_estop", "sequence": 1}, {**DRIVE, "sequence": 2})
         assert [(await commands.get()).kind for _ in range(2)] == ["reset_estop", "drive"]
         assert run.subscription == moq.Subscription(
-            delay=moq.Delay(max=publish.CONTROL_DELAY), order=moq.Order.ASCENDING
+            delay=moq.Delay(max=publish.CONTROL_DELAY), ranges=[moq.Range(order=moq.Order.ASCENDING)]
         )
 
     asyncio.run(watching(scenario))

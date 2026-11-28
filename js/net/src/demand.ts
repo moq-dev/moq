@@ -10,15 +10,25 @@ import { Duration } from "@moq/clock";
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import { Counts } from "./cover.ts";
 import { Ranges } from "./ranges.ts";
-import type { Order, Range, Subscription } from "./track.ts";
+import type { Range, Subscription } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
-import { isEmpty, type Joining, joinOf, maxOf, rangeBudget, rangeKey, sameRanges } from "./window.ts";
-
-/** The preferences besides the ranges, already checked and defaulted. */
-export interface Scalars {
-	priority: number;
-	order: Order;
-}
+import {
+	DEFAULT_POLICY,
+	isEmpty,
+	type Joining,
+	joinOf,
+	maxOf,
+	type Policy,
+	policyOf,
+	policyRank,
+	rangeBudget,
+	rangeKey,
+	rankPolicy,
+	retunes as retuned,
+	sameRanges,
+	sameSpans,
+	withPolicy,
+} from "./window.ts";
 
 /**
  * A change to a subscriber's preferences that edits its ranges by key: the ranges keyed `retire`
@@ -26,7 +36,7 @@ export interface Scalars {
  * again replaces its range in place; any other key added is past every key held. Costs the ranges
  * it names, however many the subscriber holds. Mirrors the Rust `Edit`.
  */
-export interface Edit extends Scalars {
+export interface Edit {
 	retire: readonly bigint[];
 	add: readonly (readonly [bigint, Range])[];
 	/** The group each live join among `add` was already placed at, by its key: see {@link Subscription.placed}. */
@@ -62,12 +72,6 @@ export function samePlaced(
 	return true;
 }
 
-/** What one subscriber adds to an aggregate besides its ranges. */
-export interface Contribution {
-	priority: number;
-	descending: boolean;
-}
-
 /**
  * A live join a received copy's readers wait on, by its lag in milliseconds (null for no lag limit) and its end, with the
  * widest max in milliseconds one waits with, as a budget, and the newest answer tick any of them saw
@@ -83,32 +87,21 @@ export interface JoinAsk {
 
 /** A change to one subscriber's preferences, as an aggregate counts it. */
 export interface Change {
-	before?: Contribution;
-	after?: Contribution;
+	/** Whether the subscriber was counted before the change. */
+	before?: boolean;
+	/** Whether the subscriber is counted after it. */
+	after?: boolean;
 	/** The ranges `before` held and `after` doesn't, counted. */
 	gone: readonly Held[];
 	/** The ranges `after` holds and `before` doesn't, counted. */
 	came: readonly Held[];
 }
 
-function contribution(scalars: Scalars): Contribution {
-	return { priority: scalars.priority, descending: scalars.order === "descending" };
-}
-
-function sameScalars(a: Scalars, b: Scalars): boolean {
-	return a.priority === b.priority && a.order === b.order;
-}
-
-// Whether `next` holds `old`'s ranges in order, each the same or the same live join under another
-// max: a change that keeps every key, so each join stays where it joined.
+// Whether `next` holds `old`'s ranges in order, each the same, the same groups under another
+// policy, or the same live join under another max: a change that keeps every key, so each range
+// stays where it resolved.
 function retunes(old: readonly Range[], next: readonly Range[]): boolean {
-	return (
-		old.length === next.length &&
-		old.every((range, index) => {
-			const join = joinOf(next[index]);
-			return rangeKey(range) === rangeKey(next[index]) || (join !== undefined && joinOf(range) === join);
-		})
-	);
+	return old.length === next.length && old.every((range, index) => retuned(range, next[index]));
 }
 
 /** The ranges `old` holds more of than `next`, then those `next` holds more of than `old`. */
@@ -155,9 +148,12 @@ export function answered(): number {
  * Mirrors the Rust `Prefs`.
  */
 export class Prefs implements Getter<Subscription | undefined> {
-	#scalars?: Scalars;
+	// Whether any preferences were given yet.
+	#given = false;
 	// In key order: a whole replacement keys by position, and each key an edit adds is past the rest.
 	#ranges = new Map<bigint, Range>();
+	// Each range's policy, counted by its rank: see {@link policy}.
+	#policies = new Counts<number>();
 	// The join tick each live join range was added at, by key: see {@link since}.
 	#since = new Map<bigint, number>();
 	// The group each live join range was already placed at, by key: see {@link Subscription.placed}.
@@ -169,8 +165,8 @@ export class Prefs implements Getter<Subscription | undefined> {
 	/** Told each change, so the aggregates this subscriber joins move by what changed. */
 	watch?: (change: Change) => void;
 	/**
-	 * Whether the ranges last changed by a retune alone, each live join kept under its key with
-	 * another max, rather than replaced or restated.
+	 * Whether the ranges last changed by a retune alone, each kept under its key with another policy
+	 * or live join max, rather than replaced or restated.
 	 */
 	retuned = false;
 
@@ -181,9 +177,9 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 	/** The preferences as a {@link Subscription}, costing every range once per change. */
 	peek(): Subscription | undefined {
-		if (!this.#scalars) return undefined;
+		if (!this.#given) return undefined;
 		if (!this.#value) {
-			this.#value = { ...this.#scalars, ranges: [...this.#ranges.values()] };
+			this.#value = { ranges: [...this.#ranges.values()] };
 			const placed = this.#placedByIndex();
 			if (placed.size > 0) this.#value.placed = placed;
 		}
@@ -213,14 +209,25 @@ export class Prefs implements Getter<Subscription | undefined> {
 		return this.revision.subscribe(() => fn(this.peek()));
 	}
 
-	/** The preferences besides the ranges, without reading the ranges. */
-	scalars(): Scalars | undefined {
-		return this.#scalars;
+	/** Whether any preferences were given yet, without reading the ranges. */
+	given(): boolean {
+		return this.#given;
 	}
 
-	/** What these add to an aggregate besides the ranges. */
-	contribution(): Contribution | undefined {
-		return this.#scalars && contribution(this.#scalars);
+	/**
+	 * The priority and order these ranges ask as a whole, without reading the ranges: the highest
+	 * priority, newest first if any range at it is. Mirrors the Rust `Prefs::policy`.
+	 */
+	policy(): Policy {
+		const top = this.#policies.last();
+		return top === undefined ? { ...DEFAULT_POLICY } : rankPolicy(top);
+	}
+
+	// Count `range`'s policy once more, or once less for a `delta` of -1.
+	#count(range: Range, delta: 1 | -1): void {
+		const rank = policyRank(policyOf(range));
+		if (delta > 0) this.#policies.add(rank);
+		else this.#policies.remove(rank);
 	}
 
 	/** Every range with its key, in key order. */
@@ -278,35 +285,37 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 	/**
 	 * Replace every preference, already checked and defaulted, rekeying the ranges by position when
-	 * they change. Ranges that change only a live join's max keep their keys, so each stays where it
-	 * joined, unless `retune` is false, as a subscription restated whole: those come back as the keyed
-	 * ranges they now read. Returns whether the ranges changed, and how; nothing happens unless
-	 * something did. Mirrors the Rust `Prefs::replace`.
+	 * they change. Ranges that change only their policy or a live join's max keep their keys, so each
+	 * stays where it resolved, and come back as the keyed ranges they now read. Without `retune`, as a
+	 * subscription restated whole, only a change of policy alone keeps them: a restated live join
+	 * whose max changed is placed afresh. Returns whether the ranges changed, and how; nothing
+	 * happens unless something did. Mirrors the Rust `Prefs::replace`.
 	 */
 	set(next: Subscription, retune = true): false | "replaced" | (readonly [bigint, Range])[] {
-		const scalars = this.#scalars;
 		const old = [...this.#ranges.values()];
 		const placed = samePlaced(this.#placedByIndex(), next.placed);
 		const same = placed && sameRanges(old, next.ranges ?? []);
-		if (scalars && same && sameScalars(scalars, next as Scalars)) return false;
-		const before = this.contribution();
+		if (this.#given && same) return false;
+		const before = this.#given;
 		const [gone, came] = same ? [[], []] : moved(this.held(), heldOf(next.ranges ?? [], next.placed));
-		const retuned =
-			!same && retune && placed && retunes(old, next.ranges ?? []) ? this.#retune(next.ranges ?? []) : undefined;
+		const kept = retune ? retunes(old, next.ranges ?? []) : sameSpans(old, next.ranges ?? []);
+		const retuned = !same && placed && kept ? this.#retune(next.ranges ?? []) : undefined;
 		if (!same) this.retuned = retuned !== undefined;
 		this.#replace(next, retuned !== undefined);
-		this.watch?.({ before, after: this.contribution(), gone, came });
+		this.watch?.({ before, after: true, gone, came });
 		this.touch();
 		return same ? false : (retuned ?? "replaced");
 	}
 
-	// Replace each range that changed only its live join's max under its own key, keeping its join
-	// tick. Returns the ranges replaced, with their keys.
+	// Replace each range that changed only its policy or live join's max under its own key, keeping
+	// its join tick. Returns the ranges replaced, with their keys.
 	#retune(next: readonly Range[]): (readonly [bigint, Range])[] {
 		const changed: (readonly [bigint, Range])[] = [];
 		for (const [index, [key, old]] of [...this.#ranges].entries()) {
 			const range = next[index];
 			if (rangeKey(old) === rangeKey(range)) continue;
+			this.#count(old, -1);
+			this.#count(range, 1);
 			this.#ranges.set(key, range);
 			changed.push([key, range]);
 		}
@@ -315,8 +324,8 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 	/** Apply `edit`, costing the ranges it names. Returns whether the ranges changed. */
 	edit(edit: Edit): boolean {
-		const before = this.contribution();
-		const { retire, add, placed, ...scalars } = edit;
+		const before = this.#given;
+		const { retire, add, placed } = edit;
 		const readded = new Set(add.map(([key]) => key));
 		const gone: Held[] = [];
 		const came: Held[] = [];
@@ -330,13 +339,18 @@ export class Prefs implements Getter<Subscription | undefined> {
 			// One added again is replaced in place below, keeping its order.
 			if (range === undefined || readded.has(key)) continue;
 			gone.push(held(key, range));
+			this.#count(range, -1);
 			this.#ranges.delete(key);
 			this.#since.delete(key);
 			this.#placed.delete(key);
 		}
 		for (const [key, range] of add) {
 			const old = this.#ranges.get(key);
-			if (old !== undefined) gone.push(held(key, old));
+			if (old !== undefined) {
+				gone.push(held(key, old));
+				this.#count(old, -1);
+			}
+			this.#count(range, 1);
 			this.#ranges.set(key, range);
 			const group = placed?.get(key);
 			if (group === undefined) this.#placed.delete(key);
@@ -349,10 +363,10 @@ export class Prefs implements Getter<Subscription | undefined> {
 			came.push(held(key, range));
 		}
 		const moved = gone.length > 0 || came.length > 0;
-		if (!moved && this.#scalars && sameScalars(this.#scalars, scalars)) return false;
-		this.#scalars = scalars;
+		if (!moved && this.#given) return false;
+		this.#given = true;
 		this.#value = undefined;
-		this.watch?.({ before, after: this.contribution(), gone, came });
+		this.watch?.({ before, after: true, gone, came });
 		this.touch();
 		return moved;
 	}
@@ -360,8 +374,8 @@ export class Prefs implements Getter<Subscription | undefined> {
 	// Take `next`, already checked and defaulted, rekeying its ranges by position unless they were
 	// `retuned` in place already.
 	#replace(next: Subscription, retuned = false): void {
-		const { ranges, placed, ...rest } = next;
-		this.#scalars = rest as Scalars;
+		const { ranges, placed } = next;
+		this.#given = true;
 		if (
 			!retuned &&
 			(!sameRanges([...this.#ranges.values()], ranges ?? []) || !samePlaced(this.#placedByIndex(), placed))
@@ -370,7 +384,9 @@ export class Prefs implements Getter<Subscription | undefined> {
 			const tick = joinTick();
 			this.#since.clear();
 			this.#placed.clear();
+			this.#policies = new Counts<number>();
 			for (const [key, range] of this.#ranges) {
+				this.#count(range, 1);
 				if (joinOf(range) !== undefined) this.#since.set(key, tick);
 				const group = placed?.get(Number(key));
 				if (group !== undefined) this.#placed.set(key, group);
@@ -383,24 +399,23 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 /**
  * The aggregate of every subscriber's preferences, counted so a change costs what it moved:
- * the highest priority and widest staleness budget, descending if any subscriber is, and the union
- * of the ranges. Read as a {@link Subscription}, materialized only when read. Mirrors the Rust
+ * the widest staleness budget, and the union of the ranges, each kept at its own priority and
+ * order. Read as a {@link Subscription}, materialized only when read. Mirrors the Rust
  * `Subscriptions`.
  */
 export class Subscriptions implements Getter<Subscription | undefined> {
 	#count = 0;
-	#priority = new Counts<number>();
 	// Each non-empty range's staleness budget, counted: a history range's is the widest of all.
 	#maxDelay = new Counts<number>();
-	#descending = 0;
 	#ranges = new Ranges();
-	// The live joins already placed (see {@link Subscription.placed}), by the group each was placed at
-	// and its end, with each one's staleness budget counted. Kept out of {@link #ranges}: a placed join
-	// starts where it was placed, whatever its lag, so it merges with no other range.
-	#placed = new Map<string, { group: bigint; end: bigint | undefined; budgets: Counts<number> }>();
-	// Exact-group Position ranges (see {@link Subscription.placed} with a bigint start), by group and
-	// end, counted separately from time-containment ranges in {@link #ranges}.
-	#exact = new Map<string, { group: bigint; end: bigint | undefined; count: number }>();
+	// The live joins already placed (see {@link Subscription.placed}), by the group each was placed
+	// at, its end, and its policy, with each one's staleness budget counted. Kept out of {@link
+	// #ranges}: a placed join starts where it was placed, whatever its lag, so it merges with no other
+	// range.
+	#placed = new Map<string, { group: bigint; end: bigint | undefined; policy: Policy; budgets: Counts<number> }>();
+	// Exact-group Position ranges (see {@link Subscription.placed} with a bigint start), by group,
+	// end, and policy, counted separately from time-containment ranges in {@link #ranges}.
+	#exact = new Map<string, { group: bigint; end: bigint | undefined; policy: Policy; count: number }>();
 	// The time starts a received copy's readers wait on, by time, counted: see {@link asks}.
 	#asks = new Map<bigint, number>();
 	// The live joins a received copy's readers wait on, by lag and end, each budget they wait under
@@ -418,25 +433,16 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	 * `gone` and `came`. Returns whether the aggregate changed.
 	 */
 	replace({ before, after, gone, came }: Change): boolean {
-		const prev = this.#scalars();
+		const prev = this.#count > 0;
 		let reshaped = false;
 		// New ranges count before old ones leave, so a range both hold never reads as gone.
 		for (const { range } of came) if (!isEmpty(range)) this.#maxDelay.add(rangeBudget(range));
 		for (const { range } of gone) if (!isEmpty(range)) this.#maxDelay.remove(rangeBudget(range));
-		if (after) {
-			this.#priority.add(after.priority);
-			this.#descending += after.descending ? 1 : 0;
-			this.#count++;
-		}
+		if (after) this.#count++;
 		for (const held of came) if (this.#addRange(held)) reshaped = true;
-		if (before) {
-			this.#priority.remove(before.priority);
-			this.#descending -= before.descending ? 1 : 0;
-			this.#count--;
-		}
+		if (before) this.#count--;
 		for (const held of gone) if (this.#removeRange(held)) reshaped = true;
-		const next = this.#scalars();
-		const changed = reshaped || prev?.priority !== next?.priority || prev?.descending !== next?.descending;
+		const changed = reshaped || prev !== this.#count > 0;
 		if (changed) {
 			this.#value = null;
 			this.#revision.update((revision) => revision + 1);
@@ -448,19 +454,20 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	// `Subscriptions::add_range`.
 	#addRange({ range, placed }: Held): boolean {
 		if (placed === undefined) return this.#ranges.add(range);
-		const key = `${placed}:${range.end ?? ""}`;
+		const policy = policyOf(range);
+		const key = `${placed}:${range.end ?? ""}:${policyRank(policy)}`;
 		if (typeof range.start === "bigint") {
 			const held = this.#exact.get(key);
 			if (held) {
 				held.count++;
 				return false;
 			}
-			this.#exact.set(key, { group: placed, end: range.end, count: 1 });
+			this.#exact.set(key, { group: placed, end: range.end, policy, count: 1 });
 			return true;
 		}
 		let held = this.#placed.get(key);
 		if (!held) {
-			held = { group: placed, end: range.end, budgets: new Counts<number>() };
+			held = { group: placed, end: range.end, policy, budgets: new Counts<number>() };
 			this.#placed.set(key, held);
 		}
 		const widest = held.budgets.last();
@@ -472,7 +479,7 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	// Rust `Subscriptions::remove_range`.
 	#removeRange({ range, placed }: Held): boolean {
 		if (placed === undefined) return this.#ranges.remove(range);
-		const key = `${placed}:${range.end ?? ""}`;
+		const key = `${placed}:${range.end ?? ""}:${policyRank(policyOf(range))}`;
 		if (typeof range.start === "bigint") {
 			const held = this.#exact.get(key);
 			if (!held) throw new Error("a counted exact range");
@@ -564,45 +571,39 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		return this.#maxDelay.last() ?? 0;
 	}
 
-	#scalars(): Contribution | undefined {
-		if (this.#count === 0) return undefined;
-		return { priority: this.#priority.last() ?? 0, descending: this.#descending > 0 };
-	}
-
 	/** The aggregate, costing the union's length once per change. */
 	peek(): Subscription | undefined {
 		if (this.#value !== null) return this.#value;
-		const scalars = this.#scalars();
-		if (!scalars) {
+		if (this.#count === 0) {
 			this.#value = undefined;
 			return undefined;
 		}
 		const ranges = [...this.#ranges.union()];
-		const value: Subscription = {
-			priority: scalars.priority,
-			// One live subscriber held behind another's backlog is worse than a backlog sent late.
-			order: scalars.descending ? "descending" : "ascending",
-			ranges,
-		};
-		// Each placed join once under the widest max asked of it, and each exact-group range once,
-		// by group then end, the open one last, as the Rust map orders them.
+		const value: Subscription = { ranges };
+		// Each placed join once per policy under the widest max asked of it, and each exact-group
+		// range once per policy, by group, then end, the open one last, then policy, the most urgent
+		// first, as the Rust map orders them.
 		if (this.#placed.size > 0 || this.#exact.size > 0) {
 			const placed = new Map<number, bigint>();
 			const end = (entry: { end: bigint | undefined }) => entry.end ?? UNBOUNDED;
 			const order = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
-			const held = [...this.#placed.values()].sort((a, b) => order(a.group, b.group) || order(end(a), end(b)));
-			for (const { group, end, budgets } of held) {
+			const by = (
+				a: { group: bigint; end: bigint | undefined; policy: Policy },
+				b: { group: bigint; end: bigint | undefined; policy: Policy },
+			) => order(a.group, b.group) || order(end(a), end(b)) || policyRank(b.policy) - policyRank(a.policy);
+			const held = [...this.#placed.values()].sort(by);
+			for (const { group, end, policy, budgets } of held) {
 				placed.set(ranges.length, group);
 				const join: Range = { start: { live: { min: Duration.ZERO, max: maxOf(budgets.last() ?? 0) } } };
 				if (end !== undefined) join.end = end;
-				ranges.push(join);
+				ranges.push(withPolicy(join, policy));
 			}
-			const exact = [...this.#exact.values()].sort((a, b) => order(a.group, b.group) || order(end(a), end(b)));
-			for (const { group, end } of exact) {
+			const exact = [...this.#exact.values()].sort(by);
+			for (const { group, end, policy } of exact) {
 				placed.set(ranges.length, group);
 				const range: Range = { start: group };
 				if (end !== undefined) range.end = end;
-				ranges.push(range);
+				ranges.push(withPolicy(range, policy));
 			}
 			value.placed = placed;
 		}
