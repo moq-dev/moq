@@ -18,13 +18,15 @@ the PR. Each only shows up around pauses or on a mixed-version path:
    sees no GROUP_END, so its fragment's last sample runs to the next group's start. A lite-07
    edge ends that sample at GROUP_END instead (`Fetch` in `rs/moq-hls/src/export/rendition.rs`,
    `declared.or(content)`).
-2. **DASH `S@d` can disagree with its fragment.** The grid uses GROUP_END for a segment's
+2. **DASH `S@d` can disagree with its fragment (on pure `lite-07` paths too).** The grid uses GROUP_END for a segment's
    content end only when the watcher sees it before the next group starts
-   (`Grid::place` / `Grid::end` in `rs/moq-hls/src/export/grid.rs`). The fragment reads the
-   group's own end, so the two can differ.
-3. **The resize guard drops the declared end.** `Follow::poll_end` in `rendition.rs` skips
+   (`Grid::place` / `Grid::end` in `rs/moq-hls/src/export/grid.rs:448`, `open.stop.unwrap_or(group.media)`). The fragment reads the
+   group's own end, so the two diverge whenever the successor arrives before `GROUP_END` even on an all-`lite-07` path.
+3. **The resize guard drops the declared end.** `Follow::poll_end` in `rendition.rs:2289-2297` skips
    `grid.end()` while an in-band resize may still be handed to a catalog update. So a final
    off-grid GOP's segment metadata can fall back to an inferred end.
+
+Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit): ✅ pulled back from `m3` to `m2` so mixed `lite-06`/`lite-07` rollout URL byte divergence and pure `lite-07` DASH `S@d` mismatches are fixed before `0.22.0` ships (reversing [moq-dev/moq#9842](https://github.com/moq-dev/moq/pull/9842)'s move to `m3`).
 
 Recheck once [lite-07 is finalized](/quest/m2/lite07-finalize.md):
 
