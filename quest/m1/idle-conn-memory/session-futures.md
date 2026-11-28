@@ -45,3 +45,7 @@ one `Arc` of its fields; and the `-Zprint-type-sizes` build above, plus an
 idle run of `moq-bench`, is the loop. `jeprof` on macOS cannot unwind or
 symbolize the relay (no `dyld_info`, no frame pointers in jemalloc's
 backtrace), so per-site attribution needs a Linux host.
+
+Once the epic's `idle` workload lands, run `just bench-profile heap` on a Linux
+host and record the per-site table here, so the remaining rows are attributed
+by profile instead of by type size.
