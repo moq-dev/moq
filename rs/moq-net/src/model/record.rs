@@ -128,6 +128,11 @@ impl Record {
 		key < self.floor || self.reported.contains_key(&key)
 	}
 
+	/// Whether `key` was folded into the settled prefix, so it stays told for good.
+	pub fn folded(&self, key: u64) -> bool {
+		key < self.floor
+	}
+
 	/// The parts of `range` the wire was told nothing of.
 	pub fn untold(&self, range: Range<u64>) -> RangeSet<u64> {
 		let range = range.start.max(self.floor)..range.end;

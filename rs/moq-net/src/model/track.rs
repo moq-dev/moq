@@ -12094,12 +12094,19 @@ impl Cursor {
 		})
 	}
 
-	/// Take back `key`, handed out and never read: it is owed again, so a read hands it out
-	/// while it is cached and wanted, as one never handed out.
+	/// Take back `key`, handed out and never read: it is owed again where it came from, the
+	/// arrivals or a fill, so a read hands it out while it is cached and wanted, as one never
+	/// handed out.
 	#[cfg(feature = "async")]
 	fn give_back(&mut self, key: u64) {
 		self.record.delivered.remove(key..key + 1);
-		self.filter.owed.insert(key..=key);
+		let arrived = (self.state.read().lookup.get(&key)).is_none_or(Slot::is_read);
+		match &mut self.misses {
+			Some(misses) if !arrived => misses.refill(key),
+			_ => {
+				self.filter.owed.insert(key..=key);
+			}
+		}
 		idle::Idle::disarm(&mut self.idle);
 	}
 
@@ -13773,7 +13780,7 @@ impl Subscriber {
 	}
 
 	/// What this reader settled.
-	fn record(&self) -> &Record {
+	pub(crate) fn record(&self) -> &Record {
 		match &self.inner {
 			Inner::Plain(cursor) => &cursor.record,
 			Inner::Resume(_, logical) => &logical.record,

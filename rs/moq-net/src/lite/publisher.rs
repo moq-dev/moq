@@ -7846,7 +7846,13 @@ impl TrackRun {
 	/// higher-ranked group may preempt where it may not. A finished stream waiting for its
 	/// acknowledgement can't be taken over, so it isn't ranked.
 	fn stuck(&self) -> Option<(i8, i64)> {
-		let waiting = self.opening.as_ref()?.rank();
+		let opening = self.opening.as_ref()?;
+		// Its served mark folded into the record's settled prefix can't be taken back, so it
+		// keeps its place rather than go back to the cache told.
+		if self.answer.emits_range() && self.track.record().folded(opening.key) {
+			return None;
+		}
+		let waiting = opening.rank();
 		let mut held = (self.children.iter())
 			.filter(|serve| serve.serving())
 			.map(GroupServe::rank);

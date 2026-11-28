@@ -486,7 +486,8 @@ impl Misses {
 		self.pick_up();
 	}
 
-	/// Offer `key`, a fill's answer still cached, again: a widened budget owes it once more.
+	/// Offer `key`, a fill's answer still cached, again: a widened budget owes it once more, or
+	/// a read handed it back unread.
 	pub fn refill(&mut self, key: u64) {
 		self.filled.insert(key);
 	}
