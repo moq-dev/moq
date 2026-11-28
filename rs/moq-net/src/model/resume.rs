@@ -2985,11 +2985,12 @@ impl Reader {
 	}
 
 	/// Whether a fill in `waiting`, each one whose read waits on its route this pass, still
-	/// owes a group from `floor` below the candidate `first` that the reader lacks and the
-	/// local bounds admit, as its own ordered read waits for it: one a fill of its route has yet
-	/// to answer, or its received route's live feed owes within the arrival grace. A fill
-	/// still unanswered owes what it was asked. Parks `waiter` until that grace folds; the
-	/// answer, the group landing, or its drop wakes the fill's own read.
+	/// owes a group from `floor` below the candidate `first` that the reader lacks, the local
+	/// bounds admit, and no copy declares skipped or given up for good, as its own ordered read
+	/// waits for it: one a fill of its route has yet to answer, or its received route's live
+	/// feed owes within the arrival grace. A fill still unanswered owes what it was asked. Parks
+	/// `waiter` until that grace folds; the answer, the group landing, or its drop wakes the
+	/// fill's own read.
 	fn fill_owes_below(
 		&mut self,
 		waiting: &[usize],
@@ -3009,15 +3010,20 @@ impl Reader {
 				.key()
 				.min(copy.end().unwrap_or(u64::MAX))
 				.min(cap.unwrap_or(u64::MAX));
-			let gaps: Vec<std::ops::Range<u64>> = (self.window().runs(from))
+			let mut open: RangeSet<u64> = (self.window().runs(from))
 				.take_while(|run| *run.start() < below)
 				.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(below)))
 				.collect();
-			let owes = |gap: std::ops::Range<u64>| match &self.copies[index].sub {
+			for copy in &self.copies {
+				for run in copy.track.gone_in(from..below).iter() {
+					open.remove(run.clone());
+				}
+			}
+			let owes = |gap: &std::ops::Range<u64>| match &self.copies[index].sub {
 				Sub::Pending(_) => true,
-				Sub::Ready(sub) => sub.owes(gap, waiter),
+				Sub::Ready(sub) => sub.owes(gap.clone(), waiter),
 			};
-			if gaps.into_iter().any(owes) {
+			if open.iter().any(owes) {
 				return true;
 			}
 		}
@@ -10991,6 +10997,31 @@ mod test {
 			};
 			assert_eq!(drain(&mut sub, true), read, "{case}");
 		}
+	}
+
+	/// A group a replaced copy's publisher gives up for good is passed, though the switch asked
+	/// the serving route for it too: that verdict on the group settles it, as on one route.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_passes_a_group_a_replaced_copy_gave_up() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, true), [0]);
+		// Group 1 is still in flight on the copy the switch replaces.
+		write(&a, 2);
+		let mut b = received_copy();
+		// Its session asked the feed from below the resume point, as the switch's backfill does.
+		b.request_start(Some(1)).unwrap();
+		write(&b, 3);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, true), [0u64; 0]);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		a.drop_groups(1..2, StreamError::NotFound);
+		assert_eq!(drain(&mut sub, true), [2, 3]);
 	}
 
 	/// A group a replaced copy lost is waited for before an ordered read passes it while the

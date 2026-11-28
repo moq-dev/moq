@@ -475,6 +475,11 @@ interface Copy {
 	 * for it after all.
 	 */
 	drains?: Set<bigint>;
+	/**
+	 * Asked only for groups under the serving copy's resume point, which come as fills or from a
+	 * feed asked below where it started: an ordered read waits on what it still owes there.
+	 */
+	fills?: true;
 }
 
 /**
@@ -1057,6 +1062,36 @@ class Reader implements ResumeSource {
 			);
 	}
 
+	/**
+	 * Whether a fill other than `next`, the copy an ordered read is about to hand out `key` from,
+	 * still owes a group below `key` that `delivered` lacks, the reader's window and cursor name, and
+	 * no copy says no group arrives at, as its own ordered read waits for it: one a fill of its route
+	 * has yet to answer, or its received route's live feed owes within the budget. Arms that read's
+	 * wakeups, which wake this one. Mirrors the Rust `Reader::fill_owes_below`.
+	 */
+	#fillOwesBelow(next: Copy, key: bigint, delivered: Delivered): boolean {
+		const floor = delivered.runEnd(0n) ?? 0n;
+		const cursor = this.#shell.cursor.peek();
+		for (const copy of this.#copies) {
+			if (!copy.fills || copy === next || !this.#feeds(copy)) continue;
+			const start = max(floor, copy.backfill ? cursor.start : max(cursor.start, copy.floor ?? 0n));
+			const end = min(min(key, copyEnd(copy) ?? key), cursor.end ?? key);
+			if (start >= end) continue;
+			const gone: Run[] = [];
+			for (const other of this.#copies) {
+				for (const run of hooks.goneIn(other.sub, start, end)) insertRun(gone, run.start, run.end);
+			}
+			for (const run of this.#window().runs(start, end)) {
+				for (const gap of delivered.gaps(run.start, run.end)) {
+					for (const open of runGaps(gone, gap.start, gap.end)) {
+						if (hooks.owes(copy.sub, open.start, open.end)) return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 	#update(copy: Copy): void {
 		// A closed copy still resolves replaced ranges against the groups it holds, for the window.
 		const wire = this.#wire(copy);
@@ -1175,6 +1210,7 @@ class Reader implements ResumeSource {
 			widened.until = end - 1n;
 			widened.since = now();
 			widened.done = undefined;
+			widened.fills = true;
 			if (raised) widened.backfill = true;
 			this.#update(widened);
 			this.#bound(widened);
@@ -1197,6 +1233,7 @@ class Reader implements ResumeSource {
 				replaced: true,
 				since: now(),
 				lease: 0,
+				fills: true,
 			},
 			this.#copies.length - 1,
 		);
@@ -1478,6 +1515,8 @@ class Reader implements ResumeSource {
 				if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
 					return this.tryGroup(ordered, delivered, dispositions, admit);
 				}
+				// The fill's answer, its track giving the group up, or the budget wakes the read.
+				if (this.#fillOwesBelow(next, first.key, delivered)) return { kind: "idle" };
 			}
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
@@ -2521,6 +2560,16 @@ class Reader implements ResumeSource {
 	proven(): boolean {
 		const serving = this.#serving();
 		return serving !== undefined && hooks.provenTrack(serving.sub);
+	}
+
+	owes(start: bigint, end: bigint): boolean {
+		for (const copy of this.#copies) {
+			const from = copy.backfill || copy.floor === undefined ? start : max(start, copy.floor);
+			const bound = copyEnd(copy);
+			const to = bound === undefined ? end : min(end, bound);
+			if (from < to && hooks.owes(copy.sub, from, to)) return true;
+		}
+		return false;
 	}
 
 	mayLand(land: Land): boolean {

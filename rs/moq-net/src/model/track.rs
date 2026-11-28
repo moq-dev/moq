@@ -2122,6 +2122,19 @@ impl TrackState {
 		gone.then_some(run.end)
 	}
 
+	/// The parts of `groups` no group will fill: declared skipped or given up for good, as
+	/// [`Self::hole_end`] has it with `dropped`. A cost in the holes it overlaps.
+	fn gone_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		if groups.is_empty() {
+			return RangeSet::new();
+		}
+		self.drops
+			.overlapping(&groups)
+			.filter(|(_, hole)| matches!(hole, Hole::Skip | Hole::Drop { stale: None, .. }))
+			.map(|(run, _)| run.start.max(groups.start)..run.end.min(groups.end))
+			.collect()
+	}
+
 	/// The runs of `keys` outside every whole group's span, where a group may still start:
 	/// none starts inside one (see [`Self::span_end`]).
 	fn outside_spans(&self, keys: ops::Range<u64>) -> Vec<ops::Range<u64>> {
@@ -8620,6 +8633,15 @@ impl Consumer {
 			return serving.hole_end(key, dropped);
 		}
 		self.with_state(|state| state?.read().hole_end(key, dropped))
+	}
+
+	/// The parts of `groups` no group will fill here; see `TrackState::gone_in`.
+	pub(super) fn gone_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.gone_in(groups);
+		}
+		self.with_state(|state| state.map(|state| state.read().gone_in(groups)))
+			.unwrap_or_default()
 	}
 
 	/// The parts of `groups` the publisher declared skipped, never to be produced. Parks
