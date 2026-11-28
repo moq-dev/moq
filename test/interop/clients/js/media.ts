@@ -587,8 +587,8 @@ async function explainStalls(
 		}
 	}
 
-	// A gap the player heard in the source's main rendition that no hold here covers began after the
-	// source's encoder. Looked up from as far back as the player's delay, since a hold plays out that late.
+	// Where the source's main rendition stood still. A hold covering the player's gap places it; none
+	// leaves it open. Looked up from as far back as the player's delay, since a hold plays out that late.
 	if (sourcePage) {
 		try {
 			const from = { start: start - (bounds.lead ?? 0), end: bounds.end };

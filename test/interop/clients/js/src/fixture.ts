@@ -308,8 +308,7 @@ export class Fixture {
 	}
 
 	// Log where the main rendition's audio stops moving: its captured frames reaching the page, and the
-	// encoder emitting them. A gap in that rendition at the player that neither covers began after the
-	// encoder. The alternate rendition is not watched.
+	// encoder emitting them. The alternate rendition is not watched.
 	#watchAudio(capture: Publish.Audio.Capture, encoder: Publish.Audio.Encoder): void {
 		const captured = stage("capture");
 		const encoded = stage("encoder");
