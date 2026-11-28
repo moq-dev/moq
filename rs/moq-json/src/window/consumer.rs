@@ -61,6 +61,9 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next event and its frame's timestamp, or `None` once the track ends.
+	///
+	/// A group that fails, whatever with, is read past from the next group's checkpoint; only
+	/// the track's own error ends the reader.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<Event<T>>>>> {
 		loop {
@@ -84,23 +87,13 @@ impl<T: DeserializeOwned> Consumer<T> {
 			};
 
 			match group.poll_read_frame(waiter) {
-				// Judged by stream code, so a group the publisher reset as old is the same loss as
-				// one this side dropped.
-				Poll::Ready(Err(err))
-					if matches!(
-						moq_net::StreamError::from(&err),
-						moq_net::StreamError::Old
-							| moq_net::StreamError::TooFarBehind
-							| moq_net::StreamError::Evicted
-							| moq_net::StreamError::GroupTooLarge
-					) =>
-				{
-					// This group is no longer complete, but the next one starts with a checkpoint
-					// that can account for everything this reader missed.
+				// A failed group is that group's gap, whatever it failed with: the next one starts
+				// with a checkpoint that accounts for everything this reader missed, and only the
+				// track's own error, from the next group read, ends the reader.
+				Poll::Ready(Err(_)) => {
 					self.group = None;
 					self.codec = None;
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
 				Poll::Ready(Ok(Some(frame))) => {
 					let codec = self.codec.as_mut().expect("an open MoQ group has a window codec");
 					self.at = Some(frame.timestamp);

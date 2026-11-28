@@ -297,3 +297,44 @@ route-sweep, which failed only at commits before
 [moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)). Scheduled run
 [46038678705](https://github.com/moq-dev/moq/actions/runs/46038678705) (`f7a41c3ea5`), the first
 with those fixes, goes to the next triage.
+
+Triaged 2026-11-28 (maintainer, /quest-plan), from Nightly
+[46038678705](https://github.com/moq-dev/moq/actions/runs/46038678705) (`f7a41c3ea5`), scheduled TS
+[46044376056](https://github.com/moq-dev/moq/actions/runs/46044376056) and Interop
+[46045301725](https://github.com/moq-dev/moq/actions/runs/46045301725) and
+[46166329015](https://github.com/moq-dev/moq/actions/runs/46166329015), and Cache's
+`Warm (macos-latest)` since `f101d7908e`. Fixed in PRs from this triage: the lite-07 fetch cells
+of the Rust and relay session benches and the JS `publisher-update` hang, both from
+[moq-dev/moq#9687](https://github.com/moq-dev/moq/pull/9687)
+([moq-dev/moq#9855](https://github.com/moq-dev/moq/pull/9855)); `TS long recovery`'s fault model,
+from [moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561)'s 100 ms audio groups
+([moq-dev/moq#9856](https://github.com/moq-dev/moq/pull/9856)); the macOS dev shell, whose
+nixpkgs from the quest v0.31.0 bump fails Darwin swift-collections and no binary cache carries a
+Darwin `swift-format` at it or at nixpkgs-unstable's head
+([moq-dev/moq#9857](https://github.com/moq-dev/moq/pull/9857)); Interop's open-GOP fixture,
+from [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)
+([moq-dev/moq#9858](https://github.com/moq-dev/moq/pull/9858)); and the three easy surviving
+`resume.rs` mutants ([moq-dev/moq#9861](https://github.com/moq-dev/moq/pull/9861)). New child, in m3 by decision:
+[resume.rs's back-cut mutants](/quest/m3/resume-cut-mutants.md), the other 16. Since that quest
+sits in m3 by decision, this epic's passing run may fail a `mutants` shard only on a survivor that
+quest lists; any other missed mutant still fails it. Owned by open
+PRs or quests: Windows' CRLF crate names
+([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545), a draft since 11-24),
+quic-interop's moq-quic client against quic-go `handshakeloss`, a runner miscount
+([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445), which now conflicts with `main`),
+and Chromium lite-06 stream credit
+([moq-dev/moq#9864](https://github.com/moq-dev/moq/pull/9864) fixes it). Dropped as
+one-night failures (re-check if one repeats): `moq-relay/http_auth`'s paired
+`relay_http_admission` +10 to 15% (each night flags a different unrelated bench at that size),
+the TS congested path (passed on 11-28), and `relay_fill_javascript`'s lite-07
+`below the start` (passed 10 of 10 locally at `f7684041f5`).
+
+Accepted the same day: `Shipping sizes`' `js/hang` grew 5.4% raw (678,554 to 715,316 bytes;
+brotli 183,890 to 193,538) over the 5% day-over-day bound, two days of growth since the 11-26
+job skipped. About 29.5 KB is `@moq/net` (`track`, the lite subscriber and publisher, `resume`)
+and 7.4 KB is `@moq/hang` (`health.js`, `util/aac.js`, the `cts` and `raw` containers), with no
+single culprit; the failed report is the next baseline. The trend (`js/hang` +20% since 11-18)
+went to the [cost audit](/quest/m3/audit-cost.md).
+Today's run [46162157084](https://github.com/moq-dev/moq/actions/runs/46162157084) goes to the
+next triage; it already shows `moq-quic/wire` `wire_decode/padded/packets_64` +11.4% and a
+browser benchmark smoke `#writeFrame` error.

@@ -44,7 +44,7 @@ hide this stall, not fix it, and the mesh's only lite-07 link has no lite-07
 alternative.
 
 If the fix needs a change to the lite-07-wip wire, that part joins m2 under
-[lite-07 subscribe](/quest/m2/lite07-subscribe/README.md), per the milestone
+its own m2 quest required by [lite-07 finalize](/quest/m2/lite07-finalize.md), per the milestone
 rules in [the questline](/quest/README.md), and this quest keeps any non-wire
 part.
 
@@ -52,6 +52,5 @@ Decided 2026-11-25 (maintainer, `/quest-plan`): ✅ keep (rejected: drop).
 
 ## Related
 
-- [lite-07 subscribe](/quest/m2/lite07-subscribe/README.md) - the lite-07 subscribe redesign, where a wire change for this would go
 - [Route health](/quest/m3/route-health/README.md) - failover off a stalled route, which would mask rather than fix this
 - [Nightly](/quest/m0/nightly/README.md) - its notes on earlier mesh replay violations, some from CPU-starved relays

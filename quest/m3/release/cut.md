@@ -152,6 +152,19 @@ From the 2026-10-25 pre-cut run:
 
 - Write the moq-cli and moq-gst `MIGRATE.md` entries from the Impact section of
   [moq-dev/moq#6522](https://github.com/moq-dev/moq/pull/6522); that rename list exists nowhere else.
+- Write the `moq-net`, `@moq/net`, and bindings `MIGRATE.md` entry for
+  [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529): default `recv_group`/`recvGroup`
+  delivery order flipped to newest-first (`Group Order`), which was omitted from its PR title (`!`)
+  and would otherwise be missed by automated migration generation (found 2026-11-28, design-gate audit).
+- Before cutting `0.22.0`, verify the `release`-line Go proxy prerequisites from
+  [Go module proxy](/quest/m0/go-module-proxy.md): [moq-dev/moq#9844](https://github.com/moq-dev/moq/pull/9844)
+  is on `release` (`git show origin/release:sh/go/ffi-origin.sh` succeeds), `go.moq.dev`'s `@v/list`
+  explicitly lists `v0.4.28` and any later mirror-only `moq-ffi` tags (so an interrupted upload whose
+  `.info` already exists cannot hide a missing `@v/list` entry from a rerun of `backfill`), and
+  explicit versioned verification passes (`just infra go backfill && just infra go verify --proxy direct v0.4.28`
+  plus any later mirror-only tags).
+  The whole `go-module-proxy` quest is intentionally not in `Required` below because its final mirror-archival
+  step happens after `0.22.0`'s `moq-ffi` release publishes through `go.moq.dev`.
 
 From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
 merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
@@ -311,6 +324,11 @@ candidate:
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
+- [A group every subscriber passes over stops pausing its ingest](/quest/m0/owed-group-pass-over.md) - closes the `#9770` paused-stream receive-credit stall and `ReceiveCredit.tla` gap before 0.22
+- [JS arrival reads recompute reach from live state and bound passed steps](/quest/m0/js-arrival-budget-steps.md) - fixes `#9746`'s cache-invariant fill suppression and unbounded `#passed.steps` leak before 0.22
+- [moq-quic stops sticky ecn_prior_path from discarding new-path CE feedback](/quest/m0/quic-ecn-prior-path.md) - fixes `#9709`'s omitted ECN suppression bug before 0.22
+- [Remove checks: write from self-hosted queue reporting and drop gh-readonly-queue from cache-write](/quest/m0/queue-report-isolation.md) - removes `checks: write` from shared PR runners and `gh-readonly-queue` from `cache-write`
+- [Kotlin moq-ffi 0.4.28 missing from Maven Central](/quest/m0/kt-ffi-maven-0428.md) - diagnoses and fixes the Maven Central publish failure before 0.22 cuts Kotlin FFI
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed

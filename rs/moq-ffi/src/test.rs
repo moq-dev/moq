@@ -2934,6 +2934,41 @@ async fn raw_group_abort_reaches_consumer() {
 	assert!(consumer.read_frame().await.is_err());
 }
 
+/// A track's frame read passes a group its publisher aborted, as it does any failed group: only
+/// the track's own end ends the read.
+#[tokio::test]
+async fn track_read_frame_passes_an_aborted_group() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("aborted".into(), Some(timed_info())).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	// The read takes the open group, then waits on its first frame when the abort lands.
+	let cut = track.append_group(us(0)).unwrap();
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.read_frame().await }).await
+	};
+	wait_group_acquired(&cut).await;
+	cut.abort(409).unwrap();
+	let next = track.append_group(us(1)).unwrap();
+	next.write_frame(MoqFrame {
+		payload: b"next".to_vec(),
+		timestamp: us(1),
+	})
+	.unwrap();
+	next.finish().unwrap();
+	let frame = kio::clock::timeout(TIMEOUT, read)
+		.await
+		.expect("the read never ended")
+		.unwrap()
+		.unwrap()
+		.expect("the group after the abort");
+	assert_eq!(frame.payload, b"next");
+
+	track.abort(410).unwrap();
+	assert!(consumer.read_frame().await.is_err(), "the track's abort ends the read");
+}
+
 #[tokio::test]
 async fn dynamic_track_request_can_abort() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -6160,53 +6195,6 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 			.unwrap()
 			.is_none()
 	);
-}
-
-/// An error on a pending group's first frame is terminal for that group: the
-/// next `read_frame` moves on rather than retrying the dead group.
-#[tokio::test]
-async fn raw_read_frame_drops_aborted_pending_group() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
-	let consumer = track.consume(None).unwrap();
-
-	let first = track.append_group(us(0)).unwrap();
-	let read = {
-		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.read_frame().await })
-	};
-	wait_group_acquired(&first).await;
-	first.abort(409).unwrap();
-
-	let err = kio::clock::timeout(TIMEOUT, read)
-		.await
-		.expect("timed out waiting for the aborted group")
-		.expect("read task panicked");
-	match err {
-		Err(MoqError::Protocol { details: protocol }) => {
-			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
-			assert_eq!(protocol.code, 64 + 409);
-			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
-		}
-		Err(other) => panic!("expected Protocol App(409), got {other:?}"),
-		Ok(Some(_)) => panic!("aborted group returned a frame"),
-		Ok(None) => panic!("aborted group returned EOF"),
-	}
-
-	let payload = b"next".to_vec();
-	track
-		.write_frame(MoqFrame {
-			payload: payload.clone(),
-			timestamp: us(4_000),
-		})
-		.unwrap();
-	let frame = kio::clock::timeout(TIMEOUT, consumer.read_frame())
-		.await
-		.expect("timed out reading the group after an aborted pending group")
-		.unwrap()
-		.expect("an aborted pending group must not block later groups");
-	assert_eq!(frame.payload, payload);
-	assert_eq!(micros(frame.timestamp), 4_000);
 }
 
 /// `next_group` and `read_frame` share one ordered cursor. A cancelled

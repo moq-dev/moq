@@ -41,10 +41,17 @@ Sites, with recommendations (re-grep each on the head):
   detected, as `coding::Recv` does; the ietf layer is a low-effort
   compatibility layer, so prefer deleting the distinction where the session
   can just close.
-- moq-ffi and libmoq match `moq_net::Error::{Closed, Dropped, Cancel, Old}`
-  to mean a clean end or a stale group. Where a moq-net poll reports a clean
+- moq-ffi and libmoq match `moq_net::Error::{Closed, Dropped, Cancel}`
+  to mean a clean end. Where a moq-net poll reports a clean
   end as an error, it returns `Ok(None)` instead; that part is breaking in
-  moq-net, so split it to m2 if it is more than a mechanical change.
+  moq-net, so split it to m2 if it is more than a mechanical change. (Their
+  stale-group `Old` matches went when a group's failure became that group's
+  gap.)
+- Single-group fetches answer a miss apart from a failure by matching
+  `NotFound`, `Old`, and `Evicted`: moq-hls's export (`unservable` in
+  `export/rendition.rs`, 404 versus 500) and moq-relay's HTTP fetch
+  (`web.rs`). Recommended: have the fetch report "not served" as its own
+  outcome where moq-net decides it, so neither caller reads the error.
 - Additional `moq_net::Error::{Closed, Unroutable}` matches (added 2026-11-21
   from the pre-cut full-codebase audit): `rs/moq-srt/src/ts.rs:248,668`,
   `rs/moq-boy/src/input.rs:151` (if `moq-boy` is still in tree),
