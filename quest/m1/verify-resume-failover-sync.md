@@ -33,6 +33,14 @@ unreviewed under the `low` tier.
   route withdrawal as a separate transition.
 - Update the coverage tables and sync commits in both `SKILL.md` files once
   TLC passes.
+- Progress (PR draft): `ResumeReader.tla` gained `Skip`/`MaxSkips` and `Skip.cfg`
+  passes with both mutants failing; `ResumeReader.cfg` and `Evict.cfg` still need a
+  rerun at `MaxSkips = 0`. `FailoverChain.tla` splits `Die` into `Die` (sources
+  close), `Fail` (copies fail), and `Withdraw`, plus a `Verdict` step and the
+  `FailsOnlyUnroutable` rule (its mutant fails in 76 states), but the split grew
+  `FailoverChain.cfg` past 20M distinct states without finishing in 25 minutes
+  (it was 7.5M): shrink the interleavings (for example fold `Fail` into the
+  step that observes it) before running the failover configs.
 
 Tests: run the TLC model checks named in `.claude/skills/verify-resume/SKILL.md`
 and `.claude/skills/verify-failover/SKILL.md` (plus `just check`).
