@@ -37,7 +37,8 @@ const range = (ranges: number, index: bigint): WireRange => {
 async function run(ranges: number, edited: number | "steer", updates: number): Promise<number> {
 	const origin = new OriginProducer();
 	const broadcast = origin.route(Path.from("bench")).broadcast;
-	broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	if (!track) throw new Error("the track already exists");
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
@@ -84,7 +85,11 @@ async function run(ranges: number, edited: number | "steer", updates: number): P
 		}
 		await update.encode(client.writer, Version.DRAFT_07);
 	}
+	// A lite-07 FIN asks for what the ranges name, which never arrives, so end the track too:
+	// the publisher takes every update it decoded before the FIN, then closes cleanly. The run
+	// with no updates pays the same end, so it cancels out.
 	client.writer.close();
+	track.finish();
 	await serving;
 	const elapsed = performance.now() - start;
 	publisher.close();
