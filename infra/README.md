@@ -448,9 +448,10 @@ A 404 is final: nothing falls back past this proxy.
 from the `publish` Environment, reusing its `R2_ACCESS_KEY_ID` and
 `R2_SECRET_ACCESS_KEY`. Until the cutover below, it reads moq.dev's go-import
 tag (`just go ffi-origin`) and keeps publishing to the moq-dev/moq-go-ffi git
-mirror. sum.golang.org pins the first hash it sees for each version, so the
-upload never replaces an object: a rerun skips identical files and fails on
-different ones.
+mirror. Tags are cut from `release`, so the cutover waits until `release`
+carries the go.moq.dev publisher (`just go ffi-origin`). sum.golang.org pins
+the first hash it sees for each version, so the upload never replaces an
+object: a rerun skips identical files and fails on different ones.
 
 All of this runs once, by a maintainer, in this order, with no `moq-ffi`
 release in flight between steps 3 and 5.
@@ -478,7 +479,8 @@ release in flight between steps 3 and 5.
    ```
 
    `backfill` copies every version proxy.golang.org lists, byte for byte as
-   `go mod download` checked it against sum.golang.org. `verify` downloads each
+   `go mod download` checked it against sum.golang.org, and builds any mirror
+   tag it lacks with `sh/go/modzip`. `verify` downloads each
    one through `https://go.moq.dev` from a clean module cache, so the go
    command checks it against sum.golang.org again, and fails if any listed
    version is missing.
@@ -495,10 +497,17 @@ release in flight between steps 3 and 5.
 5. **Catch up and verify the paths users take**, from a clean module cache:
 
    ```bash
-   just infra go backfill   # any release the mirror took before the cutover
+   just infra go backfill   # any release the mirror took around the cutover
    just infra go verify --proxy direct
    just infra go verify --proxy https://proxy.golang.org
    ```
+
+   `verify` downloads every version go.moq.dev lists, which pins a
+   mirror-only tag in sum.golang.org, but fails only for a missing version
+   proxy.golang.org lists. Confirm a mirror-only tag, such as v0.4.28, with
+   `curl -fsS https://go.moq.dev/moq.dev/moq-ffi/@v/list`. sum.golang.org may
+   answer a cached 404 for such a tag for a while after an earlier lookup;
+   rerun `verify` later if it does.
 
 6. **Archive the mirror** once a `moq-ffi` release has published through
    go.moq.dev (its `Publish to Go module mirror` job runs `Publish to

@@ -114,6 +114,7 @@ mod tests {
 	fn frame(ms: u64, keyframe: bool) -> Frame {
 		Frame {
 			timestamp: moq_net::Timestamp::from_millis(ms).unwrap(),
+			decode: None,
 			duration: None,
 			payload: bytes::Bytes::from_static(b"encoded"),
 			keyframe,

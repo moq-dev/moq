@@ -37,6 +37,7 @@ pub(crate) fn hvc1_frame(
 	let keyframe = hvc1_is_keyframe(data.as_ref(), length_size);
 	Ok(crate::container::Frame {
 		timestamp: pts,
+		decode: None,
 		payload: data.into_bytes(),
 		keyframe,
 		duration: None,

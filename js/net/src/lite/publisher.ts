@@ -58,7 +58,7 @@ import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounc
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
-import { closeViolation } from "./error.ts";
+import { closeViolation, servedError } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -132,7 +132,10 @@ function subscribed(front: broadcast.Consumer, msg: Subscribe): track.Consumer {
  * A frame's fields ahead of its payload, built in memory for one write: a stream write is far
  * costlier than a varint, and a backlog pays it for every frame. The timestamp `delta` is present
  * when the track is stamped, and `inflated` when the frame was decompressed. Lite-07 leads with the
- * size plus one, leaving 0 for GROUP_END; earlier versions end the header with the size.
+ * size plus one, leaving 0 for GROUP_END, and carries a delta after the stream's `first` unsigned,
+ * since a group's timestamps never decrease; the first counts from the group's start, which a
+ * group's first frame may precede, so it is zigzagged as every delta is before lite-07, whose
+ * header ends with the size.
  */
 export function frameHeader(
 	version: StreamVersion,
@@ -140,10 +143,16 @@ export function frameHeader(
 	inflated: number | undefined,
 	size: number,
 	lengthFirst: boolean,
+	first: boolean,
 ) {
 	const parts: Uint8Array[] = [];
 	if (lengthFirst) parts.push(encodeVarint(size + 1, version));
-	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
+	if (delta !== undefined) {
+		const unsigned = lengthFirst && !first;
+		// A lite-05/06 ingest may still carry a decreasing timestamp, which lite-07 can't encode.
+		if (unsigned && delta < 0n) throw new RangeError("timestamp below the previous frame");
+		parts.push(encodeVarint(unsigned ? delta : zigzag(delta), version));
+	}
 	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
 	if (!lengthFirst) parts.push(encodeVarint(size, version));
 	return concat(parts);
@@ -151,7 +160,7 @@ export function frameHeader(
 
 /**
  * Lite-07 GROUP_END, after a finished group's last frame: a zero `Payload Length`, where a frame
- * would start, then the group's exclusive `end` as a delta from `base`: the highest timestamp the
+ * would start, then the group's exclusive `end` as a delta from `base`: the last timestamp the
  * stream carried, or the group's start when it carried none. A finished group's end is at or
  * above both, so the delta is never negative.
  */
@@ -1268,7 +1277,7 @@ export class Publisher {
 		try {
 			front = await this.#resolve(msg, left.signal);
 		} catch (err: unknown) {
-			stream.writer.reset(error(err));
+			stream.writer.reset(servedError(error(err)));
 			return;
 		}
 		// Revoked while the broadcast resolved: the watch already reset the stream.
@@ -1602,8 +1611,9 @@ export class Publisher {
 			// A subscriber that left is owed nothing more, and its stream may already be reset.
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
-			closeViolation(this.#quic, err);
-			const e = error(err);
+			// The served track's error, such as a malformed group upstream, ends only this
+			// subscription: its decoder (`SubscriptionControls`) closes the session for its own input.
+			const e = servedError(error(err));
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
@@ -1760,8 +1770,8 @@ export class Publisher {
 			stream.writer.close();
 			await acknowledged(stream.writer);
 		} catch (err: unknown) {
-			closeViolation(this.#quic, err);
-			const e = error(err);
+			// Nothing here decodes: an error is the served group's, which ends only this fetch.
+			const e = servedError(error(err));
 			abandon ??= e;
 			releaseFetched(e);
 			stream.abort(e);
@@ -1822,7 +1832,7 @@ export class Publisher {
 			try {
 				front = await this.#resolve(msg, holding);
 			} catch (err: unknown) {
-				stream.writer.reset(error(err));
+				stream.writer.reset(servedError(error(err)));
 				return;
 			}
 			if (!front) {
@@ -1895,7 +1905,7 @@ export class Publisher {
 				const log = e === givenUp?.peek() ? console.debug : console.warn;
 				log(`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`);
 				if (group) hooks.releaseGroupReader(group, e);
-				stream.abort(e);
+				stream.abort(servedError(e));
 			}
 		} finally {
 			hold.abort();
@@ -2214,7 +2224,7 @@ export class Publisher {
 			endSent = true;
 			if (!emitRange) return true;
 			const endError = hooks.subscriberEndError(track);
-			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
+			const code = endError && hasEndError(this.version) ? toStreamCode(servedError(endError)) : undefined;
 			return controls.response(
 				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
 			);
@@ -2795,7 +2805,7 @@ export class Publisher {
 		} catch (err) {
 			hold.abort();
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
-			stream.writer.reset(error(err));
+			stream.writer.reset(servedError(error(err)));
 		} finally {
 			watch.dispose();
 		}
@@ -2853,7 +2863,7 @@ export class Publisher {
 		} catch (err) {
 			const e = cancel.signal.aborted ? error(cancel.signal.reason) : error(err);
 			console.debug(`tracks end: broadcast=${msg.broadcast} error=${reason(e)}`);
-			stream.writer.reset(e);
+			stream.writer.reset(servedError(e));
 		} finally {
 			tracks?.close();
 			watch.dispose();
@@ -2966,7 +2976,10 @@ export class Publisher {
 			})();
 			void updates.then(
 				() => cancel.abort(new StreamError(StreamCode.Cancel)),
-				(err) => cancel.abort(error(err)),
+				(err) => {
+					closeViolation(this.#quic, err);
+					cancel.abort(error(err));
+				},
 			);
 			const front = await this.#resolve(msg, cancel.signal);
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
@@ -2981,7 +2994,7 @@ export class Publisher {
 			stream.writer.close();
 			await updates;
 		} catch (err) {
-			closeViolation(this.#quic, err);
+			// Only the update reader's own errors close the session, above; the track's end here.
 			stream.abort(error(err));
 		} finally {
 			track?.close();
@@ -3011,7 +3024,10 @@ export class Publisher {
 		})();
 		void updates.then(
 			() => track.close(),
-			(err) => track.close(error(err)),
+			(err) => {
+				closeViolation(this.#quic, err);
+				track.close(error(err));
+			},
 		);
 		try {
 			const info = await untilAborted(track.info(), signal);
@@ -3106,9 +3122,9 @@ export class Publisher {
 			}
 		}
 
-		// Lite-07 counts the first delta from the group's start, and GROUP_END from the highest.
+		// Lite-07 counts the first delta from the group's start, and GROUP_END from the last frame.
 		let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
-		let highest: bigint | undefined;
+		let first = true;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
 			const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!read) break;
@@ -3119,7 +3135,6 @@ export class Publisher {
 				const ts = wireTime(frame.timestamp, stamp);
 				delta = ts - prevTs;
 				prevTs = ts;
-				highest = max(highest ?? ts, ts);
 			}
 
 			const header = frameHeader(
@@ -3128,7 +3143,9 @@ export class Publisher {
 				read.inflated,
 				readSize(read),
 				hasLengthFirst(this.version),
+				first,
 			);
+			first = false;
 			const chunks = read.chunks;
 			// One budget race covers the frame's header and payload.
 			await write(async () => {
@@ -3140,7 +3157,7 @@ export class Publisher {
 		// Lite-07: a response that reached a finished group's end says so before the FIN.
 		const end = group.end;
 		if (hasGroupEnd(this.version) && end !== undefined && hooks.groupIndex(group) >= group.frameCount)
-			await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
+			await write(() => stream.write(groupEnd(stream.version, end, prevTs)));
 	}
 
 	/**
@@ -3225,9 +3242,9 @@ export class Publisher {
 			if (hasReliableReset(this.version)) held = stream.hold();
 
 			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
-			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
+			// at, and GROUP_END from the last timestamp sent.
 			let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
-			let highest: bigint | undefined;
+			let first = true;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below. A received tail may already begin there.
 			let reached = hooks.groupIndex(group) === startFrame;
@@ -3309,12 +3326,19 @@ export class Publisher {
 					const ts = wireTime(read.frame.timestamp, stamp);
 					delta = ts - prevTs;
 					prevTs = ts;
-					highest = max(highest ?? ts, ts);
 				}
 
 				const header = options.meta
-					? frameHeader(stream.version, delta, undefined, read.inflated ?? readSize(read), true)
-					: frameHeader(stream.version, delta, read.inflated, readSize(read), hasLengthFirst(this.version));
+					? frameHeader(stream.version, delta, undefined, read.inflated ?? readSize(read), true, first)
+					: frameHeader(
+							stream.version,
+							delta,
+							read.inflated,
+							readSize(read),
+							hasLengthFirst(this.version),
+							first,
+						);
+				first = false;
 				// A metadata FRAME is its header: the frame's bytes are never read, so nothing waits for them.
 				const chunks = options.meta ? undefined : read.chunks;
 				const payload = options.meta || chunks ? undefined : read.frame.payload;
@@ -3331,7 +3355,7 @@ export class Publisher {
 			if (end !== undefined) {
 				options.ended?.(end);
 				spanEnd = end;
-				await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
+				await write(() => stream.write(groupEnd(stream.version, end, prevTs)));
 			}
 			stream.close();
 			group.close();
@@ -3343,7 +3367,7 @@ export class Publisher {
 			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = servedError(error(err));
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
 			if (hasReliableReset(this.version) && (await accounts(stream, held))) {

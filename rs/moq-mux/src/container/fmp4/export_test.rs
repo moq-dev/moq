@@ -1371,6 +1371,7 @@ fn annexb_frame(timestamp_us: u64, nals: &[&[u8]]) -> crate::container::Frame {
 	}
 	crate::container::Frame {
 		timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+		decode: None,
 		payload: payload.freeze(),
 		keyframe: true,
 		duration: None,
@@ -2451,6 +2452,7 @@ async fn hevc_main10_is_described_from_its_sps() {
 	live.track
 		.write(crate::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			decode: None,
 			payload: keyframe.freeze(),
 			keyframe: true,
 			duration: None,
@@ -2509,6 +2511,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let source = 3_600_000_000;
 	let sample = |micros: u64, keyframe: bool| crate::container::Frame {
 		timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+		decode: None,
 		payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]),
 		keyframe,
 		duration: Some(moq_net::Timestamp::from_micros(33_000).unwrap()),
@@ -2696,6 +2699,7 @@ async fn avc3_with_a_record_exports_as_avc3() {
 	live.track
 		.write(crate::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			decode: None,
 			payload: length_prefixed(&[SPS, PPS, IDR]).into(),
 			keyframe: true,
 			duration: None,

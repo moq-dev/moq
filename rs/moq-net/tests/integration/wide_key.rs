@@ -113,11 +113,16 @@ async fn wide_key_fails_only_its_subscription() {
 	let broadcast = publisher
 		.route("bench", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
+	// Untimed, so its frame is at its key: a timed frame below its group's start has no
+	// unsigned lite-07 delta.
+	let wide = broadcast
+		.broadcast()
+		.create_track("wide", moq_net::track::Info::default())
+		.unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
 	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
-	group.write_frame(latest(), b"wide".as_ref()).unwrap();
+	group.write_frame(Timestamp::unscaled(WIDE), b"wide".as_ref()).unwrap();
 	let mut group = narrow.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
 

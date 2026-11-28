@@ -240,7 +240,7 @@ test("churn never postpones synced", async () => {
 	expect(await new Events(tracks).drain()).toEqual(["synced", "+c", "+d", "+e"]);
 });
 
-test("a removal of a seen track may precede synced", async () => {
+test("a cancelled track owes synced nothing, and a later change follows it", async () => {
 	const broadcast = new BroadcastProducer();
 	defined(broadcast.createTrack("a"));
 	defined(broadcast.createTrack("b"));
@@ -249,7 +249,7 @@ test("a removal of a seen track may precede synced", async () => {
 	expect(await tracks.next()).toMatchObject({ kind: "added", name: "a" });
 	broadcast.removeTrack("a");
 	broadcast.removeTrack("c");
-	expect(await new Events(tracks).drain()).toEqual(["+b", "-a", "synced"]);
+	expect(await new Events(tracks).drain()).toEqual(["+b", "synced", "-a"]);
 });
 
 test("a stalled reader holds one change per name", async () => {
@@ -372,6 +372,45 @@ test("readers wait for the lister to sync", async () => {
 
 	tracks.tracks.close();
 	expect(lister.wanted.peek()).toBe(false);
+});
+
+test("a removal re-added after sync keeps synced behind the changes queued before it", async () => {
+	const broadcast = new BroadcastProducer();
+	const lister = wireOf(broadcast).lister();
+	const tracks = list(broadcast);
+	lister.add("a", { info: INFO });
+	expect(await tracks.drain()).toEqual(["+a"]);
+	lister.remove("a");
+	lister.add("b", { info: INFO });
+	lister.synced();
+	// Churn coalesces in place, so it owes synced nothing extra.
+	for (let round = 0; round < 3; round++) {
+		lister.add("a", { info: INFO });
+		lister.remove("a");
+	}
+	lister.add("a", { info: INFO });
+	expect(await tracks.drain()).toEqual(["-a", "+a", "+b", "synced"]);
+});
+
+test("re-adds after sync never postpone synced", async () => {
+	const broadcast = new BroadcastProducer();
+	const lister = wireOf(broadcast).lister();
+	const tracks = list(broadcast);
+	lister.add("a", { info: INFO });
+	lister.add("b", { info: INFO });
+	expect(await tracks.drain()).toEqual(["+a", "+b"]);
+	lister.synced();
+	// Before each read, a track the reader saw leaves and comes back, in an order that kept a
+	// re-add ahead of a counted SYNCED forever.
+	const events: string[] = [];
+	for (const name of ["a", "b", "a", "a", "b", "b", "a", "a"]) {
+		if (events.includes("synced")) break;
+		lister.remove(name);
+		lister.add(name, { info: INFO });
+		const event = await tracks.tracks.next();
+		events.push(event?.kind === "synced" ? "synced" : `${event?.kind} ${event?.name}`);
+	}
+	expect(events).toEqual(["synced"]);
 });
 
 test("a name listed by both is reported once", async () => {

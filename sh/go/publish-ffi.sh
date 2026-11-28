@@ -16,10 +16,12 @@ set -euo pipefail
 #
 # Expects the staged Go module tarball under `go-out/`, produced by
 # package-ffi.sh as `moq-ffi-${BUILD_VERSION}-go.tar.gz`. The version's time is
-# the checked-out commit's, so a rerun rebuilds identical files, which the
-# upload skips. A version whose .info is already in the bucket (it goes up
-# last) was published by an earlier run, whose native build may differ by a
-# byte, so it is only relisted and verified, not rebuilt over.
+# the checked-out commit's, so a rerun rebuilds an identical .info and .mod,
+# which the upload skips. A version whose .zip is already in the bucket was
+# uploaded by an earlier run, whose native build may differ by a byte, or by
+# infra/go/backfill.sh, whose .info has the mirror commit's time, so its files
+# stay: a rerun uploads only whichever of .mod and .info the bucket lacks,
+# then relists and verifies it.
 
 DRY_RUN=false
 while [[ $# -gt 0 ]]; do
@@ -75,13 +77,13 @@ fi
 # shellcheck source=infra/go/r2.sh
 source "$INFRA_DIR/r2.sh"
 # Recursive from the bucket root, so a module with no versions yet lists empty.
-published=$(rclone lsf -R --files-only --include "/moq.dev/moq-ffi/@v/$VERSION.info" "$BUCKET")
-if [[ -n "$published" ]]; then
-    echo "$VERSION is already in the bucket: relisting and verifying it instead of uploading."
-    # An empty @v directory uploads nothing but still rewrites `list`, in case
-    # the earlier run failed after its .info.
-    mkdir -p "$WORK/relist/moq.dev/moq-ffi/@v"
-    "$INFRA_DIR/upload.sh" "$WORK/relist"
+held=$(rclone lsf -R --files-only --include "/moq.dev/moq-ffi/@v/$VERSION.*" "$BUCKET" | sed 's|.*/||')
+if grep -qxF "$VERSION.zip" <<<"$held"; then
+    echo "$VERSION's zip is already in the bucket: completing, relisting, and verifying it instead of uploading this build."
+    for name in $held; do
+        rm -f "$WORK/proxy/moq.dev/moq-ffi/@v/$name"
+    done
+    "$INFRA_DIR/upload.sh" "$WORK/proxy"
     # verify.sh checks the version against sum.golang.org, which pinned the
     # first upload's hash.
     GOT=$("$INFRA_DIR/verify.sh" --proxy direct "$VERSION")

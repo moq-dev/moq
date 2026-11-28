@@ -38,7 +38,7 @@ CONSTANTS
     Hold,         \* whether the reader holds a group while it reads it, keeping its copy
     MaxEvicts,    \* groups the caches of routes no longer served evict, in all
     MaxSkips,     \* groups a route learns the publisher skipped, summed over routes
-    ReArm         \* whether an eviction re-arms the backfill; FALSE only to see a rule fail
+    ReArm         \* whether a group a copy stops draining re-arms the backfill; FALSE only to see a rule fail
 
 Groups == 0 .. G - 1
 Tracks == 1 .. MaxTracks
@@ -67,8 +67,6 @@ vars == <<trk, front, rd, reading>>
 Arrived(t) == {trk[t].arr[i] : i \in 1 .. Len(trk[t].arr)}
 \* The groups its cache still holds.
 Landed(t) == Arrived(t) \ trk[t].gone
-\* `track::Consumer::evicted`: how many groups its cache evicted so far.
-Evicted(t) == Cardinality(trk[t].gone)
 \* How many groups the caches of every route evicted, counting each route's own.
 Evictions == Cardinality(UNION {{<<u, g>> : g \in trk[u].gone} : u \in Tracks})
 Live(t) == trk[t].made /\ ~trk[t].failed
@@ -107,11 +105,11 @@ Admits(floor, until, g) ==
     /\ g >= (IF floor = None THEN 0 ELSE floor)
     /\ (until = NoBound \/ g <= until)
 
-\* `drains` is `Copy::drains`: the track's eviction count when `BackfillGaps`
-\* last left the copy a group to drain, else None.
+\* `drains` is `Copy::drains`: the groups `BackfillGaps` left the copy to drain
+\* that the reader still lacked when last looked at.
 NewCopy(id, t, gen, floor, rep, until) ==
     [id |-> id, t |-> t, gen |-> gen, floor |-> floor, rep |-> rep,
-     until |-> until, done |-> "no", drained |-> 0, took |-> {}, drains |-> None]
+     until |-> until, done |-> "no", drained |-> 0, took |-> {}, drains |-> {}]
 
 \* The wire asks for [floor, until] instead (`Copy::cap`, or `Copy::send` on a
 \* reuse or a widening; neither reopens a drained copy): the cursor
@@ -211,7 +209,7 @@ Sync(r, f) ==
         IF at # 0 THEN
             \* Returning to a route reuses its copy, from the boundary.
             LET c == reps[at]
-                c2 == Window([c EXCEPT !.gen = f.gen, !.rep = FALSE, !.done = "no", !.drains = None],
+                c2 == Window([c EXCEPT !.gen = f.gen, !.rep = FALSE, !.done = "no", !.drains = {}],
                              Max2(c.floor, bnd), NoBound)
                 rest == [j \in 1 .. Len(reps) - 1 |-> IF j < at THEN reps[j] ELSE reps[j + 1]]
             IN [r EXCEPT !.gen = f.gen, !.resumed = TRUE, !.copies = rest \o <<c2>>]
@@ -245,10 +243,30 @@ Backfill(r, lo, hi) ==
                                  \o <<NewCopy(r.next, newest.t, newest.gen, lo, TRUE, hi - 1)>>
                                  \o <<newest>>]
 
+\* `Copy::may_drain`: a replaced copy still read, holding group `g` under its
+\* cap, on a route that did not fail.
+DrainsBy(c, g) ==
+    /\ c.rep /\ c.done = "no"
+    /\ Start(c) <= g /\ g < End(c)
+    /\ ~trk[c.t].failed
+    /\ g \in Landed(c.t)
+
+\* `Reader::rescan_drains`: a group `BackfillGaps` left a copy to drain, which
+\* the reader still lacks, that no longer drains there (its route evicted it,
+\* or the copy ran out or failed) re-arms the walk. Checked only on a pass with
+\* nothing to hand out.
+Rescan(r) ==
+    LET n == Len(r.copies)
+        owed(i) == r.copies[i].drains \ r.dlv
+        lost(i) == ReArm /\ \E g \in owed(i) : ~DrainsBy(r.copies[i], g)
+    IN [r EXCEPT !.copies = [i \in 1 .. n |->
+                    [r.copies[i] EXCEPT !.drains = IF lost(i) THEN {} ELSE owed(i)]],
+                 !.resumed = @ \/ \E i \in 1 .. n : lost(i)]
+
 \* `Reader::backfill_gaps`: after a switch, ask the serving route for what the
 \* reader lacks below its copy's resume point, from the lowest gap no replaced
-\* copy still drains: a live one holding it under its cap. Each copy left a
-\* group under that gap records its track's eviction count (`Copy::drains`).
+\* copy still drains: a live one holding it under its cap. Each group under that
+\* gap joins the drains of the first copy that drains it (`Copy::drains`).
 BackfillGaps(r) ==
     IF ~r.resumed THEN r
     ELSE
@@ -258,28 +276,23 @@ BackfillGaps(r) ==
         IF n = 0 \/ r.copies[n].floor = None THEN r1
         ELSE
             LET at == r.copies[n].floor
-                drainsBy(i, g) ==
-                    LET c == r.copies[i] IN
-                    /\ c.rep /\ c.done = "no"
-                    /\ Start(c) <= g /\ g < End(c)
-                    /\ ~trk[c.t].failed
-                    /\ g \in Landed(c.t)
+                drainsBy(i, g) == DrainsBy(r.copies[i], g)
                 drains(g) == \E i \in 1 .. n : drainsBy(i, g)
                 gaps == {g \in 0 .. at - 1 : g \notin r.dlv /\ ~drains(g)}
                 below == IF gaps = {} THEN at ELSE Min(gaps)
                 \* The first copy that drains each group under the lowest gap, as
                 \* the walk finds it.
-                left == {Min({i \in 1 .. n : drainsBy(i, g)}) : g \in {h \in 0 .. below - 1 : h \notin r.dlv}}
+                left(i) == {g \in 0 .. below - 1 :
+                                g \notin r.dlv /\ i = Min({j \in 1 .. n : drainsBy(j, g)})}
                 r2 == [r1 EXCEPT !.copies = [i \in 1 .. n |->
-                        [r.copies[i] EXCEPT !.drains = IF i \in left THEN Evicted(r.copies[i].t) ELSE None]]]
+                        [r.copies[i] EXCEPT !.drains = @ \cup left(i)]]]
             IN IF gaps = {} THEN r2 ELSE Backfill(r2, Min(gaps), at)
 
 \* The copy loop of `poll_first`: peek each copy, keeping the first group in
 \* Group Order, here the highest; a tie goes to the newer copy. A copy that ran out cleanly is read again
 \* once a group arrived on it since (`Copy::drained`); one arriving on the
 \* serving copy, which resumed at a floor, may be under it (`late`), as may
-\* what a replaced copy that just failed still had to drain, or one whose
-\* cache evicted since `BackfillGaps` left it a group to drain.
+\* what a replaced copy that just failed still had to drain.
 RECURSIVE Scan(_, _, _, _, _, _)
 Scan(cs, dlv, gen, i, best, late) ==
     IF i > Len(cs) THEN [cs |-> cs, best |-> best, late |-> late]
@@ -294,12 +307,11 @@ Scan(cs, dlv, gen, i, best, late) ==
             THEN Scan(cs, dlv, gen, i + 1, best, late)
         ELSE
             LET p == Peek(c, dlv)
-                lost == ReArm /\ c.rep /\ c.drains # None /\ c.drains # Evicted(c.t)
-                cs2 == [cs EXCEPT ![i] = IF lost THEN [p.c EXCEPT !.drains = None] ELSE p.c]
+                cs2 == [cs EXCEPT ![i] = p.c]
                 better == p.g # None /\ (best.g = None \/ p.g >= best.g)
             IN Scan(cs2, dlv, gen, i + 1,
                     IF better THEN [i |-> i, g |-> p.g] ELSE best,
-                    late \/ (reopens /\ serves) \/ (c.rep /\ p.c.done = "err") \/ lost)
+                    late \/ (reopens /\ serves) \/ (c.rep /\ p.c.done = "err"))
 
 NoBest == [i |-> 0, g |-> None]
 
@@ -333,7 +345,8 @@ Retains(c, dlv, known) ==
         THEN "keep"
     ELSE "no"
 
-\* `Reader::let_go`: drop the replaced copies nothing needs; whether any waits.
+\* `Reader::let_go`: drop the replaced copies nothing needs; whether any waits,
+\* and whether one it dropped was left a group to drain, which re-arms the walk.
 LetGo(r) ==
     LET n == Len(r.copies)
         ret == [i \in 1 .. n |->
@@ -342,7 +355,8 @@ LetGo(r) ==
         order == CHOOSE s \in [1 .. Cardinality(kept) -> kept] :
                     \A a, b \in 1 .. Cardinality(kept) : a < b => s[a] < s[b]
     IN [copies |-> [k \in 1 .. Cardinality(kept) |-> r.copies[order[k]]],
-        waits |-> \E i \in 1 .. n : ret[i] = "wait"]
+        waits |-> \E i \in 1 .. n : ret[i] = "wait",
+        gaveUp |-> ReArm /\ \E i \in 1 .. n : ret[i] = "no" /\ r.copies[i].drains \ r.dlv # {}]
 
 \* `Reader::poll_end`, with `poll_first`'s guard: a drained serving copy ends
 \* the track only once no copy it replaced may still deliver below the end.
@@ -366,10 +380,17 @@ Pass(r1) ==
     IF sc.best.g # None THEN [r |-> Take(r2, sc.best), cid |-> r2.copies[sc.best.i].id, g |-> sc.best.g]
     ELSE IF sc.late THEN Pass(BackfillGaps(r2))
     ELSE
-        LET drained == \E c \in Serving(r2) : c.done = "ok"
-            lg == LetGo(r2)
-            r4 == [r2 EXCEPT !.copies = lg.copies]
-        IN [r |-> [r4 EXCEPT !.ended = PollEnd(r4, drained, lg.waits)], cid |-> 0, g |-> None]
+        \* Nothing to hand out: only now are the drains rescanned.
+        LET r3 == Rescan(r2)
+        IN
+        IF r3.resumed THEN Pass(BackfillGaps(r3))
+        ELSE
+        LET drained == \E c \in Serving(r3) : c.done = "ok"
+            lg == LetGo(r3)
+            r4 == [r3 EXCEPT !.copies = lg.copies]
+        IN
+        IF lg.gaveUp THEN Pass(BackfillGaps([r4 EXCEPT !.resumed = TRUE]))
+        ELSE [r |-> [r4 EXCEPT !.ended = PollEnd(r4, drained, lg.waits)], cid |-> 0, g |-> None]
 
 Poll(r) == Pass(BackfillGaps(Sync(r, front)))
 

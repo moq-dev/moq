@@ -141,7 +141,7 @@ async fn a_start_group_arrives_whole() {
 	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
 		for index in frames {
 			group
-				.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+				.write_frame(Timestamp::from_millis(5 + index).unwrap(), payload(index))
 				.unwrap();
 		}
 	};
@@ -260,7 +260,7 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 				let mut group = fixture.track.append_next().unwrap();
 				for index in 0..3 {
 					group
-						.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+						.write_frame(Timestamp::from_millis(5 + index).unwrap(), payload(index))
 						.unwrap();
 				}
 				group.finish().unwrap();
@@ -292,7 +292,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 			let mut group = track.append_next().unwrap();
 			for index in 0..3 {
 				group
-					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+					.write_frame(Timestamp::from_millis(5 + index).unwrap(), payload(index))
 					.unwrap();
 			}
 			group.finish().unwrap();

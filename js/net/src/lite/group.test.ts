@@ -3,7 +3,8 @@ import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError } from "../er
 import { Producer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { concat, encodeVarint, Reader, Writer } from "../stream.ts";
-import { Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
+import { authoredInfo } from "../track.ts";
 import { RESERVED } from "../util/key.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
@@ -53,13 +54,15 @@ test("every frame in a chunk reaches the reader before it wakes", async () => {
 test("frames split at every byte keep their payloads and timestamps", async () => {
 	const producer = new Producer(0n);
 	const consumer = producer.consume();
-	// Deltas wide enough for multi-byte varints, and one that steps back.
+	// Deltas wide enough for multi-byte varints, and one that steps back, as a lite-05/06
+	// publisher's B-frames may: an unchecked copy takes it.
 	const frames = [
 		{ delta: 100, payload: [1] },
 		{ delta: 20_000, payload: [2, 2] },
 		{ delta: -50, payload: [] },
 		{ delta: 0, payload: Array.from({ length: 300 }, () => 4) },
 	];
+	hooks.bindGroupTimed(producer, authoredInfo({ timescale: Timescale(SCALE), unchecked: true }));
 	const bytes = encode(frames);
 	const chunks = Array.from(bytes, (byte) => new Uint8Array([byte]));
 
@@ -113,10 +116,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	const frames = [
 		{ delta: 100n, payload: [1] },
 		{ delta: 20_000n, payload: [2, 2] },
-		{ delta: -50n, payload: [] },
+		{ delta: lengthFirst ? 50n : -50n, payload: [] },
 	];
-	const encoded = frames.map(({ delta, payload }) =>
-		concat([frameHeader(version, delta, undefined, payload.length, lengthFirst), new Uint8Array(payload)]),
+	const encoded = frames.map(({ delta, payload }, index) =>
+		concat([
+			frameHeader(version, delta, undefined, payload.length, lengthFirst, index === 0),
+			new Uint8Array(payload),
+		]),
 	);
 	// The first field is the size plus one on lite-07, and the timestamp delta before it.
 	const first = encoded[0];
@@ -124,6 +130,8 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	else expect(Array.from(first.subarray(first.length - 2))).toEqual([1, 1]);
 
 	const producer = new Producer(0n);
+	// Only lite-05/06 may step back, and only into an unchecked copy.
+	if (!lengthFirst) hooks.bindGroupTimed(producer, authoredInfo({ timescale: Timescale(SCALE), unchecked: true }));
 	const consumer = producer.consume();
 	await readFrames(streamOf(encoded, version), producer, { scale: SCALE, lengthFirst });
 	producer.finish();
@@ -137,7 +145,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	expect(await consumer.readFrame()).toBeUndefined();
 
 	// A compressed track's inflated size follows the timestamp delta, and the size still leads.
-	const compressed = concat([frameHeader(version, 7n, 9, 2, lengthFirst), new Uint8Array([5, 6])]);
+	const compressed = concat([frameHeader(version, 7n, 9, 2, lengthFirst, true), new Uint8Array([5, 6])]);
 	const decoded = (await streamOf([compressed], version).decode(
 		frameDecoder({ scale: SCALE, compress: true, lengthFirst }),
 	)) as WireFrame;
@@ -153,7 +161,8 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		const lengthFirst = hasLengthFirst(version);
 		const decode = frameDecoder({ scale: SCALE, lengthFirst });
 		// Only the header: the cap must not wait for any payload bytes.
-		const header = (size: number) => streamOf([frameHeader(version, 0n, undefined, size, lengthFirst)], version);
+		const header = (size: number) =>
+			streamOf([frameHeader(version, 0n, undefined, size, lengthFirst, true)], version);
 		expect(((await header(MAX_FRAME_BYTES).decode(decode)) as WireFrame).size).toBe(MAX_FRAME_BYTES);
 		await expect(header(MAX_FRAME_BYTES + 1).decode(decode)).rejects.toThrow(FrameTooLarge);
 		const producer = new Producer(0n);
@@ -217,21 +226,21 @@ test.each([
 	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
 });
 
-// A lite-07 GROUP_END's End is a delta from the highest timestamp the stream carried, or from the
+// A lite-07 GROUP_END's End is a delta from the last timestamp the stream carried, or from the
 // group's start when it carried none: 0 ends the group there.
-test("a lite-07 GROUP_END counts from the stream's highest timestamp", async () => {
+test("a lite-07 GROUP_END counts from the stream's last timestamp", async () => {
 	expect(await readLite07(lite07(0, 0), 5n)).toBe(5n);
 	expect(await readLite07(lite07(0, 3), 5n)).toBe(8n);
 	// Frame 0 at the start (delta 0), then one 40 later: End is 40 + 20 past the start.
-	expect(await readLite07(lite07(2, 0, 7, 2, 80, 8, 0, 20), 1000n)).toBe(1060n);
+	expect(await readLite07(lite07(2, 0, 7, 2, 40, 8, 0, 20), 1000n)).toBe(1060n);
 });
 
-// The first lite-07 FRAME on a stream counts its delta from the Group Start, so frame 0 carries 0;
-// later ones count from the frame before. Before lite-07 the first delta counts from 0.
+// The first lite-07 FRAME on a stream counts its unsigned delta from the Group Start, so frame 0
+// carries 0; later ones count from the frame before. Before lite-07 the first delta counts from 0.
 test("a lite-07 stream's first delta counts from the group's start", async () => {
 	const producer = new Producer(1000n);
 	const consumer = producer.consume();
-	await readFrames(streamOf([lite07(2, 0, 7, 2, 66, 8)], Version.DRAFT_07), producer, {
+	await readFrames(streamOf([lite07(2, 0, 7, 2, 33, 8)], Version.DRAFT_07), producer, {
 		scale: SCALE,
 		lengthFirst: true,
 	});
@@ -250,7 +259,7 @@ test("a resumed lite-07 stream counts its first delta from the group's start", a
 	const producer = new Producer(1000n);
 	hooks.startGroup(producer, 3);
 	const consumer = producer.consume();
-	// Frame 3 sits 99 past the start, and the group ends 33 past it.
+	// Frame 3 sits 99 past the start (a zigzag first delta), and the group ends 33 past it.
 	const end = await readFrames(streamOf([lite07(2, 198, 7, 0, 33)], Version.DRAFT_07), producer, {
 		scale: SCALE,
 		lengthFirst: true,
@@ -267,18 +276,18 @@ test("a resumed lite-07 stream counts its first delta from the group's start", a
 	expect(await fetched.decode(decode)).toEqual({ end: 2010n });
 });
 
-// B-frames send timestamps backwards within a group, so GROUP_END counts from the highest one, not
-// the last.
-test("a lite-07 group with B-frames ends at a delta from its highest frame", async () => {
+// Lite-07 deltas are unsigned (non-decreasing, including zero ties), so GROUP_END counts from the
+// last frame's timestamp.
+test("a lite-07 group with monotonic deltas and ties ends from its last frame", async () => {
 	const producer = new Producer(0n);
 	const consumer = producer.consume();
-	// Presentation order 0, 100, 33, 66: the highest is 100, and the group ends at 133.
-	const bytes = lite07(2, 0, 1, 2, 200, 2, 2, 133, 3, 2, 66, 4, 0, 33);
+	// Decode times 0, 33, 33, 66, and the group ends at 99.
+	const bytes = lite07(2, 0, 1, 2, 33, 2, 2, 0, 3, 2, 33, 4, 0, 33);
 	const end = await readFrames(streamOf([bytes], Version.DRAFT_07), producer, { scale: SCALE, lengthFirst: true });
-	expect(end).toBe(133n);
+	expect(end).toBe(99n);
 	const times = [];
 	for (let i = 0; i < 4; i++) times.push((await consumer.readFrame())?.timestamp?.value);
-	expect(times).toEqual([0, 100, 33, 66]);
+	expect(times).toEqual([0, 33, 33, 66]);
 	producer.finishAt(end as bigint);
 });
 
@@ -298,7 +307,7 @@ test("a scale-less lite-07 FRAME carries no timestamp", async () => {
 	// With no timestamps the End counts from the group's start.
 	expect(end).toBe(12n);
 	// The publisher writes no delta either.
-	const header = frameHeader(Version.DRAFT_07, undefined, undefined, 1, true);
+	const header = frameHeader(Version.DRAFT_07, undefined, undefined, 1, true, true);
 	expect(Array.from(header)).toEqual([2]);
 });
 
@@ -323,12 +332,12 @@ test("a lite-07 GROUP carries its start and frame start", async () => {
 // Stream end at the Payload Length ends a lite-07 group; within the rest of the header, it cut a frame.
 test("a lite-07 stream ending at the Payload Length ends the group", async () => {
 	const version = Version.DRAFT_07;
-	const whole = concat([frameHeader(version, 1n, undefined, 1, true), new Uint8Array([7])]);
+	const whole = concat([frameHeader(version, 1n, undefined, 1, true, true), new Uint8Array([7])]);
 	const producer = new Producer(0n);
 	await readFrames(streamOf([whole], version), producer, { scale: SCALE, lengthFirst: true });
 	expect(producer.consume().frameCount).toBe(1);
 
-	const cut = frameHeader(version, 1n, undefined, 1, true).subarray(0, 1);
+	const cut = frameHeader(version, 1n, undefined, 1, true, true).subarray(0, 1);
 	await expect(
 		readFrames(streamOf([cut], version), new Producer(0n), { scale: SCALE, lengthFirst: true }),
 	).rejects.toThrow("unexpected end of stream");
@@ -338,7 +347,7 @@ test("a lite-07 stream ending at the Payload Length ends the group", async () =>
 // refused as a protocol violation rather than counted wrong.
 test("a lite-07 frame numbered past the safe integer range is refused", async () => {
 	const version = Version.DRAFT_07;
-	const frame = concat([frameHeader(version, 0n, undefined, 1, true), new Uint8Array([7])]);
+	const frame = concat([frameHeader(version, 0n, undefined, 1, true, true), new Uint8Array([7])]);
 	const start = Number.MAX_SAFE_INTEGER - 1;
 	const producer = new Producer(0n);
 	hooks.startGroup(producer, start);

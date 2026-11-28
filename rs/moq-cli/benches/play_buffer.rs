@@ -22,6 +22,7 @@ fn main() {
 			let frames: Vec<_> = (0..300)
 				.map(|index| moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_millis(index * 33).unwrap(),
+					decode: None,
 					duration: None,
 					payload: bytes::Bytes::from(vec![128; payload_bytes]),
 					keyframe: index % 30 == 0,

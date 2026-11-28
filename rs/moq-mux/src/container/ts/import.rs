@@ -2380,6 +2380,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 			adjust_splice(&mut held.payload, offset);
 			self.track.write(crate::container::Frame {
 				timestamp,
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from(held.payload),
 				keyframe: true,
@@ -2627,6 +2628,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 			}
 			let frame = crate::container::Frame {
 				timestamp,
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from(held.payload),
 				keyframe: join == Join::Opens,
