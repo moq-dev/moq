@@ -1085,8 +1085,7 @@ mod hop_tests {
 		let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 		assert!(info.properties.is_none());
 
-		let mut group = track.append_next().unwrap();
-		group.write_frame(ts(5), b"key".to_vec()).unwrap();
+		let mut group = track.append_group(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
@@ -1117,14 +1116,13 @@ mod hop_tests {
 			.broadcast()
 			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
 			.unwrap();
-		let mut first = track.create_empty(0u64.into()).unwrap();
-		first.write_frame(ts(5), b"key".to_vec()).unwrap();
+		let mut first = track.create_group(ts(5), b"key".to_vec()).unwrap();
 		first.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		first.finish().unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let broadcast = downstream.consume().request("room", None).await.unwrap();
 		let copy = broadcast.track("video").unwrap();
-		let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(0, None))
+		let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(5, None))
 			.await
 			.unwrap()
 			.unwrap();
@@ -1155,8 +1153,7 @@ mod hop_tests {
 				..track::Info::timed()
 			};
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
-			let mut head = track.create_empty(0u64.into()).unwrap();
-			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
+			let head = track.create_group(ts(100), b"frame".to_vec()).unwrap();
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request("room", None).await.unwrap();
@@ -1187,28 +1184,27 @@ mod hop_tests {
 			);
 			// Before any subscription, this must fetch the head over the hop, rather
 			// than reading an already subscribed copy's cache.
-			let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(0, None))
+			let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(100, None))
 				.await
 				.unwrap()
 				.unwrap();
 			assert_eq!(next(&mut fetched).await.unwrap().timestamp, ts(100));
 			assert!(next(&mut fetched).await.is_none());
 			let mut subscriber =
-				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
+				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(101)))
 					.await
 					.unwrap()
 					.unwrap();
-			let mut group = track.create_empty(1u64.into()).unwrap();
-			group.write_frame(ts(150), b"frame".to_vec()).unwrap();
+			let group = track.create_group(ts(150), b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
-			assert_eq!(received.start, 1);
+			assert_eq!(received.start, 150);
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(frame.timestamp, ts(150), "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
 			// Provenance exempts nothing from the rewind check.
-			let mut rewound = track.create_empty(2u64.into()).unwrap();
+			let mut rewound = track.create_group(ts(200), b"frame".to_vec()).unwrap();
 			assert!(matches!(
 				rewound.write_frame(ts(50), b"frame".to_vec()),
 				Err(crate::Error::TimestampMismatch)
@@ -1232,8 +1228,7 @@ mod hop_tests {
 		assert_eq!(subscriber.info().compression, crate::track::Compression::Deflate);
 
 		let payload = |n: u8| vec![n; 300];
-		let mut group = track.append_next().unwrap();
-		group.write_frame(ts(5), payload(1)).unwrap();
+		let mut group = track.append_group(ts(5), payload(1)).unwrap();
 		group.write_frame(ts(6), payload(2)).unwrap();
 		group.finish().unwrap();
 		let mut received = recv(&mut subscriber).await;

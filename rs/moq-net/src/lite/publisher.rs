@@ -8817,7 +8817,7 @@ mod serve_group_test {
 			);
 			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(2).unwrap(), b"x".as_slice())
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
 				.unwrap();
 			match finished {
 				true => group.finish_at(5).unwrap(),
@@ -8831,11 +8831,11 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "finished={finished}: no FIN");
-			// The frame: its length plus one, the zigzag timestamp delta 2 from the group's start,
-			// and the payload; then GROUP_END, its End 3 past the frame at 2.
+			// Frame 0: its length plus one and the payload, with no delta since it sits at the
+			// group's start; then GROUP_END, its End 5 past that frame.
 			let tail: &[u8] = match finished {
-				true => &[2, 4, b'x', 0, 3],
-				false => &[2, 4, b'x'],
+				true => &[2, b'x', 0, 5],
+				false => &[2, b'x'],
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");
@@ -8864,15 +8864,15 @@ mod serve_group_test {
 			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			let big = vec![b'a'; 300];
 			group
-				.write_frame(Timestamp::from_millis(2).unwrap(), big.clone())
+				.write_frame(Timestamp::from_millis(0).unwrap(), big.clone())
 				.unwrap();
 			group
-				.write_frame(Timestamp::from_millis(3).unwrap(), b"".as_slice())
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"".as_slice())
 				.unwrap();
 			group
-				.write_frame(Timestamp::from_millis(4).unwrap(), b"hello".as_slice())
+				.write_frame(Timestamp::from_millis(2).unwrap(), b"hello".as_slice())
 				.unwrap();
-			group.finish_at(5).unwrap();
+			group.finish_at(3).unwrap();
 			let used = pool.used();
 			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 			subscription
@@ -8883,15 +8883,15 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "{compression:?}: no FIN");
-			// 301 as a two-byte varint, then each delta: the first zigzag 2ms, then 1ms unsigned for
-			// the empty frame (length 1) and "hello" (length 6), then GROUP_END, its End 1 past the
-			// frame at 4.
-			let tail: &[u8] = &[0x81, 0x2d, 4, 1, 1, 6, 1, 0, 1];
+			// 301 as a two-byte varint with no delta for frame 0, then 1ms unsigned for the empty
+			// frame (length 1) and "hello" (length 6), then GROUP_END, its End 1 past the frame
+			// at 2.
+			let tail: &[u8] = &[0x81, 0x2d, 1, 1, 6, 1, 0, 1];
 			assert!(bytes.ends_with(tail), "{compression:?}: {bytes:?}");
 			let info = crate::track::Info::timed().with_compression(compression);
 			assert_eq!(
 				ingest_meta_group(&bytes, info),
-				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
+				(0, vec![300, 0, 5], vec![0, 1, 2], Some(3)),
 				"{compression:?}: the ingest reads it back"
 			);
 			assert!(
@@ -9068,15 +9068,15 @@ mod serve_group_test {
 			);
 			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'a'; 300])
+				.write_frame(Timestamp::from_millis(0).unwrap(), vec![b'a'; 300])
 				.unwrap();
 			group
-				.write_frame(Timestamp::from_millis(3).unwrap(), b"".as_slice())
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"".as_slice())
 				.unwrap();
 			group
-				.write_frame(Timestamp::from_millis(4).unwrap(), b"hello".as_slice())
+				.write_frame(Timestamp::from_millis(2).unwrap(), b"hello".as_slice())
 				.unwrap();
-			group.finish_at(5).unwrap();
+			group.finish_at(3).unwrap();
 			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 			subscription
 				.serve_group(0, 0, handle, track.consume().peek_group(0).unwrap())
@@ -9087,8 +9087,8 @@ mod serve_group_test {
 			let read: Read = serde_json::from_slice(&crate::test_interop::bun("meta", input)).unwrap();
 			assert_eq!(read.key, "0");
 			assert_eq!(read.sizes, [300, 0, 5], "{compression:?}");
-			assert_eq!(read.times, ["2", "3", "4"], "{compression:?}");
-			assert_eq!(read.end.as_deref(), Some("5"), "{compression:?}");
+			assert_eq!(read.times, ["0", "1", "2"], "{compression:?}");
+			assert_eq!(read.end.as_deref(), Some("3"), "{compression:?}");
 
 			let subscribe = lite::Subscribe {
 				id: 0,
@@ -9112,7 +9112,7 @@ mod serve_group_test {
 			let served: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("meta", input)).unwrap();
 			assert_eq!(
 				ingest_meta_group(&served, info),
-				(0, vec![300, 0, 5], vec![2, 3, 4], Some(5)),
+				(0, vec![300, 0, 5], vec![0, 1, 2], Some(3)),
 				"{compression}"
 			);
 		}
@@ -9364,12 +9364,12 @@ mod serve_group_test {
 
 			let mut group = group;
 			group
-				.write_frame(Timestamp::from_millis(2).unwrap(), vec![b'a'; 300])
+				.write_frame(Timestamp::from_millis(0).unwrap(), vec![b'a'; 300])
 				.unwrap();
 			let mut open = group
 				.create_frame(crate::frame::Info {
 					size: 10,
-					timestamp: Timestamp::from_millis(3).unwrap(),
+					timestamp: Timestamp::from_millis(1).unwrap(),
 				})
 				.unwrap();
 			open.write(b"hello".as_slice()).unwrap();
@@ -9385,13 +9385,13 @@ mod serve_group_test {
 
 			open.write(b"world".as_slice()).unwrap();
 			let group = open.finish().unwrap();
-			group.finish_at(4).unwrap();
+			group.finish_at(2).unwrap();
 			serve.await.unwrap();
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "{compression:?}: no FIN");
 			assert_eq!(
 				read_meta_group(&bytes),
-				(0, vec![300, 10], vec![2, 3], Some(4)),
+				(0, vec![300, 10], vec![0, 1], Some(2)),
 				"{compression:?}"
 			);
 			assert!(
@@ -11807,10 +11807,10 @@ mod serve_group_test {
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1, "{version}");
 
-			// Group 1 starts 1s in, and group 2 at 6s leaves group 0 past the budget while its
-			// FIN is still unacknowledged.
-			write_group(&mut track, 1, 1000);
-			write_group(&mut track, 2, 6000);
+			// A group 1s in, and one at 6s leaves group 0 past the budget while its FIN is still
+			// unacknowledged.
+			write_group(&mut track, 1000, 1000);
+			write_group(&mut track, 6000, 6000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let reliable = version.has_reliable_reset() && !plain;
 			let dropped: &[(u64, u64)] = match reliable {
@@ -12714,10 +12714,12 @@ mod serve_group_test {
 					let delta = crate::coding::decode_buf(&mut buf, Version::Lite07, |r, _| r.varint()).unwrap();
 					group_end = Some(delta);
 				} else {
-					let size = size as usize;
-					let mut body = &buf[..size];
-					let _ = crate::coding::decode_buf(&mut body, Version::Lite07, |r, _| r.varint()).unwrap();
-					frames.push(body.to_vec());
+					// Every FRAME but frame 0, at the group's start, carries a delta.
+					if !frames.is_empty() {
+						let _ = crate::coding::decode_buf(&mut buf, Version::Lite07, |r, _| r.varint()).unwrap();
+					}
+					let size = size as usize - 1;
+					frames.push(buf[..size].to_vec());
 					buf = &buf[size..];
 				}
 			}
@@ -12911,8 +12913,8 @@ mod serve_group_test {
 					),
 					false => None,
 				};
-				for key in 0..3 {
-					write_group(&mut track, key, key * 10);
+				for key in [0, 10, 20] {
+					write_group(&mut track, key, key);
 					if let Some(keeper) = &mut keeper {
 						assert_eq!(keeper.recv_group().await.unwrap().unwrap().start, key);
 					}
@@ -12934,12 +12936,12 @@ mod serve_group_test {
 					.subscribe(track::Subscription::default())
 					.await
 					.unwrap();
-				assert_eq!(live.recv_group().await.unwrap().unwrap().start, 2);
+				assert_eq!(live.recv_group().await.unwrap().unwrap().start, 20);
 				starts.push(kio::wait(|waiter| live.poll_start(waiter)).await);
 			}
 			assert_eq!(
 				starts,
-				[Some(2), Some(2)],
+				[Some(20), Some(20)],
 				"{version}: cold and warm relay starts differ"
 			);
 		}

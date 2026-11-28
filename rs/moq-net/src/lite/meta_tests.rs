@@ -141,11 +141,10 @@ async fn chain_with(upstream: &str, downstream: &str, info: crate::track::Info) 
 	}
 }
 
-/// Write a group of a big frame at `at` ms and an empty one after it.
+/// Write a group at `at` ms of a big frame there and an empty one after it.
 fn write_group(track: &crate::track::Producer, at: u64) {
-	let mut group = track.append_next().unwrap();
-	group
-		.write_frame(Timestamp::from_millis(at).unwrap(), vec![b'x'; BIG])
+	let mut group = track
+		.append_group(Timestamp::from_millis(at).unwrap(), vec![b'x'; BIG])
 		.unwrap();
 	group
 		.write_frame(Timestamp::from_millis(at + 1).unwrap(), b"".as_slice())
@@ -201,7 +200,7 @@ async fn metadata_crosses_lite07_hops_without_payload() {
 	assert_eq!(read_headers(&mut sub).await, (0, vec![(BIG as u64, 0), (0, 1)]));
 
 	write_group(&chain.track, 10);
-	assert_eq!(read_headers(&mut sub).await, (1, vec![(BIG as u64, 10), (0, 11)]));
+	assert_eq!(read_headers(&mut sub).await, (10, vec![(BIG as u64, 10), (0, 11)]));
 	assert_eq!(sent(&chain.upstream), (0, 0), "the publisher sent payload");
 	assert_eq!(sent(&chain.downstream), (0, 0), "the relay sent payload");
 }
@@ -290,7 +289,7 @@ async fn metadata_outlives_the_payload_reader_without_payload() {
 	settle().await;
 	let before = (sent(&chain.upstream), sent(&chain.downstream));
 	write_group(&chain.track, 10);
-	assert_eq!(read_headers(&mut meta).await, (1, vec![(BIG as u64, 10), (0, 11)]));
+	assert_eq!(read_headers(&mut meta).await, (10, vec![(BIG as u64, 10), (0, 11)]));
 	settle().await;
 	assert_eq!(
 		(sent(&chain.upstream), sent(&chain.downstream)),
@@ -323,12 +322,13 @@ async fn metadata_over_an_older_session_reads_headers() {
 async fn payload_subscription_continues_from_a_metadata_position() {
 	let chain = chain("moq-lite-07-wip", "moq-lite-07-wip").await;
 	let mut sub = meta(&chain.remote, None).await;
-	let mut group = chain.track.append_next().unwrap();
-	for at in 0..2 {
-		group
-			.write_frame(Timestamp::from_millis(at).unwrap(), vec![b'a' + at as u8; BIG])
-			.unwrap();
-	}
+	let mut group = chain
+		.track
+		.append_group(Timestamp::from_millis(0).unwrap(), vec![b'a'; BIG])
+		.unwrap();
+	group
+		.write_frame(Timestamp::from_millis(1).unwrap(), vec![b'b'; BIG])
+		.unwrap();
 
 	let mut headers = recv(&mut sub).await;
 	for _ in 0..2 {
@@ -406,8 +406,8 @@ async fn metadata_history_fill_carries_no_payload() {
 			.with_order(crate::track::Order::Ascending),
 	)
 	.await;
-	for (key, at) in [(0, 0), (1, 10), (2, 20)] {
-		assert_eq!(read_headers(&mut sub).await, (key, vec![(BIG as u64, at), (0, at + 1)]));
+	for at in [0, 10, 20] {
+		assert_eq!(read_headers(&mut sub).await, (at, vec![(BIG as u64, at), (0, at + 1)]));
 	}
 	assert_eq!(sent(&chain.upstream), (0, 0), "the publisher sent payload");
 	assert_eq!(sent(&chain.downstream), (0, 0), "the relay sent payload");

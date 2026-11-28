@@ -229,14 +229,16 @@ pub struct Info {
 	/// Shared, since every group holds a copy of the info.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
-	/// Whether this copy's groups skip the rewind check: set on a lite-05/06 copy, whose
-	/// untimed origin may be a released publisher stamping send times, so an older group
-	/// fetched later looks like a rewind.
+	/// Whether this is a copy received over lite-05/06, whose publisher numbers groups by
+	/// sequence: each group is keyed by its frame 0's timestamp as it arrives, so the copy answers
+	/// only live subscriptions (its upstream knows no timestamp key to ask by), and its frames skip
+	/// the rewind check, since a released publisher may stamp send times or B-frames'
+	/// presentation times.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) unchecked: bool,
+	pub(crate) legacy: bool,
 }
 
-// `unchecked` says how this copy arrived, not what it holds, so copies of one track over
+// `legacy` says how this copy arrived, not what it holds, so copies of one track over
 // different versions still match.
 impl PartialEq for Info {
 	fn eq(&self, other: &Self) -> bool {
@@ -247,7 +249,7 @@ impl PartialEq for Info {
 			compression,
 			refresh,
 			properties,
-			unchecked: _,
+			legacy: _,
 		} = self;
 		*timescale == other.timescale
 			&& *max_age == other.max_age
@@ -344,7 +346,7 @@ impl Default for Info {
 			compression: Compression::None,
 			refresh: Refresh::default(),
 			properties: None,
-			unchecked: false,
+			legacy: false,
 		}
 	}
 }
@@ -1879,9 +1881,9 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
+	/// `None` on a [legacy](Info::legacy) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, key: u64) -> Option<Neighbors> {
-		if self.info.as_ref().is_some_and(|info| info.unchecked) {
+		if self.info.as_ref().is_some_and(|info| info.legacy) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);

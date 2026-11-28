@@ -23618,7 +23618,7 @@ mod compression_tests {
 			Arc::new(crate::broadcast::Info::default()),
 			"video",
 			track::Info {
-				unchecked: true,
+				legacy: true,
 				..track::Info::timed().with_timescale(Timescale::MILLI)
 			},
 		);

@@ -14608,7 +14608,7 @@ mod test {
 				Arc::new(broadcast::Info::default()),
 				"video",
 				crate::track::Info {
-					unchecked: true,
+					legacy: true,
 					..crate::track::Info::timed()
 				},
 			);

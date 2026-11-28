@@ -5327,7 +5327,10 @@ mod tests {
 				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
 				.unwrap();
 				let mut w = crate::coding::Encoder::new(&mut bytes, version.into());
-				w.varint(0).unwrap();
+				// Frame 0 at the group's start: lite-07 carries no delta for it.
+				if !version.has_group_end() {
+					w.varint(0).unwrap();
+				}
 				w.varint(1).unwrap();
 				w.u8(42);
 				let mut setup = Vec::new();
@@ -5606,12 +5609,12 @@ mod tests {
 	}
 
 	/// GROUP_END finishes the group whole at its End, and a bare FIN closes it with every frame
-	/// sent but no end: each frame is its `Payload Length`, a timestamp delta from the group's
-	/// start, and the payload.
+	/// sent but no end: each frame is its `Payload Length` and the payload, frame 0 carrying no
+	/// timestamp delta since it sits at the group's start.
 	#[kio::test]
 	async fn group_end_finishes_and_a_bare_fin_closes() {
 		let x = u64::from(b'x');
-		for (body, end) in [(&[2, 0, x, 0, 5][..], Some(5)), (&[2, 0, x][..], None)] {
+		for (body, end) in [(&[2, x, 0, 5][..], Some(5)), (&[2, x][..], None)] {
 			let (res, track, _) = receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(0), body).await;
 			res.unwrap();
 			let mut group = track.consume().peek_group(0).unwrap();
@@ -5624,16 +5627,17 @@ mod tests {
 		}
 	}
 
-	/// Anything after GROUP_END, an End past 64 bits, or a zero length under object records,
-	/// where a record would come first, is refused.
+	/// Anything after GROUP_END, an End past 64 bits, GROUP_END before frame 0, or a zero length
+	/// under object records, where a record would come first, is refused.
 	#[kio::test]
 	async fn group_end_refuses_what_cannot_end_a_group() {
 		let x = u64::from(b'x');
 		for (key, body, reason) in [
-			(0, &[2, 0, x, 0, 5, 0][..], "a byte after GROUP_END"),
-			(0, &[2, 0, x, 0, 5, 2, 0, x], "a frame after GROUP_END"),
-			(5, &[2, 4, x, 0, u64::MAX], "an End past 64 bits"),
+			(0, &[2, x, 0, 5, 0][..], "a byte after GROUP_END"),
+			(0, &[2, x, 0, 5, 2, 0, x], "a frame after GROUP_END"),
+			(5, &[2, x, 2, 4, x, 0, u64::MAX], "an End past 64 bits"),
 			(0, &[0], "a stream ending inside GROUP_END"),
+			(0, &[0, 5], "GROUP_END before frame 0"),
 		] {
 			let (res, track, _) = receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(key), body).await;
 			assert!(res.is_err(), "accepted {reason}");
@@ -5661,14 +5665,14 @@ mod tests {
 		assert_eq!(group.end(), Some(12));
 	}
 
-	/// The first FRAME counts from the group's start, later ones from the frame before using
+	/// Frame 0 sits at the group's start, later frames count from the frame before using
 	/// unsigned non-negative deltas, and GROUP_END from the last frame. The whole group's span
 	/// holds no other start, so a reader waits for none there.
 	#[kio::test]
 	async fn group_end_counts_from_the_highest_frame() {
 		let x = u64::from(b'x');
-		// Frames at 10, 12 and 12 (deltas 0, 2, 0), then an End 3 past 12.
-		let body = [2, 0, x, 2, 2, x, 2, 0, x, 0, 3];
+		// Frames at 10, 12 and 12 (frame 0 at the start, then deltas 2 and 0), then an End 3 past 12.
+		let body = [2, x, 2, 2, x, 2, 0, x, 0, 3];
 		let (res, track, _) = receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(10), &body).await;
 		res.unwrap();
 		let mut group = track.consume().peek_group(10).unwrap();
@@ -5749,10 +5753,9 @@ mod tests {
 	}
 
 	/// A record's Timestamp, mutable or sealed, is a property like any other: nothing reads
-	/// time from it, so the frame keeps the time its own header carries.
+	/// time from it, so frame 0 keeps its group's start.
 	#[kio::test]
 	async fn ietf_records_leave_time_to_their_frame() {
-		let frame = 500u64;
 		// Each record after its Object code: Object 0 unless it says otherwise.
 		for (record, ok, reason) in [
 			(&[0, 0][..], true, "nothing at all"),
@@ -5763,14 +5766,14 @@ mod tests {
 		] {
 			let mut body = vec![0x1 | 0x4];
 			body.extend(record);
-			// The first frame's zigzag delta from the group's start at 0.
-			body.extend([frame * 2, 0]);
+			// Frame 0 carries no delta, then its size.
+			body.push(0);
 			let (res, track, _) = receive_ietf(draft18(Some(Timescale::MILLI)), &body).await;
 			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
 			if ok {
 				let mut group = track.consume().peek_group(0).unwrap();
 				let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-				assert_eq!(frame.timestamp, Timestamp::from_millis(500).unwrap(), "{reason}");
+				assert_eq!(frame.timestamp, Timestamp::from_millis(0).unwrap(), "{reason}");
 			}
 		}
 	}
@@ -5804,6 +5807,11 @@ mod tests {
 	/// copy a subscriber makes there, whose group 4 started at 1000ms, returning the stream's
 	/// result and the track.
 	async fn receive_group(version: Version, deltas: &[i64]) -> (Result<(), Error>, track::Producer) {
+		receive_after(version, 1000, deltas).await
+	}
+
+	/// [`receive_group`], with group 4's frame at `before` ms.
+	async fn receive_after(version: Version, before: u64, deltas: &[i64]) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
 		let mut script = Vec::new();
@@ -5815,19 +5823,16 @@ mod tests {
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
-		// The first delta counts from the group's start on lite-07, and from 0 before, both zigzag;
-		// lite-07's later deltas are unsigned.
-		let base = match version.has_group_end() {
-			true => 5,
-			false => 0,
-		};
+		// Before lite-07 every delta is zigzag, the first from 0. Lite-07's frame 0 carries none,
+		// sitting at the group's start, so its entry must be that start; later deltas are unsigned.
 		for (index, delta) in deltas.iter().enumerate() {
-			let delta = if index == 0 { delta - base } else { *delta };
-			let wire = match version.has_group_end() && index > 0 {
-				true => u64::try_from(delta).expect("a later lite-07 delta must be non-negative"),
-				false => crate::coding::varint::zigzag(delta),
-			};
-			encoder.varint(wire).unwrap();
+			match (version.has_group_end(), index) {
+				(true, 0) => assert_eq!(*delta, 5, "lite-07's frame 0 sits at its group's start"),
+				(true, _) => encoder
+					.varint(u64::try_from(*delta).expect("a later lite-07 delta must be non-negative"))
+					.unwrap(),
+				(false, _) => encoder.varint(crate::coding::varint::zigzag(*delta)).unwrap(),
+			}
 			encoder.bytes(b"frame").unwrap();
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
@@ -5844,17 +5849,17 @@ mod tests {
 			auth: crate::auth::Link::new(false),
 		});
 
-		// Unchecked where the wire's timestamps may be send times, as the copy is accepted.
+		// Legacy where the wire's timestamps may be send times, as the copy is accepted.
 		let info = crate::track::Info {
-			unchecked: !version.has_media_time(),
+			legacy: !version.has_media_time(),
 			..crate::track::Info::timed()
 		};
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
-		let mut before = track.create_empty(4u64.into()).unwrap();
-		before
-			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
+		let mut group = track.create_empty(4u64.into()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(before).unwrap(), &b"before"[..])
 			.unwrap();
-		before.finish().unwrap();
+		group.finish().unwrap();
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry::accepted(
@@ -5900,17 +5905,18 @@ mod tests {
 	/// write and one that rewinds is refused.
 	#[kio::test]
 	async fn a_lite07_rewind_is_refused() {
-		let (res, _track) = receive_group(Version::Lite07, &[500]).await;
+		// Frame 0 at group 5's start, 5ms, before group 4's 1000ms.
+		let (res, _track) = receive_group(Version::Lite07, &[5]).await;
 		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
 	}
 
 	/// A received timestamp past 2^61 - 1 is refused at every version, so a relay never
 	/// holds one that lite-05/06 could not carry as a group's first frame. lite-06 reaches
-	/// it with a second delta, lite-07 with a first frame its 64-bit varint can encode.
+	/// it with a second delta, lite-07 with a later delta its 64-bit varint can encode.
 	#[kio::test]
 	async fn a_received_timestamp_past_2_61_is_refused() {
 		let max: i64 = (1 << 61) - 1;
-		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+		for version in [Version::Lite05, Version::Lite06] {
 			let (res, track) = receive_group(version, &[max]).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			let mut group = track.consume().peek_group(5).unwrap();
@@ -5920,7 +5926,14 @@ mod tests {
 			let (res, _) = receive_group(version, &[max, 1]).await;
 			assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{version}: {res:?}");
 		}
-		let (res, _) = receive_group(Version::Lite07, &[max + 1]).await;
+		// Lite-07's frame 0 sits at group 5's start, so the second frame reaches the limit.
+		let (res, track) = receive_after(Version::Lite07, 4, &[5, max - 5]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(5).unwrap();
+		group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.timestamp.value(), max as u64);
+		let (res, _) = receive_after(Version::Lite07, 4, &[5, max - 4]).await;
 		assert!(matches!(res, Err(Error::BoundsExceeded(_))), "{res:?}");
 	}
 
@@ -6143,7 +6156,7 @@ mod tests {
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
-			encoder.varint(300).unwrap();
+			// Frame 0 carries no delta, sitting at the group's start.
 			encoder.bytes(b"first").unwrap();
 			encoder.varint(1).unwrap();
 			encoder.bytes(b"again").unwrap();
@@ -6268,7 +6281,10 @@ mod tests {
 				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
 				if length_first {
 					encoder.varint(payload.len() as u64 + 1).unwrap();
-					encoder.varint(delta as u64).unwrap();
+					// Lite-07's frame 0 carries no delta, sitting at the group's start.
+					if delta != 300 {
+						encoder.varint(delta as u64).unwrap();
+					}
 				} else {
 					encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
 					encoder.varint(payload.len() as u64).unwrap();
@@ -8562,10 +8578,9 @@ mod tests {
 			}
 			.encode(&mut w, version)
 			.unwrap();
-			// A one-byte payload's length plus one, then the frame at the group's key (a zero
-			// delta), since starts strictly increase.
+			// A one-byte payload's length plus one: frame 0 carries no delta, sitting at the
+			// group's key.
 			w.varint(2).unwrap();
-			w.varint(0).unwrap();
 			w.u8(payload);
 			bytes
 		};
@@ -8638,8 +8653,8 @@ mod tests {
 			}
 			.encode(&mut w, version)
 			.unwrap();
+			// Frame 0 carries no delta, sitting at the group's key.
 			w.varint(2).unwrap();
-			w.varint(key).unwrap();
 			w.u8(key as u8);
 			bytes
 		};
@@ -14697,7 +14712,7 @@ impl TrackServeRun {
 						Ok((mut info, held)) => {
 							// Lite05/06 timestamps may be send times, so the copy's groups
 							// skip the rewind check.
-							info.unchecked = !self.serve.subscriber.version.has_media_time();
+							info.legacy = !self.serve.subscriber.version.has_media_time();
 							// Before the accept, so a relay serving the track on sees it.
 							self.datagrams = SharedDatagrams::new(&self.serve, &info);
 							let mut serve_loop = ServeLoop::adopt(&self.serve, request, info.clone(), dynamic, fetches);

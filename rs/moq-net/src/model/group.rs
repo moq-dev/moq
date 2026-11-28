@@ -1580,7 +1580,7 @@ impl GroupState {
 	///
 	/// A group's timestamps never decrease, so lite-07 carries them as unsigned deltas and a
 	/// moq-transport Object ID as their offset from the group's start: a frame below its
-	/// predecessor is [`Error::TimestampMismatch`]. An `unchecked` copy is exempt, since a
+	/// predecessor is [`Error::TimestampMismatch`]. A [legacy](track::Info::legacy) copy is exempt, since a
 	/// released lite-05/06 publisher may stamp decreasing presentation times, and the lite-07
 	/// egress refuses that group instead.
 	///
@@ -2228,7 +2228,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
-		let origin = state.check_frame(neighbors.as_ref(), self.handle.track.unchecked, timestamp)?;
+		let origin = state.check_frame(neighbors.as_ref(), self.handle.track.legacy, timestamp)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let inflated = declared.unwrap_or(payload.len() as u64);
 		let payload = match &mut state.flate {
@@ -2315,7 +2315,7 @@ impl Producer {
 		for frame in frames.filled() {
 			let timestamp = self.handle.track.rescale_in(frame.timestamp, self.handle.info.start)?;
 			// The group checks the first against its own frames; the rest are checked here.
-			if !self.handle.track.unchecked && prev.is_some_and(|prev| timestamp.value() < prev.value()) {
+			if !self.handle.track.legacy && prev.is_some_and(|prev| timestamp.value() < prev.value()) {
 				return Err(Error::TimestampMismatch);
 			}
 			prev = Some(timestamp);
@@ -2343,7 +2343,7 @@ impl Producer {
 		let origin = match first {
 			Some(timestamp) => state.check_frame(
 				neighbors.as_ref(),
-				self.handle.track.unchecked,
+				self.handle.track.legacy,
 				self.handle
 					.track
 					.rescale_in(timestamp, self.handle.info.start)
@@ -2523,7 +2523,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
-		let origin = state.check_frame(neighbors.as_ref(), self.handle.track.unchecked, timestamp)?;
+		let origin = state.check_frame(neighbors.as_ref(), self.handle.track.legacy, timestamp)?;
 		// Only one frame is ever in flight, so the declared size is the most the cache
 		// can grow by before the next check.
 		let metadata_bytes = header.fields.as_ref().map_or(0, |fields| fields.heap());
