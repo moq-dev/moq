@@ -27,9 +27,9 @@ const track = broadcast.createTrack("video", {
 	priority: 2,
 });
 if (!track) throw new Error("the track already exists");
-const group = track.createGroup(4n);
-group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
-group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
+// Group 4, which starts at its first frame's time.
+const group = track.createGroup({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(4) });
+group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(5) });
 
 const publisher = new Publisher({
 	quic: pair.server,

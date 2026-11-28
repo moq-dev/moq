@@ -353,9 +353,9 @@ test("a lite-07 stream ending at the Payload Length ends the group", async () =>
 	const cut = frameHeader(version, 1n, undefined, 1, true, false).subarray(0, 1);
 	const resumed = new Producer(0n);
 	hooks.startGroup(resumed, 1);
-	await expect(
-		readFrames(streamOf([cut], version), resumed, { scale: SCALE, lengthFirst: true }),
-	).rejects.toThrow("unexpected end of stream");
+	await expect(readFrames(streamOf([cut], version), resumed, { scale: SCALE, lengthFirst: true })).rejects.toThrow(
+		"unexpected end of stream",
+	);
 });
 
 // A huge frame start, such as a FETCH's, numbers a frame past what a number counts exactly, which is

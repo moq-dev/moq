@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
+import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer";
 import { encodeFrame, Format, Producer } from "./legacy";
-import { hooks } from "../../../net/src/internal.ts";
 
 // Frozen at 200ms: nothing in these tests waits on time.
 let installed: Installed;

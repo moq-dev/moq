@@ -164,8 +164,7 @@ export function frameDecoder({
 			}
 			size = length - 1;
 		}
-		const delta =
-			timescale === undefined || implicit ? 0n : lengthFirst ? c.u62() : unzigzag(c.u62());
+		const delta = timescale === undefined || implicit ? 0n : lengthFirst ? c.u62() : unzigzag(c.u62());
 		const inflated = compress && !meta ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,

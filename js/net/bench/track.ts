@@ -3,10 +3,10 @@
 import { Duration } from "@moq/clock";
 import { DEFAULT_EXPIRY } from "../src/cache.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
+import { hooks } from "../src/internal.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
 import { GivenUp } from "../src/util/given_up.ts";
-import { hooks } from "../src/internal.ts";
 
 const retainedCounts = [25, 100, 400, 1500];
 const subscriberCounts = [1, 4, 16];

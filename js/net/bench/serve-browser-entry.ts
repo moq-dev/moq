@@ -7,6 +7,7 @@ import { Publisher as IetfPublisher } from "../src/ietf/publisher.ts";
 import { NativeSession } from "../src/ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "../src/ietf/subscribe.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
+import { hooks } from "../src/internal.ts";
 import { Publisher as LitePublisher } from "../src/lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "../src/lite/subscribe.ts";
 import { ALPN_05, Version as LiteVersion } from "../src/lite/version.ts";
@@ -15,7 +16,6 @@ import { Producer as Origin } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream } from "../src/stream.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
-import { hooks } from "../src/internal.ts";
 
 async function measure(protocol: string, groups: number, viewers: number) {
 	const origin = new Origin();

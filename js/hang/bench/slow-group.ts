@@ -16,7 +16,10 @@ for (const count of [1, 16, 256, 1024]) {
 	});
 	// The track is never accepted, so it is scale-less: each group starts at its key.
 	const write = (sequence: bigint) => {
-		track.createGroup({ payload: Varint.encode(Number(sequence) * 1000), timestamp: Time.Timestamp.unscaled(sequence) });
+		track.createGroup({
+			payload: Varint.encode(Number(sequence) * 1000),
+			timestamp: Time.Timestamp.unscaled(sequence),
+		});
 	};
 	const buffered = async (timestamp: number) => {
 		while (consumer.buffered.peek().at(-1)?.end.asMillis() !== timestamp) await consumer.buffered.changed();

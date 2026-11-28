@@ -6,6 +6,7 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import { accept, connect } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -13,7 +14,6 @@ import * as Path from "./path.ts";
 import { withMax } from "./subscription.test-util.ts";
 import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
-import { hooks } from "./internal.ts";
 
 // The first group ID a `number` cannot hold, and the largest a QUIC varint carries.
 const PAST_SAFE = 2n ** 53n + 1n;

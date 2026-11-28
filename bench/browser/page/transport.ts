@@ -61,8 +61,11 @@ async function publish(config: Transport): Promise<void> {
 		if (track.closed.peek() !== undefined) return;
 		for (let start = 0; start < config.frames; start += config.group) {
 			// Each group starts at its first frame's time, one millisecond per frame.
-			const group = track.appendGroup(Moq.Time.Timestamp.fromMillis(start));
-			for (let frame = start; frame < Math.min(start + config.group, config.frames); frame++)
+			const group = track.appendGroup({
+				payload: fixtures[start],
+				timestamp: Moq.Time.Timestamp.fromMillis(start),
+			});
+			for (let frame = start + 1; frame < Math.min(start + config.group, config.frames); frame++)
 				group.writeFrame({ payload: fixtures[frame], timestamp: Moq.Time.Timestamp.fromMillis(frame) });
 			group.finish();
 		}

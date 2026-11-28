@@ -8,7 +8,7 @@ import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { ALPN, Version as Ietf } from "./ietf/version.ts";
-import { NO_MAX_DELAY } from "./internal.ts";
+import { hooks, NO_MAX_DELAY } from "./internal.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { decodeSubscribeResponse, Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { ALPN_05, ALPN_07_WIP, Version as Lite } from "./lite/version.ts";
@@ -17,7 +17,6 @@ import { Producer as Origin } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { hooks } from "./internal.ts";
 
 const protocols = [
 	{ kind: "lite", version: Lite.DRAFT_05, alpn: ALPN_05 },

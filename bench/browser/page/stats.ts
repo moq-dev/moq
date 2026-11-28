@@ -162,9 +162,7 @@ async function receive(config: Sampling): Promise<void> {
 	let frame = 0;
 	const timer = setInterval(() => {
 		const timestamp = Moq.Time.Timestamp.fromMillis(frame);
-		const group = track.appendGroup(timestamp);
-		group.writeFrame({ payload: payload(RECEIVE_BYTES, frame), timestamp });
-		group.finish();
+		track.appendGroup({ payload: payload(RECEIVE_BYTES, frame), timestamp }).finish();
 		frame++;
 	}, 1000 / RECEIVE_FPS);
 	cleanup.push(() => {

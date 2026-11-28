@@ -174,12 +174,11 @@ try {
 					open.delete(i);
 					continue;
 				}
-				const group = track.appendGroup(Moq.Time.Timestamp.unscaled(BigInt(sequence)));
-				open.set(i, { group, sequence });
-				group.writeFrame({
+				const group = track.appendGroup({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, 0)),
-					timestamp: Moq.Time.Timestamp.unscaled(group.start),
+					timestamp: Moq.Time.Timestamp.unscaled(BigInt(sequence)),
 				});
+				open.set(i, { group, sequence });
 			} else if (current) {
 				current.group.writeFrame({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], current.sequence, 1)),

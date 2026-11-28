@@ -161,11 +161,11 @@ test("the observer reads the publisher's largest group as its subscription began
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
-	const frame = (group: Group.Producer, micros: number) =>
-		group.writeFrame({
-			timestamp: Time.Timestamp.fromMicros(micros),
-			payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.micros(micros)),
-		});
+	// A group's first frame at `millis`, which is its key.
+	const frame = (millis: number) => ({
+		timestamp: Time.Timestamp.fromMillis(millis),
+		payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.millis(millis)),
+	});
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
@@ -181,12 +181,10 @@ test("the observer reads the publisher's largest group as its subscription began
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		const first = track.createGroup(7n);
-		frame(first, 0);
+		track.createGroup(frame(7));
 		while (capture.largest() === undefined) await yieldNow();
 		// Live groups landing after the answer raise the track's largest, not the join's.
-		const later = track.createGroup(12n);
-		frame(later, 20_000);
+		track.createGroup(frame(12));
 		const seen: Arrival[] = [];
 		while (seen.length < 2) {
 			seen.push(...capture.drain());
@@ -223,8 +221,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		const group = track.appendGroup(Time.Timestamp.fromMicros(0));
-		group.writeFrame({
+		const group = track.appendGroup({
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.micros(0)),
 		});

@@ -2,10 +2,10 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { hooks } from "../../../net/src/internal.ts";
 import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
-import { hooks } from "../../../net/src/internal.ts";
 
 // A consumer at `maxDelay` on a local track, which owes no missing group until a fill handler opens.
 function setup(maxDelay = 100) {

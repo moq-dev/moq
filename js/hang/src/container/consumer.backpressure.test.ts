@@ -2,10 +2,10 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, Elapsed, Instant, timeout } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
+import { hooks } from "../../../net/src/internal.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 import type { Frame } from "./types.ts";
-import { hooks } from "../../../net/src/internal.ts";
 
 // Counts decoded samples, so a test can tell how many the consumer holds ahead of its reads.
 class Counting extends Format {

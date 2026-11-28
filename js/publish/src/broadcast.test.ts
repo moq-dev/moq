@@ -530,7 +530,9 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 	const replacement = again.track.peek();
 	expect(replacement).toBeDefined();
 	expect(replacement).not.toBe(track);
-	expect(replacement?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(0n);
+	expect(replacement?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(
+		0n,
+	);
 
 	first.close();
 	second.close();
@@ -705,7 +707,9 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		await settle();
 		const replacement = video.track.peek();
 		expect(replacement?.name).toBe("video/1");
-		expect(replacement?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(0n);
+		expect(
+			replacement?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start,
+		).toBe(0n);
 
 		// So is a display aspect change, which moves it again rather than redefining the second name.
 		video.config.set({
@@ -924,7 +928,9 @@ test("identity changes before the first announce take a fresh track name", async
 	// The replacement starts empty, so no group from the old codec reads under the new config.
 	const replacement = video.track.peek();
 	expect(replacement?.name).toBe("video/1");
-	expect(replacement?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(0n);
+	expect(replacement?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(
+		0n,
+	);
 
 	broadcast.close();
 });
@@ -1161,7 +1167,9 @@ test("a new network broadcast starts every track name over", async () => {
 	await settle();
 	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBeUndefined();
 	expect(video.track.peek()?.name).toBe("video");
-	expect(video.track.peek()?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(0n);
+	expect(
+		video.track.peek()?.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start,
+	).toBe(0n);
 	expect(() => broadcast.video("video/1").close()).not.toThrow();
 
 	broadcast.close();

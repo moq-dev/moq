@@ -1566,7 +1566,13 @@ test("lite-07 GROUP_END may end a group at its last frame or a stream at its sta
 	const later = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2000n, startFrame: 1 });
 	try {
 		later.track.createGroup(textFrame("x", Timestamp.fromMillis(2000))).finishAt(2000n);
-		expect(await later.servedGroup()).toMatchObject({ key: 2000n, frameStart: 1, times: [], endDelta: 0n, end: 2000n });
+		expect(await later.servedGroup()).toMatchObject({
+			key: 2000n,
+			frameStart: 1,
+			times: [],
+			endDelta: 0n,
+			end: 2000n,
+		});
 	} finally {
 		await later.close();
 	}

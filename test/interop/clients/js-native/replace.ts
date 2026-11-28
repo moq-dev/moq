@@ -36,8 +36,7 @@ function replacement(): Moq.Track.Producer {
 }
 
 function write(sequence: bigint): void {
-	const group = track.createGroup(sequence);
-	group.writeFrame({
+	const group = track.createGroup({
 		payload: new TextEncoder().encode(String(sequence)),
 		timestamp: Moq.Time.Timestamp.unscaled(sequence),
 	});

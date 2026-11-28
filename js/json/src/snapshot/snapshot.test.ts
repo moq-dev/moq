@@ -769,7 +769,10 @@ test("a snapshot past the budget is refused", () => {
 test("snapshot consumer skips a group the publisher dropped mid-read", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const first = track.appendGroup({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.fromMillis(1) });
+	const first = track.appendGroup({
+		payload: new TextEncoder().encode('{"v":0}'),
+		timestamp: Time.Timestamp.fromMillis(1),
+	});
 	expect((await consumer.latest())?.value).toEqual({ v: 0 });
 
 	const next = consumer.latest();
@@ -782,7 +785,10 @@ test("snapshot consumer skips a group the publisher dropped mid-read", async () 
 test("snapshot consumer propagates a non-gap frame failure", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const group = track.appendGroup({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.fromMillis(1) });
+	const group = track.appendGroup({
+		payload: new TextEncoder().encode('{"ok":true}'),
+		timestamp: Time.Timestamp.fromMillis(1),
+	});
 	expect((await consumer.next())?.value).toEqual({ ok: true });
 	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
@@ -791,8 +797,7 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 test("a value that fails the schema rejects the read", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer({ track, schema: z.object({ n: z.number() }) });
-	track
-		.appendGroup({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
+	track.appendGroup({ payload: new TextEncoder().encode('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
 	await expect(consumer.latest()).rejects.toBeInstanceOf(z.core.$ZodError);
 });
 

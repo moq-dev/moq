@@ -2,6 +2,7 @@
 
 import { defined } from "../src/defined.test-util.ts";
 import { randomHop } from "../src/hop.ts";
+import { hooks } from "../src/internal.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
 import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
@@ -10,7 +11,6 @@ import { Producer as OriginProducer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream } from "../src/stream.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
-import { hooks } from "../src/internal.ts";
 
 const groups = 128;
 const counts = [1, 4, 16];

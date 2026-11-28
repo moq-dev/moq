@@ -716,7 +716,9 @@ test("the pump keeps frame ordinals in submit order", async () => {
 	const p = await pair("video");
 	const writes: Promise<void>[] = [];
 	const datagrams: Promise<bigint>[] = [];
-	const groups = await Promise.all([0, 1].map((i) => p.producer.appendGroup({ timestamp: ms(i), plaintext: text(`frame-${i}`) })));
+	const groups = await Promise.all(
+		[0, 1].map((i) => p.producer.appendGroup({ timestamp: ms(i), plaintext: text(`frame-${i}`) })),
+	);
 	for (let i = 2; i < 200; i++) {
 		writes.push(groups[i % 2].writeFrame(ms(i), text(`frame-${i}`)));
 		if (i % 50 === 2) datagrams.push(p.dg.producer.append(ms(i), text(`datagram-${i}`)));

@@ -6,6 +6,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { hooks } from "../../../net/src/internal.ts";
 import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
@@ -15,7 +16,6 @@ import { stubSupport } from "../webcodecs.test-util";
 import { Decoder } from "./decoder";
 import { Source } from "./source";
 import { supported } from "./supported";
-import { hooks } from "../../../net/src/internal.ts";
 
 const flush = () => yieldNow();
 

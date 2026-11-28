@@ -1193,7 +1193,9 @@ test("audio failure stays local through demand changes and capture format re-arm
 		await settle();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup({ payload: new Uint8Array(), timestamp: Moq.Time.Timestamp.fromMicros(0) }).start).toBe(0n);
+		expect(
+			siblingTrack.appendGroup({ payload: new Uint8Array(), timestamp: Moq.Time.Timestamp.fromMicros(0) }).start,
+		).toBe(0n);
 		await push(0, 1); // 60 ms, so one open group
 		expect((await subscriber.largest())?.group).toBe(0n);
 		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
@@ -1222,7 +1224,9 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(FakeAudioEncoder.instances).toHaveLength(instances);
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.identity).toBe(epoch);
-		expect(siblingTrack.appendGroup({ payload: new Uint8Array(), timestamp: Moq.Time.Timestamp.fromMicros(1) }).start).toBe(1n);
+		expect(
+			siblingTrack.appendGroup({ payload: new Uint8Array(), timestamp: Moq.Time.Timestamp.fromMicros(1) }).start,
+		).toBe(1n);
 
 		const reconfiguring = configured();
 		capture.out.format.set({ sampleRate: 48_000, channelCount: 2 });
@@ -1242,7 +1246,9 @@ test("audio failure stays local through demand changes and capture format re-arm
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.identity).toBe(epoch);
-		expect(siblingTrack.appendGroup({ payload: new Uint8Array(), timestamp: Moq.Time.Timestamp.fromMicros(2) }).start).toBe(2n);
+		expect(
+			siblingTrack.appendGroup({ payload: new Uint8Array(), timestamp: Moq.Time.Timestamp.fromMicros(2) }).start,
+		).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();

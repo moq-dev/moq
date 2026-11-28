@@ -143,10 +143,9 @@ export function finish(
 		const health = healthRoute.broadcast;
 		const healthTrack = health.createTrack("live");
 		if (!healthTrack) throw new Error("the track already exists");
-		const group = healthTrack.appendGroup(Moq.Time.Timestamp.unscaled((healthTrack.largest()?.group ?? -1n) + 1n));
-		group.writeFrame({
+		const group = healthTrack.appendGroup({
 			payload: new TextEncoder().encode("session-alive"),
-			timestamp: Moq.Time.Timestamp.unscaled(group.start),
+			timestamp: Moq.Time.Timestamp.unscaled((healthTrack.largest()?.group ?? -1n) + 1n),
 		});
 		group.finish();
 		healthTrack.finish();

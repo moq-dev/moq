@@ -20,9 +20,13 @@ import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
-// Append the group after the newest on a scale-less track: its start is the next key.
-function appendNext(track: Moq.Track.Producer): Moq.Group.Producer {
-	return track.appendGroup(Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n));
+// Append the group after the newest on a scale-less track, opened with the first of `payloads`
+// and holding the rest: its start is the next key.
+function appendNext(track: Moq.Track.Producer, [first, ...rest]: Uint8Array[]): Moq.Group.Producer {
+	const timestamp = Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n);
+	const group = track.appendGroup({ payload: first, timestamp });
+	for (const payload of rest) group.writeFrame({ payload, timestamp });
+	return group;
 }
 
 install();
@@ -84,14 +88,11 @@ function frames(sequence: number): Uint8Array[] {
 function write(track: Moq.Track.Producer) {
 	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
 	for (let sequence = 0; sequence < GROUPS; sequence++) {
-		const group = appendNext(track);
 		if (drop && sequence === 1) {
-			group.abort(new Error("cut"));
+			appendNext(track, frames(sequence).slice(0, 1)).abort(new Error("cut"));
 			continue;
 		}
-		for (const payload of frames(sequence))
-			group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
-		group.finish();
+		appendNext(track, frames(sequence)).finish();
 	}
 	track.finish();
 }
@@ -102,9 +103,10 @@ function write(track: Moq.Track.Producer) {
  */
 function serveHistory(track: Moq.Track.Producer) {
 	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
-	const live = track.createGroup(BigInt(GROUPS - 1));
-	for (const payload of frames(GROUPS - 1))
-		live.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(live.start) });
+	const timestamp = Moq.Time.Timestamp.unscaled(BigInt(GROUPS - 1));
+	const [first, ...rest] = frames(GROUPS - 1);
+	const live = track.createGroup({ payload: first, timestamp });
+	for (const payload of rest) live.writeFrame({ payload, timestamp });
 	live.finish();
 	const requests = track.requests();
 	void (async () => {
@@ -178,9 +180,7 @@ try {
 			if (history) serveHistory(track);
 			let head: Moq.Group.Producer | undefined;
 			if (late) {
-				head = appendNext(track);
-				for (const payload of frames(0).slice(0, LATE_HEAD))
-					head.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(head.start) });
+				head = appendNext(track, frames(0).slice(0, LATE_HEAD));
 			}
 			broadcastPublication.announce();
 			const lines = createInterface({ input: process.stdin });
@@ -190,12 +190,7 @@ try {
 				for (const payload of frames(0).slice(LATE_HEAD))
 					head.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(head.start) });
 				head.finish();
-				for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
-					const group = appendNext(track);
-					for (const payload of frames(sequence))
-						group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
-					group.finish();
-				}
+				for (let sequence = 1; sequence < LATE_GROUPS; sequence++) appendNext(track, frames(sequence)).finish();
 				track.finish();
 				track.close();
 			} else if (!status && !cached && !history) {

@@ -6303,9 +6303,7 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	producer.createGroup(textFrame("one", Timestamp.unscaled(1n))).finish();
 	const finished = producer.finish();
 	// @ts-expect-error a finished track appends no group
-	expect(() => finished.appendGroup(textFrame("two", Timestamp.unscaled(2n)))).toThrow(
-		"at or past the track's end",
-	);
+	expect(() => finished.appendGroup(textFrame("two", Timestamp.unscaled(2n)))).toThrow("at or past the track's end");
 	expect(() => finished.createGroup(textFrame("two", Timestamp.unscaled(2n)))).toThrow("at or past the track's end");
 
 	const group = finished.createGroup(textFrame("late", Timestamp.unscaled(0n))).finish();
