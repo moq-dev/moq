@@ -471,6 +471,7 @@ mod tests {
 		track
 			.write(Frame {
 				timestamp: moq_net::Timestamp::ZERO,
+				decode: None,
 				payload: bytes::Bytes::from_static(b"old"),
 				keyframe: true,
 				duration: None,
@@ -501,6 +502,7 @@ mod tests {
 		track
 			.write(Frame {
 				timestamp: moq_net::Timestamp::ZERO,
+				decode: None,
 				payload: bytes::Bytes::from_static(b"new"),
 				keyframe: true,
 				duration: None,

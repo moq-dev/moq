@@ -163,6 +163,7 @@ impl Spread {
 		self.sent += due;
 		Some(Frame {
 			timestamp,
+			decode: None,
 			duration: None,
 			payload: self.frame.payload.slice(from..to),
 			keyframe: self.frame.keyframe && from == 0,

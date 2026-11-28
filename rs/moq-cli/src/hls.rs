@@ -503,6 +503,7 @@ mod test {
 		for (index, micros) in [5_000_000, 0].into_iter().enumerate() {
 			let frame = Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				decode: None,
 				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
 				payload: bytes::Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
 				keyframe: true,

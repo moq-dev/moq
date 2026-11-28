@@ -379,6 +379,7 @@ fn an_object_spreads_across_a_pcr_interval_its_drift_stretched() {
 	let start = Instant::now();
 	let frame = Frame {
 		timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+		decode: None,
 		duration: None,
 		payload: Bytes::from(vec![0x47; 3 * RUN]),
 		keyframe: true,

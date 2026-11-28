@@ -83,6 +83,7 @@ impl Import {
 		let pts = self.track.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp: pts,
+			decode: None,
 			payload: frame.into_bytes(),
 			keyframe: header.keyframe,
 			duration: None,

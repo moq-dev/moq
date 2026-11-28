@@ -1655,6 +1655,7 @@ pub(crate) mod tests {
 		section_producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1450).unwrap(),
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from_static(CUE),
 				keyframe: true,
@@ -1680,6 +1681,7 @@ pub(crate) mod tests {
 		pes_producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1450).unwrap(),
+				decode: None,
 				duration: None,
 				payload: bytes::Bytes::from_static(PES),
 				keyframe: true,

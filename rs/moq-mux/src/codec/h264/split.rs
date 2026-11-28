@@ -252,6 +252,7 @@ impl Split {
 
 		self.pending.push(crate::container::Frame {
 			timestamp: pts,
+			decode: None,
 			payload,
 			keyframe,
 			duration: None,

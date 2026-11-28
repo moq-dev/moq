@@ -29,6 +29,7 @@ informative:
   secure: I-D.ietf-moq-secure-objects
   aeadlimits: I-D.irtf-cfrg-aead-limits
   hang: I-D.lcurley-moq-hang
+  moq-timestamp: I-D.lcurley-moq-timestamp
 
 --- abstract
 
@@ -173,7 +174,7 @@ key      = HKDF-Expand(prk, key_info, 16)
 # Object Identity {#identity}
 A protected object is identified by `(generation, physical_name, domain, group, frame)`.
 
-- **Grouped frames** (`domain = 0x00`): `group` is the group start (moq-lite-07 Group Start, earlier moq-lite Group Sequence, or MOQT Group ID); `frame` is the zero-based write-order frame index within the group. On {{moqt}}, `frame` is the explicit Object ID, never its arrival ordinal: publishers supporting both transports MUST assign contiguous Object IDs from `0` so each matches its {{moql}} write-order index, relays MUST NOT renumber protected objects, and an Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption.
+- **Grouped frames** (`domain = 0x00`): `group` is the group start (moq-lite-07 Group Start, earlier moq-lite Group Sequence, or MOQT Group ID); `frame` is the zero-based write-order frame index within the group. On {{moqt}} without {{moq-timestamp}} Object IDs, `frame` is the explicit Object ID, never its arrival ordinal: publishers supporting both transports MUST assign contiguous Object IDs from `0` so each matches its {{moql}} write-order index, relays MUST NOT renumber protected objects, and an Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption. When {{moq-timestamp}} encodes timestamps in Object IDs, `frame` remains the zero-based write-order index, so relays bridging {{moql}} and {{moqt}} preserve nonces without re-encrypting. Such an Object ID encodes time rather than frame count, so a partial mid-group {{moqt}} delivery does not reveal its starting index: a consumer of a protected {{moq-timestamp}} track MUST receive each group from its first object (`frame = 0`) unless the transport supplies the starting frame index (as {{moql}} `Frame Start` does), and relays MUST NOT drop or reorder frames inside a protected group.
 - **Datagrams** (`domain = 0x01`): `group` is the datagram sequence (moq-lite-07 Sequence, moq-lite-05/06 Group Sequence, or MOQT `OBJECT_DATAGRAM` Group ID at Object ID `0`); `frame = 0`.
 
 The 96-bit AES-128-GCM nonce is:

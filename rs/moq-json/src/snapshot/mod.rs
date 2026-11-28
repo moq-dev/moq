@@ -608,34 +608,14 @@ mod test {
 		assert_eq!(frames(&mut fresh), vec![(ms(103), json!({ "n": 3 }))]);
 	}
 
-	/// A delta may carry a timestamp older than its group's first frame, but a new group must start
-	/// past that frame, so a refresh whose newest timestamp is still the group's own start waits for a
-	/// later update, then restates the value there.
+	/// A group's timestamps never decrease, so an update below the newest one is refused.
 	#[test]
-	fn a_refresh_after_older_updates_waits_for_a_later_one() {
+	fn an_update_below_the_newest_is_refused() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(
-			cfg(true),
-			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
-		);
-		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
-			producer.update(&json!({ "n": n }), ms(at)).unwrap();
-		}
-
-		let mut late = producer.consume();
-		let (waiter, woken) = crate::refresh::flagged();
-		assert!(
-			producer.poll_refresh(&waiter).is_pending(),
-			"no group may share the open group's start"
-		);
-		woken.take();
-
-		producer.update(&json!({ "n": 4 }), ms(140)).unwrap();
-		assert!(woken.take(), "the later update wakes the parked refresh");
-		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
-		let mut fresh = groups(&mut late).pop().expect("the fresh group");
-		assert_eq!(fresh.start, 140);
-		assert_eq!(frames(&mut fresh), vec![(ms(140), json!({ "n": 4 }))]);
+		let (mut producer, _track) = producer_on(cfg(true), timed());
+		producer.update(&json!({ "n": 0 }), ms(130)).unwrap();
+		assert!(producer.update(&json!({ "n": 1 }), ms(110)).is_err());
+		producer.update(&json!({ "n": 2 }), ms(140)).unwrap();
 	}
 
 	/// A refresh restates the last value written, never one whose update was rejected, and the next

@@ -217,7 +217,7 @@ summarize_load() {
     local output=$2
     local workload=$3
 
-    # Confirmed losses are monotonic; outstanding gaps can recover and hide loss.
+    # Loss is lifetime: the groups the ordered reads skipped or lost, over those they reached.
     jq -s --arg workload "$workload" --arg transport "$TRANSPORT" '
 		if length < 2 then error("load benchmark produced fewer than two samples") else . end
 		| .[-1] as $last
