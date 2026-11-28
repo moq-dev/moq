@@ -1308,8 +1308,12 @@ export class Publisher {
 					hasEnd: false,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
-					// a trimmed head starts partway through.
-					firstObject: slice.skip === 0,
+					// a trimmed head starts partway through. A timed slice past Object 0 still
+					// starts at frame 0 when frame 0's ID reaches it, as in Rust.
+					firstObject:
+						slice.skip === 0 ||
+						(timescale !== undefined &&
+							(hooks.groupTimedId(group, 0, timescale) ?? -1n) >= BigInt(slice.skip)),
 				},
 			});
 

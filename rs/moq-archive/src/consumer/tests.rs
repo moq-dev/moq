@@ -335,24 +335,30 @@ async fn a_decreasing_stored_group_is_refused() {
 	assert_eq!(reader.finished().await.unwrap(), Position::group(4001));
 }
 
-/// A live group whose head was pruned can't be shown never to decrease, so it reads as gone,
-/// as a fill reads it.
+/// A timed live group whose head was pruned can't be shown never to decrease, so it reads as
+/// gone, as a fill reads it. An untimed one's frames all share its key, so its tail stands.
 #[tokio::test(start_paused = true)]
-async fn a_live_group_with_a_pruned_head_is_not_served() {
-	let archive = Archive::new();
-	archive.track("video", 0, true).await;
-	archive.object("video", 2, vec![frames(true, 5, 2..4)]).await;
-	archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
-	archive.complete().await;
+async fn a_live_group_with_a_pruned_head_is_served_only_untimed() {
+	for timed in [true, false] {
+		let archive = Archive::new();
+		archive.track("video", 0, timed).await;
+		archive.object("video", 2, vec![frames(timed, 5, 2..4)]).await;
+		archive.end("video", End::Finish(At { group: 6, frame: 0 })).await;
+		archive.complete().await;
 
-	let (broadcast, _run) = serve(&archive.store).await;
-	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = group(&mut reader).await.unwrap();
-	assert_eq!(group.start, 5);
-	let read = timeout(Duration::from_secs(10), group.read_frame()).await.unwrap();
-	assert!(matches!(read, Err(moq_net::Error::NotFound)), "{read:?}");
-	assert!(next(&mut reader).await.is_none());
-	assert_eq!(reader.finished().await.unwrap(), Position::group(6));
+		let (broadcast, _run) = serve(&archive.store).await;
+		let mut reader = subscribe(&broadcast, "video").await;
+		let mut group = group(&mut reader).await.unwrap();
+		assert_eq!(group.start, 5);
+		let read = timeout(Duration::from_secs(10), group.read_frame()).await.unwrap();
+		// A reader from frame 0 finds the untimed head evicted rather than the group gone.
+		match timed {
+			true => assert!(matches!(read, Err(moq_net::Error::NotFound)), "{read:?}"),
+			false => assert!(matches!(read, Err(moq_net::Error::Evicted)), "{read:?}"),
+		}
+		assert!(next(&mut reader).await.is_none());
+		assert_eq!(reader.finished().await.unwrap(), Position::group(6));
+	}
 }
 
 /// Whether a read failed because its group's timestamps decrease.

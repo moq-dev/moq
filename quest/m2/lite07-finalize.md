@@ -281,13 +281,20 @@ for unsigned lite timestamp deltas, so lite-07's
 decrease (rejected: the next wip version after the cut).
 
 Decided 2026-11-27 (maintainer, on
-[moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ lite-07
-freezes with a group stream's first `FRAME` carrying no timestamp delta, since
-frame 0 sits at the group's start, and every later delta unsigned (rejected: a
-zigzag first delta letting frame 0 precede its start). ✅ Every first-party
-decoder reads `cts` while lite-07 publishers keep writing `legacy`; publishers
-switch to `cts` with [lite-08](/quest/m4/cts-encoders.md) (rejected:
-first-party encoders on `cts` for lite-07).
+[moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ Every
+first-party decoder reads `cts` while lite-07 publishers keep writing `legacy`;
+publishers switch to `cts` with [lite-08](/quest/m4/cts-encoders.md)
+(rejected: first-party encoders on `cts` for lite-07). ✅ Whenever groups are
+keyed by frame 0's timestamp, lite-05/06 and draft-18..22 ingress re-keys each
+timed group by its frame 0 timestamp on arrival, breaking their by-sequence
+requests (rejected: leaving those copies unchecked).
+
+Open (maintainer, on
+[moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): whether
+lite-07's group key becomes frame 0's timestamp by construction, so a group
+stream's first `FRAME` carries no timestamp delta and every delta is unsigned.
+Until then a stream's first `FRAME` carries a zigzag delta from the Group
+Start, letting frame 0 precede it.
 
 ## Required
 

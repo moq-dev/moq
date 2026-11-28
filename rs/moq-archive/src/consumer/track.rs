@@ -84,14 +84,20 @@ impl Live {
 				open
 			}
 			None => {
-				let mut group = Some(self.producer.create_group(group::Info { start: sequence })?);
-				if first > 0 {
-					// Its head was pruned, so its timestamps can't be shown never to decrease: gone,
-					// as a fill reads it.
-					if let Some(group) = group.take() {
-						let _ = group.abort(moq_net::Error::NotFound);
+				let mut group = self.producer.create_group(group::Info { start: sequence })?;
+				// A head pruned from a timed group leaves its timestamps unable to be shown never
+				// to decrease, so it is gone, as a fill reads it; an untimed one's all share its key.
+				let group = match (first, self.timescale) {
+					(0, _) => Some(group),
+					(_, None) => {
+						group.start_at(first)?;
+						Some(group)
 					}
-				}
+					(_, Some(_)) => {
+						let _ = group.abort(moq_net::Error::NotFound);
+						None
+					}
+				};
 				self.open.insert(Open {
 					group,
 					sequence,
@@ -333,17 +339,21 @@ async fn serve_group<S: ObjectStore>(
 		fill.drop_groups(gap..found.sequence);
 		return;
 	}
-	if position == 0 && first.frame_start > 0 {
-		// Its head was pruned, so its timestamps can't be shown never to decrease, even for a
-		// tail that starts past it.
+	let start = match position {
+		0 => first.frame_start,
+		_ => 0,
+	};
+	// Its head was pruned. A timed group's timestamps then can't be shown never to decrease,
+	// even for a tail that starts past it; an untimed one's all share its key.
+	if start > frame || (timed && start > 0) {
 		fill.drop_groups(sequence..sequence + 1);
 		return;
 	}
 
 	// The group's frames, with their indices, across every object holding it.
-	let mut stored: Vec<(u64, &Frame)> = (0..).zip(&found.frames).collect();
+	let mut stored: Vec<(u64, &Frame)> = (start..).zip(&found.frames).collect();
 	for object in &objects[1..] {
-		let next = stored.len() as u64;
+		let next = start + stored.len() as u64;
 		match object.entries.first() {
 			Some(entry) if entry.sequence == sequence && object.frame_start == next => {
 				stored.extend((next..).zip(&entry.frames));
@@ -359,8 +369,8 @@ async fn serve_group<S: ObjectStore>(
 	if !fill.is_wanted(key) {
 		return;
 	}
-	// Checked from the group's first frame on, skipped ones included, so a read starting
-	// mid-group refuses what a whole read does.
+	// Checked from the group's first stored frame on, skipped ones included, so a read
+	// starting mid-group refuses what a whole read does.
 	let mut latest = None;
 	for (_, stored) in &stored {
 		let Ok(timestamp) = timestamp(stored.timestamp, timescale, sequence) else {

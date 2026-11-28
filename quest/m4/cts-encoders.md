@@ -23,8 +23,7 @@ with the same presentation times as through `legacy`.
 
 The timestamp work
 ([moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)) made a group's
-timestamps never decrease, made frame 0 of a lite-07 group sit at the group's
-start, and landed the pieces this builds on:
+timestamps never decrease and landed the pieces this builds on:
 
 - `moq_mux::container::Frame::decode` and `Container::decode_order`: a
   decode-order producer groups by decode time and writes it to the transport.

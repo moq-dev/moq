@@ -8303,7 +8303,10 @@ impl GroupServe {
 		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions) || self.group_gap > 0 || timed_egress;
 		flags.first_object = match wire.as_ref().filter(|_| same_mode) {
 			Some(wire) => wire.first_object && self.slice.skip <= wire.first_id,
-			None => self.slice.skip == 0,
+			// A timed slice past Object 0 still starts at frame 0 when frame 0's ID reaches it.
+			None => {
+				self.slice.skip == 0 || (self.timed && self.group.timed_id(0).is_some_and(|id| id >= self.slice.skip))
+			}
 		};
 		// A stream capped by the range stops before the group may end, so its FIN cannot
 		// claim END_OF_GROUP. Our own group may close without saying it is whole, which only
@@ -23472,6 +23475,8 @@ mod compression_tests {
 		let mut r = crate::coding::Decoder::new(&written, Version::Draft23.into());
 		let header = ietf::GroupHeader::decode(&mut r, Version::Draft23).unwrap();
 		assert_eq!(header.group_id, 1000);
+		// The stream starts at frame 0, whatever its ID.
+		assert!(header.flags.first_object);
 		assert_eq!(r.varint().unwrap(), 33); // Object ID 33
 		assert_eq!(r.varint().unwrap(), 0); // empty properties
 		let len = r.varint().unwrap() as usize;
