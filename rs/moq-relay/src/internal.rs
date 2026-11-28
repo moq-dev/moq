@@ -244,8 +244,8 @@ impl Internal {
 	/// Attach the relay cluster used to serve the `/nodes` topology snapshot and
 	/// the refused-session counts at `/metrics`.
 	pub fn with_cluster(mut self, cluster: &crate::cluster::Cluster) -> Self {
-		self.nodes = Some(cluster.nodes.clone());
-		self.refusals = Some(cluster.refusals.clone());
+		self.nodes = Some(cluster.shared.nodes.clone());
+		self.refusals = Some(cluster.shared.refusals.clone());
 		self
 	}
 

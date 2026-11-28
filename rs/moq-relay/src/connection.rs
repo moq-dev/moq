@@ -122,7 +122,7 @@ impl<R: Incoming> Connection<R> {
 			biased;
 			admitted = Box::pin(lifecycle.on(shared.as_ref(), admit)) => admitted?,
 			() = request.expired() => {
-				lifecycle.cluster.refusals.record(RefusalKind::Unavailable);
+				lifecycle.cluster.shared.refusals.record(RefusalKind::Unavailable);
 				return Err(anyhow::Error::new(moq_net::Error::Timeout).context("admission timed out"));
 			}
 		};
@@ -332,7 +332,7 @@ impl Lifecycle {
 		if let Err(err) = &admitted
 			&& let Some(refusal) = err.refusal
 		{
-			self.cluster.refusals.record(refusal);
+			self.cluster.shared.refusals.record(refusal);
 		}
 		admitted
 	}
