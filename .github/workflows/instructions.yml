@@ -1,6 +1,6 @@
 name: Instructions
 
-# Nightly instruction counts for the deterministic Criterion benches, under stock
+# Nightly instruction counts for the deterministic benches, under stock
 # Valgrind through swole (`just rs instructions`). Kixel Quest reads them
 # and bisects a regression to its landing; nothing gates on them, and Nightly's
 # paired timing still measures every bench. See bench/README.md.

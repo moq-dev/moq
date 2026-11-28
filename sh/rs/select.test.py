@@ -309,7 +309,7 @@ class SelectTest(unittest.TestCase):
             "triple": ("Cargo.toml", '[target.x86_64-pc-windows-msvc.dependencies]\nwindows = "1"\n'),
             "plain": ("src/lib.rs", "// Credit windows in unix time.\n#[cfg(test)]\nmod tests {}\n"),
             "width": ("src/lib.rs", '#[cfg(target_pointer_width = "64")]\nfn f() {}\n'),
-            "codspeed": ("Cargo.toml", "[target.'cfg(codspeed)'.dependencies]\nx = \"1\"\n"),
+            "custom": ("Cargo.toml", "[target.'cfg(loom)'.dependencies]\nx = \"1\"\n"),
         }
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

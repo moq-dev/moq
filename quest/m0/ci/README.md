@@ -55,7 +55,7 @@ Decisions (maintainer, 2026-10-13):
   [#6040](https://github.com/moq-dev/moq/pull/6040) the queue runs on the
   self-hosted `moq-queue` runner with mbx's local store, so the cache writers are
   the hosted scheduled jobs on `main`: Nightly and the workflows it calls,
-  CodSpeed, Interop and TS.
+  Instructions, Interop and TS.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally, to compare runners once the pipeline

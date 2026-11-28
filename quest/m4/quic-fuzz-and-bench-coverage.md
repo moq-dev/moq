@@ -19,6 +19,4 @@ Gaps identified in the audit:
 
 Public API: none. Wire: none.
 
-## Related
-
-- [Benches move from Criterion to rust2-bench-harness](/quest/m5/bench-harness.md) - match whichever bench harness is active when this runs
+New benches are swole `#[bench]` functions, as `rs/moq-quic/benches/` already are.
