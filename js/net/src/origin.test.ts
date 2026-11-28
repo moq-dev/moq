@@ -3742,6 +3742,39 @@ test("published names refuse navigation segments", () => {
 	}
 });
 
+test("an exact listing reports only what could serve its path, and waits only on sets above it", async () => {
+	const origin = new Producer();
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.all());
+	const held = ["room", "room/cam", "room/cam/viewer.echo", "other"].map((name) => origin.route(Path.from(name), {}));
+	const announced = origin.consume().announced(Path.from("room/cam"), { exact: true });
+	const seen = [(await announced.next())?.prefix, (await announced.next())?.prefix];
+	expect(seen.sort()).toEqual([Path.from("room"), Path.from("room/cam")]);
+	// Asking for more releases the initial set; nothing beneath the path follows.
+	let more = false;
+	const rest = announced.next().then((entry) => {
+		more = entry !== undefined;
+	});
+	await settle();
+	expect(announced.synced.peek()).toBe(true);
+
+	// A session still owing the set beneath the path holds nothing up; one above it does.
+	const detach = wireOf(scoped).attach(false);
+	const beneath = wireOf(scoped).snapshot(Path.from("room/cam/viewer.echo"));
+	await settle();
+	expect(announced.synced.peek()).toBe(true);
+	const above = wireOf(scoped).snapshot(Path.from("room"));
+	await settle();
+	expect(announced.synced.peek()).toBe(false);
+	above();
+	beneath();
+	detach();
+	announced.close();
+	await rest;
+	expect(more).toBe(false);
+	for (const route of held) route.broadcast.close();
+	origin.close();
+});
+
 test("a `*` is refused everywhere a path is named", async () => {
 	const origin = new Producer();
 	try {

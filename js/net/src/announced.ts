@@ -82,6 +82,16 @@ export interface Options {
 	 * listing broadcasts does not. Requests resolve through covering routes either way.
 	 */
 	covering?: boolean;
+
+	/**
+	 * Report only the routes that could serve the listed prefix itself, those at or above it,
+	 * and none beneath it; synced once no session owes an initial set at or above it. Implies
+	 * `covering`. For code asking whether a path is reachable, as a request resolves it, not
+	 * what lies beneath it.
+	 *
+	 * @internal
+	 */
+	exact?: boolean;
 }
 
 /**

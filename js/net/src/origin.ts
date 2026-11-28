@@ -555,6 +555,10 @@ class VersionedSignal<T> extends Signal<T> {
 	}
 }
 
+// Which routes a listing reports relative to each listed prefix: those at or beneath it, those
+// that could serve it from above too (`covering`), or only those at or above it (`exact`).
+type Reach = "beneath" | "both" | "above";
+
 // Navigation belongs to relative references, resolved before publication.
 function publishPath(path: Path.Valid): void {
 	nameable(path);
@@ -2744,7 +2748,8 @@ export class Consumer implements Reader {
 		const producer = new announce.Producer();
 		const listed = this.#scope.listed(prefix);
 		void producer.closed.then(this.#state.watch(listed.toArray().map((member) => member.text as Path.Valid)));
-		void this.#runAnnounced(producer, listed, options?.hidden ?? false, options?.covering ?? false);
+		const reach: Reach = options?.exact ? "above" : options?.covering ? "both" : "beneath";
+		void this.#runAnnounced(producer, listed, options?.hidden ?? false, reach);
 		const consumer = producer.consume();
 		// The last reader leaving ends the stream and its watch.
 		closeUnwanted(producer);
@@ -2752,7 +2757,7 @@ export class Consumer implements Reader {
 	}
 
 	/** The routes visible to one announcement watcher. */
-	#listed(listed: Path.Prefixes, hidden: boolean, covering: boolean): Map<Path.Valid, Presented> {
+	#listed(listed: Path.Prefixes, hidden: boolean, reach: Reach): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
 		const root = this.#scope.root;
 		const heads = listed.toArray().map((member) => member.text as Path.Valid);
@@ -2771,7 +2776,8 @@ export class Consumer implements Reader {
 			// covering reader sees each one whose subtree overlaps its scope, as Rust's cursor does.
 			const seen = heads.some(
 				(head) =>
-					(Path.hasPrefix(head, path) || (covering && Path.hasPrefix(path, head))) &&
+					((reach !== "above" && Path.hasPrefix(head, path)) ||
+						(reach !== "beneath" && Path.hasPrefix(path, head))) &&
 					(hidden || !hiddenBelow(head, path)),
 			);
 			if (!seen) continue;
@@ -2810,7 +2816,7 @@ export class Consumer implements Reader {
 		producer: announce.Producer,
 		listed: Path.Prefixes,
 		hidden: boolean,
-		covering: boolean,
+		reach: Reach,
 	): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by ref
 		// plus route. Diffing the identity rather than mere presence means a republish emits a
@@ -2821,7 +2827,7 @@ export class Consumer implements Reader {
 			for (;;) {
 				if (this.#state.closed.peek() !== undefined) break;
 
-				const next = this.#listed(listed, hidden, covering);
+				const next = this.#listed(listed, hidden, reach);
 
 				for (const [path, snap] of active) {
 					if (!next.has(path))
@@ -2848,7 +2854,12 @@ export class Consumer implements Reader {
 				let behind = false;
 				for (const prefix of this.#state.snapshots.peek().keys()) {
 					for (const member of listed) {
-						if (!member.overlaps(prefix)) continue;
+						if (
+							reach === "above"
+								? !Path.hasPrefix(prefix, member.text as Path.Valid)
+								: !member.overlaps(prefix)
+						)
+							continue;
 						if (hidden || !hiddenBelow(member.text as Path.Valid, prefix)) behind = true;
 					}
 				}
