@@ -144,23 +144,13 @@ export class Producer<T> {
 		// A throw leaves the edit uncommitted and the retained window unchanged. The next edit opens a
 		// new group, since a consumer may hold the group the frame was meant for.
 		if (encoded.keyframe) {
-			// Opened before the previous group finishes, so a key at or before the newest group's is
-			// refused with the previous group still open.
-			const group = this.#track.appendGroup(at);
+			// Opened with its frame before the previous group finishes, so a key at or before the
+			// newest group's, or a frame the track refuses, leaves the previous group still open.
+			const group = this.#track.appendGroup({ payload: encoded.payload, timestamp: at });
 			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.
 			this.#group?.finish();
-			this.#group = undefined;
-			try {
-				group.writeFrame({ payload: encoded.payload, timestamp: at });
-			} catch (err) {
-				// The group carries no frames, so close it rather than leaving it open on the track. A
-				// consumer that already advanced into it would otherwise block with nothing to read.
-				group.finish();
-				throw err;
-			}
-
 			this.#group = group;
 			encoded.commit();
 			return;
