@@ -1101,8 +1101,10 @@ class Run:
             self.violation(report, "shown", shown)
         # No fault ends a hold, so a pause that recovers on its own is the failure, and `unfed`
         # sees only a reader still stalled when the hold ends.
-        if report["kind"] == "hold" and (paused := [row for row in report["readers"]["worst"] if row["s"] > self.script.stall]):
-            self.violation(report, "paused", paused)
+        if report["kind"] == "hold":
+            worst = report["readers"]["worst"]
+            if paused := [row for row in worst if row["s"] > self.script.stall]:
+                self.violation(report, "paused", paused)
         died = [proc.name for proc in self.procs() if proc.died]
         if died:
             self.violation(report, "died", died)

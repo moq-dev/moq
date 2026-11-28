@@ -43,27 +43,23 @@ Route-health failover would move a stalled track to another route, but it would
 hide this stall, not fix it, and the mesh's only lite-07 link has no lite-07
 alternative.
 
-Update 2026-11-28 (`/quest-start`): [`half-roll-hold.toml`](/test/mesh-replay/half-roll-hold.toml)
-(relays `a` and `b` rolled so `a-b` is the only lite-07 link, then a 10-minute `hold` that fails on
-any reader pause past `stall`) reproduces it deterministically on one loaded macOS host, and
-[`half-roll.toml`](/test/mesh-replay/half-roll.toml) alone does at its first roll. Readers on `a`
-(then `b`) of other relays' broadcasts read nothing from the roll on, and never recovered within
-the 13-minute run (no 1 to 3 minute recovery). With the relay built at each commit and this
-checkout's `moq-bench`, 4 broadcasts per relay, one run each:
+Update 2026-11-28 (`/quest-start`): it did not reproduce in the replay. The new
+[`half-roll-hold.toml`](/test/mesh-replay/half-roll-hold.toml) (relays `a` and `b` rolled so `a-b`
+is the only lite-07 link, then a 10-minute `hold` that fails on any reader pause past `stall`)
+ran clean, 4 broadcasts per relay, on a loaded macOS host at:
 
-| Relay build | Result |
-| --- | --- |
-| `5d86f05321` | starved, 791s pause in the hold |
-| `a1c13dd38d` (parent of #9564) | starved |
-| `64c69c2548` ([#9564](https://github.com/moq-dev/moq/pull/9564), its S5 merged) | starved (`half-roll.toml`) |
-| `f24ac5065e` (`main`) | clean: `half-roll.toml` once, `half-roll-hold.toml` at 4 and 32 broadcasts |
+- `5d86f05321` built whole (relay, `moq-bench`, and shaper from that commit, the replay harness
+  copied over it), one run;
+- `main` at `f24ac5065e`, 4 and 32 broadcasts, two runs.
 
-So #9564 is not the fix, and something in the 42 net, relay, and quic commits between
-`64c69c2548` and `f24ac5065e` is. Next: bisect them with `half-roll.toml` (about 3 minutes a
-run, 6 builds), name the commit, check it has a test at the lowest layer that fails without it,
-and add one if not. If that commit is a quic or cc change (#9709 to #9716, #9745) the stall may
-be a send-window starvation the lite code only exposed. Not yet checked: that these starved
-readers are the quest's 1 to 3 minute stall rather than another mid-roll strand.
+The original three runs' mesh, broadcast count, and logs are unknown, and Nightly's mesh replays
+also passed at `5d86f05321`. A relay built at an older commit run against this checkout's
+`moq-bench` starves every reader from the first roll, but that is skew, not this bug: the client
+sends lite-07's `Meta` byte (added in `eed4c1850c`) and the older relay answers PROTOCOL_VIOLATION.
+Build both from one commit when replaying an old build.
+
+What remains is to catch it again: run the hold on the nightly's hosts (Linux, 32 broadcasts)
+a few nights with `HARNESS_KEEP=1`, and if it still never fails, delete this quest.
 
 If the fix needs a change to the lite-07-wip wire, that part joins m2 under
 [lite-07 subscribe](/quest/m2/lite07-subscribe/README.md), per the milestone
@@ -71,6 +67,12 @@ rules in [the questline](/quest/README.md), and this quest keeps any non-wire
 part.
 
 Decided 2026-11-25 (maintainer, `/quest-plan`): ✅ keep (rejected: drop).
+
+## Waiting
+
+- Maintainer: the stall did not reproduce at `5d86f05321` built whole or on `main`; keep the quest?
+  - Delete it, keeping the hold check (Recommended) - nothing reproduces it, and the hold soaks that exact state; reopen from the check's failure with logs if it ever fires
+  - Keep it for a few nightly hold runs on Linux - costs a nightly job's 10 minutes a cell to rule out a host-specific cause
 
 ## Related
 
