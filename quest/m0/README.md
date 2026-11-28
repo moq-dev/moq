@@ -2,16 +2,25 @@
 
 ## Goal
 
-The work in flight now: passing Nightly, Interop, and Video runs, backports
-and patch releases for the `release` line, CI cost and latency, test flakes,
-and a few small fixes for hostile input, WebSocket throughput, agent disk use,
-and CRLF checkouts. The quest merge driver
-([moq-dev/moq#6728](https://github.com/moq-dev/moq/pull/6728)), local reviews
-([moq-dev/moq#7175](https://github.com/moq-dev/moq/pull/7175)), and the
-declared HLS segment grid
-([moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652)) landed.
+The operational work the `0.22.0` cut needs now: passing Nightly, Interop,
+and Video runs, which the cut's release gate runs, the test flakes that turn
+them red, and the rind 0.4 adapters. CI cost and `release`-line backports
+that need not block the cut live in m3; the ci epic stays here only until its
+child mbx-b2's claim ends, then moves to m3 whole.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
+to m2 hold only what the cut or lite-07 finalization needs, plus
+semver-breaking API or wire changes; every other quest moved to m3 and ships
+later in a patch version (rejected: moving only m1; keeping all of m0 as an
+ops bucket). The [questline](/quest/README.md) states the rule.
+
+Here, js-listing-synced-order and release-attest-backport moved. The
+interop-green and nightly epics and rind-adapters stay as cut blockers, and
+the test-flakes-5 epic stays because its interop finish-lane flakes fail the
+Interop run the cut's gate runs. The ci epic (its child mbx-b2 is claimed) and
+repeatable-instruction-counts stay only until their claims end.
 
 The release API gates (#3829..#3878) and the release that followed them are
 done.

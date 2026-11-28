@@ -3,12 +3,24 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`. The
+after the next cut of `main` into `release`, and the non-breaking work the
+cut or [lite-07 finalization](/quest/m2/lite07-finalize.md) requires. A quest
+stays here only for a reason of its own: the cut waiting on m2 is not one. The
 [release cut](/quest/m3/release/cut.md) and its pre-cut reviews wait on this
 milestone (plus `cut.md`'s m0 blockers, not m1); complete it before cutting
 main into release.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
+to m2 hold only what the cut or lite-07 finalization needs, plus
+semver-breaking API or wire changes; every other quest moved to m3 and ships
+later in a patch version (rejected: moving only m1; keeping all of m0 as an
+ops bucket). The [questline](/quest/README.md) states the rule.
+
+Here, [hls-group-end-timing](/quest/m3/hls-group-end-timing.md) moved: it
+rechecks HLS timing after lite-07 is finalized and changes no API. The
+typed superseded group end (additive) stays only while its PR claims it.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
@@ -39,7 +51,8 @@ Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
   API cut).
 - ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
   five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
-  and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
+  and [TS unpadded audio buffer](/quest/m3/ts-unpadded-audio-buffer.md) to m1 (moved on to m3
+  2026-11-28),
   and kio's crates.io publish (since dropped: kio moved back into `rs/kio`) to m0 as a direct
   `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
   in m2).
