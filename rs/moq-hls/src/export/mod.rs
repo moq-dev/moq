@@ -1637,14 +1637,13 @@ mod tests {
 
 	/// Open the group of [`Gops::gop`] `index` on `media`, holding one VP8 keyframe at its start.
 	fn keyframe_group(media: &moq_net::track::Producer, index: u64) -> moq_net::group::Producer {
-		let group = create_with(
-			&media,
+		create_with(
+			media,
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_millis(index * 2_000).unwrap(),
 				payload: bytes::Bytes::from_static(KEYFRAME),
 			},
-		);
-		group
+		)
 	}
 
 	/// Wait until `rendition` lists at least `count` segments.
@@ -3825,14 +3824,13 @@ mod tests {
 		/// Start the group at `pts_ms` with a keyframe, leaving it open for more frames.
 		fn open(&mut self, pts_ms: u64) -> moq_net::group::Producer {
 			let frame = vp8_frame(pts_ms * 1_000, true);
-			let group = create_with(
+			create_with(
 				&self.track,
 				hang::container::Frame {
 					timestamp: frame.timestamp,
 					payload: frame.payload,
 				},
-			);
-			group
+			)
 		}
 
 		/// The publisher loses its session: the track fails.

@@ -391,7 +391,7 @@ fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 mod tests {
 	use super::*;
 
-	use moq_net::{Timescale, Timestamp, group, track};
+	use moq_net::{Timescale, Timestamp, track};
 
 	/// Every file under `dir`, relative to it.
 	fn files(dir: &std::path::Path) -> Vec<String> {
@@ -434,8 +434,7 @@ mod tests {
 		for path in ["live/a", "live/b", "other"] {
 			let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			let track = broadcast.broadcast().create_track("video", info.clone()).unwrap();
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
+			let group = track.create_group(Timestamp::from_millis(0).unwrap(), path).unwrap();
 			group.finish().unwrap();
 			broadcast.announce().unwrap();
 			identities.push(broadcast.identity());
@@ -491,8 +490,7 @@ mod tests {
 			.with_max_age(Duration::from_secs(3600));
 		let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
+		let group = track.create_group(Timestamp::from_millis(0).unwrap(), path).unwrap();
 		group.finish().unwrap();
 		broadcast.announce().unwrap();
 		(broadcast, track)
@@ -636,10 +634,12 @@ mod tests {
 			.with_max_age(None);
 		let video = source.create_track("video", info).unwrap();
 		for sequence in 0..2 {
-			let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
-			group.write_frame(pts, format!("frame {sequence}")).unwrap();
-			group.finish().unwrap();
+			video
+				.create_group(pts, format!("frame {sequence}"))
+				.unwrap()
+				.finish()
+				.unwrap();
 		}
 		let _video = video.finish().unwrap();
 		let recording =

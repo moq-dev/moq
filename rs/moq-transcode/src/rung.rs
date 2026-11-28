@@ -552,14 +552,14 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// encoder without touching the CPU. The resize carries the source's
 					// color space across, which is what the encoder signals.
 					encoder.encode(rung, frame).await?;
-					claim_drain(&mut current, &producer, &active, &mut encoder)?;
+					claim_drain(&mut current, producer, &active, &mut encoder)?;
 				}
 				Some(Item::End(end)) => {
 					if current.is_some() {
 						// The source group is complete, so this one has to be too: a
 						// hardware encoder is still holding its last frames.
 						encoder.flush().await?;
-						claim_drain(&mut current, &producer, &active, &mut encoder)?;
+						claim_drain(&mut current, producer, &active, &mut encoder)?;
 					}
 					if let Some(output) = current.take() {
 						match end {
