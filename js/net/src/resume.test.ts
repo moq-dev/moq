@@ -5577,6 +5577,54 @@ test("a switch backfills a group the replaced copy holds without its head", asyn
 	}
 });
 
+// An ordered read passes every key below a group it hands out, so a group a replaced copy was left
+// to drain and lost is asked of the serving route before one above it goes out. Mirrors the Rust
+// `an_ordered_read_asks_for_a_lost_drain_before_passing_it`.
+test("an ordered read asks for a group a draining copy loses before passing it", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe(withMax({ delay: { max: null } }))
+		.ordered();
+	try {
+		ta.write(0n);
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(0n);
+		ta.write(1n);
+		ta.write(2n);
+		ta.write(3n);
+		front.serve(b.consume());
+		await settle();
+		// The switch leaves groups 1 and 2 to the replaced copy.
+		expect(ordered.tryNextGroup()?.start).toBe(1n);
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		ta.write(4n);
+		tb.write(2n);
+		tb.write(3n);
+		await settle();
+		const keys: bigint[] = [];
+		for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) {
+			keys.push(group.start);
+			group.close();
+		}
+		expect(keys).toEqual([2n, 3n]);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
 // A group the switch left to a replaced copy to drain, which that copy's cache then evicts, is asked
 // of the serving route after all: what the reader gets never depends on what a copy happens to hold.
 // Mirrors the Rust `a_group_a_draining_copy_loses_is_backfilled`.

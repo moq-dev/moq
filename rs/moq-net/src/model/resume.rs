@@ -3219,12 +3219,21 @@ impl Reader {
 			return self.poll_first(ordered, parks, delivered, waiter);
 		}
 		if let Some(first) = first {
+			// An ordered hand-out passes every key below it: a group a copy was left to drain
+			// there and no longer drains is asked of the serving route first.
+			if ordered {
+				let resumed = self.resumed.is_some();
+				self.rescan_drains(delivered, Some(first.key()), waiter);
+				if !resumed && self.resumed.is_some() && self.window().floor().is_some() {
+					return None;
+				}
+			}
 			return Some(Poll::Ready(Ok(Some(first))));
 		}
 		// Nothing to hand out, so a group a copy was left to drain and no longer drains is asked
 		// of the serving route now, as a cursor asks a fill only once it holds nothing to read:
 		// a backlog draining meanwhile costs no rescan per group.
-		self.rescan_drains(delivered, waiter);
+		self.rescan_drains(delivered, None, waiter);
 		// A copy answering this pass may have placed the ranges the switch's backfill waits
 		// for: ask for it now, since no later group is sure to wake the read.
 		if self.resumed.is_some() && self.window().floor().is_some() {
@@ -3728,11 +3737,21 @@ impl Reader {
 	/// reader still lacks, no longer drains there: evicted, given up as stale, or its copy
 	/// failed or spent its budget. The serving route is then asked for it after all, as a cursor
 	/// on the track would ask again. Costs the groups left to drain, each one a copy holds.
-	fn rescan_drains(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
+	///
+	/// With `below`, only the groups under that key, which an ordered read checks before it passes
+	/// them: this costs the groups handed out since.
+	fn rescan_drains(&mut self, delivered: &Delivered, below: Option<u64>, waiter: &kio::Waiter) {
 		let (start, budget) = (self.groups.0, self.mirrored.widest());
 		let mut lost = false;
 		for copy in &mut self.copies {
-			copy.drains.retain(|key| !delivered.contains(*key));
+			match below {
+				Some(_) => {
+					while copy.drains.first().is_some_and(|key| delivered.contains(*key)) {
+						copy.drains.pop_first();
+					}
+				}
+				None => copy.drains.retain(|key| !delivered.contains(*key)),
+			}
 			if copy.drains.is_empty() {
 				continue;
 			}
@@ -3741,7 +3760,10 @@ impl Reader {
 					Sub::Ready(sub) => Some(sub.taking()),
 					Sub::Pending(_) => None,
 				};
-				(copy.drains.iter()).any(|key| !copy.may_drain(*key, taking.as_ref(), start, budget, waiter))
+				(copy.drains.iter())
+					.take_while(|key| below.is_none_or(|below| **key < below))
+					.filter(|key| !delivered.contains(**key))
+					.any(|key| !copy.may_drain(*key, taking.as_ref(), start, budget, waiter))
 			};
 			if stopped {
 				copy.drains.clear();
@@ -10778,6 +10800,34 @@ mod test {
 			assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "debt {debt}");
 			assert_eq!(drain(&mut sub, false), [2], "debt {debt}");
 		}
+	}
+
+	/// An ordered read passes every key below a group it hands out, so a group a replaced copy was
+	/// left to drain and lost is asked of the serving route before one above it goes out, and read
+	/// first when that route's cache holds it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_asks_for_a_lost_drain_before_passing_it() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, true), [0]);
+		write(&a, 1);
+		write(&a, 2);
+		write(&a, 3);
+		let b = copy();
+		routes.serve(b.consume());
+		let Poll::Ready(Ok(Some(group))) = sub.poll_next_group(&kio::Waiter::noop()) else {
+			panic!("the replaced copy's group 1");
+		};
+		assert_eq!(group.start, 1);
+		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+		write(&b, 2);
+		a.evict(2);
+		assert_eq!(drain(&mut sub, true), [2, 3]);
 	}
 
 	/// A group the switch left to a replaced copy to drain is asked of the serving route once that

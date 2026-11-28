@@ -1269,12 +1269,15 @@ class Reader implements ResumeSource {
 		const drains = (key: bigint) =>
 			this.#copies.find((copy) => this.#mayDrain(copy, key, cursor, taking.get(copy)));
 		let start: bigint | undefined;
+		// Copies an earlier walk left keys to, whose set this walk's keys may now leave unsorted.
+		const merged = new Set<Copy>();
 		for (const gap of delivered.gaps(max(floor, cursor), resumed)) {
 			let key = gap.start;
 			for (; key < gap.end; key++) {
 				const copy = drains(key);
 				if (!copy) break;
 				// Added to what earlier walks left.
+				if (copy.drains?.size) merged.add(copy);
 				copy.drains ??= new Set();
 				copy.drains.add(key);
 			}
@@ -1282,6 +1285,10 @@ class Reader implements ResumeSource {
 				start = key;
 				break;
 			}
+		}
+		// Kept ascending, so an ordered read's rescan stops at the group it hands out.
+		for (const copy of merged) {
+			copy.drains = new Set([...(copy.drains ?? [])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
 		}
 		// A raised start is asked from its time whatever the local floor, so the backfill places it,
 		// and the group holding it is read once the floor lets it.
@@ -1463,6 +1470,15 @@ class Reader implements ResumeSource {
 			owing = first.owing;
 			const next = first.next;
 			if (!next) break;
+			// An ordered hand-out passes every key below it: a group a copy was left to drain there
+			// and no longer drains is asked of the serving route first.
+			if (ordered && first.key !== undefined) {
+				const resumed = this.#resumed;
+				this.#rescanDrains(delivered, first.key);
+				if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
+					return this.tryGroup(ordered, delivered, dispositions, admit);
+				}
+			}
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
 				const dropped = this.#tryDrop(delivered);
@@ -1815,14 +1831,22 @@ class Reader implements ResumeSource {
 	// longer drains there: evicted, given up as stale, or its copy failed or spent its budget. The
 	// serving route is then asked for it after all, as a cursor on the track would ask again. Costs
 	// the groups left to drain, each one a copy holds. Mirrors the Rust `Reader::rescan_drains`.
-	#rescanDrains(delivered: Delivered): void {
+	//
+	// With `below`, only the groups under that key, which an ordered read checks before it passes
+	// them: each copy keeps its keys ascending, so this costs the groups handed out since.
+	#rescanDrains(delivered: Delivered, below?: bigint): void {
 		const cursor = this.#shell.cursor.peek().start;
 		for (const copy of this.#copies) {
 			if (copy.drains === undefined) continue;
-			for (const key of copy.drains) if (delivered.has(key)) copy.drains.delete(key);
-			const taking = copy.drains.size > 0 ? hooks.taking(copy.sub) : undefined;
+			let taking: ((key: bigint) => boolean) | undefined;
 			let drains = true;
 			for (const key of copy.drains) {
+				if (delivered.has(key)) {
+					copy.drains.delete(key);
+					continue;
+				}
+				if (below !== undefined && key >= below) break;
+				taking ??= hooks.taking(copy.sub);
 				if (this.#mayDrain(copy, key, cursor, taking)) continue;
 				drains = false;
 				break;
@@ -1867,7 +1891,7 @@ class Reader implements ResumeSource {
 	// because the window still owes a lower one that may yet land there. First is the lowest for an
 	// ordered read, else the first in the subscription's Group Order. Mirrors the Rust `poll_first`.
 	// A group at or past `admit` (ordered reads only) stays next, unjudged.
-	#first(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; owing: Copy[] } {
+	#first(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; key?: bigint; owing: Copy[] } {
 		let first: { copy: Copy; key: bigint } | undefined;
 		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
@@ -1900,7 +1924,7 @@ class Reader implements ResumeSource {
 				recv.group.close();
 			}
 		}
-		return { next: first?.copy, owing };
+		return { next: first?.copy, key: first?.key, owing };
 	}
 
 	/**
@@ -2012,18 +2036,15 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		const serving = this.#serving();
 		if (serving) this.#boundAtEnd(serving);
-		const resumed = this.#resumed;
-		// A group a copy no longer drains, which no read since has asked of the serving route.
+		// A group a copy no longer drains, which no read since has asked of the serving route, and
+		// any walk an earlier pass queued: asked here, since a caller awaiting only the close may
+		// never read, and the end then waits for it as for any copy that may still deliver.
 		this.#rescanDrains(this.#delivered);
+		if (this.#resumed && this.#window().floor() !== undefined) this.#backfillGaps(this.#delivered);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
-		// A copy that stopped draining a group, or was let go with one, owes the serving route a
-		// backfill first: asked here, since a caller awaiting only the close may never read, and
-		// the end then waits for it as for any copy that may still deliver.
-		if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
-			this.#backfillGaps(this.#delivered);
-			this.wake();
-			return false;
-		}
+		// A copy let go with a group to drain: asked the same way, then judged again, since a
+		// backfill a cache answers at once may leave nothing to wait for.
+		if (this.#resumed && this.#window().floor() !== undefined) return this.#conclude();
 		this.#ended = {
 			largest: serving && hooks.peekLargest(serving.sub).largest,
 			object: serving && hooks.objectLargest(serving.sub),
