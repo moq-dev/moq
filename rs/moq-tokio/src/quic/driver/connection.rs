@@ -18,7 +18,8 @@ use tokio::sync::mpsc;
 use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
-	ConnectionEvent, Duration, Instant, VarInt, events, mutex::Mutex, recv, runtime::Slot, send, udp_transmit,
+	ConnectionEvent, Duration, IO_LOOP_BOUND, Instant, VarInt, events, mutex::Mutex, recv, runtime::Slot, send,
+	udp_transmit,
 };
 use moq_congestion::Controller;
 pub use moq_quic::connection::{Error, Stats};
@@ -790,7 +791,9 @@ impl State {
 
 	/// If this returns `Err`, the endpoint is dead, so the driver should exit immediately.
 	fn process_conn_events(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
-		loop {
+		// A backlog the endpoint keeps refilling must not hold this worker (and the connection
+		// lock) from the timer, the socket, and other tasks, as tokio's channel budget kept it.
+		for _ in 0..IO_LOOP_BOUND {
 			match self.conn_events.poll_recv(cx) {
 				#[cfg(test)]
 				Poll::Ready(Some(ConnectionEvent::Rebind)) => {
@@ -813,6 +816,8 @@ impl State {
 				}
 			}
 		}
+		cx.waker().wake_by_ref();
+		Ok(())
 	}
 
 	fn drive_timer(&mut self, cx: &mut Context<'_>) -> bool {
