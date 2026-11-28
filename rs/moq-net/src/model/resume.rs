@@ -1439,12 +1439,8 @@ impl Subscriber {
 	/// unread: as one cursor keeps what it owes, since a late group there may be fresh by its
 	/// own successor on that copy. Nor past `keep`, an outer reader's own such group.
 	pub(super) fn forget_past(&self, delivered: &mut Delivered, terms: track::FoldTerms, keep: Option<u64>) {
-		let reader = self.reader();
-		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
-			Sub::Ready(sub) => Some((copy, sub)),
-			Sub::Pending(_) => None,
-		});
-		let Some((_, newest)) = ready.next() else {
+		let mut reader = self.reader();
+		let Some(newest) = (reader.copies.iter()).rposition(|copy| matches!(copy.sub, Sub::Ready(_))) else {
 			return;
 		};
 		// Every copy but the newest is replaced. Judged as the pick judges a copy under any
@@ -1452,16 +1448,20 @@ impl Subscriber {
 		// copy again, so what it holds unread stays owed meanwhile, as on one track, until the
 		// group is stale by its own successor there even at the track's max age. So a lease on
 		// the copy never holds back the fold for good.
-		let kept = ready
-			.filter(|(copy, _)| {
-				reader
-					.reads(copy, Duration::MAX, delivered, &kio::Waiter::noop())
-					.is_some()
-			})
-			.filter_map(|(_, sub)| sub.lowest_owed(delivered.floor(), delivered))
-			.chain(keep)
-			.min();
-		newest.forget_past_budget(delivered, terms, kept);
+		let mut kept = keep;
+		for index in 0..newest {
+			if (reader.reads(&reader.copies[index], Duration::MAX, delivered, &kio::Waiter::noop())).is_none() {
+				continue;
+			}
+			if let Sub::Ready(sub) = &mut reader.copies[index].sub
+				&& let Some(owed) = sub.lowest_owed(delivered.floor(), delivered)
+			{
+				kept = Some(kept.map_or(owed, |kept| kept.min(owed)));
+			}
+		}
+		if let Sub::Ready(newest) = &reader.copies[newest].sub {
+			newest.forget_past_budget(delivered, terms, kept);
+		}
 	}
 
 	/// Poll for the track's declared exclusive end.
@@ -1488,9 +1488,9 @@ impl Subscriber {
 	/// The lowest group at or above `from` any copy holds unread that `delivered` lacks and
 	/// some budget still reads; see [`track::Subscriber::lowest_owed`].
 	pub(super) fn lowest_owed(&self, from: u64, delivered: &Delivered) -> Option<u64> {
-		let reader = self.reader();
-		(reader.copies.iter())
-			.filter_map(|copy| match &copy.sub {
+		let mut reader = self.reader();
+		(reader.copies.iter_mut())
+			.filter_map(|copy| match &mut copy.sub {
 				Sub::Ready(sub) => sub.lowest_owed(from, delivered),
 				Sub::Pending(_) => None,
 			})

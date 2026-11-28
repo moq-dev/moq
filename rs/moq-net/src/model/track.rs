@@ -11715,32 +11715,34 @@ impl Cursor {
 	/// any one stale even at the track's max age bound, judged within this read's own window
 	/// and cap: no budget reads one stale there.
 	///
-	/// Counts what arrived since the read last took arrivals in too, which it owes once it
-	/// does: nothing polls a copy past its reader's budget, yet a widened budget reads the
-	/// groups that landed on it meanwhile. Costs those arrivals, which the cache bounds.
-	fn lowest_owed(&self, mut from: u64, delivered: &Delivered) -> Option<u64> {
+	/// Takes in what arrived since the read last looked first, which it owes as a poll would:
+	/// nothing polls a copy past its reader's budget, yet a widened budget reads the groups
+	/// that landed on it meanwhile. Each arrival is taken in once, however often this asks.
+	fn lowest_owed(&mut self, mut from: u64, delivered: &Delivered) -> Option<u64> {
+		self.take_arrivals();
 		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, &kio::Waiter::noop()) else {
 			return None;
 		};
 		let bound = drift.bound.unwrap_or(Duration::MAX);
-		let owed = |key: u64| !delivered.contains(key) && !self.state.read().is_stale(key, &drift.edge, bound);
-		// Only the keys it appends matter here, not whether the track ended.
-		let mut arrived = Vec::new();
-		let _ =
-			(self.state.read()).poll_arrivals(&Cell::new(self.index), self.floor(), &self.filter.window, &mut arrived);
-		let arrived = (arrived.into_iter())
-			.filter(|key| *key >= from && self.admits(*key) && owed(*key))
-			.min();
+		let stale = |key: u64| self.state.read().is_stale(key, &drift.edge, bound);
 		while let Some(group) = self.lowest_unread(from) {
-			if arrived.is_some_and(|arrived| arrived < group.start) {
-				break;
-			}
-			if owed(group.start) {
+			if !delivered.contains(group.start) && !stale(group.start) {
 				return Some(group.start);
 			}
 			from = group.start.checked_add(1)?;
 		}
-		arrived
+		None
+	}
+
+	/// Owe what arrived since the last look; see [`Self::owe_arrivals`], whose answer this
+	/// returns once any arrived.
+	fn take_arrivals(&mut self) -> bool {
+		let index = Cell::new(self.index);
+		let floor = self.floor();
+		let filter = &mut *self.filter;
+		let took = (self.state.read()).poll_arrivals(&index, floor, &filter.window, &mut filter.arrived);
+		self.index = index.get();
+		matches!(took, Poll::Ready(Ok(true))) && self.owe_arrivals()
 	}
 
 	/// The groups this reader reads, and its cap; see [`Coverage`].
@@ -12331,17 +12333,7 @@ impl Cursor {
 			// What arrived since the last look is owed too, so the pick below sees every group
 			// held unread, buffered or re-offered by a widening, and hands out the first in the
 			// subscription's order. A late lower group is owed once it arrives, never passed over.
-			let took = {
-				let index = Cell::new(self.index);
-				let floor = self.floor();
-				let filter = &mut *self.filter;
-				let took = (self.state.read()).poll_arrivals(&index, floor, &filter.window, &mut filter.arrived);
-				self.index = index.get();
-				took
-			};
-			if let Poll::Ready(Ok(true)) = took
-				&& self.owe_arrivals()
-			{
+			if self.take_arrivals() {
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 			}
 			// Read once, so an update landing mid-pick applies to the next pick whole.
@@ -13783,8 +13775,8 @@ impl Subscriber {
 	/// The lowest group at or above `from` an arrival read holds unread that `delivered` lacks
 	/// and some budget still reads: past any one stale even at its track's max age bound,
 	/// judged by the read that holds it.
-	pub(super) fn lowest_owed(&self, from: u64, delivered: &Delivered) -> Option<u64> {
-		match &self.inner {
+	pub(super) fn lowest_owed(&mut self, from: u64, delivered: &Delivered) -> Option<u64> {
+		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.lowest_owed(from, delivered),
 			Inner::Resume(resume, _) => resume.lowest_owed(from, delivered),
 		}
