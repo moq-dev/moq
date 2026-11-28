@@ -34,7 +34,7 @@
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@moq/video": "workspace:^",
-		"mediabunny": "^1.66.0"
+		"mediabunny": "^1.66.1"
 	},
 	"devDependencies": {
 		"@moq/common": "workspace:*",
