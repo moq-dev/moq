@@ -904,8 +904,8 @@ mod tests {
 	}
 
 	/// And the registry follows the negotiated protocol, not just the stream direction. A
-	/// group dropped for being old is a moq-lite code with no moq-transport value, so
-	/// the same abort has to leave a different number on each wire.
+	/// group dropped for being old is a moq-lite code that moq-transport says as
+	/// DELIVERY_TIMEOUT, so the same abort has to leave a different number on each wire.
 	#[test]
 	fn abort_stops_with_the_negotiated_protocols_code() {
 		let mut lite = stop_log(crate::lite::Version::Lite05);
@@ -915,7 +915,10 @@ mod tests {
 		ietf.abort(&Error::Old);
 
 		assert_eq!(lite.stream.get_ref().stops, vec![StreamError::Old.to_code()]);
-		assert_eq!(ietf.stream.get_ref().stops, vec![crate::ietf::error::INTERNAL_ERROR]);
+		assert_eq!(
+			ietf.stream.get_ref().stops,
+			vec![crate::ietf::error::to_stream_code(&StreamError::DeliveryTimeout)]
+		);
 		assert_ne!(lite.stream.get_ref().stops, ietf.stream.get_ref().stops);
 	}
 
