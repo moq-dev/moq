@@ -24,6 +24,7 @@ export class RangeFetch {
 	readonly bound?: number;
 	readonly #track: track.Producer;
 	readonly #timescale?: Timescale;
+	readonly #timestampIds: boolean;
 	readonly #version: IetfVersion;
 	readonly #changed = new Signal(0);
 	readonly #stop = new AbortController();
@@ -38,6 +39,7 @@ export class RangeFetch {
 		first: bigint;
 		track: track.Producer;
 		timescale?: Timescale;
+		timestampIds?: boolean;
 		last: bigint;
 		bound?: number;
 		version: IetfVersion;
@@ -48,6 +50,7 @@ export class RangeFetch {
 		this.bound = options.bound;
 		this.#track = options.track;
 		this.#timescale = options.timescale;
+		this.#timestampIds = options.timestampIds ?? false;
 		this.#version = options.version;
 	}
 
@@ -201,13 +204,16 @@ export class RangeFetch {
 							? next
 							: next - 1 + object.object + objectDeltaBias(version)
 						: object.object;
-				if (id === undefined || id !== next || !Number.isSafeInteger(id))
-					throw new Error("FETCH object gap is unsupported");
+				if (id === undefined || !Number.isSafeInteger(id) || id < next)
+					throw new ProtocolViolation("FETCH object ID decreased");
+				if (!this.#timestampIds && id !== next) throw new Error("FETCH object gap is unsupported");
 				if (key === this.last && this.bound !== undefined && id >= this.bound)
 					throw new ProtocolViolation("FETCH continued past FETCH_OK's End Location");
 				const producer = this.#current?.producer;
 				if (producer) {
-					const timestamp = objectTime(this.#timescale, producer.start);
+					const timestamp = this.#timestampIds
+						? objectTime(this.#timescale, producer.start, BigInt(id), object.tie ?? 0n)
+						: objectTime(this.#timescale, producer.start);
 					if (object.payload) producer.writeFrame({ payload: object.payload, timestamp });
 					else if (
 						!(await untilAborted(

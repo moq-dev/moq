@@ -1659,12 +1659,12 @@ test("a group that beats its track info waits for it", async () => {
 	}
 });
 
-// A lite-07 FRAME: the payload size plus one, the zigzag timestamp delta, then the first `sent`
+// A lite-07 FRAME: the payload size plus one, the unsigned timestamp delta, then the first `sent`
 // bytes of the payload.
 function liteFrame(delta: number, payload: Uint8Array, sent = payload.byteLength): Promise<Uint8Array> {
 	return Writer.collect(Version.DRAFT_07, async (w) => {
 		await w.u53(payload.byteLength + 1);
-		await w.u62(BigInt(delta) * 2n);
+		await w.u62(BigInt(delta));
 		if (sent > 0) await w.write(payload.subarray(0, sent));
 	});
 }

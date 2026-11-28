@@ -2059,12 +2059,12 @@ impl FrameIngest {
 						continue;
 					}
 					// Before lite-07 the timestamp delta doubles as the per-frame sentinel.
-					let Some(zz) = ready!(self.poll_header_varint(reader, size.is_none(), waiter))? else {
+					let Some(raw) = ready!(self.poll_header_varint(reader, size.is_none(), waiter))? else {
 						return Poll::Ready(Ok(None));
 					};
 					let next = self
 						.clock
-						.timestamp(crate::coding::varint::unzigzag(zz))
+						.decode_delta(raw)
 						.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 					let scale = self.framing.timescale.expect("only a timed track is stamped");
 					let timestamp = Timestamp::new(next, scale)
@@ -2203,10 +2203,10 @@ impl FrameIngest {
 				IngestPhase::Timing { size } => {
 					let size = *size;
 					if self.framing.stamped() {
-						let Poll::Ready(Ok(zz)) = reader.poll_varint(&noop) else {
+						let Poll::Ready(Ok(delta)) = reader.poll_varint(&noop) else {
 							return None;
 						};
-						let next = self.clock.timestamp(crate::coding::varint::unzigzag(zz))?;
+						let next = self.clock.decode_delta(delta)?;
 						max_ts = max_ts.max(next);
 					}
 					self.phase = IngestPhase::Inflated { size, timestamp: None };
@@ -5650,19 +5650,18 @@ mod tests {
 		assert_eq!(group.end(), Some(12));
 	}
 
-	/// The first FRAME counts from the group's start, later ones from the frame before, and
-	/// GROUP_END from the highest frame, not the last, since B-frames go back in time. The
-	/// whole group's span holds no other start, so a reader waits for none there.
+	/// The first FRAME counts from the group's start, later ones from the frame before using
+	/// unsigned non-negative deltas, and GROUP_END from the last frame. The whole group's span
+	/// holds no other start, so a reader waits for none there.
 	#[kio::test]
 	async fn group_end_counts_from_the_highest_frame() {
 		let x = u64::from(b'x');
-		let zigzag = crate::coding::varint::zigzag;
-		// Frames at 10, 12 and 10, then an End 3 past 12.
-		let body = [2, zigzag(0), x, 2, zigzag(2), x, 2, zigzag(-2), x, 0, 3];
+		// Frames at 10, 12 and 12 (deltas 0, 2, 0), then an End 3 past 12.
+		let body = [2, 0, x, 2, 2, x, 2, 0, x, 0, 3];
 		let (res, track, _) = receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(10), &body).await;
 		res.unwrap();
 		let mut group = track.consume().peek_group(10).unwrap();
-		for millis in [10, 12, 10] {
+		for millis in [10, 12, 12] {
 			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(frame.timestamp, Timestamp::from_millis(millis).unwrap());
 		}
@@ -5742,7 +5741,7 @@ mod tests {
 	/// time from it, so the frame keeps the time its own header carries.
 	#[kio::test]
 	async fn ietf_records_leave_time_to_their_frame() {
-		let frame = crate::coding::varint::zigzag(500);
+		let frame = 500u64;
 		// Each record after its Object code: Object 0 unless it says otherwise.
 		for (record, ok, reason) in [
 			(&[0, 0][..], true, "nothing at all"),
@@ -5753,7 +5752,8 @@ mod tests {
 		] {
 			let mut body = vec![0x1 | 0x4];
 			body.extend(record);
-			body.extend([frame, 0]);
+			// The first frame's zigzag delta from the group's start at 0.
+			body.extend([frame * 2, 0]);
 			let (res, track, _) = receive_ietf(draft18(Some(Timescale::MILLI)), &body).await;
 			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
 			if ok {
@@ -5804,14 +5804,19 @@ mod tests {
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
-		// The first delta counts from the group's start on lite-07, and from 0 before.
+		// The first delta counts from the group's start on lite-07, and from 0 before, both zigzag;
+		// lite-07's later deltas are unsigned.
 		let base = match version.has_group_end() {
 			true => 5,
 			false => 0,
 		};
 		for (index, delta) in deltas.iter().enumerate() {
 			let delta = if index == 0 { delta - base } else { *delta };
-			encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
+			let wire = match version.has_group_end() && index > 0 {
+				true => u64::try_from(delta).expect("a later lite-07 delta must be non-negative"),
+				false => crate::coding::varint::zigzag(delta),
+			};
+			encoder.varint(wire).unwrap();
 			encoder.bytes(b"frame").unwrap();
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
@@ -6127,9 +6132,9 @@ mod tests {
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
-			encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+			encoder.varint(300).unwrap();
 			encoder.bytes(b"first").unwrap();
-			encoder.varint(crate::coding::varint::zigzag(1)).unwrap();
+			encoder.varint(1).unwrap();
 			encoder.bytes(b"again").unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::eof(script);
 			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
@@ -6252,7 +6257,7 @@ mod tests {
 				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
 				if length_first {
 					encoder.varint(payload.len() as u64 + 1).unwrap();
-					encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
+					encoder.varint(delta as u64).unwrap();
 				} else {
 					encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
 					encoder.varint(payload.len() as u64).unwrap();
@@ -8576,10 +8581,10 @@ mod tests {
 			}
 			.encode(&mut w, version)
 			.unwrap();
-			// A one-byte payload's length plus one, then the frame at the group's key, since
-			// starts strictly increase.
+			// A one-byte payload's length plus one, then the frame at the group's key (a zero
+			// delta), since starts strictly increase.
 			w.varint(2).unwrap();
-			w.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
+			w.varint(0).unwrap();
 			w.u8(payload);
 			bytes
 		};
@@ -8653,7 +8658,7 @@ mod tests {
 			.encode(&mut w, version)
 			.unwrap();
 			w.varint(2).unwrap();
-			w.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
+			w.varint(key).unwrap();
 			w.u8(key as u8);
 			bytes
 		};

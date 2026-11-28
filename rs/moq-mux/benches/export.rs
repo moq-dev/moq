@@ -54,6 +54,7 @@ async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, 
 			track
 				.write(Frame {
 					timestamp: Timestamp::from_millis(index as u64 * 20).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"audio-frame"),
 					keyframe: index == 0,
@@ -293,6 +294,7 @@ async fn prepare_video(
 		video
 			.write(Frame {
 				timestamp: Timestamp::from_scale(pts, 90_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.into(),
 				keyframe: index == 0,

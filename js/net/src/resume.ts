@@ -82,6 +82,7 @@ import {
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
+import type { Timescale } from "./time.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import {
@@ -479,6 +480,11 @@ interface Copy {
 	 * for it after all.
 	 */
 	drains?: Set<bigint>;
+	/**
+	 * Asked only for groups under the serving copy's resume point, which come as fills or from a
+	 * feed asked below where it started: an ordered read waits on what it still owes there.
+	 */
+	fills?: true;
 }
 
 /**
@@ -1061,6 +1067,34 @@ class Reader implements ResumeSource {
 			);
 	}
 
+	/**
+	 * Whether a fill other than `next`, the copy an ordered read is about to hand out `key` from,
+	 * still owes a group below `key` that `delivered` lacks, the reader's window and cursor name, and
+	 * the reader or a copy has not recorded skipped, as its own ordered read waits for it: one a fill
+	 * of its route has yet to answer, or its received route's live feed owes within the budget. Each
+	 * fill judges its own drops: another route giving a group up says nothing of this one. Arms that
+	 * read's wakeups, which wake this one. Mirrors the Rust `Reader::fill_owes_below`.
+	 */
+	#fillOwesBelow(next: Copy, key: bigint, delivered: Delivered): boolean {
+		const floor = delivered.runEnd(0n) ?? 0n;
+		const cursor = this.#shell.cursor.peek();
+		for (const copy of this.#copies) {
+			if (!copy.fills || copy === next || !this.#feeds(copy)) continue;
+			const start = max(floor, copy.backfill ? cursor.start : max(cursor.start, copy.floor ?? 0n));
+			const end = min(min(key, copyEnd(copy) ?? key), cursor.end ?? key);
+			if (start >= end) continue;
+			const skipped = this.skippedIn(start, end);
+			for (const run of this.#window().runs(start, end)) {
+				for (const gap of delivered.gaps(run.start, run.end)) {
+					for (const open of runGaps(skipped, gap.start, gap.end)) {
+						if (hooks.owes(copy.sub, open.start, open.end)) return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
 	#update(copy: Copy): void {
 		// A closed copy still resolves replaced ranges against the groups it holds, for the window.
 		const wire = this.#wire(copy);
@@ -1190,6 +1224,7 @@ class Reader implements ResumeSource {
 			widened.until = end - 1n;
 			widened.since = now();
 			widened.done = undefined;
+			widened.fills = true;
 			if (raised) widened.backfill = true;
 			this.#update(widened);
 			this.#bound(widened);
@@ -1212,6 +1247,7 @@ class Reader implements ResumeSource {
 				replaced: true,
 				since: now(),
 				lease: 0,
+				fills: true,
 			},
 			this.#copies.length - 1,
 		);
@@ -1493,6 +1529,8 @@ class Reader implements ResumeSource {
 				if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
 					return this.tryGroup(ordered, delivered, dispositions, admit);
 				}
+				// The fill's answer, its track giving the group up, or the budget wakes the read.
+				if (this.#fillOwesBelow(next, first.key, delivered)) return { kind: "idle" };
 			}
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
@@ -2536,6 +2574,16 @@ class Reader implements ResumeSource {
 	proven(): boolean {
 		const serving = this.#serving();
 		return serving !== undefined && hooks.provenTrack(serving.sub);
+	}
+
+	owes(start: bigint, end: bigint): boolean {
+		for (const copy of this.#copies) {
+			const from = copy.backfill || copy.floor === undefined ? start : max(start, copy.floor);
+			const bound = copyEnd(copy);
+			const to = bound === undefined ? end : min(end, bound);
+			if (from < to && hooks.owes(copy.sub, from, to)) return true;
+		}
+		return false;
 	}
 
 	mayLand(land: Land): boolean {
@@ -3704,9 +3752,9 @@ export class Front {
 		}
 	}
 
-	largest(name: string, meta = false): track.Position | undefined {
+	largest(name: string, meta = false, timescale?: Timescale): track.Position | undefined {
 		const source = this.#source;
-		return source && (meta ? source.meta : source.wire).largest(name);
+		return source && (meta ? source.meta : source.wire).largest(name, timescale);
 	}
 
 	async fetchGroup(
@@ -3869,7 +3917,7 @@ class FrontConsumer extends broadcast.Consumer {
 			lister: view.lister,
 			subscribe: (name, options) => front.subscribe(name, options),
 			resolveTrackInfo: (name, hold) => front.resolveTrackInfo(name, hold),
-			largest: (name) => front.largest(name),
+			largest: (name, timescale) => front.largest(name, false, timescale),
 			fetchGroup: (name, key, options) => front.fetchGroup(name, key, options),
 		};
 		// Each route's source decides which copy a metadata reader gets; the front keeps the two

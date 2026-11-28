@@ -1039,6 +1039,37 @@ impl GroupState {
 		self.log.get(index)
 	}
 
+	/// Each frame's moq-timestamp Object ID and timestamp value in order, from frame 0 through
+	/// any in flight, for the group starting at `start`; `None` once this copy no longer holds
+	/// frame 0.
+	///
+	/// Derived from timestamps alone, so every copy holding frame 0 agrees on them, while a
+	/// copy without it cannot know where a run of tied timestamps pushed the IDs.
+	/// `timestamp_ids` says whether a relayed copy's wire Object IDs are timestamp IDs.
+	#[cfg(feature = "async")]
+	fn timed_ids(&self, start: u64, timestamp_ids: bool) -> Option<impl Iterator<Item = (u64, u64)> + '_> {
+		let whole = match self.wire() {
+			None => true,
+			// Timestamp IDs skip ticks with no gap mark, so only a copy from the group's first
+			// object whose IDs match the derived ones vouches for holding every frame.
+			Some(wire) if timestamp_ids => wire.first_object && !wire.sparse,
+			// Ordinal IDs declare each skipped ID with a gap, so a copy whose gaps account for
+			// every ID it lacks, its head's included, holds every frame.
+			Some(wire) => wire.fetchable,
+		};
+		if self.held() != 0 || !whole {
+			return None;
+		}
+		let partial = self.partial.as_ref().map(|partial| partial.timestamp);
+		let stamps = self.entries(0, self.committed()).map(|entry| entry.frame.timestamp);
+		let mut prior = None;
+		Some(stamps.chain(partial).map(move |timestamp| {
+			let (id, _) = crate::ietf::object::timestamp_object_id(start, prior, timestamp.value());
+			prior = Some(id);
+			(id, timestamp.value())
+		}))
+	}
+
 	/// The committed frames held in `start..end`, in order.
 	fn entries(&self, start: usize, end: usize) -> impl Iterator<Item = &Entry> {
 		(start.max(self.held())..end.min(self.committed())).map_while(|index| self.entry(index))
@@ -1545,11 +1576,35 @@ impl GroupState {
 		self.poll_terminal(index)
 	}
 
-	/// Check frame 0's `timestamp` against the track's `neighbors`, returning how to record
-	/// it. Anything but a timed frame 0 checked under an open local track is unchecked.
-	fn check_start(&self, neighbors: Option<&track::Neighbors>, timestamp: Timestamp) -> Result<Origin> {
+	/// Check the next frame's `timestamp`, returning how to record the group's start.
+	///
+	/// A group's timestamps never decrease, so lite-07 carries them as unsigned deltas and a
+	/// moq-transport Object ID as their offset from the group's start: a frame below its
+	/// predecessor is [`Error::TimestampMismatch`]. An `unchecked` copy is exempt, since a
+	/// released lite-05/06 publisher may stamp decreasing presentation times, and the lite-07
+	/// egress refuses that group instead.
+	///
+	/// Frame 0 is also checked against the track's `neighbors`. Anything but a timed frame 0
+	/// checked under an open local track is unchecked, including a relayed copy's first object
+	/// when it starts mid-group.
+	fn check_frame(
+		&self,
+		neighbors: Option<&track::Neighbors>,
+		unchecked: bool,
+		timestamp: Timestamp,
+	) -> Result<Origin> {
+		if let Timeline::Timed { latest, .. } = self.timeline
+			&& !unchecked
+			&& timestamp.value() < latest.value()
+		{
+			return Err(Error::TimestampMismatch);
+		}
 		match (neighbors, timestamp.timed()) {
-			(Some(neighbors), Some(start)) if self.next_index == 0 => neighbors.admit(start),
+			(Some(neighbors), Some(start))
+				if self.next_index == 0 && !self.wire().is_some_and(|wire| !wire.first_object) =>
+			{
+				neighbors.admit(start)
+			}
 			_ => Ok(self.origin),
 		}
 	}
@@ -1595,8 +1650,40 @@ impl GroupState {
 		self.relay.as_ref()?.wire.as_ref()
 	}
 
+	/// See [`Handle::last_data_object`].
+	fn last_data_object(&self) -> Option<u64> {
+		match self.wire() {
+			Some(wire) => match self.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
+			None => (self.next_index as u64).checked_sub(1),
+		}
+	}
+
 	fn wire_mut(&mut self) -> Option<&mut Wire> {
 		self.relay.as_mut()?.wire.as_mut()
+	}
+
+	/// Record a relayed object's wire `id` at frame `index` of the group starting at `start`.
+	///
+	/// A copy stays ordinal-aligned while each ID is its ordinal, or, on a track whose Object
+	/// IDs are timestamps (`timestamp_ids`), the moq-timestamp ID its timestamp takes after the
+	/// previous object's (see [`crate::ietf::object::timestamp_object_id`]): either way the
+	/// same frame has the same ID on every copy from frame 0. Anything else, or a copy whose
+	/// first object is not the group's, is sparse.
+	fn relayed(&mut self, id: u64, index: u64, start: u64, timestamp: Timestamp, timestamp_ids: bool) {
+		let offset = self.offset;
+		let Some(wire) = self.wire_mut() else {
+			return;
+		};
+		let prior = wire.last.replace(id);
+		let timed = timestamp_ids && id == crate::ietf::object::timestamp_object_id(start, prior, timestamp.value()).0;
+		if offset == 0 {
+			wire.sparse |= (id != index && !timed) || (!wire.first_object && wire.first_id > 0);
+		} else if !timestamp_ids {
+			wire.sparse |= id != index;
+		}
 	}
 
 	fn canonicalize(&self, index: usize, entry: &mut Entry) -> Result<()> {
@@ -2090,7 +2177,9 @@ impl Producer {
 	///
 	/// `timestamp` is converted into the parent track's timescale. On a scale-less track it
 	/// is [`Timestamp::unscaled`] at this group's start; a frame that doesn't match its track
-	/// is [`Error::TimestampMismatch`].
+	/// is [`Error::TimestampMismatch`]. So is one below the previous frame's timestamp: a
+	/// group's timestamps never decrease, so a stream with B-frames stamps decode time and
+	/// carries presentation time in its payload.
 	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
 		// A metadata copy holds no payload, so nothing writes one into it.
 		if self.handle.alive.meta {
@@ -2139,7 +2228,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
-		let origin = state.check_start(neighbors.as_ref(), timestamp)?;
+		let origin = state.check_frame(neighbors.as_ref(), self.handle.track.unchecked, timestamp)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let inflated = declared.unwrap_or(payload.len() as u64);
 		let payload = match &mut state.flate {
@@ -2173,10 +2262,8 @@ impl Producer {
 			state.charge.add(metadata_bytes);
 		}
 		let index = state.next_index as u64;
-		if let Some(wire) = state.wire_mut() {
-			wire.last = Some(object_id);
-			wire.sparse |= object_id != index;
-		}
+		let timestamp_ids = self.handle.track.timestamp_ids() == Some(true);
+		state.relayed(object_id, index, self.handle.info.start, timestamp, timestamp_ids);
 		let now = state.commit(entry);
 		state.next_index = next_index;
 		state.wrote = true;
@@ -2224,8 +2311,14 @@ impl Producer {
 		if self.handle.alive.meta {
 			return Err(Error::Unsupported);
 		}
+		let mut prev: Option<Timestamp> = None;
 		for frame in frames.filled() {
-			self.handle.track.rescale_in(frame.timestamp, self.handle.info.start)?;
+			let timestamp = self.handle.track.rescale_in(frame.timestamp, self.handle.info.start)?;
+			// The group checks the first against its own frames; the rest are checked here.
+			if !self.handle.track.unchecked && prev.is_some_and(|prev| timestamp.value() < prev.value()) {
+				return Err(Error::TimestampMismatch);
+			}
+			prev = Some(timestamp);
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
 				return Err(Error::FrameTooLarge);
 			}
@@ -2248,8 +2341,9 @@ impl Producer {
 		state.admit(next_index)?;
 		let first = frames.filled().first().map(|frame| frame.timestamp);
 		let origin = match first {
-			Some(timestamp) => state.check_start(
+			Some(timestamp) => state.check_frame(
 				neighbors.as_ref(),
+				self.handle.track.unchecked,
 				self.handle
 					.track
 					.rescale_in(timestamp, self.handle.info.start)
@@ -2360,8 +2454,8 @@ impl Producer {
 	/// build it with doesn't have to match the track. A frame the group cannot take
 	/// aborts the group with the error: [`Error::FrameTooLarge`] if the declared size
 	/// exceeds 32 MiB, what a copy holds (refused before allocating),
-	/// [`Error::TimestampMismatch`] if the timestamp can't be converted, or
-	/// [`Error::Closed`] once the group finished.
+	/// [`Error::TimestampMismatch`] if the timestamp can't be converted or falls below the
+	/// previous frame's, or [`Error::Closed`] once the group finished.
 	///
 	/// The declared size is allocated up front while the frames in flight through the
 	/// origin handle fit its budget, and grows with the bytes written past that, so a
@@ -2429,7 +2523,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
-		let origin = state.check_start(neighbors.as_ref(), timestamp)?;
+		let origin = state.check_frame(neighbors.as_ref(), self.handle.track.unchecked, timestamp)?;
 		// Only one frame is ever in flight, so the declared size is the most the cache
 		// can grow by before the next check.
 		let metadata_bytes = header.fields.as_ref().map_or(0, |fields| fields.heap());
@@ -2474,10 +2568,14 @@ impl Producer {
 			.as_ref()
 			.and_then(|partial| partial.fields.as_ref())
 			.map_or(state.next_index as u64, |fields| fields.id);
-		if let Some(wire) = state.wire_mut() {
-			wire.last = Some(object_id);
-			wire.sparse |= object_id != (next_index - 1) as u64;
-		}
+		let timestamp_ids = self.handle.track.timestamp_ids() == Some(true);
+		state.relayed(
+			object_id,
+			(next_index - 1) as u64,
+			self.handle.info.start,
+			timestamp,
+			timestamp_ids,
+		);
 		state.next_index = next_index;
 		state.wrote = true;
 		// Opening the frame is enough: the header carries the timestamp, so the group's
@@ -2779,6 +2877,16 @@ impl Producer {
 		self.handle.frame_count()
 	}
 
+	/// The highest timestamp written so far, or `None` before a timed frame.
+	///
+	/// A group's timestamps never decrease, so a timed frame below it is refused.
+	pub fn latest(&self) -> Option<Timestamp> {
+		match self.handle.state.read().timeline {
+			Timeline::Timed { latest, .. } => Some(latest),
+			_ => None,
+		}
+	}
+
 	/// Whether the group has been aborted (including pool eviction). The track's
 	/// read paths treat an aborted cached group as absent.
 	///
@@ -2892,8 +3000,12 @@ impl Handle {
 			if wire.last.is_some() && gap.is_some_and(|gap| gap > missing) {
 				return Err(Error::MalformedTrack);
 			}
-			// A first object's gap may also cover IDs below where this copy starts.
-			wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
+			// A first object's gap may also cover IDs below where this copy starts. Timestamp
+			// Object IDs skip the ticks between frames with no Prior Object ID Gap, so a FETCH
+			// judges such a copy's missing head by its first ID instead (`ietf::publisher`).
+			if self.track.timestamp_ids() != Some(true) {
+				wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
+			}
 		}
 		Ok(())
 	}
@@ -3264,14 +3376,7 @@ impl Handle {
 	/// else its frame index; `None` before the first frame. A terminal object does not
 	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
 	pub(crate) fn last_data_object(&self) -> Option<u64> {
-		let state = self.state.read();
-		match state.wire() {
-			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
-				Some(relay) => relay.last_before_end,
-				None => wire.last,
-			},
-			None => (state.next_index as u64).checked_sub(1),
-		}
+		self.state.read().last_data_object()
 	}
 
 	/// Cap the group at `frames`, for a track end inside it, or lift the cap with `None`:
@@ -3701,6 +3806,8 @@ impl Handle {
 				timescale: self.track.timescale,
 				#[cfg(feature = "async")]
 				ietf: self.track.ietf(),
+				#[cfg(feature = "async")]
+				timestamp_ids: self.track.timestamp_ids(),
 				arrived: self.alive.arrived,
 				stale_counted: AtomicBool::new(false),
 				stale_under: std::sync::OnceLock::new(),
@@ -4340,6 +4447,8 @@ pub(super) struct Delivery {
 	timescale: Option<Timescale>,
 	#[cfg(feature = "async")]
 	ietf: Option<crate::ietf::Version>,
+	#[cfg(feature = "async")]
+	timestamp_ids: Option<bool>,
 	arrived: crate::time::Instant,
 	// Whichever reader observes expiry first records its unread tail only once.
 	pub(super) stale_counted: AtomicBool,
@@ -4489,6 +4598,7 @@ impl Consumer {
 		self.cursor.state.read().past_cut(index)
 	}
 
+	/// The last object's ID, the terminal one included, as a relay preserves it for Largest.
 	#[cfg(feature = "async")]
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
@@ -4496,6 +4606,91 @@ impl Consumer {
 			Some(wire) => wire.last,
 			None => (state.next_index as u64).checked_sub(1),
 		}
+	}
+
+	/// The last data object's ID, as [`Handle::last_data_object`]: never the terminal object.
+	#[cfg(feature = "async")]
+	pub(crate) fn last_data_object(&self) -> Option<u64> {
+		self.cursor.state.read().last_data_object()
+	}
+
+	/// The ordinal of the last frame written, which a dense Object ID equals.
+	#[cfg(feature = "async")]
+	pub(crate) fn last_frame(&self) -> Option<u64> {
+		(self.cursor.state.read().next_index as u64).checked_sub(1)
+	}
+
+	/// The moq-timestamp Object ID of frame `index` (see [`GroupState::timed_ids`]), or `None`
+	/// when it is not written yet or this copy no longer holds frame 0.
+	#[cfg(feature = "async")]
+	pub(crate) fn timed_id(&self, index: u64) -> Option<u64> {
+		let index = usize::try_from(index).ok()?;
+		self.cursor
+			.state
+			.read()
+			.timed_ids(self.start, self.timestamp_ids() == Some(true))?
+			.nth(index)
+			.map(|(id, _)| id)
+	}
+
+	/// Frame `index`'s moq-timestamp Object ID and timestamp value, as [`Self::timed_id`], or
+	/// [`Error::TimestampMismatch`] when a timestamp through it decreases, which those IDs
+	/// can't carry: a lite-05/06 copy may hold one.
+	#[cfg(feature = "async")]
+	pub(crate) fn timed_entry(&self, index: u64) -> Option<Result<(u64, u64)>> {
+		let index = usize::try_from(index).ok()?;
+		let state = self.cursor.state.read();
+		let mut prior: Option<(u64, u64)> = None;
+		for (count, (id, timestamp)) in state
+			.timed_ids(self.start, self.timestamp_ids() == Some(true))?
+			.enumerate()
+		{
+			if prior.is_some_and(|(_, prior)| timestamp < prior) {
+				return Some(Err(Error::TimestampMismatch));
+			}
+			prior = Some((id, timestamp));
+			if count == index {
+				return prior.map(Ok);
+			}
+		}
+		None
+	}
+
+	/// The moq-timestamp Object ID of the last frame written. A copy that no longer holds
+	/// frame 0 answers the last timestamp's offset from the start, which the ID is never below.
+	#[cfg(feature = "async")]
+	pub(crate) fn last_timed_id(&self) -> Option<u64> {
+		let state = self.cursor.state.read();
+		let last = state.next_index.checked_sub(1)?;
+		if let Some((id, _)) = state
+			.timed_ids(self.start, self.timestamp_ids() == Some(true))
+			.and_then(|mut ids| ids.nth(last))
+		{
+			return Some(id);
+		}
+		match state.timeline {
+			Timeline::Timed { latest, .. } => Some(latest.value().saturating_sub(self.start)),
+			Timeline::Empty | Timeline::Untimed => None,
+		}
+	}
+
+	/// The first frame whose moq-timestamp Object ID is at least `id`, or the next frame to be
+	/// written when none is yet; `None` when this copy no longer holds frame 0.
+	#[cfg(feature = "async")]
+	pub(crate) fn timed_frame(&self, id: u64) -> Option<u64> {
+		let state = self.cursor.state.read();
+		let mut ids = state.timed_ids(self.start, self.timestamp_ids() == Some(true))?;
+		Some(match ids.position(|(timed, _)| timed >= id) {
+			Some(index) => index as u64,
+			None => state.next_index as u64,
+		})
+	}
+
+	/// Whether the group finished with every frame written, not cut short by its transport.
+	#[cfg(feature = "async")]
+	pub(crate) fn is_finished(&self) -> bool {
+		let state = self.cursor.state.read();
+		state.outcome.frames().is_some() && state.range_end.is_none()
 	}
 
 	#[cfg(feature = "async")]
@@ -4926,6 +5121,13 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.delivery.ietf
+	}
+
+	/// Whether the parent track's moq-transport publisher declared `ID_TIMESCALE`, so its
+	/// Object IDs are moq-timestamp IDs, or `None` for a moq-lite one.
+	#[cfg(feature = "async")]
+	pub(crate) fn timestamp_ids(&self) -> Option<bool> {
+		self.delivery.timestamp_ids
 	}
 
 	/// The index of the next frame this consumer will return.
@@ -5999,30 +6201,49 @@ mod test {
 	#[cfg(feature = "async")]
 	use futures::FutureExt;
 
+	/// A group's timestamps never decrease: a frame below its predecessor is refused where it
+	/// is created, by every write path, and a tie is fine.
 	#[test]
-	fn reordered_frames_keep_the_highest_group_pts() {
+	fn a_frame_below_its_predecessor_is_refused() {
+		let ms = |ms| Timestamp::from_millis(ms).unwrap();
 		for mode in 0..3 {
-			let mut group = Info { start: 0 }.produce();
-			let timestamps = [0, 80, 40].map(|ms| Timestamp::from_millis(ms).unwrap());
-			if mode == 1 {
-				let mut frames = frame::Buffer::<3>::new();
-				for timestamp in timestamps {
-					frames.push(Frame::new(timestamp, Bytes::new())).unwrap();
-				}
-				group.write_frames(&mut frames).unwrap();
-			} else {
-				for timestamp in timestamps {
-					if mode == 0 {
-						group.write_frame(timestamp, Bytes::new()).unwrap();
-					} else {
-						let frame = group.create_frame(frame::Info { size: 0, timestamp }).unwrap();
-						group = frame.finish().unwrap();
+			for (start, timestamps, refused) in [
+				(0, [0, 40, 40], None),
+				(0, [0, 80, 40], Some(2)),
+				(10, [15, 12, 20], Some(1)),
+			] {
+				let mut group = Some(Info { start }.produce());
+				let consumer = group.as_ref().unwrap().consume();
+				let timestamps = timestamps.map(ms);
+				let res = match mode {
+					1 => {
+						let mut frames = frame::Buffer::<3>::new();
+						for timestamp in timestamps {
+							frames.push(Frame::new(timestamp, Bytes::new())).unwrap();
+						}
+						group.as_mut().unwrap().write_frames(&mut frames)
 					}
+					_ => timestamps.into_iter().try_for_each(|timestamp| match mode {
+						0 => group.as_mut().unwrap().write_frame(timestamp, Bytes::new()),
+						_ => {
+							let frame = group.take().unwrap().create_frame(frame::Info { size: 0, timestamp })?;
+							group = Some(frame.finish()?);
+							Ok(())
+						}
+					}),
+				};
+				let label = format!("mode {mode}, start {start}");
+				match refused {
+					None => res.unwrap(),
+					Some(_) => assert!(matches!(res, Err(Error::TimestampMismatch)), "{label}: {res:?}"),
 				}
+				// A refused batch writes none of it.
+				let written = match (mode, refused) {
+					(1, Some(_)) => 0,
+					(_, refused) => refused.unwrap_or(3),
+				};
+				assert_eq!(consumer.frame_count(), written, "{label}");
 			}
-			assert_eq!(group.handle.timestamp(), Some(timestamps[0]), "mode {mode}");
-			assert_eq!(group.handle.latest(), Some(timestamps[1]), "mode {mode}");
-			group.finish().unwrap();
 		}
 	}
 

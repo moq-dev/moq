@@ -1317,6 +1317,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::ZERO,
+					decode: None,
 					duration: None,
 					payload: vec![0; 4].into(),
 					keyframe: true,
@@ -1327,6 +1328,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::ZERO,
+					decode: None,
 					duration: None,
 					payload: vec![0; 960 * 8 * 4].into(),
 					keyframe: true,
@@ -1391,6 +1393,7 @@ mod tests {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
+						decode: None,
 						duration: None,
 						payload: vec![0; 960 * size_of::<f32>()].into(),
 						keyframe: true,
@@ -1491,6 +1494,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: vec![0; 960 * size_of::<f32>()].into(),
 					keyframe: true,
@@ -1578,6 +1582,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: vec![0; 960 * size_of::<f32>()].into(),
 					keyframe: true,
@@ -1653,6 +1658,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(micros).unwrap(),
+					decode: None,
 					duration: None,
 					payload: vec![0; 960 * size_of::<f32>()].into(),
 					keyframe: true,
@@ -1745,6 +1751,7 @@ mod tests {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: Timestamp::from_micros(start + packet * 20_000).unwrap(),
+						decode: None,
 						duration: None,
 						payload: vec![0; 960 * size_of::<f32>()].into(),
 						keyframe: packet == 0,
@@ -1801,6 +1808,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(1_000_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: [0, 0, 0x80, 0x3e].repeat(7680).into(),
 				keyframe: true,
@@ -1856,6 +1864,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 					keyframe: true,
@@ -1950,6 +1959,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(packet * frames, 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload,
 					keyframe: true,
@@ -2146,6 +2156,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: payload.into(),
 					keyframe: true,
@@ -2214,6 +2225,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: vec![0u8; 1024 * size_of::<f32>()].into(),
 					keyframe: true,
@@ -2311,6 +2323,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(packet as u64 * 20_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload,
 					keyframe: packet == 0,
@@ -2353,6 +2366,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(micros).unwrap(),
+					decode: None,
 					duration: Some(Timestamp::from_micros(20_000).unwrap()),
 					keyframe: true,
 					payload: (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect::<Vec<_>>().into(),
@@ -2411,6 +2425,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(micros).unwrap(),
+					decode: None,
 					duration: Some(Timestamp::from_scale(1024, 44_100).unwrap()),
 					keyframe: true,
 					payload: (0..1024).flat_map(|_| sample.to_le_bytes()).collect::<Vec<_>>().into(),
@@ -2492,6 +2507,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_scale(packet * FRAMES, 44_100).unwrap(),
+					decode: None,
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -2552,6 +2568,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: moq_net::Timestamp::ZERO,
+				decode: None,
 				duration: None,
 				payload,
 				keyframe: true,
@@ -2634,6 +2651,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp,
+					decode: None,
 					payload: packet.payload,
 					keyframe: true,
 					duration: None,
@@ -2713,6 +2731,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: *stamp,
+					decode: None,
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -2769,6 +2788,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::try_from(PACKET * index).unwrap(),
+					decode: None,
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -2946,6 +2966,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(frames, 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload,
 					keyframe,
@@ -3060,6 +3081,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp,
+					decode: None,
 					duration: None,
 					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 					keyframe: true,
@@ -3149,6 +3171,7 @@ mod tests {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
+						decode: None,
 						duration: None,
 						payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 						keyframe: true,
@@ -3259,6 +3282,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(micros).unwrap(),
+					decode: None,
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -3367,6 +3391,7 @@ mod tests {
 					.unwrap();
 				let frame = moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -3467,6 +3492,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let frame = moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.clone(),
 				keyframe: true,
@@ -3541,6 +3567,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let frame = moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
+				decode: None,
 				duration: None,
 				payload: payload.clone(),
 				keyframe: true,
@@ -3649,6 +3676,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: crate::single(encoder.encode_all(&vec![0.25f32; encoder.frame_size()]).unwrap()).payload,
 				keyframe: true,
@@ -3765,6 +3793,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 					keyframe: true,
@@ -3822,6 +3851,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(packet * frame_size as u64, 48_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload,
 					keyframe: true,
@@ -3897,6 +3927,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::ZERO,
+				decode: None,
 				duration: None,
 				payload: payload.into(),
 				keyframe: true,
@@ -3950,6 +3981,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::ZERO,
+				decode: None,
 				payload: packet.payload,
 				keyframe: true,
 				duration: None,

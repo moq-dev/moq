@@ -18,25 +18,19 @@ import {
 	SessionError,
 	StreamCode,
 	StreamError,
+	TimestampMismatch,
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, WireRoute } from "../hop.ts";
-import {
-	datagramTrackInfo,
-	finalKey,
-	firstEligible,
-	hiddenBelow,
-	hooks,
-	presented,
-	type ReadGroupFrame,
-} from "../internal.ts";
+import { datagramTrackInfo, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { routeFailed } from "../resume.ts";
 import { type Stream, Writer } from "../stream.ts";
+import { floorAt, type Timescale } from "../time.ts";
 import {
 	type Groups,
 	type Info,
@@ -62,7 +56,7 @@ import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
+import { FetchFrame, Frame, Group as GroupMessage, timestampObjectId } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
@@ -87,7 +81,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
-import { type IetfVersion, isDraft23 } from "./version.ts";
+import { hasTimestampObjectIds, type IetfVersion, isDraft23 } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
 const RETRY_BASE = 100;
@@ -250,6 +244,8 @@ interface RunGroup {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+	/** The track's timescale when this subscription carries moq-timestamp Object IDs and TIMESTAMP_TIE. */
+	timescale?: Timescale;
 }
 
 /** How many data streams a subscription opened, fill streams included. */
@@ -299,6 +295,8 @@ interface RunFill {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+	/** The track's timescale when this subscription carries moq-timestamp Object IDs and TIMESTAMP_TIE. */
+	timescale?: Timescale;
 }
 
 // The condition a request that failed for `err` is refused with, mirroring Rust's `to_code`: a
@@ -755,7 +753,8 @@ export class Publisher {
 			// fill ends exactly where a Next Object subscription begins, which is what lets
 			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
 			// group with no gap and no overlap.
-			const edge = liveEdge(track);
+			const timescale = idTimescale(info, version);
+			const edge = liveEdge(track, timescale);
 			const fill =
 				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
@@ -857,6 +856,7 @@ export class Publisher {
 					unsubscribed,
 					cancelled: fillAbort.signal,
 					streams,
+					timescale,
 				}).finally(() => {
 					if (filling === fill) filling = undefined;
 				});
@@ -884,6 +884,7 @@ export class Publisher {
 					bounds,
 					unsubscribed,
 					streams,
+					timescale,
 				});
 				groups.add(task);
 				void task.finally(() => groups.delete(task));
@@ -910,7 +911,7 @@ export class Publisher {
 						// A fill holds one cache view. At most this decoded update waits behind
 						// it; request parsing then backpressures any further fill requests.
 						if (params.fillParameters) await filling;
-						const snapshot = liveEdge(track);
+						const snapshot = liveEdge(track, timescale);
 						this.#applyPublished(msg, params);
 						const selected =
 							msg.fill && Filter.isDraft20(version)
@@ -1081,11 +1082,23 @@ export class Publisher {
 			// subscriber where the track ended. A range that stopped short of the end never saw
 			// it, and claiming it would end the subscriber's track early.
 			const final = hooks.subscriberEnd(track);
-			const reached = final !== undefined && (range.end === undefined || range.end.group + 1n >= finalKey(final));
-			if (!datagramTrack && ended && !publishError && final !== undefined && reached && !streams.terminalSent) {
+			const wireEnd = final !== undefined ? this.#wireEnd(track, final, timescale) : undefined;
+			const reached =
+				wireEnd !== undefined &&
+				(range.end === undefined ||
+					(wireEnd.object === 0
+						? range.end.group >= wireEnd.group ||
+							(range.end.group + 1n === wireEnd.group &&
+								(range.end.object === undefined ||
+									this.#objectCapReachesEnd(track, range.end.group, range.end.object, timescale)))
+						: range.end.group > wireEnd.group ||
+							(range.end.group === wireEnd.group &&
+								(range.end.object === undefined || range.end.object + 1n >= BigInt(wireEnd.object)))));
+			if (!datagramTrack && ended && !publishError && wireEnd !== undefined && reached && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
-					final,
+					group: wireEnd.group,
+					wireObject: wireEnd.object,
 					publisherPriority,
 					unsubscribed,
 					streams,
@@ -1233,7 +1246,8 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, track, group, publisherPriority, ranking, live, bounds, unsubscribed, streams } = options;
+		const { requestId, track, group, publisherPriority, ranking, live, bounds, unsubscribed, streams, timescale } =
+			options;
 		const { slice } = live;
 		const excluded = Promise.withResolvers<void>();
 		let rangeError: Error | undefined;
@@ -1293,8 +1307,8 @@ export class Publisher {
 				subGroupId: 0n,
 				publisherPriority,
 				flags: {
-					// Only the Prior Group ID Gap is ever written as a property.
-					hasExtensions: groupGap > 0n,
+					// A timed track may emit TIMESTAMP_TIE on any frame, so carry extension lengths.
+					hasExtensions: groupGap > 0n || timescale !== undefined,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
 					// A FIN never claims the group's end: an explicit END_OF_GROUP does, once the
@@ -1302,7 +1316,8 @@ export class Publisher {
 					hasEnd: false,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
-					// a trimmed head starts partway through.
+					// a trimmed head starts partway through. A timed slice past Object 0 may still
+					// start at frame 0, which its first read below settles.
 					firstObject: slice.skip === 0,
 				},
 			});
@@ -1335,14 +1350,32 @@ export class Publisher {
 			};
 
 			try {
+				const ids = timescale && new TimedIds(group.start, timescale);
+				// Reading from the filter's start drops the objects below it: they are outside the
+				// requested range, so skipping them is not a gap. A moq-timestamp ID follows the
+				// one before it, so a timed read walks from frame 0.
+				const readNext = () =>
+					race([hooks.readGroupFrame(group, false, ids ? 0 : slice.skip), closed, stopped]);
+				// A timed slice past Object 0 starts at frame 0 only when frame 0's ID reaches it, so its
+				// header waits on the first read, which the loop below then sends, as the Rust
+				// `describe` waits for a write. A slice that selects nothing needs no frame.
+				let held: { read: Awaited<ReturnType<typeof readNext>> } | undefined;
+				if (
+					timescale !== undefined &&
+					slice.skip > 0 &&
+					(slice.until === undefined || slice.until > slice.skip)
+				) {
+					const read = await readNext();
+					// Frame 0's ID counts from the group's start alone.
+					if (read && read.index === 0) {
+						const dts = BigInt(floorAt(read.frame.timestamp, timescale));
+						header.flags.firstObject =
+							timestampObjectId(group.start, undefined, dts).id >= BigInt(slice.skip);
+					}
+					held = { read };
+				}
 				await send(() => header.encode(stream, this.#session.version));
-				// The first written object goes on the wire as its absolute id, so a trimmed
-				// head shows the true numbering rather than a silently renumbered group.
-				let first = true;
-				// The next object id that could be written, which starts at the filter rather
-				// than at zero. A backwards range (`startObject` above `endObject` in the same
-				// group) is empty, and starting here is what lets the check below see that
-				// before the read parks on an object the range already excludes.
+				let priorObject: bigint | undefined;
 				let next = slice.skip;
 				// Whether the group finished, rather than the range or a stop ending the read.
 				let ended = false;
@@ -1352,24 +1385,26 @@ export class Publisher {
 					// outside the requested range, so stop without waiting for the group's end.
 					if (slice.until !== undefined && next >= slice.until) break;
 
-					// Reading from the filter's start drops the objects below it: they are outside
-					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, false, slice.skip), closed, stopped]);
+					const read = held ? held.read : await readNext();
+					held = undefined;
 					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (read === undefined) ended = true;
 					if (!read) break;
-					next = read.index + 1;
-					if (slice.until !== undefined && read.index >= slice.until) break;
+
+					const { id, tie } = ids ? ids.next(read) : { id: BigInt(read.index), tie: undefined };
+					next = Number(id) + 1;
+					if (slice.until !== undefined && Number(id) >= slice.until) break;
+					if (Number(id) < slice.skip) continue;
 
 					// A frame written in pieces streams its payload after the header.
 					const chunks = read.chunks;
 					const gap = read.index === 0 ? groupGap : undefined;
 					const obj = chunks?.size
-						? new Frame({ streamed: chunks.size, groupGap: gap })
-						: new Frame({ payload: chunks ? new Uint8Array(0) : read.frame.payload, groupGap: gap });
-					const delta = first ? read.index : 0;
-					first = false;
+						? new Frame({ streamed: chunks.size, groupGap: gap, tie })
+						: new Frame({ payload: chunks ? new Uint8Array(0) : read.frame.payload, groupGap: gap, tie });
+					const delta = priorObject === undefined ? id : id - priorObject - 1n;
+					priorObject = id;
 					await send(() => obj.encode(stream, header.flags, this.#session.version, delta));
 					// Even an empty one: it is an object only once committed, and may still be aborted.
 					if (chunks) await send(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
@@ -1377,22 +1412,20 @@ export class Publisher {
 
 				// The track ends right after this group's last object, so the marker rides this
 				// stream rather than a separate one.
+				const last = ids ? ids.nextMin() : group.frameCount;
 				const end = hooks.subscriberEnd(track);
-				const marked = end?.group === group.start && end.frame === next;
+				const inRange = last >= slice.skip && (slice.until === undefined || last < slice.until);
+				const marked = ended && inRange && end?.group === group.start && end.frame === group.frameCount;
 				// A finished group ends with END_OF_GROUP one past its last object, unless the
 				// END_OF_TRACK below marks that place or the range misses it: a filter starting
 				// past the group's end, or one stopping short of it.
-				const last = group.frameCount;
-				if (ended && !marked && last >= slice.skip && (slice.until === undefined || last < slice.until)) {
-					// Every object below `last` was written, so only an empty stream names it.
-					await send(() => new Frame().encode(stream, header.flags, this.#session.version, first ? last : 0));
-					first = false;
+				if (ended && !marked && inRange) {
+					const endDelta = priorObject === undefined ? BigInt(last) : BigInt(last) - priorObject - 1n;
+					await send(() => new Frame().encode(stream, header.flags, this.#session.version, endDelta));
 				} else if (marked) {
-					await new Frame({ endOfTrack: true }).encode(
-						stream,
-						header.flags,
-						this.#session.version,
-						first ? next : 0,
+					const endDelta = priorObject === undefined ? BigInt(last) : BigInt(last) - priorObject - 1n;
+					await send(() =>
+						new Frame({ endOfTrack: true }).encode(stream, header.flags, this.#session.version, endDelta),
 					);
 				}
 
@@ -1430,15 +1463,69 @@ export class Publisher {
 		}
 	}
 
+	/**
+	 * Where the track ends on this subscription's wire: past the moq-timestamp ID of the last frame
+	 * before `final` when `timescale` is set, else `final` itself. Undefined when this copy cannot
+	 * prove that ID, which is no end to declare. Mirrors the Rust `wire_end`.
+	 */
+	#wireEnd(
+		track: TrackSubscriber,
+		final: TrackPosition,
+		timescale: Timescale | undefined,
+	): { group: bigint; object: number } | undefined {
+		if (!timescale || final.frame <= 0) return { group: final.group, object: final.frame };
+		const cached = hooks.cachedGroup(track, final.group);
+		if (!cached) return undefined;
+		try {
+			const settled = hooks.groupSettledFrames(cached);
+			// An empty finished group was delivered, moving the subscriber's live edge past it.
+			if (settled === 0) return { group: final.group + 1n, object: 0 };
+			const frame = settled === undefined ? final.frame : Math.min(final.frame, settled);
+			const id = hooks.groupTimedId(cached, frame - 1, timescale);
+			return id === undefined ? undefined : { group: final.group, object: Number(id) + 1 };
+		} finally {
+			cached.close();
+		}
+	}
+
+	/**
+	 * Whether a range ending at object `cap` of `group` reaches that group's last object, on this
+	 * subscription's wire. A timed group this copy cannot prove the last ID of doesn't.
+	 */
+	#objectCapReachesEnd(
+		track: TrackSubscriber,
+		group: bigint,
+		cap: bigint,
+		timescale: Timescale | undefined,
+	): boolean {
+		const cached = hooks.cachedGroup(track, group);
+		if (cached) {
+			try {
+				const count = hooks.groupSettledFrames(cached) ?? cached.frameCount;
+				if (count === 0) return true;
+				const last = timescale ? hooks.groupTimedId(cached, count - 1, timescale) : BigInt(count - 1);
+				return last !== undefined && cap >= last;
+			} finally {
+				cached.close();
+			}
+		}
+		const largest = hooks.objectLargest(track);
+		if (largest === undefined || largest.group < group) return true;
+		// An ordinal only bounds a moq-timestamp ID from below.
+		if (largest.group === group && !timescale) return cap >= BigInt(largest.frame);
+		return false;
+	}
+
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: TrackPosition;
+		group: bigint;
+		wireObject: number;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
 	}) {
-		const { requestId, final, publisherPriority, unsubscribed, streams } = options;
+		const { requestId, group, wireObject, publisherPriority, unsubscribed, streams } = options;
 		const version = this.#session.version;
 		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version }).catch(() => undefined);
 		if (!stream) return;
@@ -1447,7 +1534,7 @@ export class Publisher {
 		try {
 			const header = new GroupMessage({
 				trackAlias: requestId,
-				groupId: final.group,
+				groupId: group,
 				subGroupId: 0n,
 				publisherPriority,
 				flags: {
@@ -1456,11 +1543,11 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: false,
 					hasPriority: true,
-					firstObject: final.frame === 0,
+					firstObject: wireObject === 0,
 				},
 			});
 			await header.encode(stream, version);
-			await new Frame({ endOfTrack: true }).encode(stream, header.flags, version, final.frame);
+			await new Frame({ endOfTrack: true }).encode(stream, header.flags, version, wireObject);
 			stream.close();
 		} catch (err: unknown) {
 			stream.reset(error(err));
@@ -1475,7 +1562,8 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, ranking, fill, cache, publisherPriority, unsubscribed, cancelled, streams } = options;
+		const { requestId, ranking, fill, cache, publisherPriority, unsubscribed, cancelled, streams, timescale } =
+			options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -1516,6 +1604,7 @@ export class Publisher {
 					out,
 					group,
 					slice: groupSlice(fill, group.start),
+					timescale,
 					cancelled: given.signal,
 				});
 				stream.close();
@@ -1556,14 +1645,17 @@ export class Publisher {
 		out,
 		group,
 		slice,
+		timescale,
 		cancelled,
 	}: {
 		out: FetchWriter;
 		group: group.Consumer;
 		slice: GroupSlice;
+		timescale?: Timescale;
 		cancelled: AbortSignal;
 	}): Promise<void> {
 		let next = slice.skip;
+		const ids = timescale && new TimedIds(group.start, timescale);
 
 		// The subscriber leaving has to end the fill too. An absolute filter ending below the
 		// edge with no end object leaves `until` unset, so this reads until the group closes,
@@ -1576,13 +1668,17 @@ export class Publisher {
 
 			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
 			const frame = await untilAborted(
-				race([hooks.readGroupFrame(group, false, slice.skip), out.stream.closed]),
+				race([hooks.readGroupFrame(group, false, ids ? 0 : slice.skip), out.stream.closed]),
 				cancelled,
 			);
 			if (!frame) break;
-			next = frame.index + 1;
-			if (slice.until !== undefined && frame.index >= slice.until) break;
-			await out.object(group.start, frame, cancelled);
+			const timed = ids?.next(frame);
+			const oid = timed ? Number(timed.id) : frame.index;
+			const tie = timed?.tie;
+			next = oid + 1;
+			if (slice.until !== undefined && oid >= slice.until) break;
+			if (oid < slice.skip) continue;
+			await out.object(group.start, frame, cancelled, oid, tie);
 		}
 	}
 
@@ -2259,7 +2355,8 @@ export class Publisher {
 			try {
 				const broadcast = await this.#resolve(name, hold.signal);
 				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
-				const largest = wireOf(broadcast).largest(msg.trackName);
+				const timescale = idTimescale(info, version);
+				const largest = wireOf(broadcast).largest(msg.trackName, timescale);
 				answer = new TrackStatusOk({
 					largest: largest && { groupId: largest.group, objectId: BigInt(largest.frame) },
 					properties: trackProperties(info, msg.propertiesWanted),
@@ -2421,6 +2518,7 @@ class FetchWriter {
 	/** The track's Publisher Priority on the wire, which the first object states for all. */
 	readonly #priority: number;
 	#written = false;
+	#previousObject?: number;
 
 	constructor({ stream, version, priority }: { stream: Writer; version: IetfVersion; priority: number }) {
 		this.stream = stream;
@@ -2429,17 +2527,25 @@ class FetchWriter {
 	}
 
 	/** Write `read` of group `key`, following the prior object of that group, if any. */
-	async object(key: bigint, read: ReadGroupFrame, stop: AbortSignal): Promise<void> {
+	async object(
+		key: bigint,
+		read: ReadGroupFrame,
+		stop: AbortSignal,
+		object = read.index,
+		tie?: bigint,
+	): Promise<void> {
 		const chunks = read.chunks;
 		const obj = new FetchFrame({
 			payload: chunks ? undefined : read.frame.payload,
 			streamed: chunks?.size || undefined,
 			priority: this.#priority,
+			tie,
 		});
 		const position = {
 			group: key,
-			object: read.index,
+			object,
 			first: !this.#written,
+			previousObject: this.#previousObject,
 		};
 		await untilAborted(obj.encode(this.stream, position, this.#version), stop);
 		// Even an empty payload: the object exists only once committed, and may still be aborted.
@@ -2449,6 +2555,7 @@ class FetchWriter {
 				stop,
 			);
 		this.#written = true;
+		this.#previousObject = object;
 	}
 }
 
@@ -2592,18 +2699,88 @@ type FillServe =
 	| { kind: "unsupported" };
 
 /** Snapshot the live edge of a track. */
-function liveEdge(track: TrackSubscriber): LiveEdge {
+/**
+ * The timescale a subscription's moq-timestamp Object IDs count in: a timed track's, on a draft-23+
+ * session, whether or not the request asked for track properties, so an Object ID names one frame.
+ * Undefined means dense frame ordinals.
+ */
+function idTimescale(info: Info, version: IetfVersion): Timescale | undefined {
+	return hasTimestampObjectIds(version) ? (info.timescale ?? undefined) : undefined;
+}
+
+/**
+ * Assigns moq-timestamp Object IDs to a group's frames as one stream reads them in order from frame
+ * 0 (draft-lcurley-moq-timestamp): each is its timestamp's offset from the group start, or one past
+ * the previous ID when a run of tied timestamps pushed that ID higher. Mirrors the Rust `TimedIds`.
+ */
+class TimedIds {
+	readonly #start: bigint;
+	readonly #timescale: Timescale;
+	#prior?: bigint;
+	// The previous frame's timestamp, in the timescale.
+	#priorDts?: bigint;
+	// The frame `next` reads, which follows the last.
+	#index = 0;
+
+	constructor(start: bigint, timescale: Timescale) {
+		this.#start = start;
+		this.#timescale = timescale;
+	}
+
+	/** The lowest ID the next frame can take. */
+	nextMin(): number {
+		return this.#prior === undefined ? 0 : Number(this.#prior) + 1;
+	}
+
+	/**
+	 * The ID of `read`, the next frame, and its `TIMESTAMP_TIE` when non-zero. A copy that no longer
+	 * holds the frames before it cannot prove its ID, so the read fails. A timestamp below the previous
+	 * one throws {@link TimestampMismatch}, as on lite-07: the draft forbids it, and a lite-05/06 copy
+	 * can still hold one.
+	 */
+	next(read: ReadGroupFrame): { id: bigint; tie?: bigint } {
+		if (read.index !== this.#index)
+			throw new StreamError(StreamCode.Internal, {
+				message: "the group's head is gone, so its Object IDs are unknown",
+			});
+		const dts = BigInt(floorAt(read.frame.timestamp, this.#timescale));
+		if (this.#priorDts !== undefined && dts < this.#priorDts) throw new TimestampMismatch();
+		this.#index++;
+		const { id, tie } = timestampObjectId(this.#start, this.#prior, dts);
+		this.#prior = id;
+		this.#priorDts = dts;
+		return { id, tie: tie > 0n ? tie : undefined };
+	}
+}
+
+/** Snapshot the live edge of a track, in moq-timestamp Object IDs at `timescale` when set. */
+function liveEdge(track: TrackSubscriber, timescale: Timescale | undefined): LiveEdge {
 	const latest = hooks.latestKey(track);
 	const largest = hooks.objectLargest(track);
 	if (!largest) return latest === undefined ? {} : { latest, next: { group: latest, object: 0n } };
 
 	const group = largest.group;
-	const object = BigInt(largest.frame);
+	const object = timescale ? timedObject(track, largest, timescale) : BigInt(largest.frame);
 	return {
 		latest,
 		largest: { group, object },
 		next: { group, object: object + 1n },
 	};
+}
+
+/**
+ * The moq-timestamp Object ID of frame `at`, from the group cached for it. A copy that cannot prove
+ * it answers the frame's ordinal, which the ID is never below: a Next Object subscription then
+ * starts at or before the true edge rather than past objects still to come.
+ */
+function timedObject(track: TrackSubscriber, at: TrackPosition, timescale: Timescale): bigint {
+	const cached = hooks.cachedGroup(track, at.group);
+	if (!cached) return BigInt(at.frame);
+	try {
+		return hooks.groupTimedId(cached, at.frame, timescale) ?? BigInt(at.frame);
+	} finally {
+		cached.close();
+	}
 }
 
 /**

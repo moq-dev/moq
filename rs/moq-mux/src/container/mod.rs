@@ -105,6 +105,17 @@ pub struct Frame {
 	/// order. B-frames may have non-monotonic presentation timestamps.
 	pub timestamp: moq_net::Timestamp,
 
+	/// Decode timestamp, when it differs from [`timestamp`](Self::timestamp), or `None` when the
+	/// frame decodes at its presentation time.
+	///
+	/// A [decode-order](Container::decode_order) container writes each frame to the transport at
+	/// its decode time and groups by it: `raw`, which therefore refuses a reordered frame, and
+	/// `cts`, which this build still only reads (a decoded `cts` frame reports it). Other
+	/// containers ignore it: they carry the presentation time in the payload and stamp the
+	/// transport with the newest one so far in the group, since a group's timestamps never
+	/// decrease.
+	pub decode: Option<moq_net::Timestamp>,
+
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
@@ -157,6 +168,18 @@ pub(crate) fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Ti
 /// The earlier of two timestamps, `a` when they don't compare; see [`later`].
 pub(crate) fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
 	if b < a { b } else { a }
+}
+
+/// The decode time `delay` before `presentation`, in its scale, or the timeline's zero for a
+/// picture that decodes before it, so decode times stay in order and never pass a presentation time.
+pub(crate) fn decode_time(
+	presentation: moq_net::Timestamp,
+	delay: moq_net::Timestamp,
+) -> Result<moq_net::Timestamp, moq_net::Error> {
+	let scale = presentation.scale().ok_or(moq_net::Error::TimestampMismatch)?;
+	let delay = delay.convert(scale).map_err(|_| moq_net::Error::TimestampMismatch)?;
+	moq_net::Timestamp::new(presentation.value().saturating_sub(delay.value()), scale)
+		.map_err(|_| moq_net::Error::TimestampMismatch)
 }
 
 /// Stamp `frame` with the duration that ends at `bound`, unless it already has one.
@@ -255,6 +278,13 @@ pub trait Container {
 	/// The media role, when this format represents an audio or video track.
 	fn kind(&self) -> Kind {
 		Kind::Data
+	}
+
+	/// Whether the transport carries each frame's [`decode`](Frame::decode) time, so a
+	/// [`Producer`] groups frames by it. Otherwise the producer ignores decode times and the
+	/// payload carries each frame's presentation time.
+	fn decode_order(&self) -> bool {
+		false
 	}
 
 	/// Refuse a format this build can read but not write, before a producer is built for it.

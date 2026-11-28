@@ -26,7 +26,7 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
 
 - ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
   to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
-  [timestamp-ids](/quest/m2/timestamp-ids.md) (rejected: folding into
+  timestamp-ids ([moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)) (rejected: folding into
   [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).
   Creates groups eagerly from frame 0 across Rust, JS, `moq-ffi`, `libmoq`, and
   bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits

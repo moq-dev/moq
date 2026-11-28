@@ -599,9 +599,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// the track set is declared; release the reservation to publish. An H.264/H.265 rendition
 		// still waiting for its first keyframe holds the catalog back on its own.
 		self.initial_reservation = None;
+		// The tag's own time is when the picture decodes.
+		let decode = match composition_time {
+			0 => None,
+			offset @ 1.. => Some(crate::container::decode_time(
+				timestamp,
+				Timestamp::from_millis(offset as u64)?,
+			)?),
+			offset => Some(
+				timestamp.checked_add(
+					Timestamp::from_millis(offset.unsigned_abs() as u64)?
+						.convert(timestamp.scale().ok_or(moq_net::Error::TimestampMismatch)?)?,
+				)?,
+			),
+		};
 		let stream = self.video.get_mut(&track_id).expect("checked above");
 		let result = match stream.write(Frame {
 			timestamp,
+			decode,
 			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe,
@@ -654,6 +669,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			stream.track.write(Frame {
 				timestamp,
+				decode: None,
 				duration,
 				payload: Bytes::copy_from_slice(data),
 				keyframe,

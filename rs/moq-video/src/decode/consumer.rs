@@ -635,6 +635,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: true,
@@ -723,6 +724,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: true,
@@ -824,6 +826,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"access unit"),
 				keyframe: true,
@@ -896,6 +899,7 @@ mod tests {
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"access unit"),
 				keyframe: true,
@@ -995,6 +999,7 @@ mod tests {
 				.enumerate()
 				.map(|(index, stamp)| moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(*stamp).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1059,6 +1064,7 @@ mod tests {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1156,6 +1162,7 @@ mod tests {
 				&mut group,
 				&[moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(frame * 33_333).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1205,6 +1212,7 @@ mod tests {
 		let frames: Vec<_> = (0..FRAMES)
 			.map(|index| moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
+				decode: None,
 				duration: None,
 				payload: Bytes::from_static(b"access unit"),
 				keyframe: index == 0,
@@ -1240,6 +1248,7 @@ mod tests {
 		);
 		let picture = |micros: u64, payload: &'static [u8]| moq_mux::container::Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			duration: Some(Timestamp::from_micros(33_333).unwrap()),
 			payload: Bytes::from_static(payload),
 			keyframe: true,
@@ -1329,6 +1338,7 @@ mod tests {
 		);
 		let picture = |micros: u64| moq_mux::container::Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			duration: Some(Timestamp::from_micros(33_333).unwrap()),
 			payload: Bytes::from_static(b"access unit"),
 			keyframe: true,
@@ -1410,6 +1420,7 @@ mod tests {
 				.enumerate()
 				.map(|(index, stamp)| moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(*stamp).unwrap(),
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe: index == 0,
@@ -1542,6 +1553,7 @@ mod tests {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
+						decode: None,
 						duration: None,
 						payload: encoded.payload,
 						keyframe: index == 0,
@@ -1709,6 +1721,7 @@ mod tests {
 			wire.write(
 				&mut group,
 				&[moq_mux::container::Frame {
+					decode: None,
 					// Group starts strictly increase, so each access unit presents a second later.
 					timestamp: Timestamp::from_micros(sequence as u64 * SECOND).unwrap(),
 					duration: None,
@@ -1766,6 +1779,7 @@ mod tests {
 				&mut group,
 				&[moq_mux::container::Frame {
 					timestamp: Timestamp::ZERO,
+					decode: None,
 					duration: None,
 					payload: Bytes::from_static(b"access unit"),
 					keyframe,

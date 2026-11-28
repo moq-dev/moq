@@ -290,6 +290,22 @@ struct Sample {
 	range: std::ops::Range<usize>,
 }
 
+impl Sample {
+	/// The decode time once the edit list applies, when it differs from the presentation time.
+	///
+	/// An edit list usually starts presentation at the first sample, so the samples decoding before
+	/// it decode at its time instead: decode times stay in order and never pass a presentation time.
+	fn decode(&self) -> Option<Timestamp> {
+		let scale = self.timestamp.scale()?;
+		let value = match self.pts.checked_sub(self.dts) {
+			Some(0) => return None,
+			Some(offset) => self.timestamp.value().saturating_sub(offset),
+			None => self.timestamp.value().checked_add(self.dts - self.pts)?,
+		};
+		Timestamp::new(value, scale).ok()
+	}
+}
+
 /// The samples one `traf` places in its `mdat`.
 struct Run {
 	samples: Vec<Sample>,
@@ -1907,12 +1923,26 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 			Kind::Video => sample.sync,
 			Kind::Audio => (index == 0 && placement.new_segment) || producer.needs_keyframe(),
 		};
+		// A decode-order container learns the delay from `decode`; the others need it told.
 		if sample.pts > sample.dts {
 			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 		}
 		let timestamp = placement.offset.apply(sample.timestamp)?;
+		// Mapped only where read: an edit list can place the first decode time before the
+		// clock's zero even though its presentation time maps to it.
+		let decode = match producer.decode_order() {
+			true => sample.decode().map(|decode| placement.offset.apply(decode)).transpose()?,
+			false => None,
+		};
 		let duration = sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?;
-		let streamed = producer.open(timestamp, keyframe, duration, sample.range.len())?;
+		let frame = crate::container::Frame {
+			timestamp,
+			decode,
+			duration,
+			payload: bytes::Bytes::new(),
+			keyframe,
+		};
+		let streamed = producer.open(frame, sample.range.len())?;
 		Ok((streamed, keyframe))
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }

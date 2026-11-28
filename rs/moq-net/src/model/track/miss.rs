@@ -419,6 +419,11 @@ impl Misses {
 		self.filled.range(keys).copied()
 	}
 
+	/// Whether a fill still owes this reader a group in `groups`.
+	pub fn wants(&self, groups: &ops::Range<u64>) -> bool {
+		!groups.is_empty() && self.wanted.overlaps(groups)
+	}
+
 	/// The lowest key asked and not answered yet.
 	pub fn lowest_wanted(&self) -> Option<u64> {
 		self.wanted.iter().next().map(|run| run.start)

@@ -606,8 +606,12 @@ function writeGroupWithLegacyFrames(
 	stamp: (ts: number) => Time.Timestamp = (ts) => Time.Timestamp.fromMicros(ts),
 ) {
 	const group = track.createGroup(sequence);
+	// A group's transport times never decrease, so a reordered frame rides at the newest one so
+	// far, as the Legacy Producer stamps it; its payload keeps its own presentation time.
+	let newest: number | undefined;
 	for (const ts of timestamps) {
-		group.writeFrame({ payload: encodeLegacy(ts), timestamp: stamp(ts) });
+		newest = newest === undefined ? ts : Math.max(newest, ts);
+		group.writeFrame({ payload: encodeLegacy(ts), timestamp: stamp(newest) });
 	}
 	group.finish();
 }

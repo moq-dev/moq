@@ -926,6 +926,7 @@ mod tests {
 	fn frame(micros: u64, payload: &[u8]) -> Frame {
 		Frame {
 			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::copy_from_slice(payload),
 			keyframe: false,
@@ -1113,6 +1114,7 @@ mod tests {
 				producer
 					.write(Frame {
 						timestamp: Timestamp::from_micros(offset + i * 100_000).unwrap(),
+						decode: None,
 						duration: None,
 						payload: Bytes::from_iter((0..180u16).map(|b| (b ^ i as u16) as u8)),
 						keyframe: i % 10 == 0,
@@ -1236,6 +1238,7 @@ mod tests {
 				self.audio
 					.write(Frame {
 						timestamp: moq_net::Timestamp::from_micros(offset + i * 100_000).unwrap(),
+						decode: None,
 						duration: None,
 						payload: bytes::Bytes::from_iter((0..180u16).map(|b| (b ^ i as u16) as u8)),
 						keyframe: i % 10 == 0,

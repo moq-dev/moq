@@ -47,6 +47,7 @@ fn write<R: Clone + Send + 'static>(
 		}
 		for (ms, keyframe) in part {
 			producer.write(Frame {
+				decode: None,
 				timestamp: moq_net::Timestamp::from_millis(ms)?,
 				payload: bytes::Bytes::from_static(&[1]),
 				keyframe,

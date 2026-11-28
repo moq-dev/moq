@@ -795,6 +795,7 @@ mod tests {
 	fn payload_frame(micros: u64, keyframe: bool, payload: &'static [u8]) -> moq_mux::container::Frame {
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::from_static(payload),
 			keyframe,
 			duration: None,
@@ -808,6 +809,7 @@ mod tests {
 		let payload = if keyframe { KEYFRAME } else { &[0x31, 0x00, 0x00][..] };
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::copy_from_slice(payload),
 			keyframe,
 			duration: None,
@@ -2176,6 +2178,7 @@ mod tests {
 			media
 				.write(moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]),
 					keyframe: true,
 					duration: None,

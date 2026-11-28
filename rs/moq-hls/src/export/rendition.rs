@@ -3406,6 +3406,7 @@ mod tests {
 	fn sample(ms: u64, duration_ms: Option<u64>, payload: &'static [u8]) -> moq_mux::container::Frame {
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(ms).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(payload),
 			keyframe: ms == 0,
 			duration: duration_ms.map(|ms| moq_net::Timestamp::from_millis(ms).unwrap()),

@@ -197,8 +197,8 @@ struct Inner<T> {
 	/// Watches for a joiner wanting a group past the largest written.
 	refresh: Refresh,
 
-	/// The newest timestamp written, which a refresh restates the window at. An edit may carry an
-	/// older timestamp than its group's first frame, and a new group may not start before that one.
+	/// The newest timestamp written, which a refresh restates the window at. A group's timestamps
+	/// never decrease, so a later write may not go below it, nor a new group start before it.
 	/// `None` before the first write.
 	at: Option<moq_net::Timestamp>,
 

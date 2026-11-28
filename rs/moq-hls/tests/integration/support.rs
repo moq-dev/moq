@@ -182,6 +182,7 @@ pub fn frame(second: u64, payload: u8) -> moq_mux::container::Frame {
 	bytes.extend_from_slice(&[payload; 8]);
 	moq_mux::container::Frame {
 		timestamp: moq_net::Timestamp::from_secs(second).expect("timestamp"),
+		decode: None,
 		payload: bytes.into(),
 		keyframe,
 		duration: None,

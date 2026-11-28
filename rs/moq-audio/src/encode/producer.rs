@@ -791,6 +791,7 @@ impl Producer {
 		}
 		let mux_frame = MuxFrame {
 			timestamp: stamp.start,
+			decode: None,
 			payload: encoded.payload,
 			keyframe,
 			duration: None,
@@ -816,6 +817,7 @@ impl Producer {
 	) -> Result<(), Error> {
 		track.write(MuxFrame {
 			timestamp: terminal.end,
+			decode: None,
 			payload: Bytes::new(),
 			keyframe: true,
 			duration: None,
@@ -831,6 +833,7 @@ impl Producer {
 			let timestamp = terminal.start.checked_add(offset)?;
 			track.write(MuxFrame {
 				timestamp,
+				decode: None,
 				payload: packet.payload,
 				keyframe: false,
 				duration: None,

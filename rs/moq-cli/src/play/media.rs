@@ -2261,6 +2261,7 @@ mod tests {
 				video
 					.write(moq_mux::container::Frame {
 						timestamp: moq_net::Timestamp::from_millis(at).unwrap(),
+						decode: None,
 						duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
 						keyframe: index == 0,
 						payload: Bytes::from_static(b"picture"),
@@ -2400,6 +2401,7 @@ mod tests {
 		));
 		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 20).unwrap(),
+			decode: None,
 			duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
 			keyframe,
 			payload: Bytes::from_static(b"picture"),
@@ -2546,6 +2548,7 @@ mod tests {
 		});
 		let pcm = |micros: u64, samples: usize, sample: f32| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			decode: None,
 			duration: Some(moq_net::Timestamp::from_scale(samples as u64, 44_100).unwrap()),
 			keyframe: true,
 			payload: std::iter::repeat_n(sample.to_le_bytes(), samples)
@@ -2698,6 +2701,7 @@ mod tests {
 		));
 		let picture = |millis: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
+			decode: None,
 			duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
 			keyframe,
 			payload: Bytes::from_static(b"picture"),
@@ -2763,6 +2767,7 @@ mod tests {
 			.collect();
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_scale(index * PACKET, SAMPLE_RATE as u64).unwrap(),
+			decode: None,
 			duration: None,
 			payload: Bytes::from(payload),
 			keyframe: true,
@@ -3608,6 +3613,7 @@ mod tests {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: encoded.timestamp,
+						decode: None,
 						duration: None,
 						payload: encoded.payload,
 						keyframe: index == 0,

@@ -29,6 +29,10 @@ impl Container for Wire {
 		self.0
 	}
 
+	fn decode_order(&self) -> bool {
+		true
+	}
+
 	fn finish_group(
 		&self,
 		group: &mut moq_net::group::Producer,
@@ -45,8 +49,12 @@ impl Container for Wire {
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		// A data track's zero-byte object is its discontinuity marker, so an empty frame has no
 		// encoding.
-		match self.0 == Kind::Data && frame.payload.is_empty() {
-			true => Err(crate::Error::EmptyRawPayload),
+		if self.0 == Kind::Data && frame.payload.is_empty() {
+			return Err(crate::Error::EmptyRawPayload);
+		}
+		// The transport timestamp is both times, so a reordered frame has no encoding.
+		match frame.decode.is_some_and(|decode| decode != frame.timestamp) {
+			true => Err(moq_net::Error::TimestampMismatch.into()),
 			false => Ok(()),
 		}
 	}
@@ -76,6 +84,7 @@ impl Container for Wire {
 
 		Ok(vec![Frame {
 			timestamp: frame.timestamp,
+			decode: None,
 			payload: frame.payload,
 			keyframe: false,
 			duration: None,
@@ -148,6 +157,7 @@ mod tests {
 			.with_buffer(std::time::Duration::from_secs(1));
 		let cue = |millis: u64, payload: &'static [u8], keyframe: bool| Frame {
 			timestamp: Timestamp::from_millis(millis).unwrap(),
+			decode: None,
 			payload: Bytes::from_static(payload),
 			keyframe,
 			duration: None,

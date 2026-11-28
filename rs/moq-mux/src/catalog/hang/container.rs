@@ -20,7 +20,8 @@ pub enum Container {
 	Raw(Kind),
 	/// [`Raw`](Self::Raw) audio whose codec states each packet's duration.
 	RawAudio(legacy::Audio),
-	/// QUIC varint composition time offset (in track timescale) + raw codec bitstream.
+	/// QUIC varint composition time offset (in track timescale) + raw codec bitstream, timed by
+	/// the MoQ transport timestamp as its decode time.
 	Cts(Kind),
 	/// [`Cts`](Self::Cts) audio whose codec states each packet's duration.
 	CtsAudio(legacy::Audio),
@@ -127,9 +128,17 @@ impl ContainerTrait for Container {
 		}
 	}
 
+	fn decode_order(&self) -> bool {
+		matches!(
+			self,
+			Self::Raw(_) | Self::RawAudio(_) | Self::Cts(_) | Self::CtsAudio(_)
+		)
+	}
+
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		match self {
 			Self::Raw(kind) => raw::Wire(*kind).check(frame),
+			Self::RawAudio(_) => raw::Wire(Kind::Audio).check(frame),
 			Self::Cts(kind) => cts::Wire(*kind).check(frame),
 			Self::CtsAudio(_) => cts::Wire(Kind::Audio).check(frame),
 			_ => Ok(()),

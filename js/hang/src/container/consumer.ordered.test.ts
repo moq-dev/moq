@@ -240,14 +240,22 @@ test("an open GOP past keys the reader gave up on waits for its leading picture"
 			reads.push(read.kind === "frame" ? `frame ${read.frame.timestamp.asMillis()}` : read.kind);
 		}
 	})();
-	const frame = (group: ReturnType<typeof track.createGroup>, ms: number) =>
+	// A group's transport times never decrease, so a reordered picture rides at the newest one so
+	// far, `at`; its payload keeps its own presentation time.
+	const frame = (group: ReturnType<typeof track.createGroup>, ms: number, at = ms) =>
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.millis(ms)),
-			timestamp: Time.Timestamp.fromMillis(ms),
+			timestamp: Time.Timestamp.fromMillis(at),
 		});
 	try {
 		const first = track.createGroup(0n);
-		for (const ms of [0, 120, 40, 80]) frame(first, ms);
+		for (const [ms, at] of [
+			[0, 0],
+			[120, 120],
+			[40, 120],
+			[80, 120],
+		])
+			frame(first, ms, at);
 		first.finish();
 		// Key 1 never lands, so the reader gives it up once the budget passes.
 		const open = track.createGroup(2n);
@@ -255,7 +263,7 @@ test("an open GOP past keys the reader gave up on waits for its leading picture"
 		await clock.advance(Duration.millis(100));
 		await flush();
 		expect(reads).toEqual(["frame 0", "frame 120", "frame 40", "frame 80"]);
-		frame(open, 160);
+		frame(open, 160, 280);
 		open.finish();
 		await clock.advance(Duration.ZERO);
 		await flush();
