@@ -33,7 +33,7 @@ Counted on fedora (same fingerprint `x86_64-ce1501c93c32`, loaded host, `--bench
 
 What remains:
 
-1. Split the `stats` movers: count `.tmp/movers` (the 16 names) at `--jobs 1` twice in one checkout and twice in a second checkout at a longer path, on one host. Same-checkout disagreement points at load or the clock; cross-checkout only at the path. Diff Callgrind profiles of one mover (`session-report[1x10/connections=1]`) between the disagreeing runs, as the Found section above did, and fix it in rust2-bench (now [kixel-ai/swole](https://github.com/kixel-ai/swole)) or the bench, whichever owns the source.
+1. Split the `stats` movers: count the 16 movers above with `--benchmarks` at `--jobs 1` twice in one checkout and twice in a second checkout at a longer path, on one host. Same-checkout disagreement points at load or the clock; cross-checkout only at the path. Diff Callgrind profiles of one mover (`session-report[1x10/connections=1]`) between the disagreeing runs, as the Found section above did, and fix it in rust2-bench (now [kixel-ai/swole](https://github.com/kixel-ai/swole)) or the bench, whichever owns the source.
 2. Then count every benchmark twice in two checkouts at different paths, one run from an idle start and one loaded to the runner's core count, and find every count equal; drop the `--jobs 1` from `.github/workflows/codspeed.yml` and the wall-clock caveats in it, `sh/rs/instructions.sh`, and `bench/README.md`.
 
 Public API: none. Wire: none.
