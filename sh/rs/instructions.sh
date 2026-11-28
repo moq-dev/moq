@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Count the deterministic Criterion benches' instructions under stock Valgrind with rust2-bench,
+# Count the deterministic Criterion benches' instructions under stock Valgrind with swole,
 # as the nightly Instructions workflow does (x86-64 Linux).
 #
-# Usage: sh/rs/instructions.sh run|compare <base>|fingerprint [rust2-bench options]
+# Usage: sh/rs/instructions.sh run|compare <base>|fingerprint [swole options]
 #
 # With `--benchmarks <file>`, Cargo builds only the bench targets its names live in, since each
 # name starts with its target's file (`rs/<package>/benches/<target>.rs::`), so a bisect step
@@ -10,16 +10,23 @@
 # resolves the same features, and the targets link the same code, as a full count's.
 set -euo pipefail
 
-usage="usage: sh/rs/instructions.sh run|compare <base>|fingerprint [rust2-bench options]"
+usage="usage: sh/rs/instructions.sh run|compare <base>|fingerprint [swole options]"
 command=${1:?$usage}
 
 # Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
 # rind is built to skip that one startup check, or it refuses the simulated CPU.
 export VALGRIND_BUG_494162=1
-bench=(nix run --inputs-from . rust2#bench --)
+bench=(nix run --inputs-from . swole --)
 
+# swole's `sim` counts under Valgrind; `run` counts this commit and `compare <base>` both sides.
+shift
 case "$command" in
-    fingerprint | help | -h | --help) exec "${bench[@]}" "$@" ;;
+    fingerprint) exec "${bench[@]}" fingerprint sim "$@" ;;
+    help | -h | --help)
+        echo "$usage"
+        echo "Options are swole sim's, below:"
+        exec "${bench[@]}" --help
+        ;;
     run | compare) ;;
     *)
         echo "$usage" >&2
@@ -51,7 +58,7 @@ declare -A features=(["moq-json"]=bench ["moq-net"]=fuzz ["moq-quic"]=fuzz)
 # The targets the `--benchmarks` file names, when given.
 named=()
 args=("$@")
-for ((i = 1; i < ${#args[@]}; i++)); do
+for ((i = 0; i < ${#args[@]}; i++)); do
     if [[ ${args[i]} == --benchmarks ]]; then
         file=${args[i + 1]:?--benchmarks takes a file}
         while IFS= read -r name || [[ -n $name ]]; do
@@ -91,4 +98,13 @@ for target in $(printf '%s\n' "${benches[@]}" | sort -u); do
     cargo+=(--bench "$target")
 done
 
-exec "${bench[@]}" "$@" -- "${cargo[@]}"
+if [[ $command == compare ]]; then
+    base=${1:-}
+    if [[ -z $base || $base == -* ]]; then
+        echo "instructions.sh: compare takes a base commit first; $usage" >&2
+        exit 2
+    fi
+    shift
+    exec "${bench[@]}" sim "$base" "$@" -- "${cargo[@]}"
+fi
+exec "${bench[@]}" sim "$@" -- "${cargo[@]}"
