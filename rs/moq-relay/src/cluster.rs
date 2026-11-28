@@ -1528,7 +1528,27 @@ fn dialer<'a>(cluster: &'a Cluster, token: &'a PeerToken) -> impl FnMut(DialTarg
 /// cluster without a dial template can serve local sessions but cannot dial
 /// remote peers.
 #[derive(Clone)]
-pub struct Cluster {
+pub struct Cluster(Arc<Shared>);
+
+impl std::ops::Deref for Cluster {
+	type Target = Shared;
+
+	fn deref(&self) -> &Shared {
+		&self.0
+	}
+}
+
+/// Configuring a handle copies the state it shares, so it never changes its clones.
+impl std::ops::DerefMut for Cluster {
+	fn deref_mut(&mut self) -> &mut Shared {
+		Arc::make_mut(&mut self.0)
+	}
+}
+
+/// The state behind a [`Cluster`] handle, held once: the handle is cloned for every
+/// connection and every task serving it, and the fields are over a kilobyte.
+#[derive(Clone)]
+pub struct Shared {
 	client_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
 	peer_quic: crate::limits::Quic,
@@ -1727,7 +1747,7 @@ impl Cluster {
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.node(), "cluster initialized");
-		let cluster = Cluster {
+		let cluster = Cluster(Arc::new(Shared {
 			client_limits: client.resolve(),
 			peer_limits: peer.resolve(),
 			peer_quic: peer.quic,
@@ -1751,7 +1771,7 @@ impl Cluster {
 			stats,
 			stats_paths,
 			stats_producer,
-		};
+		}));
 		Ok((cluster, Driver { work }))
 	}
 
