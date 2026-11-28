@@ -184,7 +184,7 @@ test("capture gaps keep the broadcast identity and its track sequences", async (
 		await settle();
 		const track = env.audio.rendition.track.peek();
 		if (!track) throw new Error("expected the demanded audio track");
-		expect(track.appendGroup(Time.Timestamp.fromMicros(0)).start).toBe(0n);
+		expect(track.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) }).start).toBe(0n);
 
 		// Both devices may be absent during a swap or retry, even though both remain selected.
 		env.video.source.set(undefined);
@@ -200,7 +200,7 @@ test("capture gaps keep the broadcast identity and its track sequences", async (
 		await start(env);
 		expect(env.broadcast.net.peek()).toBe(net);
 		expect(env.audio.rendition.track.peek()).toBe(track);
-		expect(track.appendGroup(Time.Timestamp.fromMicros(1)).start).toBe(1n);
+		expect(track.appendGroup({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(1) }).start).toBe(1n);
 
 		// A different device format uses the broadcast's existing fresh-track mechanism.
 		env.audio.rendition.config.set({ ...audioConfig, sampleRate: Catalog.u53(44100) });
