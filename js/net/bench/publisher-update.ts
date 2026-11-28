@@ -84,11 +84,21 @@ async function run(ranges: number, edited: number | "steer", updates: number): P
 		}
 		await update.encode(client.writer, Version.DRAFT_07);
 	}
-	// A lite-07 FIN asks for what the ranges name, which never arrives: cancel instead.
-	client.close();
+	// A lite-07 FIN asks for what the ranges still name, which never arrives, so retire them all
+	// first: serving then ends only once the publisher has applied every update. The run with no
+	// updates pays the same retirement, so it cancels out.
+	await new SubscribeUpdate({
+		priority: 0,
+		order: "ascending",
+		maxDelay: 3_600_000,
+		remove: Array.from({ length: Number(next - oldest) }, (_, index) => oldest + BigInt(index)),
+		ranges: [],
+	}).encode(client.writer, Version.DRAFT_07);
+	client.writer.close();
 	await serving;
 	const elapsed = performance.now() - start;
 	publisher.close();
+	client.close();
 	pair.client.close();
 	pair.server.close();
 	broadcast.close();
