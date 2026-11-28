@@ -18,15 +18,16 @@ esac
 
 # The dev shell's swift-format, rather than the toolchain's `swift format`, so
 # the check runs on Linux too. Only x86_64-linux dev shells carry one (see
-# flake.nix); macOS uses Xcode's, after dropping the dev shell's nixpkgs SDK as
+# flake.nix); macOS uses Xcode's through Apple's xcrun (the dev shell's is
+# xcbuild's), after dropping the dev shell's nixpkgs SDK as
 # check.sh does, and aarch64-linux skips.
 xcode=(env)
 [[ "${SDKROOT:-}" != /nix/store/* ]] || xcode+=(-u SDKROOT)
 [[ "${DEVELOPER_DIR:-}" != /nix/store/* ]] || xcode+=(-u DEVELOPER_DIR)
 if command -v swift-format >/dev/null 2>&1; then
     swift_format=(swift-format)
-elif [[ "$(uname -s)" == Darwin ]] && "${xcode[@]}" xcrun --find swift-format >/dev/null 2>&1; then
-    swift_format=("${xcode[@]}" xcrun swift-format)
+elif [[ "$(uname -s)" == Darwin ]] && "${xcode[@]}" /usr/bin/xcrun --find swift-format >/dev/null 2>&1; then
+    swift_format=("${xcode[@]}" /usr/bin/xcrun swift-format)
 else
     echo "swift format: no swift-format on PATH, skipping" >&2
     exit 0
