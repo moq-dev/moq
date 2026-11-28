@@ -194,8 +194,16 @@ pub(super) trait Beside {
 	/// Forget every given-up run above `floor` not covered by `reported` or `pending`, paying
 	/// cache debt without settling untold keys or forcing an immediate re-probe. The reader
 	/// remembers only a bounded span to re-judge once a lowered start or wider budget makes
-	/// those keys relevant again.
-	fn forget_untold(&mut self, _floor: u64, _reported: &RangeMap<u64, Report>, _pending: &RangeMap<u64, Pending>) {}
+	/// those keys relevant again. When `keep_skips` is true (a rescan is already pending),
+	/// preserved upstream skips stay until the rescan drains them.
+	fn forget_untold(
+		&mut self,
+		_floor: u64,
+		_reported: &RangeMap<u64, Report>,
+		_pending: &RangeMap<u64, Pending>,
+		_keep_skips: bool,
+	) {
+	}
 }
 
 impl Beside for () {
@@ -402,8 +410,25 @@ impl Record {
 	/// ask allowance bounds in turn. Returns the runs it folded.
 	fn fold(&mut self, reader: &Standing, beside: &mut dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
-		// The runs copied from the track's drop set go first: the next scan folds in again
-		// whatever the track still holds.
+		// On a drop-tracking reader, debt forgets unreported skips and miss verdicts instead of
+		// settling them into `floor` or `reported`: their wire was never told, so a later
+		// lowered start or wider budget still scans the track or asks upstream for them.
+		// Runs before discarding `received: true` entries from `pending` so adopted upstream
+		// skips already queued for reporting stay protected across the rescan.
+		// Walks only the non-empty skip/miss sets rather than `reported` or `pending`, so
+		// sustained debt costs O(1) once they are clear.
+		if reader.drops {
+			if !self.skipped.is_empty() {
+				self.skipped.forget(self.floor..u64::MAX);
+			}
+			if !self.written_off.is_empty() {
+				self.written_off.clear();
+			}
+			beside.forget_untold(self.floor, &self.reported, &self.pending, self.rescan);
+		}
+		// The runs copied from the track's drop set go after `forget_untold`: the next scan
+		// folds in again whatever the track still holds (and restores any queued adopted skips
+		// the cache evicted meanwhile).
 		let received: Vec<_> = self
 			.pending
 			.iter()
@@ -415,20 +440,6 @@ impl Record {
 				self.pending.remove(run);
 			}
 			self.rescan = true;
-		}
-		// On a drop-tracking reader, debt forgets unreported skips and miss verdicts instead of
-		// settling them into `floor` or `reported`: their wire was never told, so a later
-		// lowered start or wider budget still scans the track or asks upstream for them.
-		// Walks only the non-empty skip/miss sets rather than `reported` or `pending`, so
-		// sustained debt costs O(1) once they are clear.
-		if reader.drops {
-			if !self.skipped.is_empty() {
-				self.skipped.forget(self.floor..u64::MAX);
-			}
-			if !self.written_off.is_empty() {
-				self.written_off.clear();
-			}
-			beside.forget_untold(self.floor, &self.reported, &self.pending);
 		}
 		let floor = self.final_end(self.floor, reader, &*beside, Fold::Debt).end;
 		if floor > self.floor {
@@ -664,6 +675,7 @@ mod test {
 				floor: u64,
 				reported: &RangeMap<u64, Report>,
 				pending: &RangeMap<u64, Pending>,
+				_keep_skips: bool,
 			) {
 				let mut cleared = Vec::new();
 				for run in self.runs.overlapping(&(floor..u64::MAX)) {

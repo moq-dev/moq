@@ -37145,32 +37145,47 @@ mod test {
 	}
 
 	/// An adopted upstream `Hole::Skip` shed from `state.drops` before `DropCursor` reports it
-	/// is reconstructed as `Hole::Skip` rather than downgraded to `NotFound`.
+	/// is reconstructed as `Hole::Skip` rather than downgraded to `NotFound`, even if the
+	/// reader also folds under cache debt while that skip is queued as `received: true`.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_shed_adopted_skip_is_reconstructed_as_skip() {
-		let mut producer = track_producer("test", Info::timed());
-		producer.start_at(0).unwrap();
-		write_group(&producer, 0);
-		producer.drop_groups(1..2, StreamError::NotFound);
-		producer.skip_received(2..4);
-		write_group(&producer, 4);
-		let mut subscriber = producer.subscribe(replay());
-		let waiter = kio::Waiter::noop();
-		// Probe so `misses.adopt_drops` adopts `2..4` as `Hole::Skip`.
-		assert_eq!(drain_groups(&mut subscriber), [4, 0]);
-		// First `poll_drop` reports `1..2` and leaves `2..4` queued in `record.pending`.
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((1..2, Hole::drop(StreamError::NotFound)))
-		);
-		// Shed `2..4` from `state.drops` before the next `poll_drop`.
-		producer.state.write().ok().expect("open").forget_drops(2..4);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((2..4, Hole::Skip)),
-			"adopted skip survives drop-set shedding"
-		);
+		for debt_fold in [false, true] {
+			let pool = crate::cache::Pool::new(crate::cache::Config::default());
+			let broadcast = Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			});
+			let mut producer = Producer::new(broadcast, "test", Info::timed());
+			producer.start_at(0).unwrap();
+			write_group(&producer, 0);
+			producer.drop_groups(1..2, StreamError::NotFound);
+			producer.skip_received(2..4);
+			write_group(&producer, 4);
+			let mut subscriber = producer.subscribe(replay());
+			let waiter = kio::Waiter::noop();
+			// Probe so `misses.adopt_drops` adopts `2..4` as `Hole::Skip`.
+			assert_eq!(drain_groups(&mut subscriber), [4, 0]);
+			// First `poll_drop` reports `1..2` and leaves `2..4` queued in `record.pending`.
+			assert_eq!(
+				subscriber.poll_drop(&waiter),
+				Poll::Ready((1..2, Hole::drop(StreamError::NotFound)))
+			);
+			// Shed `2..4` from `state.drops` before the next `poll_drop`.
+			producer.forget_drops(2..4);
+			if debt_fold {
+				// Force a reader debt fold while `2..4` sits queued as `received: true`
+				// (and a second fold while `rescan` is pending).
+				pool.resize(1);
+				subscriber.settle_record(None);
+				subscriber.settle_record(None);
+			}
+			assert_eq!(
+				subscriber.poll_drop(&waiter),
+				Poll::Ready((2..4, Hole::Skip)),
+				"debt_fold {debt_fold}: adopted skip survives drop-set shedding"
+			);
+		}
 	}
 
 	/// Widening a cursor's budget before its first `poll_drop` must not seed an obsolete stale
@@ -37198,6 +37213,94 @@ mod test {
 			subscriber.poll_drop(&waiter).is_pending(),
 			"the obsolete 100 ms stale verdict must not be seeded under the 60 s budget"
 		);
+	}
+
+	/// Forgetting a miss under a wider budget and then another after narrowing to a tighter
+	/// budget must track the narrower budget so a later widening past it re-judges the span.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widening_past_a_narrower_forgotten_debt_verdict_rejudges_it() {
+		let pool = crate::cache::Pool::new(crate::cache::Config::default());
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let mut producer = Producer::new(broadcast, "test", Info::timed());
+		let dynamic = producer.requests();
+		producer.start_at(100).unwrap();
+		write_group(&producer, 100);
+		write_group(&producer, 2500);
+		let mut subscriber = producer.subscribe(within(Duration::from_secs(1), None));
+		let waiter = kio::Waiter::noop();
+		// Restrict owed drops to 2500.. so stale misses below 2500 stay untold.
+		let mut owed = RangeSet::new();
+		owed.insert(2500..u64::MAX);
+		subscriber.set_drop_owed(owed);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert_eq!(drain_groups(&mut subscriber), [2500, 100]);
+		// First debt fold forgets the stale miss 0..100 (age 2400 ms > 1 s) under the 1 s budget.
+		pool.resize(1);
+		subscriber.settle_record(None);
+
+		// Narrow to 100 ms, mark the track unfed so 101..2500 is a miss, and write adjacent
+		// group 2501 at 2800 ms so 101..2500 (reach 2500 ms, age 300 ms > 100 ms) is judged
+		// stale under 100 ms with no new gap above 2500, then fold it under debt too.
+		producer.set_unfed(true);
+		subscriber.update(within(Duration::from_millis(100), None)).unwrap();
+		let mut group = producer.create_group(group::Info { start: 2501 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(2800).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [2501]);
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
+		subscriber.settle_record(None);
+
+		// Widen to 500 ms (narrower than the original 1 s, wider than the 100 ms narrow run):
+		// must invalidate forgotten_debt and ask a fill for 101..2500 (age 300 ms <= 500 ms).
+		subscriber.update(within(Duration::from_millis(500), None)).unwrap();
+		assert!(subscriber.poll_drop(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("widening from 100 ms to 500 ms must re-judge the narrower forgotten verdict");
+		};
+		assert_eq!((fill.start().group, fill.end()), (101, 2500));
+	}
+
+	/// On a multi-range subscription with a narrow range and a wider disjoint range, seeding
+	/// `record.pending` on the first `poll_drop` must check each stale segment against its own
+	/// range's current budget rather than the subscription's widest budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_multi_range_seed_judges_each_span_against_its_own_budget() {
+		let mut producer = track_producer("test", Info::timed());
+		let sub = Subscription::default().with_ranges([
+			Range {
+				start: Start::Live {
+					min: None,
+					max: Some(Duration::from_millis(100)),
+				},
+				end: Some(2),
+			},
+			Range {
+				start: Start::Time(300),
+				end: None,
+			},
+		]);
+		let mut subscriber = producer.subscribe(sub);
+		producer.start_at(2).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 300);
+		let waiter = kio::Waiter::noop();
+		// Group 2 is fresh (reach 300 ms, age 0 ms) while 0..2 is stale under its 100 ms range
+		// (reach 2 ms, age 298 ms > 100 ms).
+		assert!(matches!(
+			subscriber.poll_next_group(&waiter),
+			Poll::Ready(Ok(Some(g))) if g.start == 2
+		));
+		// First `poll_drop` must seed `0..2` (stale under its own 100 ms range budget), not skip
+		// it because the disjoint 300.. range has an unbounded budget.
+		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
 	}
 
 	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds

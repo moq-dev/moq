@@ -101,6 +101,10 @@ pub(super) struct Misses {
 	/// wider budget asks it again (see [`Self::widen`]), and so does terms that no longer
 	/// settle a verdict adopted from the track (see [`Self::retake`]).
 	stale: RangeMap<u64, Stale>,
+	/// Non-`NotFound` upstream errors adopted from `state.drops` (such as `Unroutable` or
+	/// `Evicted`), so reconstructing a verdict after `state.drops` sheds it preserves the
+	/// original error instead of downgrading it to `NotFound`.
+	adopted_errors: RangeMap<u64, crate::StreamError>,
 	/// The budget and coverage the adopted verdicts in `stale` were last found to settle
 	/// under, `None` while it holds none.
 	adopted_under: Option<(Budget, super::Coverage)>,
@@ -129,9 +133,9 @@ pub(super) struct Misses {
 	/// clearing `judged` or `at`, and invalidated only when a lowered start, wider owed-drop
 	/// set, or wider budget makes those keys relevant again.
 	forgotten_debt: Option<ops::Range<u64>>,
-	/// The reader's budget when [`Self::forgotten_debt`] was recorded, so only a widening past
-	/// it re-judges those keys.
-	forgotten_budget: Option<Budget>,
+	/// The narrowest budget across all verdicts forgotten into [`Self::forgotten_debt`], so
+	/// any widening past even the tightest forgotten verdict triggers re-judging.
+	forgotten_narrowest: Option<Duration>,
 }
 
 /// A stale verdict a reader holds: the budget it was judged under, and whose judgement it is.
@@ -1018,6 +1022,15 @@ impl Misses {
 				}
 				self.stale = stale;
 			}
+			if !self.adopted_errors.is_empty() {
+				let mut adopted_errors = RangeMap::new();
+				for (run, err) in self.adopted_errors.iter() {
+					for kept in self.given_up.overlapping(run) {
+						adopted_errors.insert(kept.start.max(run.start)..kept.end.min(run.end), err.clone());
+					}
+				}
+				self.adopted_errors = adopted_errors;
+			}
 			for (&start, &(end, _)) in &self.deferred.runs {
 				for run in span.overlapping(&(start..end)) {
 					candidates.insert(start.max(run.start)..end.min(run.end));
@@ -1052,6 +1065,7 @@ impl Misses {
 					set.remove(0..low);
 				}
 				self.stale.remove(0..low);
+				self.adopted_errors.remove(0..low);
 				self.deferred.remove(0..low);
 			}
 			// What the window no longer covers is forgotten, and what it newly covers
@@ -1073,6 +1087,7 @@ impl Misses {
 						set.remove(run.clone());
 					}
 					self.stale.remove(run.clone());
+					self.adopted_errors.remove(run.clone());
 					self.deferred.remove(run);
 				}
 				for run in view.gained(old, low, last).into_iter().map(half) {
@@ -1415,6 +1430,7 @@ impl Misses {
 				set.remove(0..low);
 			}
 			self.stale.remove(0..low);
+			self.adopted_errors.remove(0..low);
 		}
 		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
 		debug_assert!(evicted.is_empty(), "an eviction landed without counting");
@@ -1802,6 +1818,7 @@ impl Misses {
 	fn hold_verdict(&mut self, groups: ops::Range<u64>, stale: Option<Stale>) {
 		self.given_up.insert(groups.clone());
 		self.skipped.remove(groups.clone());
+		self.adopted_errors.remove(groups.clone());
 		match stale {
 			Some(stale) => {
 				self.narrowest = Some(
@@ -1826,14 +1843,18 @@ impl Misses {
 				if *gone == Hole::Skip {
 					self.given_up.insert(run.clone());
 					self.skipped.insert(run.clone());
-					self.stale.remove(run);
+					self.stale.remove(run.clone());
+					self.adopted_errors.remove(run);
 					continue;
 				}
 				let stale = gone.stale_budget().map(|budget| Stale {
 					budget,
 					adopted: Some(gone.stale_cap()),
 				});
-				self.hold_verdict(run, stale);
+				self.hold_verdict(run.clone(), stale);
+				if stale.is_none() && gone.error() != crate::StreamError::NotFound {
+					self.adopted_errors.insert(run, gone.error());
+				}
 				adopted |= stale.is_some();
 			}
 		}
@@ -1850,6 +1871,7 @@ impl Misses {
 		self.given_up.insert(groups.clone());
 		self.skipped.insert(groups.clone());
 		self.stale.remove(groups.clone());
+		self.adopted_errors.remove(groups.clone());
 		given_up.push((groups, Hole::Skip));
 	}
 
@@ -1860,13 +1882,15 @@ impl Misses {
 	pub fn retake(&mut self, drift: &Drift) -> RangeSet<u64> {
 		let mut taken = self.widen(&drift.budget);
 		if let Some(debt) = self.forgotten_debt.as_ref()
-			&& self.forgotten_budget.as_ref().is_none_or(|prev| {
-				prev.runs(debt.clone())
+			&& self.forgotten_narrowest.is_none_or(|narrowest| {
+				drift
+					.budget
+					.runs(debt.clone())
 					.into_iter()
-					.any(|(run, old)| drift.budget.runs(run).into_iter().any(|(_, now)| now > old))
+					.any(|(_, now)| now > narrowest)
 			}) {
 			let debt = self.forgotten_debt.take().expect("checked above");
-			self.forgotten_budget = None;
+			self.forgotten_narrowest = None;
 			self.judged.remove(debt);
 			self.at = None;
 		}
@@ -1945,29 +1969,35 @@ impl Misses {
 					if part.is_empty() || judged.adopted.is_some() {
 						continue;
 					}
-					let settled = match budget {
+					match budget {
 						Some(budget) => {
-							let current = match budget.is_uniform() {
-								true => budget.at(part.start),
-								false => budget.widest(),
-							};
-							current <= judged.budget
+							for (seg, current) in budget.runs(part) {
+								if current <= judged.budget {
+									f(seg, Hole::missed(Some(judged.budget)));
+								}
+							}
 						}
-						None => true,
-					};
-					if settled {
-						f(part, Hole::missed(Some(judged.budget)));
+						None => f(part, Hole::missed(Some(judged.budget))),
 					}
 				}
 				for part in self.stale.gaps(&missed) {
-					f(part, Hole::missed(None));
+					for (err_run, err) in self.adopted_errors.overlapping(&part) {
+						let seg = err_run.start.max(part.start)..err_run.end.min(part.end);
+						if !seg.is_empty() {
+							f(seg, Hole::drop(err.clone()));
+						}
+					}
+					for seg in self.adopted_errors.gaps(&part) {
+						f(seg, Hole::missed(None));
+					}
 				}
 			}
 		}
 	}
 
 	/// The contiguous final given-up run ending at `end`, clamped to `floor`, if any: a skip,
-	/// a non-stale miss, or this reader's own stale verdict at or above `bound`.
+	/// a non-stale miss (preserving its adopted upstream error), or this reader's own stale
+	/// verdict at or above `bound`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn final_below(&self, end: u64, floor: u64, bound: Option<Duration>) -> Option<(ops::Range<u64>, Hole)> {
 		let prev = end.checked_sub(1)?;
@@ -1995,12 +2025,21 @@ impl Misses {
 			.overlapping(&(start..end))
 			.next_back()
 			.map_or(start, |(stale, _)| stale.end.max(start));
+		if let Some((err_run, err)) = self.adopted_errors.get_key_value(&prev) {
+			return Some((err_run.start.max(start)..end, Hole::drop(err.clone())));
+		}
+		let start = self
+			.adopted_errors
+			.overlapping(&(start..end))
+			.next_back()
+			.map_or(start, |(err_run, _)| err_run.end.max(start));
 		Some((start..end, Hole::missed(None)))
 	}
 
 	/// Judge `run` afresh: no longer given up, and judged again by the next probe.
 	pub fn reopen(&mut self, run: ops::Range<u64>) {
 		self.given_up.remove(run.clone());
+		self.adopted_errors.remove(run.clone());
 		self.judged.remove(run);
 		// The next probe judges under new terms, which looks at every key it has not judged.
 		self.at = None;
@@ -2029,7 +2068,7 @@ impl Misses {
 			Some(debt)
 		};
 		if self.forgotten_debt.is_none() {
-			self.forgotten_budget = None;
+			self.forgotten_narrowest = None;
 		}
 	}
 }
@@ -2396,7 +2435,8 @@ fn clip(run: ops::Range<u64>, from: u64, admitted: &RangeInclusiveSet<u64>) -> V
 /// settled those keys, so never asks a fill for them again.
 impl super::super::record::Beside for Misses {
 	fn runs(&self) -> u64 {
-		(self.given_up.len() + self.skipped.len() + self.stale.len() + self.unasked.len()) as u64
+		(self.given_up.len() + self.skipped.len() + self.stale.len() + self.adopted_errors.len() + self.unasked.len())
+			as u64
 	}
 
 	fn given_up_end(&self, key: u64) -> Option<u64> {
@@ -2429,7 +2469,8 @@ impl super::super::record::Beside for Misses {
 		if !folded.is_empty() {
 			self.given_up.remove(folded.clone());
 			self.skipped.remove(folded.clone());
-			self.stale.remove(folded);
+			self.stale.remove(folded.clone());
+			self.adopted_errors.remove(folded);
 		}
 	}
 
@@ -2438,6 +2479,7 @@ impl super::super::record::Beside for Misses {
 		floor: u64,
 		reported: &RangeMap<u64, super::super::record::Report>,
 		pending: &RangeMap<u64, super::super::record::Pending>,
+		keep_skips: bool,
 	) {
 		if self.given_up.is_empty() {
 			return;
@@ -2460,15 +2502,35 @@ impl super::super::record::Beside for Misses {
 					untold.remove(part);
 				}
 			}
+			if keep_skips {
+				for skipped in self.skipped.overlapping(&run) {
+					let part = skipped.start.max(run.start)..skipped.end.min(run.end);
+					if !part.is_empty() {
+						untold.remove(part);
+					}
+				}
+			}
 			cleared.extend(untold);
 		}
 		if cleared.is_empty() {
 			return;
 		}
 		for run in cleared {
+			for (_, judged) in self.stale.overlapping(&run) {
+				self.forgotten_narrowest = Some(
+					self.forgotten_narrowest
+						.map_or(judged.budget, |prev| prev.min(judged.budget)),
+				);
+			}
+			if let Some(budget) = &self.budget {
+				for (_, current) in budget.runs(run.clone()) {
+					self.forgotten_narrowest = Some(self.forgotten_narrowest.map_or(current, |prev| prev.min(current)));
+				}
+			}
 			self.given_up.remove(run.clone());
 			self.skipped.remove(run.clone());
 			self.stale.remove(run.clone());
+			self.adopted_errors.remove(run.clone());
 			self.forgotten_debt = Some(match self.forgotten_debt.take() {
 				Some(prev) => prev.start.min(run.start)..prev.end.max(run.end),
 				None => run,
@@ -2477,9 +2539,6 @@ impl super::super::record::Beside for Misses {
 		self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
 		if !self.stale.iter().any(|(_, verdict)| verdict.adopted.is_some()) {
 			self.adopted_under = None;
-		}
-		if self.forgotten_budget.is_none() {
-			self.forgotten_budget = self.budget.clone();
 		}
 	}
 }

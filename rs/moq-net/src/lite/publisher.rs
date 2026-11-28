@@ -12393,45 +12393,52 @@ mod serve_group_test {
 
 	/// On a front, a budget widening serving a cached group below `start` must not emit a
 	/// retryable route failure (such as UNROUTABLE) as a final reaching drop, and must stop the
-	/// contiguous walk there.
+	/// contiguous walk there, even after cache reclamation evicts the drop from `state.drops`.
 	#[kio::test]
 	async fn a_widened_budget_stops_reaching_drops_at_retryable_route_error() {
-		let version = Version::Lite06;
-		let mut front = track::Routed::new("test", crate::track::Info::timed());
-		for key in (0..1000).step_by(20) {
-			write_group(&mut front.copy, key, key);
-			front.copy.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
-		}
-		// Mark the gap directly below group 860 as UNROUTABLE (with a NotFound run below it).
-		front.copy.drop_groups(850..860, crate::StreamError::Unroutable);
-		let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
-		let subscriber = front
-			.logical
-			.consume()
-			.subscribe(subscription)
-			.now_or_never()
-			.expect("an accepted logical track answers at once")
-			.unwrap();
-		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		let start = run.start.resolved().expect("resolved");
-		assert_eq!(start, 880);
+		for reclaimed in [false, true] {
+			let version = Version::Lite06;
+			let mut front = track::Routed::new("test", crate::track::Info::timed());
+			for key in (0..1000).step_by(20) {
+				write_group(&mut front.copy, key, key);
+				front.copy.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+			}
+			// Mark the gap directly below group 860 as UNROUTABLE (with a NotFound run below it).
+			front.copy.drop_groups(850..860, crate::StreamError::Unroutable);
+			let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+			let subscriber = front
+				.logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.expect("an accepted logical track answers at once")
+				.unwrap();
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let start = run.start.resolved().expect("resolved");
+			assert_eq!(start, 880);
+			if reclaimed {
+				// Evict the UNROUTABLE drop from the serving copy's drop cache so reaching_drops
+				// falls back to the copy's miss ledger.
+				front.copy.forget_drops(850..860);
+			}
 
-		let named = drops(&mut writer, &log, version).await.len();
-		run.replace(lite::SubscribeUpdate {
-			wanted_group: None,
-			order: crate::track::Order::Descending,
-			priority: 1,
-			max_delay: Some(Duration::from_millis(120)),
-			ranges: vec![lite::Range::span(None, 0, None, None)],
-		});
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		let widened = drops(&mut writer, &log, version).await.split_off(named);
-		assert_eq!(
-			widened,
-			Vec::<(u64, u64)>::new(),
-			"retryable UNROUTABLE below 860 is not forwarded and stops the contiguous walk"
-		);
+			let named = drops(&mut writer, &log, version).await.len();
+			run.replace(lite::SubscribeUpdate {
+				wanted_group: None,
+				order: crate::track::Order::Descending,
+				priority: 1,
+				max_delay: Some(Duration::from_millis(120)),
+				ranges: vec![lite::Range::span(None, 0, None, None)],
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let widened = drops(&mut writer, &log, version).await.split_off(named);
+			assert_eq!(
+				widened,
+				Vec::<(u64, u64)>::new(),
+				"reclaimed {reclaimed}: retryable UNROUTABLE below 860 is not forwarded and stops the contiguous walk"
+			);
+		}
 	}
 
 	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,
