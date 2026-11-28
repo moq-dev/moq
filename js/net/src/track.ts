@@ -1011,8 +1011,6 @@ let cachedMirror: (producer: Producer, key: bigint, from: number) => GroupConsum
 // Whether the producer still caches a group that has not failed, with `whole` only one held from
 // its first frame; assigned in its static block.
 let cachedHolds: (producer: Producer, key: bigint, whole?: boolean) => boolean;
-// How many cached groups the pool evicted from the producer; assigned in its static block.
-let evictions: (producer: Producer) => number;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
@@ -1509,9 +1507,6 @@ export class Producer {
 	// The newest live group the cache let go of, and its newest frame: the live edge a join measures
 	// stays where its publisher reached. Mirrors the Rust `TrackState::departed_edge`.
 	#departedEdge?: { key: bigint; latest: Timestamp };
-	// How many cached groups the pool evicted, so a reader that left a group to this copy to read
-	// learns it may be gone. Mirrors the Rust `TrackState::evicted_groups`.
-	#evictions = 0;
 	// This track's account against its broadcast's cache pool (a pool of its own when it has no
 	// broadcast), which evicts the cached groups once idle.
 	#account: cache.Track<CachedGroup>;
@@ -1624,7 +1619,6 @@ export class Producer {
 				if (wholeEnd !== undefined && wholeEnd > entry.group.start + 1n)
 					this.#skipReceived(entry.group.start + 1n, wholeEnd);
 				if (!entry.fetched && span.started && !span.failed) this.#depart(entry, span);
-				this.#evictions++;
 			},
 			settle: () => this.#settle(),
 			expireDrops: (now) => this.#expireDrops(now),
@@ -1948,7 +1942,6 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
-		evictions = (producer) => producer.#evictions;
 		cachedHolds = (producer, key, whole = false) => {
 			const entry = producer.#cached.get(key);
 			if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
@@ -4186,14 +4179,19 @@ export class Subscriber {
 		if (forgot !== undefined && delivered === this.#delivered) this.#judge(0n, forgot);
 	}
 
-	// The lowest group buffered unread within this reader's range and window, not in `delivered`.
-	#lowestBuffered(delivered: Delivered): bigint | undefined {
+	// The lowest group buffered unread within this reader's range and window, not in `delivered`. With
+	// `fresh`, only one not stale even at the track's max age, which bounds every budget.
+	#lowestBuffered(delivered: Delivered, fresh = false): bigint | undefined {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
+		// Judged within this read's own window and cap, at the max age alone.
+		const own = fresh ? this.#drift() : undefined;
+		const drift = own && { ...own, budget: Budget.uniform(NO_MAX_DELAY).clamped(own.bound) };
 		for (let index = timelineIndex(groups, start); index < groups.length; index++) {
 			const key = groups[index].start;
 			if (end !== undefined && key >= end) return undefined;
-			if (this.#window.contains(key) && !delivered.has(key)) return key;
+			if (!this.#window.contains(key) || delivered.has(key)) continue;
+			if (!drift || !this.#staleAt(key, drift)) return key;
 		}
 		return undefined;
 	}
@@ -5497,8 +5495,10 @@ export class Subscriber {
 		};
 		hooks.keyAfter = (subscriber, key) => subscriber.#keyAfter(key);
 		hooks.refused = (subscriber) => subscriber.#settle() ?? subscriber.#resume?.refused();
-		hooks.lowestBuffered = (subscriber, delivered) =>
-			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
+		hooks.lowestBuffered = (subscriber, delivered, fresh) =>
+			subscriber.#resume
+				? subscriber.#resume.lowestBuffered(delivered, fresh)
+				: subscriber.#lowestBuffered(delivered, fresh);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.untell = (subscriber, start, end) => {
 			if (start >= end) return;
@@ -5581,10 +5581,6 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.landed(start, end);
 			const producer = subscriber.#state.producer;
 			return producer && cachedLanded(producer, start, end);
-		};
-		hooks.evictions = (subscriber) => {
-			const producer = subscriber.#state.producer;
-			return producer === undefined ? 0 : evictions(producer);
 		};
 		hooks.holdsGroup = (subscriber, key, whole) => {
 			const producer = subscriber.#state.producer;

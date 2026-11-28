@@ -470,10 +470,11 @@ interface Copy {
 	 */
 	dropped?: bigint;
 	/**
-	 * The track's eviction count when {@link Reader.backfillGaps} last left it a group the reader
-	 * lacks to drain, so an eviction since asks the serving route again.
+	 * The groups {@link Reader.backfillGaps} left it to drain that the reader still lacks, each one
+	 * it held then: once one no longer drains here, or the copy is let go, the serving route is asked
+	 * for it after all.
 	 */
-	drains?: number;
+	drains?: Set<bigint>;
 }
 
 /**
@@ -705,6 +706,7 @@ class Reader implements ResumeSource {
 			copy.until = undefined;
 			copy.since = undefined;
 			copy.done = undefined;
+			copy.drains = undefined;
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// boundary, is the capped copies' to deliver.
 			if (boundary !== undefined) copy.floor = max(copy.floor ?? 0n, boundary);
@@ -1256,47 +1258,38 @@ class Reader implements ResumeSource {
 		}
 		this.#resumed = false;
 		if (resumed === undefined) return;
-		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
-		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
-		// spent its drain budget delivers nothing more, even while a read still leases it, and one
-		// holding a group without its head may give that group up, so neither counts.
+		// A group a replaced copy drains (see #mayDrain) is that copy's: the serving route is asked
+		// from the lowest one none drains.
 		const cursor = this.#shell.cursor.peek().start;
-		// Each replaced copy's evictions so far, counted before the walk looks at what it holds, so a
-		// group it is left to drain and loses after is asked of the serving route then.
-		const evictions = new Map(
-			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.evictions(copy.sub)]),
-		);
 		// Each replaced copy's staleness verdict, taken once for the whole walk.
 		const taking = new Map(
 			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.taking(copy.sub)]),
 		);
 		// The copy left to drain group `key`, if any.
 		const drains = (key: bigint) =>
-			this.#copies.find(
-				(copy) =>
-					copy.replaced &&
-					this.#feeds(copy) &&
-					(copy.backfill ? cursor : max(cursor, copy.floor ?? 0n)) <= key &&
-					key < (copyEnd(copy) ?? UNBOUNDED) &&
-					taking.get(copy)?.(key) === true &&
-					!copyFailed(copy) &&
-					hooks.holdsGroup(copy.sub, key, true),
-			);
-		const left = new Set<Copy>();
+			this.#copies.find((copy) => this.#mayDrain(copy, key, cursor, taking.get(copy)));
 		let start: bigint | undefined;
+		// Copies an earlier walk left keys to, whose set this walk's keys may now leave unsorted.
+		const merged = new Set<Copy>();
 		for (const gap of delivered.gaps(max(floor, cursor), resumed)) {
 			let key = gap.start;
 			for (; key < gap.end; key++) {
 				const copy = drains(key);
 				if (!copy) break;
-				left.add(copy);
+				// Added to what earlier walks left.
+				if (copy.drains?.size) merged.add(copy);
+				copy.drains ??= new Set();
+				copy.drains.add(key);
 			}
 			if (key < gap.end) {
 				start = key;
 				break;
 			}
 		}
-		for (const copy of this.#copies) copy.drains = left.has(copy) ? evictions.get(copy) : undefined;
+		// Kept ascending, so an ordered read's rescan stops at the group it hands out.
+		for (const copy of merged) {
+			copy.drains = new Set([...(copy.drains ?? [])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
+		}
 		// A raised start is asked from its time whatever the local floor, so the backfill places it,
 		// and the group holding it is read once the floor lets it.
 		for (const time of owed) start = start === undefined ? time : min(start, time);
@@ -1452,8 +1445,8 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
-		this.#reopen();
 		this.#reopenFolded(delivered);
+		this.#reopen();
 		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -1477,6 +1470,15 @@ class Reader implements ResumeSource {
 			owing = first.owing;
 			const next = first.next;
 			if (!next) break;
+			// An ordered hand-out passes every key below it: a group a copy was left to drain there, or
+			// the candidate itself, that it no longer drains is asked of the serving route first.
+			if (ordered && first.key !== undefined) {
+				const resumed = this.#resumed;
+				this.#rescanDrains(delivered, first.key);
+				if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
+					return this.tryGroup(ordered, delivered, dispositions, admit);
+				}
+			}
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
 				const dropped = this.#tryDrop(delivered);
@@ -1562,7 +1564,22 @@ class Reader implements ResumeSource {
 				break;
 			}
 		}
+		const resumed = this.#resumed;
+		// Nothing to hand out, so a group a copy was left to drain and no longer drains is asked of
+		// the serving route now, as a cursor asks a fill only once it holds nothing to read: a
+		// backlog draining meanwhile costs no rescan per group.
+		this.#rescanDrains(delivered);
 		this.#letGo(delivered);
+		// A copy that stopped draining a group, or was let go with one, owes the serving route a
+		// backfill: ask now.
+		if (this.#resumed && !resumed) owed = true;
+		// A replaced copy that failed or was let go with a group to drain this pass owes the
+		// serving route a backfill once the window is placed: ask now, before any end, since its
+		// close already fired and no later group is sure to wake the read. A backfill that failed
+		// is not asked again (`#refused`), so this ends. Mirrors the Rust `Reader::poll_first`.
+		if (owed && this.#resumed && this.#window().floor() !== undefined) {
+			return this.tryGroup(ordered, delivered, dispositions, admit);
+		}
 		// A copy that ran out or was let go no longer holds back a drop.
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -1575,12 +1592,8 @@ class Reader implements ResumeSource {
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 		// A revert serves the copy the failed replacement capped again, which may hold the next
-		// group already. A replaced copy that failed this pass owes the serving route a backfill
-		// once the window is placed: ask now, since its close already fired and no later group is
-		// sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
-		// ends. Mirrors the Rust `Reader::poll_first`.
-		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
-		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
+		// group already.
+		if (end.kind === "idle" && this.route.generation !== generation) {
 			return this.tryGroup(ordered, delivered, dispositions, admit);
 		}
 		return end;
@@ -1812,13 +1825,54 @@ class Reader implements ResumeSource {
 			copy.done = undefined;
 			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
 		}
-		// A group the switch left a replaced copy to drain may be gone from its cache since: the
-		// serving route is asked for it after all, as a cursor on the track would ask again.
+	}
+
+	// Re-arm the walk once a group a walk left a copy to drain, which the reader still lacks, no
+	// longer drains there: evicted, given up as stale, or its copy failed or spent its budget. The
+	// serving route is then asked for it after all, as a cursor on the track would ask again. Costs
+	// the groups left to drain, each one a copy holds. Mirrors the Rust `Reader::rescan_drains`.
+	//
+	// With `through`, only the groups up to that key, which an ordered read checks before it hands
+	// it out and passes those below: the copy offering it may hold it without its head, so not
+	// drain it. Each copy keeps its keys ascending, so this costs the groups handed out since.
+	#rescanDrains(delivered: Delivered, through?: bigint): void {
+		const cursor = this.#shell.cursor.peek().start;
 		for (const copy of this.#copies) {
-			if (copy.drains === undefined || hooks.evictions(copy.sub) === copy.drains) continue;
+			if (copy.drains === undefined) continue;
+			let taking: ((key: bigint) => boolean) | undefined;
+			let drains = true;
+			for (const key of copy.drains) {
+				if (delivered.has(key)) {
+					copy.drains.delete(key);
+					continue;
+				}
+				if (through !== undefined && key > through) break;
+				taking ??= hooks.taking(copy.sub);
+				if (this.#mayDrain(copy, key, cursor, taking)) continue;
+				drains = false;
+				break;
+			}
+			if (drains) continue;
 			copy.drains = undefined;
 			this.#resumed = true;
 		}
+	}
+
+	// Whether `copy` drains group `key` for a reader whose cursor starts at `cursor`: replaced and
+	// still read, holding the group's head under its cap and inside its own ranges, and its read
+	// `taking` still offers it. A copy that failed or spent its drain budget delivers nothing more,
+	// even while a read still leases it, and one holding a group without its head may give that
+	// group up, so neither drains. Mirrors the Rust `Copy::may_drain`.
+	#mayDrain(copy: Copy, key: bigint, cursor: bigint, taking: ((key: bigint) => boolean) | undefined): boolean {
+		return (
+			copy.replaced &&
+			this.#feeds(copy) &&
+			(copy.backfill ? cursor : max(cursor, copy.floor ?? 0n)) <= key &&
+			key < (copyEnd(copy) ?? UNBOUNDED) &&
+			taking?.(key) === true &&
+			!copyFailed(copy) &&
+			hooks.holdsGroup(copy.sub, key, true)
+		);
 	}
 
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
@@ -1838,7 +1892,7 @@ class Reader implements ResumeSource {
 	// because the window still owes a lower one that may yet land there. First is the lowest for an
 	// ordered read, else the first in the subscription's Group Order. Mirrors the Rust `poll_first`.
 	// A group at or past `admit` (ordered reads only) stays next, unjudged.
-	#first(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; owing: Copy[] } {
+	#first(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; key?: bigint; owing: Copy[] } {
 		let first: { copy: Copy; key: bigint } | undefined;
 		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
@@ -1871,7 +1925,7 @@ class Reader implements ResumeSource {
 				recv.group.close();
 			}
 		}
-		return { next: first?.copy, owing };
+		return { next: first?.copy, key: first?.key, owing };
 	}
 
 	/**
@@ -1983,7 +2037,15 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		const serving = this.#serving();
 		if (serving) this.#boundAtEnd(serving);
+		// A group a copy no longer drains, which no read since has asked of the serving route, and
+		// any walk an earlier pass queued: asked here, since a caller awaiting only the close may
+		// never read, and the end then waits for it as for any copy that may still deliver.
+		this.#rescanDrains(this.#delivered);
+		if (this.#resumed && this.#window().floor() !== undefined) this.#backfillGaps(this.#delivered);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
+		// A copy let go with a group to drain: asked the same way, then judged again, since a
+		// backfill a cache answers at once may leave nothing to wait for.
+		if (this.#resumed && this.#window().floor() !== undefined) return this.#conclude();
 		this.#ended = {
 			largest: serving && hooks.peekLargest(serving.sub).largest,
 			object: serving && hooks.objectLargest(serving.sub),
@@ -2033,6 +2095,9 @@ class Reader implements ResumeSource {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
 				if (retains || copy === asked) return true;
+				// Let go with a group a walk left it to drain, which it gave up by its own verdict:
+				// the serving route is asked for it after all, as when the copy's cache loses it.
+				if ([...(copy.drains ?? [])].some((key) => !delivered.has(key))) this.#resumed = true;
 			}
 			this.#drop(copy);
 			return false;
@@ -2300,16 +2365,19 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
-	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
-	// holds unread: as one cursor keeps what it owes, since a late group there may be fresh by its
-	// own successor on that copy. Nor past `keep`, an outer reader's own such group.
+	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader,
+	// or that would under a wider budget, holds unread: as one cursor keeps what it owes, since a
+	// late group there may be fresh by its own successor on that copy. A widened budget reads an
+	// expired copy again, so only a copy whose channel ran out is passed over, and only a group
+	// stale even at the track's max age, which bounds every budget: a lease on the copy never
+	// holds back the fold for good. Nor past `keep`, an outer reader's own such group.
 	forgetPast(delivered: Delivered, terms: FoldTerms, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
 		let kept = keep;
 		for (const copy of this.#copies) {
-			if (copy === newest || !copy.replaced || !this.#feeds(copy)) continue;
-			const key = hooks.lowestBuffered(copy.sub, delivered);
+			if (copy === newest || !copy.replaced || copy.done !== undefined) continue;
+			const key = hooks.lowestBuffered(copy.sub, delivered, true);
 			if (key !== undefined) kept = min(kept ?? key, key);
 		}
 		hooks.forgetPastBudget(newest.sub, delivered, terms, kept);
@@ -2336,10 +2404,10 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
-	lowestBuffered(delivered: Delivered): bigint | undefined {
+	lowestBuffered(delivered: Delivered, fresh?: boolean): bigint | undefined {
 		let lowest: bigint | undefined;
 		for (const copy of this.#copies) {
-			const key = hooks.lowestBuffered(copy.sub, delivered);
+			const key = hooks.lowestBuffered(copy.sub, delivered, fresh);
 			if (key !== undefined) lowest = min(lowest ?? key, key);
 		}
 		return lowest;

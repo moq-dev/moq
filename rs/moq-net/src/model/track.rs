@@ -1000,9 +1000,6 @@ pub(crate) struct TrackState {
 	// Bumped whenever an eviction lands in an inbox, so a reader with nothing new skips
 	// its own lock.
 	evictions: u64,
-	// Bumped as each cached group is evicted, landed in an inbox or not; see
-	// [`Consumer::evicted`].
-	evicted_groups: u64,
 	// Bumped as each group is cached, stamped on its slot: a reader judged a slot cached
 	// only if it was cached by the count the reader last judged at.
 	cached: u64,
@@ -1989,7 +1986,6 @@ impl TrackState {
 			self.skip_groups(from..end);
 		}
 		slot.abort(abort);
-		self.evicted_groups += 1;
 		let landed = self
 			.inboxes
 			.get_mut()
@@ -8387,15 +8383,6 @@ impl Consumer {
 		})
 	}
 
-	/// How many cached groups were evicted here so far, so a reader that left a group to this
-	/// copy to read learns it may be gone.
-	pub(super) fn evicted(&self) -> u64 {
-		if let Some(serving) = self.serving() {
-			return serving.evicted();
-		}
-		self.with_state(|state| state.map_or(0, |state| state.read().evicted_groups))
-	}
-
 	/// How many groups arrived here so far; see [`Self::poll_arrived`].
 	pub(super) fn arrived(&self) -> usize {
 		self.with_state(|state| state.map_or(0, |state| state.read().next_arrival))
@@ -11763,6 +11750,24 @@ impl Cursor {
 		std::mem::take(&mut self.stale)
 	}
 
+	/// The lowest group at or above `from` this read holds unread that `delivered` lacks, past
+	/// any one stale even at the track's max age bound, judged within this read's own window
+	/// and cap: no budget reads one stale there.
+	fn lowest_owed(&self, mut from: u64, delivered: &Delivered) -> Option<u64> {
+		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, &kio::Waiter::noop()) else {
+			return None;
+		};
+		let bound = drift.bound.unwrap_or(Duration::MAX);
+		let stale = |key: u64| self.state.read().is_stale(key, &drift.edge, bound);
+		while let Some(group) = self.lowest_unread(from) {
+			if !delivered.contains(group.start) && !stale(group.start) {
+				return Some(group.start);
+			}
+			from = group.start.checked_add(1)?;
+		}
+		None
+	}
+
 	/// The groups this reader reads, and its cap; see [`Coverage`].
 	fn coverage(&self) -> Coverage {
 		Some((self.filter.window.groups()?.clone(), self.end_key))
@@ -13674,10 +13679,8 @@ impl Subscriber {
 	pub(crate) fn rescan_drops(&mut self) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.record.rescan = true,
-			Inner::Resume(resume, logical) => {
-				logical.record.rescan = true;
-				resume.rescan_drops();
-			}
+			// Each copy scans its own drops; the logical record holds none to rescan.
+			Inner::Resume(resume, _) => resume.rescan_drops(),
 		}
 	}
 
@@ -13886,6 +13889,16 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.lowest_unread(from),
 			Inner::Resume(resume, _) => resume.lowest_unread(from),
+		}
+	}
+
+	/// The lowest group at or above `from` an arrival read holds unread that `delivered` lacks
+	/// and some budget still reads: past any one stale even at its track's max age bound,
+	/// judged by the read that holds it.
+	pub(super) fn lowest_owed(&self, from: u64, delivered: &Delivered) -> Option<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.lowest_owed(from, delivered),
+			Inner::Resume(resume, _) => resume.lowest_owed(from, delivered),
 		}
 	}
 
