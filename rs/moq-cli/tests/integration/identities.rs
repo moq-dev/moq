@@ -277,7 +277,11 @@ async fn replacement(version: &str) {
 	let reference = &snapshot.audio.renditions["audio"];
 	let new = fresh.resolve(reference.broadcast.as_ref()).await.unwrap();
 	if version == LITE_07 {
-		assert_eq!(new.info().identity.as_ref(), Some(&b), "only lite-07 carries the identity");
+		assert_eq!(
+			new.info().identity.as_ref(),
+			Some(&b),
+			"only lite-07 carries the identity"
+		);
 	}
 	assert!(!new.is_clone(&pinned));
 	let mut new_subscription = new.track("audio").unwrap().subscribe(None).await.unwrap();
