@@ -316,7 +316,8 @@ fn a_routed_claim_names_its_node() {
 }
 
 /// A routed claim told unavailable while its route stays is served unavailable, once
-/// however often it changes, and a request naming its node goes nowhere.
+/// however often it changes, and a request naming its node goes nowhere until a flush
+/// serves it available again.
 #[test]
 fn an_unavailable_routed_claim_takes_no_request() {
 	let (node, _clock) = node();
@@ -374,9 +375,17 @@ fn an_unavailable_routed_claim_takes_no_request() {
 	relay.recv(claims(5, true, 3)).unwrap();
 	relay.flush();
 	assert!(self::serves(&relay).is_empty(), "already served unavailable");
+	let waiter = kio::Waiter::noop();
+	assert_eq!(node.poll_forward(2, Some(far), &room, &waiter), Poll::Ready(None));
+
+	// The router takes the claim back available at once, but a request goes by what the
+	// session serves, which only the flush brings in line.
+	relay.recv(claims(5, false, 4)).unwrap();
+	assert_eq!(node.poll_forward(2, Some(far), &room, &waiter), Poll::Ready(None));
+	relay.flush();
 	assert_eq!(
-		node.poll_forward(2, Some(far), &room, &kio::Waiter::noop()),
-		Poll::Ready(None)
+		node.poll_forward(2, Some(far), &room, &waiter),
+		Poll::Ready(Some(Via::Route { node: far }))
 	);
 }
 
