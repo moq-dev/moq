@@ -1602,7 +1602,8 @@ export class Publisher {
 			// A subscriber that left is owed nothing more, and its stream may already be reset.
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
-			closeViolation(this.#quic, err);
+			// The served track's error, such as a malformed group upstream, ends only this
+			// subscription: its decoder (`SubscriptionControls`) closes the session for its own input.
 			const e = error(err);
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
@@ -1760,7 +1761,7 @@ export class Publisher {
 			stream.writer.close();
 			await acknowledged(stream.writer);
 		} catch (err: unknown) {
-			closeViolation(this.#quic, err);
+			// Nothing here decodes: an error is the served group's, which ends only this fetch.
 			const e = error(err);
 			abandon ??= e;
 			releaseFetched(e);
@@ -2966,7 +2967,10 @@ export class Publisher {
 			})();
 			void updates.then(
 				() => cancel.abort(new StreamError(StreamCode.Cancel)),
-				(err) => cancel.abort(error(err)),
+				(err) => {
+					closeViolation(this.#quic, err);
+					cancel.abort(error(err));
+				},
 			);
 			const front = await this.#resolve(msg, cancel.signal);
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
@@ -2981,7 +2985,7 @@ export class Publisher {
 			stream.writer.close();
 			await updates;
 		} catch (err) {
-			closeViolation(this.#quic, err);
+			// Only the update reader's own errors close the session, above; the track's end here.
 			stream.abort(error(err));
 		} finally {
 			track?.close();
@@ -3011,7 +3015,10 @@ export class Publisher {
 		})();
 		void updates.then(
 			() => track.close(),
-			(err) => track.close(error(err)),
+			(err) => {
+				closeViolation(this.#quic, err);
+				track.close(error(err));
+			},
 		);
 		try {
 			const info = await untilAborted(track.info(), signal);
