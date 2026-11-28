@@ -14,7 +14,7 @@ Flag new or changed lifecycle code that breaks these (make bad combinations unre
 
 - **One enum per lifecycle**: phases are one enum/union whose variants carry their data (like `PresentState` in `rs/moq-net/src/lite/session.rs` and `State` in `js/net/src/ietf/join.ts`). Flag flags/`Option`/errors beside an enum, duplicated terminal state, `.expect()`/call-order-dependent data, and one-shot handles taken before validation.
 - **Terminal after the work**: mark finished/closed/answered only after fallible work (or record failure as terminal state). Use consuming methods like `finish(self)`. Flag "done" set before a fallible flush/write.
-- **One lock per value**: never guard one value with two locks or split across atomics (`CompletionState` in `rs/moq-gst/src/sink/session.rs`).
+- **One lock per value**: never guard one value with two locks or split across atomics (`CompletionState` in `rs/moq-gst/src/sink/session.rs`). Where a lock-free atomic mirrors locked state to avoid lock nesting (such as `Alive` in `rs/moq-net/src/model/group.rs`), publish it with `Release` before dropping the write guard that wakes waiters, and have paired `poll_*` checks read the same predicate.
 
 # Tests
 
