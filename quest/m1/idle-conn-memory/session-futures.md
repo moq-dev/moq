@@ -3,33 +3,45 @@
 ## Goal
 
 The futures, tasks and shared state `moq-relay` and `moq-net` hold for each
-idle moq-lite session over WebTransport drop well below the 41 KiB they hold
-now, found by type size and confirmed with the idle heap profile.
+idle moq-lite session over WebTransport drop well below the 41 KiB they held
+on 2026-11-27, found by type size and confirmed with the idle heap profile.
 
 ## Plan
 
 The 2026-11-27 idle profile ([epic](/quest/m1/idle-conn-memory/README.md))
-put these allocations, per connection, in the session and WebTransport layers:
+put these allocations, per connection, in the session and WebTransport layers.
+A first pass (sizes read with `RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zprint-type-sizes`,
+which prints every future's layout on stable) shrank these, so a future's
+size is its allocation, in jemalloc size classes:
+
+| Site | KiB then | Now |
+|---|---|---|
+| `Connection::start`'s boxed `supervise` future | 7.0 | 4.0 |
+| the task around `Request::ok`'s driver | 3.0 | 0.75 |
+| `lite::session::Driver` | 7.0 | 3.5 |
+| the relay connection task (`Lifecycle` held `Cluster` inline) | 1.7 | 0.6 |
+| `web::Session::run_recv` task | 2.0 | 1.0 |
+| `AnnouncePrefix` occupant `Vec` (first slot reserved alone; not re-measured) | 1.5 | 0.4 expected |
+
+Sampled live heap on loopback macOS (2,000 idle connections) fell from about
+105 KiB to about 99 KiB per connection, and RSS from 116-118 to 106-109 KiB.
+
+What remains, with the profile's figures:
 
 | Site | KiB |
 |---|---|
-| `moq_relay::connection::Connection::start`: the boxed `Map<Join<..>>` future | 7.0 |
-| the same: the tokio task cell around `moq_tokio::server::Request::ok` | 3.0 |
-| `moq_net::server::Server::start_lite`: the boxed `lite::session::Driver` | 7.0 |
 | `moq_net::lite::session::start`: `publisher::Shared` and others | 4.0 |
-| `kio::Producer<bandwidth::Registry>` default, twice | 1.8 |
-| `moq_relay::relay::serve_listening`: the connection task | 1.7 |
-| `lite::subscriber` `AnnouncePrefix` occupant `Vec` growth | 1.5 |
+| `moq_tokio::quic::web::session::Session::new`: `Web` (2.1 KiB inline: `SessionAccept` 1.0, `Settings` 0.5, request 0.2) | 5.4 |
+| `moq_net::bandwidth::Registry` and `Viewers`, one of each per session | 1.8 |
 | `moq_net::session::Session::new` channels | 1.2 |
 | `moq_relay::session::Registry` table | 1.0 |
-| `moq_tokio::quic::web::session::Session::new`: `Web` state and its task | 5.4 |
 | `transport::boxed::bi` stream boxes | 1.0 |
+| `supervise` is 3.9 KiB, just over the 3.5 KiB class: `Lease` is 2 KiB inline, the select's futures 1 KiB | 0.5 |
 
-Start from type sizes (`-Zprint-type-sizes` or `top-type-sizes` on
-`moq-relay`) for the futures above: a large future usually holds a rarely
-used branch's locals, or a setup value, across an await point. Box that state
-or drop it before the long await, so the long-lived future carries only what
-an idle session needs. Look at the two `bandwidth::Registry` producers an
-idle session builds, and at the `AnnouncePrefix` vector's capacity. Keep the
-profile's churn view in sight: a box that runs per frame trades memory for
-allocations the fan-out bench counts.
+Method notes for the rest: an `async fn` stores each argument twice (as a
+capture and a local), so a long-lived future is built from combinators or an
+`async move` block over captures instead; a handle cloned per machine holds
+one `Arc` of its fields; and the `-Zprint-type-sizes` build above, plus an
+idle run of `moq-bench`, is the loop. `jeprof` on macOS cannot unwind or
+symbolize the relay (no `dyld_info`, no frame pointers in jemalloc's
+backtrace), so per-site attribution needs a Linux host.
