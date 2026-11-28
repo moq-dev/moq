@@ -10657,6 +10657,10 @@ pub(crate) enum Pick {
 }
 
 /// What one walk of a cursor's read came to.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "returned once per walk and taken apart at once, so boxing would only allocate"
+)]
 enum Walked {
 	Found(Peeked),
 	/// The feed ended with nothing left to hand out.
