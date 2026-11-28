@@ -23,16 +23,12 @@ belong to `kixel-ai/kio` (tracked in
 [kixel-ai/kio `quest/m1/crates-io-publish.md`](https://github.com/kixel-ai/kio/blob/main/quest/m1/crates-io-publish.md))
 and `moq-dev/moq`'s `release-rs.yml` no longer publishes them; seven crates
 remain. Corrected 2026-11-27: `kio` and `kio-macros` moved back into `rs/kio`,
-so `release-rs.yml` publishes them again, but their trusted publishers name
-`kixel-ai/kio`'s `release.yml`; nine crates remain.
+so `release-rs.yml` publishes them again. Done 2026-11-27 (maintainer):
+`kio` and `kio-macros` trust `moq-dev/moq`, `release-rs.yml`, environment
+`publish`, and no longer `kixel-ai/kio`; seven crates remain.
 
 ## Waiting
 
-- Maintainer (PC): on crates.io, give `kio` and `kio-macros` (both published,
-  `kio-macros` 0.1.0 from `kixel-ai/kio` on 2026-11-26) a trusted publisher for
-  `moq-dev/moq`, workflow `release-rs.yml`, environment `publish`, and remove
-  their `kixel-ai/kio` publisher. Settings pages need a crates.io login, so check
-  with a `release-rs.yml` run that publishes either crate through OIDC.
 - Maintainer: after [the cut](/quest/m3/release/cut.md) publishes
   moq-congestion, moq-crypto, moq-opus, moq-quic, moq-rtsp, moq-vaapi, and moq-webrtc by
   token, add their trusted publishers the same way. Settings pages need a
