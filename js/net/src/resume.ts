@@ -1470,8 +1470,8 @@ class Reader implements ResumeSource {
 			owing = first.owing;
 			const next = first.next;
 			if (!next) break;
-			// An ordered hand-out passes every key below it: a group a copy was left to drain there
-			// and no longer drains is asked of the serving route first.
+			// An ordered hand-out passes every key below it: a group a copy was left to drain there, or
+			// the candidate itself, that it no longer drains is asked of the serving route first.
 			if (ordered && first.key !== undefined) {
 				const resumed = this.#resumed;
 				this.#rescanDrains(delivered, first.key);
@@ -1832,9 +1832,10 @@ class Reader implements ResumeSource {
 	// serving route is then asked for it after all, as a cursor on the track would ask again. Costs
 	// the groups left to drain, each one a copy holds. Mirrors the Rust `Reader::rescan_drains`.
 	//
-	// With `below`, only the groups under that key, which an ordered read checks before it passes
-	// them: each copy keeps its keys ascending, so this costs the groups handed out since.
-	#rescanDrains(delivered: Delivered, below?: bigint): void {
+	// With `through`, only the groups up to that key, which an ordered read checks before it hands
+	// it out and passes those below: the copy offering it may hold it without its head, so not
+	// drain it. Each copy keeps its keys ascending, so this costs the groups handed out since.
+	#rescanDrains(delivered: Delivered, through?: bigint): void {
 		const cursor = this.#shell.cursor.peek().start;
 		for (const copy of this.#copies) {
 			if (copy.drains === undefined) continue;
@@ -1845,7 +1846,7 @@ class Reader implements ResumeSource {
 					copy.drains.delete(key);
 					continue;
 				}
-				if (below !== undefined && key >= below) break;
+				if (through !== undefined && key > through) break;
 				taking ??= hooks.taking(copy.sub);
 				if (this.#mayDrain(copy, key, cursor, taking)) continue;
 				drains = false;

@@ -3220,7 +3220,8 @@ impl Reader {
 		}
 		if let Some(first) = first {
 			// An ordered hand-out passes every key below it: a group a copy was left to drain
-			// there and no longer drains is asked of the serving route first.
+			// there and no longer drains is asked of the serving route first. The candidate
+			// itself is the reserved group, handed out as it is.
 			if ordered {
 				let resumed = self.resumed.is_some();
 				self.rescan_drains(delivered, Some(first.key()), waiter);
@@ -10827,6 +10828,38 @@ mod test {
 		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
 		write(&b, 2);
 		a.evict(2);
+		assert_eq!(drain(&mut sub, true), [2, 3]);
+	}
+
+	/// A group a replaced copy was left to drain, which it lost and got again without its head, goes
+	/// out before an ordered read hands out the group above: the reserved group is handed out as it
+	/// is, where the JS take gives it up and asks the serving route instead.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_reads_a_drain_its_copy_got_again_without_its_head() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, true), [0]);
+		write(&a, 1);
+		write(&a, 2);
+		write(&a, 3);
+		let b = copy();
+		routes.serve(b.consume());
+		let Poll::Ready(Ok(Some(group))) = sub.poll_next_group(&kio::Waiter::noop()) else {
+			panic!("the replaced copy's group 1");
+		};
+		assert_eq!(group.start, 1);
+		a.evict(2);
+		let track::Received::Group(mut tail) = a.create_group_at(group::Info { start: 2 }, 1, 0..0).unwrap() else {
+			panic!("nothing else holds group 2");
+		};
+		tail.write_frame(ts(2), b"x".as_ref()).unwrap();
+		tail.finish().unwrap();
+		write(&b, 2);
 		assert_eq!(drain(&mut sub, true), [2, 3]);
 	}
 
