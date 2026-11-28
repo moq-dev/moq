@@ -25,29 +25,6 @@ use std::{
 
 use slab::Slab;
 
-/// A tree whose emptied root node, which std keeps for reuse, can be freed: an idle
-/// connection would otherwise hold one for every tree it ever filled.
-trait Shrink {
-	/// Free the root node if the tree is empty.
-	fn shrink(&mut self);
-}
-
-impl<K, V> Shrink for BTreeMap<K, V> {
-	fn shrink(&mut self) {
-		if self.is_empty() {
-			*self = Self::new();
-		}
-	}
-}
-
-impl<T> Shrink for BTreeSet<T> {
-	fn shrink(&mut self) {
-		if self.is_empty() {
-			*self = Self::new();
-		}
-	}
-}
-
 /// Bytes a group may send per turn of its round robin before it yields.
 ///
 /// One minimum-size QUIC packet, so equal groups interleave about once per packet.
@@ -153,12 +130,6 @@ impl<K: Copy, D> Queue<K, D> {
 
 	fn is_empty(&self) -> bool {
 		self.next.is_none() && self.items.is_empty()
-	}
-
-	/// Free the nodes the queue's emptied trees keep.
-	fn shrink(&mut self) {
-		self.items.shrink();
-		self.datagrams.shrink();
 	}
 
 	#[cfg(test)]
@@ -386,9 +357,7 @@ impl<K: Copy, D> Schedule<K, D> {
 		let Some(queued) = slot.queued.take() else {
 			return;
 		};
-		let queue = self.queue(slot.group);
-		queue.remove(queued);
-		queue.shrink();
+		self.queue(slot.group).remove(queued);
 		self.streams -= 1;
 		self.deactivate(slot.group);
 	}
@@ -549,10 +518,7 @@ impl<K: Copy, D> Schedule<K, D> {
 		match requeue {
 			Some(priority) if fair => self.push(id, slot, priority),
 			Some(_) => self.reinsert(id, slot),
-			None => {
-				self.queue(slot.group).shrink();
-				self.deactivate(slot.group);
-			}
+			None => self.deactivate(slot.group),
 		}
 	}
 
@@ -566,9 +532,7 @@ impl<K: Copy, D> Schedule<K, D> {
 	/// Dequeue a datagram, leaving the round robin with the group's last item.
 	fn remove_datagram(&mut self, group: Option<usize>, recency: u64) -> D {
 		self.unindex(group);
-		let queue = self.queue(group);
-		let (datagram, frame) = queue.take_datagram(recency);
-		queue.shrink();
+		let (datagram, frame) = self.queue(group).take_datagram(recency);
 		self.datagram_bytes -= frame;
 		if let btree_map::Entry::Occupied(mut count) = self.frames.entry(frame) {
 			*count.get_mut() -= 1;
@@ -576,9 +540,7 @@ impl<K: Copy, D> Schedule<K, D> {
 				count.remove();
 			}
 		}
-		self.frames.shrink();
 		self.index(group);
-		self.victims.shrink();
 
 		self.deactivate(group);
 		if let Some(group) = group {
@@ -704,7 +666,6 @@ impl<K: Copy, D> Schedule<K, D> {
 		let priority = state.priority;
 		if next == group {
 			self.levels.remove(&priority);
-			self.levels.shrink();
 			return;
 		}
 		self.link(prev).next = next;

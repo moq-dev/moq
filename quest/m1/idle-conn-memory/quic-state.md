@@ -13,8 +13,7 @@ need rather than a 64-slot chunk.
 
 [moq-dev/moq#9827](https://github.com/moq-dev/moq/pull/9827) landed most of it:
 a confirmed server frees its rustls session, sent-packet chunks start at 4
-slots, discarded packet spaces free their buffers, the scheduler frees its
-emptied B-tree roots, and `prev_path` is boxed. In the moq-quic sim, an idle
+slots, discarded packet spaces free their buffers, and `prev_path` is boxed. In the moq-quic sim, an idle
 server connection's heap went from 17.8 KB to 6.2 KB and its inline
 `Connection` from 8,240 B to 7,712 B.
 
@@ -30,6 +29,11 @@ as a crash there rather than in production.
 
 The maintainer chose (2026-11-28) to do this as its own work after the 0.22.0
 cut, not in #9827 and not dropped.
+
+The scheduler's emptied B-tree roots (a 1.3 KB leaf once any stream has sent)
+also stay: freeing them whenever a queue drained cost up to five allocation
+and free pairs per paced datagram (round 1 review of #9827). Free them only on
+a signal that the connection went idle, if one appears.
 
 The rest of the profile's items stay: the current and next 1-RTT keys
 (precomputed so a spoofed key phase costs nothing), BBRv3's state, the stream

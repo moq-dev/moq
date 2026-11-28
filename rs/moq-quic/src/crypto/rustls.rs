@@ -42,7 +42,8 @@ enum Tls {
 		got_handshake_data: bool,
 	},
 	/// A confirmed server's outcome, kept after rustls and its handshake buffers are freed: a
-	/// QUIC client sends nothing after its Finished.
+	/// QUIC client sends nothing after its Finished. The TLS exporter secret goes with rustls,
+	/// so anything bound to it must be derived before this state.
 	Confirmed {
 		handshake: HandshakeData,
 		peer: Option<Vec<CertificateDer<'static>>>,
