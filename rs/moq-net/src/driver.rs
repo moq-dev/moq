@@ -24,7 +24,9 @@ pub struct Driver {
 	// non-`Sync` children anyway. The definite no keeps a `Sync` check, such as an exporter's,
 	// from overflowing the default recursion limit on the session model's depth.
 	not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
-	state: State,
+	// Boxed: the state is hundreds of bytes, and every future that carries the driver, such as
+	// a runtime's task, holds it several times over.
+	state: Box<State>,
 	clock: Deadlines,
 }
 
@@ -75,7 +77,7 @@ impl Driver {
 	pub(crate) fn new(clock: Deadlines, state: State) -> Self {
 		Self {
 			not_sync: std::marker::PhantomData,
-			state,
+			state: Box::new(state),
 			clock,
 		}
 	}
@@ -84,7 +86,7 @@ impl Driver {
 	///
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
-		let state = Polling(&mut self.state);
+		let state = Polling(&mut *self.state);
 		waiter.batch(|| {
 			self.clock.advance(now);
 			match state.0.poll(waiter) {
