@@ -3048,11 +3048,12 @@ impl Reader {
 			if open.iter().any(owes) {
 				return Below::Owed;
 			}
-			// A group landing on another thread after the read parked is no longer owed, but it
-			// counts as arrived in the same step: checked after, a landing at any point shows.
-			// Its wake may not have reached the fill's read yet, so that read walks past its gate.
+			// A group landing in one of those gaps on another thread after the read parked is no
+			// longer owed, but it counts as arrived in the same step: checked after, a landing at
+			// any point shows. Its wake may not have reached the fill's read yet, so that read
+			// walks past its gate. Each retry takes a landing in a gap below the candidate.
 			let copy = &mut self.copies[index];
-			if copy.track.poll_arrived(arrivals, waiter).is_ready() {
+			if copy.track.arrived_in(arrivals, &open) {
 				if let Sub::Ready(sub) = &mut copy.sub {
 					sub.disarm();
 				}

@@ -8358,6 +8358,17 @@ impl Consumer {
 		self.with_state(|state| state.map_or(0, |state| state.read().next_arrival))
 	}
 
+	/// Whether a group in `groups` arrived here after the first `seen`. One evicted since may
+	/// be forgotten, which leaves nothing to read.
+	pub(super) fn arrived_in(&self, seen: usize, groups: &RangeSet<u64>) -> bool {
+		self.with_state(|state| {
+			state.is_some_and(|state| {
+				let state = state.read();
+				state.arrivals_from(seen).any(|entry| groups.contains(&entry.key))
+			})
+		})
+	}
+
 	/// Ready once more than `seen` groups arrived here. A received copy still takes the groups
 	/// in flight below an end its readers stopped waiting at. Pending for good once the track closes.
 	pub(super) fn poll_arrived(&self, seen: usize, waiter: &kio::Waiter) -> Poll<()> {
