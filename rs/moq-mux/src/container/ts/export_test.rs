@@ -13281,6 +13281,52 @@ async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
 	assert!(Clocked::of(&ts).rate() > Clocked::of(data).rate() + crate::container::ts::schedule::PACKET);
 }
 
+/// An FFmpeg TS of audio alone whose rate the import measures only after the export's tables, while
+/// its clock is still acquired, keeps its audio on time at the rate with any delay that carries the
+/// source: the send-ahead the rate needs grows before anything is due, since the anchor then gives
+/// the track sent latest the delay. A delay shorter than the source's PES packing drops frames at any
+/// rate, so it is not swept; at 300 ms, `eac3` still drops a frame the given rate keeps
+/// (`quest/m1/ts-export-audio-rate.md`).
+#[tokio::test(start_paused = true)]
+async fn an_ffmpeg_audio_source_measured_while_its_clock_is_acquired_keeps_its_audio_on_time() {
+	for (name, data) in [
+		("aac", &include_bytes!("test_data/ffmpeg_aac.ts")[..]),
+		("aac_pulse", include_bytes!("test_data/ffmpeg_aac_pulse.ts")),
+		("ac3", include_bytes!("test_data/ffmpeg_ac3.ts")),
+		("eac3", include_bytes!("test_data/ffmpeg_eac3.ts")),
+		("mp2", include_bytes!("test_data/ffmpeg_mp2.ts")),
+		("opus", include_bytes!("test_data/ffmpeg_opus.ts")),
+	] {
+		let recorded = Clocked::of(data).rate();
+		for delay in [500, 2000, 3000].map(Duration::from_millis) {
+			let (ts, dropped) = paced_export(data, Rate::Measured, delay).await;
+			assert_eq!(dropped, 0, "{name}, {delay:?}: every frame made its deadline");
+			let out = Clocked::of(&ts).rate();
+			assert!(
+				out > recorded,
+				"{name}, {delay:?}: padded to {out} b/s, no more than the recorded {recorded}"
+			);
+		}
+	}
+}
+
+/// A rate measured mid-stream at a delay shorter than the source sends its audio ahead leaves the
+/// send-ahead nowhere to grow, so the export refuses it naming the delay: FFmpeg packs 186 ms of
+/// audio a PES, which a 100 ms delay cannot hold.
+#[tokio::test(start_paused = true)]
+async fn a_rate_measured_at_a_delay_shorter_than_the_source_sends_ahead_names_the_delay() {
+	let data = include_bytes!("test_data/ffmpeg_ac3.ts");
+	let err = try_paced_export(data, Rate::Measured, Duration::from_millis(100))
+		.await
+		.expect_err("the rate cannot carry the audio")
+		.to_string();
+	assert!(
+		err.contains("the 100ms delay is shorter than the source sends"),
+		"{err}"
+	);
+	assert!(!err.contains("raise the multiplex rate"), "{err}");
+}
+
 /// Where [`paced_export`] takes its multiplex rate from.
 #[derive(Clone, Copy, Debug)]
 enum Rate {
@@ -13296,6 +13342,11 @@ enum Rate {
 /// it at `rate` and `delay` from the first stretch on until 4 s of media. Returns the output and the frames it
 /// dropped.
 async fn paced_export(data: &[u8], rate: Rate, delay: Duration) -> (BytesMut, u64) {
+	try_paced_export(data, rate, delay).await.expect("exporter error")
+}
+
+/// [`paced_export`], returning the export's error rather than failing on it.
+async fn try_paced_export(data: &[u8], rate: Rate, delay: Duration) -> Result<(BytesMut, u64), crate::Error> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(
@@ -13329,13 +13380,13 @@ async fn paced_export(data: &[u8], rate: Rate, delay: Duration) -> (BytesMut, u6
 				};
 				let mut ts = BytesMut::new();
 				// The catalog stays open, so the export pads on: stop with the media.
-				while let Some(frame) = export.next().await.expect("exporter error") {
+				while let Some(frame) = export.next().await? {
 					ts.extend_from_slice(&frame.payload);
 					if frame.timestamp >= Timestamp::from_secs(4).unwrap() {
 						break;
 					}
 				}
-				(ts, export.dropped())
+				Ok((ts, export.dropped()))
 			}));
 		}
 	}

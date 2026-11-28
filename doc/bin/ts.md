@@ -134,7 +134,10 @@ padded multiplex sends audio up to half of `--delay` ahead, spreading it across
 slots, and a source that sends its audio only at its decode time adds that much
 latency. A frame that cannot arrive in time at the rate fails the export, as
 does video whose HRD declares a longer buffer delay than `--delay`; the error
-names the delay it needs.
+names the delay it needs. So does a rate the import measures only after the
+export started, when `--delay` is shorter than the source sends its audio
+ahead (FFmpeg's default packs about 186 ms a PES), leaving audio no room to go
+out further ahead for it.
 
 ## Passthrough mode
 

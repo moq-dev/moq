@@ -86,6 +86,15 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			_ => None,
 		}
 	}
+	/// The engine a replacement's clock runs on: its own while it acquires, the active one once
+	/// committed. `None` before a replacement starts.
+	pub fn replacement_engine(&self) -> Option<&Engine<K, T>> {
+		match self.handoff.as_deref()? {
+			Handoff::Pending(pending) => Some(&pending.engine),
+			Handoff::Committed(_) => Some(&self.active),
+		}
+	}
+
 	fn committed(&self) -> Option<&Committed<K, T>> {
 		match self.handoff.as_deref() {
 			Some(Handoff::Committed(committed)) => Some(committed),
@@ -295,6 +304,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 		if let Some(acquire) = &mut engine.acquire {
 			acquire.generation += offset;
+		}
+		// Every deadline moved later by the shift, so every frame had that much more to spare.
+		let later = shift.as_secs_f64();
+		engine.margin = engine.margin.map(|margin| margin + later);
+		if let Some((_, spare)) = &mut engine.spare {
+			*spare += later;
 		}
 		engine.horizon = engine
 			.horizon
@@ -1669,6 +1684,13 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		self.margin
 	}
 
+	/// The least time a frame arrived before its deadline, in seconds: [`Self::margin`], or before
+	/// a second has passed, so far. `None` until a frame has a deadline, so while the clock is
+	/// still acquired, which anchors it on whatever the frames hold by then.
+	pub fn spare_seen(&self) -> Option<f64> {
+		self.margin.or(self.spare.map(|(_, spare)| spare))
+	}
+
 	/// How far the clock sits off the source's plus the delay, in seconds, as last measured:
 	/// positive holds the track sent latest longer than the delay, negative shorter. The
 	/// clock pulls it shut over [`RESPONSE`]. `None` until the clock has measured the source's
@@ -1826,6 +1848,43 @@ mod tests {
 		assert_eq!((next.item, next.generation), ("C", 1));
 		buffer.adopted();
 		assert_eq!(buffer.reporting().dropped(), 0);
+	}
+
+	/// A commit that moves the replacement's deadlines later to keep the output in order moves
+	/// what its frames had to spare with them: the margin of a whole second, and before one has
+	/// passed, the least so far.
+	#[kio::test]
+	async fn a_commit_shift_moves_the_spare_with_the_deadlines() {
+		for whole in [false, true] {
+			let start = kio::clock::now();
+			let delay = Duration::from_millis(500);
+			let mut buffer = Buffer::new(delay).replay();
+			buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+			buffer.push(0, arrival(start, 100, "A1")).unwrap();
+			buffer.start([1], [1]);
+			buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+			kio::clock::sleep(delay + Duration::from_millis(100)).await;
+			assert_eq!(due(&mut buffer), ["A0", "A1"]);
+			if whole {
+				// A second after B's first, the next completes B's window.
+				kio::clock::sleep(Duration::from_millis(400)).await;
+				buffer.push(1, arrival(kio::clock::now(), 11_000, "B1")).unwrap();
+			}
+			let engine = buffer.replacement_engine().unwrap();
+			assert_eq!(engine.margin().is_some(), whole);
+			let before = engine.spare_seen().unwrap();
+			assert!((before - 0.5).abs() < 1e-6, "B arrived a delay ahead: {before} s");
+			let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+				panic!("B ready");
+			};
+			// A1 went out 100 ms after B's first deadline, so the commit shifts B 100 ms later.
+			buffer.commit(first).unwrap();
+			let after = buffer.replacement_engine().unwrap().spare_seen().unwrap();
+			assert!(
+				(after - 0.6).abs() < 1e-6,
+				"whole {whole}: shifted with the deadlines: {after} s"
+			);
+		}
 	}
 
 	/// A cancel after commit resumes the old publisher at its next sync frame, since the frames
@@ -2177,17 +2236,24 @@ mod tests {
 	}
 
 	/// The margin is the least any frame had to spare over a whole second, a frame that missed
-	/// its deadline included, and holds until the next second has passed.
+	/// its deadline included, and holds until the next second has passed. Before a second has
+	/// passed, the spare seen is the least so far, and nothing while the clock is acquired.
 	#[tokio::test(start_paused = true)]
 	async fn the_margin_is_the_least_spare_over_a_second() {
 		let start = Instant::now();
 		let at = |ms: u64| start.saturating_add(Duration::from_millis(ms));
+		let mut acquiring = Buffer::new(DELAY);
+		assert_eq!(acquiring.push(1, arrival(at(0), 0, "v0")).unwrap(), Push::Queued);
+		assert_eq!(acquiring.spare_seen(), None, "no frame has a deadline yet");
+
 		let mut buffer = Buffer::new(DELAY).replay();
 		assert_eq!(buffer.push(1, arrival(at(0), 0, "v0")).unwrap(), Push::Queued);
 		assert_eq!(buffer.push(1, arrival(at(30), 40, "v40")).unwrap(), Push::Queued);
 		// Due at 180 ms.
 		assert_eq!(buffer.push(1, arrival(at(200), 80, "v80")).unwrap(), Push::Late);
 		assert_eq!(buffer.margin(), None, "no second has passed");
+		let seen = buffer.spare_seen().expect("frames have deadlines");
+		assert!((seen + 0.020).abs() < 1e-6, "seen {seen} s");
 
 		assert_eq!(
 			buffer.push(1, arrival(at(1_000), 1_000, "v1000")).unwrap(),
@@ -2195,6 +2261,11 @@ mod tests {
 		);
 		let margin = buffer.margin().expect("a second has passed");
 		assert!((margin + 0.020).abs() < 1e-6, "margin {margin} s");
+		assert_eq!(
+			buffer.spare_seen(),
+			Some(margin),
+			"the margin, once a second has passed"
+		);
 
 		assert_eq!(
 			buffer.push(1, arrival(at(1_500), 1_500, "v1500")).unwrap(),
