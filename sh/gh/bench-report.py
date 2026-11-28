@@ -564,7 +564,8 @@ def paired_section(directory):
         f"""<h2>Paired comparison</h2>
 <p>Each source built the previous nightly's commit beside this one and timed both on one runner with swole,
 in alternating pairs of samples. A change is the median of the pairs' ratios with its 95% interval, and fails
-the nightly when the whole interval is more than {threshold}% slower. {"; ".join(notes)}</p>"""
+the nightly when the whole interval is more than {threshold}% slower. A label whose pair failed lists its head's
+times alone, as unpaired, and fails the nightly too. {"; ".join(notes)}</p>"""
     ]
     for verdicts, label, flagged in PAIRED_SECTIONS:
         rows = [case for case in cases if case["verdict"] in verdicts]
