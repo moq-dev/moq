@@ -6,7 +6,7 @@ The operational work the `0.22.0` cut needs now: passing Nightly, Interop,
 and Video runs, which the cut's release gate runs, the test flakes that turn
 them red, and the rind 0.4 adapters. CI cost and `release`-line backports
 that need not block the cut live in m3; the ci epic stays here only until its
-claimed child mbx-b2 lands, then moves to m3 whole.
+child mbx-b2's claim ends, then moves to m3 whole.
 
 ## Plan
 

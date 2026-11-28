@@ -17,8 +17,8 @@ later in a patch version (rejected: moving only m1; keeping all of m0 as an
 ops bucket). The [questline](/quest/README.md) states the rule.
 
 Every m1 quest no open PR claimed moved to m3. Each quest still here was
-claimed by an open PR on 2026-11-28 (`quest unblocked --unclaimed` lists the
-current claims).
+claimed by an open PR on 2026-11-28 (open PRs from `quest/m1/` branches show
+the current claims).
 
 Decided 2026-11-05 (maintainer, milestone re-cut): m1 is the additive half
 of what was "everything before the cut" (2026-10-20). A quest stays here when

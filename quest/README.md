@@ -57,8 +57,9 @@ A change is breaking when it is an API break or a wire change, as
 [Releases](/RELEASE.md#releases) defines them. The test is whether it would need a breaking
 release if it landed right after the cut, so a change to lite-07-wip or to a
 `main`-only API the cut would publish counts. A non-urgent fix that breaks
-joins m2; when a non-breaking fix exists, the fix joins m1 (m3 until the
-`0.22.0` cut) and the break m2.
+joins m2; when a non-breaking fix exists, the fix joins m1 and the break m2;
+until the `0.22.0` cut, the fix joins m3 unless the cut or lite-07
+finalization needs it, which puts it in m2.
 An epic joins the milestone its outcome needs, children included.
 
 Decided 2026-11-05 (maintainer, milestone re-cut): milestones split by kind of
