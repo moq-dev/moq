@@ -45,7 +45,9 @@ async fn each_joining_viewer_reads_the_held_group() {
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
 		let source = broadcast.broadcast().create_track("video", info).unwrap();
-		let group = source.append_group(Timestamp::from_millis(0).unwrap(), &b"x"[..]).unwrap();
+		let group = source
+			.append_group(Timestamp::from_millis(0).unwrap(), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap();
 
 		for join in 0..3 {

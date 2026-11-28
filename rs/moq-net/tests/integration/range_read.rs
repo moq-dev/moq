@@ -27,7 +27,9 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 fn write_group(track: &mut moq_net::track::Producer, key: u64) {
 	let mut group = track.append_next(payload(key, 0)).unwrap();
 	assert_eq!(group.start, key);
-	group.write_frame(Timestamp::from_millis(key).unwrap(), payload(key, 1)).unwrap();
+	group
+		.write_frame(Timestamp::from_millis(key).unwrap(), payload(key, 1))
+		.unwrap();
 	group.finish().unwrap();
 }
 
@@ -209,7 +211,9 @@ async fn one_range_reads_back_to_back_each_complete() {
 
 async fn moved_off(version: Version, relay: bool) {
 	let (remote, mut track, _held) = fixture(version, relay).await;
-	let mut open = track.append_group(Timestamp::from_millis(3).unwrap(), payload(3, 0)).unwrap();
+	let mut open = track
+		.append_group(Timestamp::from_millis(3).unwrap(), payload(3, 0))
+		.unwrap();
 	let mut sub = remote
 		.track("video")
 		.unwrap()

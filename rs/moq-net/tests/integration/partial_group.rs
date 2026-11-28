@@ -85,7 +85,9 @@ async fn round(version: &str) -> Option<Ended> {
 	// The live edge moves a full second past the stalled group's reach.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	for millis in [1000, 2000] {
-		let next = track.append_group(Timestamp::from_millis(millis).unwrap(), &b"edge"[..]).unwrap();
+		let next = track
+			.append_group(Timestamp::from_millis(millis).unwrap(), &b"edge"[..])
+			.unwrap();
 		next.finish().unwrap();
 	}
 	let tail = kio::clock::timeout(TIMEOUT, group.read_frame())

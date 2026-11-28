@@ -96,7 +96,10 @@ impl Chain {
 
 	fn populate(&self) {
 		for key in 0..GROUPS {
-			let group = self.source.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
+			let group = self
+				.source
+				.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
+				.unwrap();
 			group.finish().unwrap();
 		}
 	}
@@ -317,7 +320,9 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.unwrap();
 	let source = broadcast.broadcast().create_track("video", timed()).unwrap();
 	for key in 0..GROUPS {
-		let group = source.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
+		let group = source
+			.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap();
 	}
 	broadcast.announce().unwrap();
@@ -373,7 +378,9 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 		let source = route.broadcast().create_track("video", timed()).unwrap();
 		route.announce().unwrap();
 		for key in 0..GROUPS {
-			let group = source.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
+			let group = source
+				.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
+				.unwrap();
 			group.finish().unwrap();
 		}
 

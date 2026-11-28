@@ -1247,7 +1247,9 @@ async fn a_prefix_grant_admits_its_broadcast(version: &'static str) {
 			})
 			.await;
 
-			let _group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref()).unwrap();
+			let _group = track
+				.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
+				.unwrap();
 			let remote = received
 				.consume()
 				.follow("ch1", None)
@@ -1322,7 +1324,9 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			.await
 			.unwrap()
 			.unwrap();
-		let _group = published.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref()).unwrap();
+		let _group = published
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
+			.unwrap();
 		let mut subscription = remote
 			.track("video")
 			.unwrap()
@@ -1336,7 +1340,9 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 		let _renewed = renewed.unwrap();
 		drop(first);
 		first_grant.closed().await;
-		let _group = published.append_group(moq_net::Timestamp::from_millis(1).unwrap(), b"renewed".as_ref()).unwrap();
+		let _group = published
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap(), b"renewed".as_ref())
+			.unwrap();
 		subscription
 			.recv_group()
 			.await
@@ -2371,7 +2377,9 @@ async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &
 		.await;
 		assert_eq!(granted(&pair.client).await, grant(&["local"], &[""]));
 
-		let _group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref()).unwrap();
+		let _group = track
+			.append_group(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
+			.unwrap();
 		let remote = local
 			.consume()
 			.follow("remote/x", None)

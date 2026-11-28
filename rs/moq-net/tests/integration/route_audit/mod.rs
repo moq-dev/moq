@@ -288,7 +288,9 @@ impl Feed {
 				let start = key * CADENCE.as_millis() as u64;
 				for track in &tracks {
 					let frame = payload(tag, key, kio::clock::now());
-					let group = track.create_group(Timestamp::from_millis(start).unwrap(), frame).unwrap();
+					let group = track
+						.create_group(Timestamp::from_millis(start).unwrap(), frame)
+						.unwrap();
 					group.finish().unwrap();
 				}
 				key += 1;

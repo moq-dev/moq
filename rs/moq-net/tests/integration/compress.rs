@@ -211,7 +211,10 @@ async fn relay_serves_every_version() {
 				"{version}: compression declared"
 			);
 
-			let mut group = fixture.track.append_group(Timestamp::from_millis(0).unwrap(), payload(0)).unwrap();
+			let mut group = fixture
+				.track
+				.append_group(Timestamp::from_millis(0).unwrap(), payload(0))
+				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(1).unwrap(), payload(1))
 				.unwrap();
@@ -291,7 +294,9 @@ async fn ietf_fetch_keeps_the_stored_form() {
 				.route("bcast", moq_net::origin::RouteOptions::hidden())
 				.unwrap();
 			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
-			let mut group = track.append_group(Timestamp::from_millis(5).unwrap(), payload(0)).unwrap();
+			let mut group = track
+				.append_group(Timestamp::from_millis(5).unwrap(), payload(0))
+				.unwrap();
 			for index in 1..3 {
 				group
 					.write_frame(Timestamp::from_millis(5 + index).unwrap(), payload(index))

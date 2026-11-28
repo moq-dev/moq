@@ -72,7 +72,9 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 
 	*gate.write().ok().unwrap() = false;
 	for key in 0..GROUPS {
-		let group = source.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
+		let group = source
+			.create_group(Timestamp::new(key, Timescale::SECOND).unwrap(), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 	}

@@ -84,7 +84,9 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 			)
 			.unwrap();
 		for key in 0..GROUPS {
-			let group = source.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+			let group = source
+				.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+				.unwrap();
 			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
@@ -115,7 +117,9 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
 		for key in 0..GROUPS {
-			let group = source.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+			let group = source
+				.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+				.unwrap();
 			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();

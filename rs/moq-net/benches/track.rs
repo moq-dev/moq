@@ -387,7 +387,10 @@ impl HighKey {
 	}
 
 	fn write(&self, key: u64) {
-		let group = self.track.create_group(Timestamp::unscaled(key), self.payload.clone()).unwrap();
+		let group = self
+			.track
+			.create_group(Timestamp::unscaled(key), self.payload.clone())
+			.unwrap();
 		group.finish().unwrap();
 	}
 
@@ -440,7 +443,11 @@ impl AbortedScan {
 		let mut stale = Vec::with_capacity(aborted);
 
 		for key in 0..aborted as u64 {
-			stale.push(track.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x")).unwrap());
+			stale.push(
+				track
+					.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x"))
+					.unwrap(),
+			);
 		}
 		track
 			.append_group(Timestamp::unscaled(aborted as u64), Bytes::from_static(b"x"))
@@ -579,9 +586,13 @@ impl Aged {
 						})])
 						.with_order(track::Order::Ascending),
 				);
-				let held = track.append_group(Timestamp::unscaled(0), Bytes::from_static(b"x")).unwrap();
+				let held = track
+					.append_group(Timestamp::unscaled(0), Bytes::from_static(b"x"))
+					.unwrap();
 				for key in 1..groups.max(2) as u64 {
-					let group = track.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x")).unwrap();
+					let group = track
+						.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x"))
+						.unwrap();
 					group.finish().unwrap();
 				}
 				let waiter = kio::Waiter::noop();
@@ -1226,7 +1237,9 @@ fn bench_range_serving(c: &mut Criterion) {
 				.unwrap();
 			// A gap between neighbors keeps every range distinct, and its group cached.
 			for key in 0..ranges * (width + 1) {
-				let group = track.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x")).unwrap();
+				let group = track
+					.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x"))
+					.unwrap();
 				group.finish().unwrap();
 			}
 			let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
@@ -1308,7 +1321,10 @@ fn bench_parked_read(c: &mut Criterion) {
 				let mut reads: Vec<_> = (0..parked)
 					.map(|read| {
 						let group = track
-							.append_group(Timestamp::from_millis(millis(micros)).unwrap(), Bytes::from_static(b"x"))
+							.append_group(
+								Timestamp::from_millis(millis(micros)).unwrap(),
+								Bytes::from_static(b"x"),
+							)
 							.unwrap();
 						micros += MICROS_PER_GROUP;
 						// Left open, so its read parks instead of ending.
@@ -1342,7 +1358,10 @@ fn bench_parked_read(c: &mut Criterion) {
 				let start = WallInstant::now();
 				for _ in 0..iterations {
 					let next = track
-						.append_group(Timestamp::from_millis(millis(micros)).unwrap(), Bytes::from_static(b"x"))
+						.append_group(
+							Timestamp::from_millis(millis(micros)).unwrap(),
+							Bytes::from_static(b"x"),
+						)
 						.unwrap();
 					next.finish().unwrap();
 					micros += MICROS_PER_GROUP;
@@ -1656,7 +1675,10 @@ impl GapFlush {
 	#[inline(never)]
 	fn flush(&mut self) {
 		const TWO_HOURS: u64 = 7_200_000;
-		let _group = self.track.create_group(at(TWO_HOURS), Bytes::from_static(b"x")).unwrap();
+		let _group = self
+			.track
+			.create_group(at(TWO_HOURS), Bytes::from_static(b"x"))
+			.unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("the group is cached");
 		};
@@ -1696,7 +1718,9 @@ fn bench_range_widening(c: &mut Criterion) {
 						.create_track("bench", moq_net::track::Info::default().with_max_age(None))
 						.unwrap();
 					for key in 0..cached {
-						let group = track.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x")).unwrap();
+						let group = track
+							.append_group(Timestamp::unscaled(key), Bytes::from_static(b"x"))
+							.unwrap();
 						group.finish().unwrap();
 					}
 					let narrow = track::Subscription::default().with_ranges([span(0, 0)]);
@@ -1832,7 +1856,9 @@ impl TimeEnd {
 	fn new(readers: usize, groups: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let zero = track.create_group(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x")).unwrap();
+		let zero = track
+			.create_group(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
 		zero.finish().unwrap();
 		// Group 1 never arrives, and the budget outlasts the run, so the end never settles.
 		let subscription = track::Subscription::default().with_ranges([span(0, u64::from(u32::MAX) * 1000)]);
@@ -1855,7 +1881,10 @@ impl TimeEnd {
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for key in 2..self.groups + 2 {
-			let group = self.track.create_group(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x")).unwrap();
+			let group = self
+				.track
+				.create_group(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
 			group.finish().unwrap();
 			for reader in &mut self.readers {
 				let mut handed = 0;
@@ -1904,7 +1933,9 @@ impl Fills {
 		// The feed starts past every run, so each is a miss.
 		let start = runs * 2;
 		track.start_at(start).unwrap();
-		let group = track.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x")).unwrap();
+		let group = track
+			.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
 		group.finish().unwrap();
 		// One range per run, with a key between each that no reader asks for.
 		let ranges = (0..runs).map(|run| span(run * 2, run * 2)).chain([from(start)]);
@@ -2002,7 +2033,9 @@ impl RangeFills {
 		// it its own fill, and has every range start at a time no group held places.
 		let start = ranges * (width + 1) + 1;
 		track.start_at(start).unwrap();
-		let group = track.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x")).unwrap();
+		let group = track
+			.create_group(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
 		group.finish().unwrap();
 		let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
 			let first = i * (width + 1) + 1;

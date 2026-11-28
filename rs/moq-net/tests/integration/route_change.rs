@@ -1125,7 +1125,9 @@ async fn replaced_behind_a_relay(version: &str) {
 			}
 			for replica in &mut replicas {
 				let group = replica.group.as_mut().unwrap();
-				group.write_frame(group.at_start(), tagged(replica.name, key, frame)).unwrap();
+				group
+					.write_frame(group.at_start(), tagged(replica.name, key, frame))
+					.unwrap();
 			}
 			if dead.is_none() {
 				let expected = (key, tagged(replicas[0].name, key, frame));
@@ -1234,7 +1236,9 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 		for replica in &mut replicas {
 			let mut group = support::LazyGroup::append(&replica.track);
 			for frame in 0..FRAMES {
-				group.write_frame(group.at_start(), tagged(replica.name, key, frame)).unwrap();
+				group
+					.write_frame(group.at_start(), tagged(replica.name, key, frame))
+					.unwrap();
 			}
 			group.finish().unwrap();
 		}

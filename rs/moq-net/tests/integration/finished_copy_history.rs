@@ -47,7 +47,9 @@ async fn read_back(version: Version, during_tail: bool) {
 		.unwrap();
 	broadcast.announce().unwrap();
 	let write = |start: u64| {
-		let group = track.create_group(Timestamp::new(start, moq_net::Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
+		let group = track
+			.create_group(Timestamp::new(start, moq_net::Timescale::SECOND).unwrap(), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap()
 	};
 

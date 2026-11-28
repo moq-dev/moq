@@ -409,4 +409,3 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 		drop((pair, _keep));
 	}
 }
-

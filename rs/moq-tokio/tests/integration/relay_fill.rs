@@ -242,8 +242,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		)
 		.expect("a free name");
 	for sequence in 0..GROUPS {
-		let mut group = track.create_group(moq_net::group::Info { start: sequence })?;
-		group.write_frame(
+		let group = track.create_group(
 			Timestamp::from_millis(sequence * 1000)?,
 			format!("group {sequence}").into_bytes(),
 		)?;
@@ -416,10 +415,10 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm:
 	for start in starts {
 		let time = Timestamp::from_millis(start)?;
 		let mut group = match append {
-			true => track.append_group(time)?,
-			false => track.create_group(moq_net::group::Info { start })?,
+			true => track.append_group(time, b"x".to_vec())?,
+			false => track.create_group(time, b"x".to_vec())?,
 		};
-		for frame in 0..frames {
+		for frame in 1..frames {
 			group.write_frame(Timestamp::from_millis(start + frame)?, b"x".to_vec())?;
 		}
 		match span {

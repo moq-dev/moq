@@ -79,7 +79,9 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	}
 	assert_eq!(got, payload[..HALF]);
 
-	let group1 = track.append_group(Timestamp::from_millis(1).unwrap(), b"next".to_vec()).unwrap();
+	let group1 = track
+		.append_group(Timestamp::from_millis(1).unwrap(), b"next".to_vec())
+		.unwrap();
 	group1.finish().unwrap();
 	let mut read1 = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(read1.start, 1);

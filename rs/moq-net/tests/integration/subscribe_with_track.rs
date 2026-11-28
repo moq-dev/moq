@@ -123,7 +123,9 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let elapsed = kio::clock::now() - start;
 	assert_eq!(frame.payload.as_ref(), b"cached", "{label}");
 
-	let live = track.append_group(Timestamp::from_millis(1).unwrap(), b"live".as_ref()).unwrap();
+	let live = track
+		.append_group(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
+		.unwrap();
 	live.finish().unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await

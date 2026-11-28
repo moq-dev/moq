@@ -89,7 +89,11 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 fn write_backlog(track: &moq_net::track::Producer) -> Vec<moq_net::group::Producer> {
 	BACKLOG
 		.iter()
-		.map(|&key| track.create_group(Timestamp::from_millis(key).unwrap(), &b"frame"[..]).unwrap())
+		.map(|&key| {
+			track
+				.create_group(Timestamp::from_millis(key).unwrap(), &b"frame"[..])
+				.unwrap()
+		})
 		.collect()
 }
 

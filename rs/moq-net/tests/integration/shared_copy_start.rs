@@ -23,7 +23,9 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const STEP: u64 = 100;
 
 fn write(track: &moq_net::track::Producer, key: u64) {
-	let group = track.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+	let group = track
+		.create_group(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+		.unwrap();
 	group.finish().unwrap();
 }
 

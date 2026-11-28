@@ -77,7 +77,9 @@ async fn a_relay_keeps_keys_and_the_gaps_between_them() {
 
 			const KEYS: [u64; 3] = [2, 5, 8];
 			for key in KEYS {
-				let group = track.append_group(Timestamp::from_millis(key).unwrap(), b"x".as_slice()).unwrap();
+				let group = track
+					.append_group(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
+					.unwrap();
 				group.finish().unwrap();
 			}
 

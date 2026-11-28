@@ -420,7 +420,9 @@ async fn rejoin_goes_live_without_the_join_head() {
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			upstream.server_transport.drop_unis();
 
-			let next = track.append_group(Timestamp::from_millis(1000).unwrap(), b"b0".as_ref()).unwrap();
+			let next = track
+				.append_group(Timestamp::from_millis(1000).unwrap(), b"b0".as_ref())
+				.unwrap();
 			next.finish().unwrap();
 
 			let local = relay.consume().request("bench", None).await.unwrap();
@@ -872,7 +874,9 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		drop(group);
 
 		// A newer catalog supersedes it, so the old one expires like any other group.
-		let newer = track.append_group(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref()).unwrap();
+		let newer = track
+			.append_group(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref())
+			.unwrap();
 		newer.finish().unwrap();
 		// Unnamed wires end the old holder on takeover. The late reader uses the
 		// current route on every version, and keeps that copy live for the expiry check.

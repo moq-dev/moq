@@ -239,7 +239,9 @@ impl Publisher {
 	fn group(&self, key: u64) {
 		let mut group = crate::support::LazyGroup::create(&self.track, key);
 		for frame in 0..FRAMES {
-			group.write_frame(group.at_start(), tagged(self.name, key, frame)).unwrap();
+			group
+				.write_frame(group.at_start(), tagged(self.name, key, frame))
+				.unwrap();
 		}
 		group.finish().unwrap();
 	}

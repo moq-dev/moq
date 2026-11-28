@@ -53,7 +53,10 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 		}
 		for round in 0..3 {
 			let group = track
-				.append_group(moq_net::Timestamp::from_millis(round * 1000).unwrap(), b"payload".as_ref())
+				.append_group(
+					moq_net::Timestamp::from_millis(round * 1000).unwrap(),
+					b"payload".as_ref(),
+				)
 				.unwrap();
 			let key = group.start;
 			group.finish().unwrap();

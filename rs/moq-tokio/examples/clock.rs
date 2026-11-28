@@ -152,8 +152,9 @@ impl Publisher {
 		let mut now = Utc::now();
 
 		loop {
-			// A group starts at its first frame: the minute, in the track's milliseconds.
-			let segment = self.track.append_group(Timestamp::from_millis(millis(now)?)?)?;
+			// A group starts at its first frame, the minute's base, in the track's milliseconds.
+			let base = now.format("%Y-%m-%d %H:%M:").to_string();
+			let segment = self.track.append_group(Timestamp::from_millis(millis(now)?)?, base)?;
 
 			tokio::spawn(async move {
 				if let Err(err) = Self::send_segment(segment, now).await {
@@ -172,11 +173,6 @@ impl Publisher {
 	}
 
 	async fn send_segment(mut segment: group::Producer, mut now: DateTime<Utc>) -> anyhow::Result<()> {
-		// Everything but the second.
-		let base = now.format("%Y-%m-%d %H:%M:").to_string();
-
-		segment.write_frame(moq_net::Timestamp::from_millis(millis(now)?)?, base.clone())?;
-
 		loop {
 			let delta = now.format("%S").to_string();
 			segment.write_frame(moq_net::Timestamp::from_millis(millis(now)?)?, delta.clone())?;

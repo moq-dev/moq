@@ -314,13 +314,14 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		clock += 10;
 		Timestamp::from_millis(clock).unwrap()
 	};
-	let record = |group: &moq_net::group::Producer, written: &mut Vec<String>, readers: &mut [Reader], payload: &str| {
-		let frame = format!("{}:{payload}", group.start);
-		for reader in readers {
-			reader.expected.push(frame.clone());
-		}
-		written.push(frame);
-	};
+	let record =
+		|group: &moq_net::group::Producer, written: &mut Vec<String>, readers: &mut [Reader], payload: &str| {
+			let frame = format!("{}:{payload}", group.start);
+			for reader in readers {
+				reader.expected.push(frame.clone());
+			}
+			written.push(frame);
+		};
 	let mut group = track.append_group(tick(), b"snapshot".as_slice()).unwrap();
 	record(&group, &mut written, &mut readers, "snapshot");
 

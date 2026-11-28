@@ -553,7 +553,9 @@ impl MeasurementClock {
 /// them.
 fn append_next(track: &track::Producer, first: &Bytes) -> group::Producer {
 	let key = track.largest().map_or(0, |largest| largest.group + 1);
-	track.append_group(Timestamp::from_millis(key).unwrap(), first.clone()).unwrap()
+	track
+		.append_group(Timestamp::from_millis(key).unwrap(), first.clone())
+		.unwrap()
 }
 
 /// Where a group on a [`timed`] track starts, as its frames' timestamp.

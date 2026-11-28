@@ -211,7 +211,9 @@ async fn a_recovery_outlives_the_finished_subscription() {
 	broadcast.announce().unwrap();
 	let mut finished = Vec::new();
 	for start in 0..6 {
-		let group = track.create_group(Timestamp::new(start, moq_net::Timescale::SECOND).unwrap(), &b"x"[..]).unwrap();
+		let group = track
+			.create_group(Timestamp::new(start, moq_net::Timescale::SECOND).unwrap(), &b"x"[..])
+			.unwrap();
 		finished.push(group.finish().unwrap());
 	}
 

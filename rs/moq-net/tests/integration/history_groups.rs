@@ -132,13 +132,17 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		first_hop.hold_unis();
 	}
 
-	let mut old = track.create_group(Timestamp::from_millis(5).unwrap(), &b"old"[..]).unwrap();
+	let mut old = track
+		.create_group(Timestamp::from_millis(5).unwrap(), &b"old"[..])
+		.unwrap();
 	for _ in 1..3 {
 		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
 			.unwrap();
 	}
 	old.finish().unwrap();
-	let mut live = track.create_group(Timestamp::from_millis(6).unwrap(), &b"live"[..]).unwrap();
+	let mut live = track
+		.create_group(Timestamp::from_millis(6).unwrap(), &b"live"[..])
+		.unwrap();
 	for _ in 1..2 {
 		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
 			.unwrap();
@@ -253,13 +257,17 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	});
 	crate::support::wanted(track.demand()).await.unwrap();
 	upstream.server_transport.hold_unis();
-	let mut old = track.create_group(Timestamp::from_millis(5).unwrap(), &b"old"[..]).unwrap();
+	let mut old = track
+		.create_group(Timestamp::from_millis(5).unwrap(), &b"old"[..])
+		.unwrap();
 	for _ in 1..3 {
 		old.write_frame(Timestamp::from_millis(5).unwrap(), &b"old"[..])
 			.unwrap();
 	}
 	old.finish().unwrap();
-	let mut live = track.create_group(Timestamp::from_millis(6).unwrap(), &b"live"[..]).unwrap();
+	let mut live = track
+		.create_group(Timestamp::from_millis(6).unwrap(), &b"live"[..])
+		.unwrap();
 	for _ in 1..2 {
 		live.write_frame(Timestamp::from_millis(6).unwrap(), &b"live"[..])
 			.unwrap();

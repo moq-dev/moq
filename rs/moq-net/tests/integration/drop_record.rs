@@ -416,7 +416,10 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 			let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			chain.upstream.server_transport.hold_unis();
 			let write = |key: u64| {
-				let group = chain.source.create_group(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD]).unwrap();
+				let group = chain
+					.source
+					.create_group(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
+					.unwrap();
 				group.finish().unwrap();
 			};
 			for key in 0..4 {
@@ -495,7 +498,10 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 				.ordered();
 			chain.upstream.server_transport.hold_unis();
 			for key in 0..WRITTEN {
-				let group = chain.source.create_group(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD]).unwrap();
+				let group = chain
+					.source
+					.create_group(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
+					.unwrap();
 				group.finish().unwrap();
 				// Newest first, the origin would serve the last written: let group 0 take the
 				// credit before the rest queue behind it. Time is simulated, so this only lets

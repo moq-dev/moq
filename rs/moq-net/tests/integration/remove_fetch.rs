@@ -55,10 +55,14 @@ async fn position_zero_and_exact_group_match() {
 		broadcast.announce().unwrap();
 
 		// Group 0 covers [0, 1000); group 1000 covers [1000, 2000).
-		let g0 = track.append_group(Timestamp::from_millis(0).unwrap(), b"g0".as_slice()).unwrap();
+		let g0 = track
+			.append_group(Timestamp::from_millis(0).unwrap(), b"g0".as_slice())
+			.unwrap();
 		g0.finish_at(1000).unwrap();
 
-		let g1 = track.append_group(Timestamp::from_millis(1000).unwrap(), b"g1".as_slice()).unwrap();
+		let g1 = track
+			.append_group(Timestamp::from_millis(1000).unwrap(), b"g1".as_slice())
+			.unwrap();
 		g1.finish_at(2000).unwrap();
 
 		let viewer = origin(2, None);
@@ -260,7 +264,9 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 		broadcast.announce().unwrap();
 
 		for i in 0u64..3 {
-			let g = track.create_group(Timestamp::from_millis(i * 1000).unwrap(), format!("g{i}").into_bytes()).unwrap();
+			let g = track
+				.create_group(Timestamp::from_millis(i * 1000).unwrap(), format!("g{i}").into_bytes())
+				.unwrap();
 			g.finish().unwrap();
 		}
 
@@ -307,7 +313,9 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 		// Group 3 starts streaming live (still open!) while the live SUBSCRIBE is active.
 		// A concurrent fetch_group(3000) before g3 finishes deduplicates onto that active
 		// SUBSCRIBE (no extra upstream SUBSCRIBE, no FETCH).
-		let mut g3 = track.create_group(Timestamp::from_millis(3000).unwrap(), b"g3-f0".as_slice()).unwrap();
+		let mut g3 = track
+			.create_group(Timestamp::from_millis(3000).unwrap(), b"g3-f0".as_slice())
+			.unwrap();
 
 		let mut live3 = kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await

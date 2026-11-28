@@ -159,7 +159,10 @@ async fn an_unfed_fetch_is_a_miss() {
 
 		write(&relay.track, b"1");
 		// The publisher skips group 2, so the feed goes past it.
-		let skipped = relay.track.create_group(moq_net::Timestamp::unscaled(3), &b"3"[..]).unwrap();
+		let skipped = relay
+			.track
+			.create_group(moq_net::Timestamp::unscaled(3), &b"3"[..])
+			.unwrap();
 		skipped.finish().unwrap();
 		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
 			.await
