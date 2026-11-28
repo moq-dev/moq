@@ -968,7 +968,6 @@ pub unsafe fn opus_decoder_ctl_impl(st: *mut OpusDecoder, request: i32, args: Va
 		_ => OPUS_UNIMPLEMENTED,
 	}
 }
-#[macro_export]
 macro_rules! opus_decoder_ctl {
     ($st:expr,$request:expr, $($arg:expr),*) => {
         $crate::opus_decoder_ctl_impl(
@@ -984,6 +983,7 @@ macro_rules! opus_decoder_ctl {
         opus_decoder_ctl!($st, $request,)
     };
 }
+pub(crate) use opus_decoder_ctl;
 pub unsafe fn opus_decoder_destroy(st: *mut OpusDecoder) {
 	free(st as *mut core::ffi::c_void);
 }

@@ -31,6 +31,7 @@ const FORMATS: &[cpal::SampleFormat] = &[
 
 /// An audio output reported by [`devices`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Device {
 	/// Opaque identifier: pass to [`Config::device`](super::Config) or
 	/// [`Engine::switch`](super::Engine::switch). Stable across runs and

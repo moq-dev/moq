@@ -22,7 +22,7 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
 
 Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 
-- ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
+- ✅ Added pre-cut Rust API fences (`#[non_exhaustive]`
   on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
   `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
   `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its

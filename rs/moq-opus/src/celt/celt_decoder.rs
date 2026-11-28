@@ -1,5 +1,4 @@
 use crate::celt::bands::{anti_collapse, celt_lcg_rand, denormalise_bands, quant_all_bands, SPREAD_NORMAL};
-use crate::opus_custom_decoder_ctl;
 
 pub mod arch_h {
 	pub type opus_val16 = f32;
@@ -308,9 +307,7 @@ unsafe fn celt_synthesis(
 		memcpy(
 			freq2 as *mut core::ffi::c_void,
 			freq.as_mut_ptr() as *const core::ffi::c_void,
-			(N as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-				.wrapping_add((0 * freq2.offset_from(freq.as_mut_ptr()) as i64) as u64),
+			(N as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 		);
 		b = 0;
 		while b < B {
@@ -606,12 +603,7 @@ unsafe fn celt_decode_lost(st: *mut OpusCustomDecoder, N: i32, LM: i32) {
 			memmove(
 				decode_mem[c as usize] as *mut core::ffi::c_void,
 				(decode_mem[c as usize]).offset(N as isize) as *const core::ffi::c_void,
-				((2048 - N + (overlap >> 1)) as u64)
-					.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-					.wrapping_add(
-						(0 * (decode_mem[c as usize]).offset_from((decode_mem[c as usize]).offset(N as isize)) as i64)
-							as u64,
-					),
+				((2048 - N + (overlap >> 1)) as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 			);
 			c += 1;
 			if !(c < C) {
@@ -691,14 +683,7 @@ unsafe fn celt_decode_lost(st: *mut OpusCustomDecoder, N: i32, LM: i32) {
 			memcpy(
 				exc.offset(1024 as isize).offset(-(exc_length as isize)) as *mut core::ffi::c_void,
 				fir_tmp.as_mut_ptr() as *const core::ffi::c_void,
-				(exc_length as u64)
-					.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-					.wrapping_add(
-						(0 * exc
-							.offset(1024 as isize)
-							.offset(-(exc_length as isize))
-							.offset_from(fir_tmp.as_mut_ptr()) as i64) as u64,
-					),
+				(exc_length as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 			);
 			let mut E1: opus_val32 = 1 as opus_val32;
 			let mut E2: opus_val32 = 1 as opus_val32;
@@ -718,9 +703,7 @@ unsafe fn celt_decode_lost(st: *mut OpusCustomDecoder, N: i32, LM: i32) {
 			memmove(
 				buf as *mut core::ffi::c_void,
 				buf.offset(N as isize) as *const core::ffi::c_void,
-				((2048 - N) as u64)
-					.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-					.wrapping_add((0 * buf.offset_from(buf.offset(N as isize)) as i64) as u64),
+				((2048 - N) as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 			);
 			extrapolation_offset = MAX_PERIOD - pitch_index;
 			extrapolation_len = N + overlap;
@@ -1098,12 +1081,7 @@ pub unsafe fn celt_decode_with_ec(
 		memmove(
 			decode_mem[c as usize] as *mut core::ffi::c_void,
 			(decode_mem[c as usize]).offset(N as isize) as *const core::ffi::c_void,
-			((2048 - N + overlap / 2) as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_sig>() as u64)
-				.wrapping_add(
-					(0 * (decode_mem[c as usize]).offset_from((decode_mem[c as usize]).offset(N as isize)) as i64)
-						as u64,
-				),
+			((2048 - N + overlap / 2) as u64).wrapping_mul(::core::mem::size_of::<celt_sig>() as u64),
 		);
 		c += 1;
 		if !(c < CC) {
@@ -1259,12 +1237,7 @@ pub unsafe fn celt_decode_with_ec(
 		memcpy(
 			&mut *oldBandE.offset(nbEBands as isize) as *mut opus_val16 as *mut core::ffi::c_void,
 			oldBandE as *const core::ffi::c_void,
-			(nbEBands as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add(
-					(0 * (&mut *oldBandE.offset(nbEBands as isize) as *mut opus_val16).offset_from(oldBandE) as i64)
-						as u64,
-				),
+			(nbEBands as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	}
 	if isTransient == 0 {
@@ -1272,16 +1245,12 @@ pub unsafe fn celt_decode_with_ec(
 		memcpy(
 			oldLogE2 as *mut core::ffi::c_void,
 			oldLogE as *const core::ffi::c_void,
-			((2 * nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * oldLogE2.offset_from(oldLogE) as i64) as u64),
+			((2 * nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 		memcpy(
 			oldLogE as *mut core::ffi::c_void,
 			oldBandE as *const core::ffi::c_void,
-			((2 * nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * oldLogE.offset_from(oldBandE) as i64) as u64),
+			((2 * nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 		if (*st).loss_count < 10 {
 			max_background_increase = M as f32 * 0.001f32;
@@ -1464,7 +1433,6 @@ pub unsafe fn opus_custom_decoder_ctl_impl(st: *mut OpusCustomDecoder, request: 
 		_ => return OPUS_BAD_ARG,
 	};
 }
-#[macro_export]
 macro_rules! opus_custom_decoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_custom_decoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -1476,3 +1444,4 @@ macro_rules! opus_custom_decoder_ctl {
         opus_custom_decoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_custom_decoder_ctl;
