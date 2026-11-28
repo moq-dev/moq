@@ -162,11 +162,17 @@ Three causes, plus one media flake:
 - 11-27 Firefox: `high-1..8: missed groups 28`. The 4-vCPU hosted runner saturates: measured there
   with per-process samples, the debug-built relay takes about 1.4 cores, the Bun publisher one, and
   the browser the rest, idle under 5% in 40% of samples, so the high tier misses its 500 ms
-  budget. On `main` at `02752605b1`, 4 of 36 lite-07 cells failed with a debug relay and 0 of 36
-  with a release one (half a core, saturated in 5% of samples); with extra relay logging, 20 of
-  48 failed. Fixed in [moq-dev/moq#9840](https://github.com/moq-dev/moq/pull/9840): the step builds the relay in release, about 4 minutes more
+  budget. On `main` at `02752605b1`, 4 of 36 lite-07 cells and 3 of 36 lite-06 cells failed with
+  a debug relay and none of either with a release one (half a core, saturated in 5% of samples);
+  with extra relay logging, 20 of 48 lite-07 cells failed. Fixed in [moq-dev/moq#9840](https://github.com/moq-dev/moq/pull/9840): the step builds the relay in release, about 4 minutes more
   when cold. The same PR gives the step the run directory and results file the other harness
   steps have, so a failing cell uploads its relay log and report.
+- Found validating that fix: one Chromium lite-06 cell left 4 subscriptions open, each holding
+  group 39's stream after its first frame, though the relay had completed them. Most likely
+  Chromium lost the group's reset ([the Chromium reset fix](/quest/m4/browser-fixes/chromium-reset-before-accept.md)),
+  and lite-06 has no drop to name the group. A flake, owned by
+  [the lite-06 lost reset child](/quest/m0/test-flakes-5/lite06-lost-reset-hang.md) of the test
+  flakes epic.
 - 11-26 Chromium media: `volume scales the output: volume 0.25: only 27/31 samples carried audio`,
   seen once. A flake, owned by [the volume check child](/quest/m0/test-flakes-5/volume-check-audio-gap.md)
   of the test flakes epic.

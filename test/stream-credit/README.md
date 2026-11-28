@@ -21,7 +21,8 @@ per cell. `cargo build -p moq-relay` builds the relay from this checkout.
 `STREAM_CREDIT_PROFILE` picks its cargo profile, and `RELAY_BIN` points at a
 prebuilt relay instead. The scheduled Interop run uses `release`: on its 4-vCPU
 runner a debug relay takes about 1.4 cores, the host saturates, and the high tier
-misses groups past its 500 ms budget (4 of 36 cells, against 0 of 36 in release).
+misses groups past its 500 ms budget (7 of 72 lite-07 and lite-06 cells, against 0
+of 72 in release).
 A run on a starved host fails the same way, so check the host's load before
 reading a high-tier miss as a scheduling bug. A failing run keeps its run directory: the relay log
 (with the publisher's scheduling at debug level), and per cell the page's
