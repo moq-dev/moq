@@ -156,6 +156,12 @@ From the 2026-10-25 pre-cut run:
   [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529): default `recv_group`/`recvGroup`
   delivery order flipped to newest-first (`Group Order`), which was omitted from its PR title (`!`)
   and would otherwise be missed by automated migration generation (found 2026-11-28, design-gate audit).
+- Before cutting `0.22.0`, verify the `release`-line Go proxy prerequisites from
+  [Go module proxy](/quest/m0/go-module-proxy.md): [moq-dev/moq#9844](https://github.com/moq-dev/moq/pull/9844)
+  is on `release` (`git show origin/release:sh/go/ffi-origin.sh` succeeds) and `moq.dev/moq-ffi@v0.4.28`
+  is backfilled and verified on `go.moq.dev` (`just infra go backfill && just infra go verify --proxy direct`).
+  The whole `go-module-proxy` quest is intentionally not in `Required` below because its final mirror-archival
+  step happens after `0.22.0`'s `moq-ffi` release publishes through `go.moq.dev`.
 
 From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
 merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):

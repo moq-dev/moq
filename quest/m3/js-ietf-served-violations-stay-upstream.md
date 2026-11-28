@@ -21,4 +21,6 @@ path. A served track's error ends only that subscription. Also update
 `stream.abort` (found in the 2026-11-28 audit of
 [moq-dev/moq#9829](https://github.com/moq-dev/moq/pull/9829)). Cover it with a
 relay-chain test like `js/net/src/data-errors.test.ts`, over an IETF
-downstream, where the upstream track is aborted with a `ProtocolViolation`.
+downstream, where the upstream track is aborted with a `ProtocolViolation`, plus
+a lite-07 datagram downstream case verifying `runDatagrams` resets with a
+malformed-track error while the downstream session stays open.

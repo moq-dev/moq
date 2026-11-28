@@ -10,7 +10,7 @@ child mbx-b2's claim ends, then moves to m3 whole.
 
 ## Plan
 
-Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit): ✅ added three `m0` cut blockers ([js-arrival-budget-steps](/quest/m0/js-arrival-budget-steps.md), [quic-ecn-prior-path](/quest/m0/quic-ecn-prior-path.md), and [queue-report-isolation](/quest/m0/queue-report-isolation.md), overriding `#9659`/`#9660` to switch ruleset 2420853 to `Queue build / Build`), pulled [owed-group-pass-over](/quest/m0/owed-group-pass-over.md), [go-module-proxy](/quest/m0/go-module-proxy.md), and [kt-ffi-maven-0428](/quest/m0/kt-ffi-maven-0428.md) back from `m3`, and deleted already-fixed `js-listing-synced-order`.
+Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit): ✅ added three `m0` cut blockers ([js-arrival-budget-steps](/quest/m0/js-arrival-budget-steps.md), [quic-ecn-prior-path](/quest/m0/quic-ecn-prior-path.md), and [queue-report-isolation](/quest/m0/queue-report-isolation.md), overriding `#9659`/`#9660` to switch ruleset 2420853 to `Queue build / Build`), pulled [owed-group-pass-over](/quest/m0/owed-group-pass-over.md) and [kt-ffi-maven-0428](/quest/m0/kt-ffi-maven-0428.md) back from `m3` as `cut.md` `Required` blockers, pulled [go-module-proxy](/quest/m0/go-module-proxy.md) back to `m0` as urgent `release`-line maintenance (its pre-cut `v0.4.28` backfill is noted in `cut.md` rather than in `cut.md`'s `Required` list, because archiving the mirror runs *after* `0.22.0` publishes `moq-ffi`), and deleted already-fixed `js-listing-synced-order`.
 
 Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
 to m2 hold only what the cut or lite-07 finalization needs, plus

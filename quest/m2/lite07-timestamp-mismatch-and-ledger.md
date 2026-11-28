@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `moq-lite-07`, both Rust and JS publishers reset a group stream with terminal `TIMESTAMP_MISMATCH` (`0x39`) whenever frame or end timestamps decrease (never `MALFORMED_TRACK` or retryable `INTERNAL_ERROR`), a proven lite-07 `Ledger` never fabricates gap proof by folding active gaps at `MAX_RUNS`, `draft-lcurley-moq-lite.md` states both rules clearly, and Kotlin, Dart, and C++ bindings expose `finish_at` alongside Python, Swift, and Go.
+On `moq-lite-07`, both Rust and JS publishers reset a group stream with terminal `TIMESTAMP_MISMATCH` (`0x39`) whenever frame or end timestamps decrease (never `MALFORMED_TRACK` or retryable `INTERNAL_ERROR`), a proven lite-07 `Ledger` never fabricates gap proof by folding active gaps at `MAX_RUNS`, `draft-lcurley-moq-lite.md` states both rules clearly, and Dart and C++ bindings expose `finish_at` alongside Python, Swift, Go, and Kotlin.
 
 ## Plan
 
@@ -18,11 +18,11 @@ Caused by [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794) (Decision
    - In `rs/moq-net/src/ledger.rs:32,167,203-212`, prune runs strictly below the lowest active range floor before checking `MAX_RUNS = 4096`. Only fold oldest gaps on non-proven (grace-based) ledgers; on a proven lite-07 ledger (`grace == Duration::MAX`), fail/bound a peer exceeding 4096 live disjoint runs instead of fabricating proof that missing groups were accounted for.
    - Tighten `drafts/draft-lcurley-moq-lite.md:887-888` to note that a publisher with no fill handler waits until `SUBSCRIBE_END` or explicit skip/end rather than emitting `NOT_FOUND` mid-track for undeclared gaps.
 3. **Cross-package `finish_at` binding parity (`#9686`):**
-   - Wrap `finish_at` in Kotlin (`kt/`), Dart (`dart/`), and C++ (`cpp/moq/`), matching `rs/moq-ffi/src/producer.rs:1165-1174`, `rs/libmoq/src/api.rs:4261-4266`, Python, Swift, and Go.
+   - Wrap `finish_at` in Dart (`dart/`) and C++ (`cpp/moq/`), matching `rs/moq-ffi/src/producer.rs:1165-1174`, `rs/libmoq/src/api.rs:4261-4266`, Python, Swift, and Go; verify Kotlin (`kt/`, whose `GroupProducer` aliases `MoqGroupProducer`) already exposes `finish_at` cleanly.
 
-Tests: Rust and JS egress tests verifying relayed decreasing-timestamp groups reset with terminal `TIMESTAMP_MISMATCH` (`0x39`), a proven-ledger unit test verifying `Ledger::account` never folds active gaps past 4096 runs, and binding tests for Kotlin/Dart/C++ `finish_at`. Run `just test interop --all`.
+Tests: Rust and JS egress tests verifying relayed decreasing-timestamp groups reset with terminal `TIMESTAMP_MISMATCH` (`0x39`), a proven-ledger unit test verifying `Ledger::account` never folds active gaps past 4096 runs, and binding tests for Dart, C++, and Kotlin `finish_at`. Run `just test interop --all`.
 
-Public API: additive `finish_at` wrappers in Kotlin, Dart, and C++ (closing pre-0.22 binding parity). Wire: aligns lite-07-wip error codes and draft text before `lite-07` freezes.
+Public API: additive `finish_at` wrappers in Dart and C++ (closing pre-0.22 binding parity). Wire: aligns lite-07-wip error codes and draft text before `lite-07` freezes.
 
 ## Related
 

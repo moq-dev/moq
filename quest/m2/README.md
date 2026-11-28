@@ -13,7 +13,7 @@ main into release.
 ## Plan
 
 Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit of 100 recently merged PRs):
-- ✅ Added six pre-0.22 wire and public-API quests to `m2`: [routing every lite-07 SUBSCRIBE through TrackRun](/quest/m2/lite07-single-subscribe-engine.md) (deleting `#9687`'s `OneShotFetch` race), [lite-07 timestamp mismatch egress and proven ledger bounds](/quest/m2/lite07-timestamp-mismatch-and-ledger.md) (`#9794`, `#9686`), [clean unwanted drop in moq-json](/quest/m2/moq-json-unwanted-drop.md) (`#9550`), [unifying moq_mux::catalog consumers on Timed and hiding hang::Container audio variants](/quest/m2/catalog-timed-consumers-and-container.md) (`#9714`, `#9553`), [pre-cut API cleanup](/quest/m2/pre-cut-api-cleanup.md) (`#9832` private `cluster::Shared`, `#9835` `Result` constructors in `moq-stats`, `#9518` hidden `poll_quiesce`), and [KeepAlive API reconciliation and PING-only probes](/quest/m2/keep-alive-probes-and-api.md) (`#9698`); confirmed [moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)'s `broadcast.meta()` API stays as-is; extended [per-range-policy](/quest/m2/lite07-subscribe/per-range-policy.md) to separate `#9607`'s stream-credit shedding from age-expiry `OLD`; and pulled [hls-group-end-timing](/quest/m2/hls-group-end-timing.md) and [front-drop-with-next-group](/quest/m2/front-drop-with-next-group.md) back from `m3` (reversing `#9842` for those two).
+- ✅ Added six pre-0.22 wire, public-API, and behavior quests to `m2`: [routing every lite-07 SUBSCRIBE through TrackRun](/quest/m2/lite07-single-subscribe-engine.md) (deleting `#9687`'s `OneShotFetch` race), [lite-07 timestamp mismatch egress and proven ledger bounds](/quest/m2/lite07-timestamp-mismatch-and-ledger.md) (`#9794`, `#9686`), [clean unwanted drop in moq-json](/quest/m2/moq-json-unwanted-drop.md) (`#9550`), [unifying moq_mux::catalog consumers on Timed and hiding hang::Container audio variants](/quest/m2/catalog-timed-consumers-and-container.md) (`#9714`, `#9553`), [pre-cut API cleanup](/quest/m2/pre-cut-api-cleanup.md) (`#9832` private `cluster::Shared`, `#9835` `Result` constructors in `moq-stats`, `#9518` hidden `poll_quiesce`), and [KeepAlive API reconciliation and PING-only probes](/quest/m2/keep-alive-probes-and-api.md) (`#9698`); confirmed [moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)'s `broadcast.meta()` API stays as-is; extended [per-range-policy](/quest/m2/lite07-subscribe/per-range-policy.md) to separate `#9607`'s stream-credit shedding from age-expiry `OLD`; and pulled [hls-group-end-timing](/quest/m2/hls-group-end-timing.md) and [front-drop-with-next-group](/quest/m2/front-drop-with-next-group.md) back from `m3` (reversing `#9842` for those two).
 
 Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
 to m2 hold only what the cut or lite-07 finalization needs, plus
@@ -22,7 +22,8 @@ later in a patch version (rejected: moving only m1; keeping all of m0 as an
 ops bucket). The [questline](/quest/README.md) states the rule.
 
 Here, [hls-group-end-timing](/quest/m2/hls-group-end-timing.md) moved: it
-rechecks HLS timing after lite-07 is finalized and changes no API. The
+rechecks HLS timing after lite-07 is finalized and changes no API (superseded
+2026-11-28: pulled back into m2, above). The
 typed superseded group end (additive) stays only while its PR claims it.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
