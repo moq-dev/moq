@@ -3007,6 +3007,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	media
 		.write(moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(1_000_000).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::from_static(b"keyframe"),
 			keyframe: true,
 			duration: None,
@@ -3015,6 +3016,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	media
 		.write(moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(1_020_000).unwrap(),
+			decode: None,
 			payload: bytes::Bytes::from_static(b"delta"),
 			keyframe: false,
 			duration: None,
@@ -3093,6 +3095,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 		media
 			.write(moq_mux::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+				decode: None,
 				payload,
 				keyframe,
 				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
@@ -4158,6 +4161,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 		media
 			.write(moq_mux::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+				decode: None,
 				payload: bytes::Bytes::from_static(payload),
 				keyframe: true,
 				duration: None,

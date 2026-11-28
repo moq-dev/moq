@@ -301,10 +301,13 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 	})();
 	const write = (sequence: bigint, ...frames: [number, Uint8Array?][]) => {
 		const group = track.createGroup(sequence);
+		// Transport times never decrease within a group; each payload keeps its own time.
+		let newest = 0;
 		for (const [timestamp, payload = new Uint8Array([1])] of frames) {
+			newest = Math.max(newest, timestamp);
 			group.writeFrame({
 				payload: encodeFrame(payload, Duration.micros(timestamp)),
-				timestamp: Time.Timestamp.fromMicros(timestamp),
+				timestamp: Time.Timestamp.fromMicros(newest),
 			});
 		}
 		group.finish();

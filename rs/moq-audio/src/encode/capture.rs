@@ -665,6 +665,7 @@ mod tests {
 						video
 							.write(moq_mux::container::Frame {
 								timestamp: catalog.timestamp(None).unwrap(),
+								decode: None,
 								payload: bytes::Bytes::copy_from_slice(payload),
 								keyframe,
 								duration: None,

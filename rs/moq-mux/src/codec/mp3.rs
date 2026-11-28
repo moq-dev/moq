@@ -202,6 +202,7 @@ impl Import {
 		let duration = duration(&payload);
 		self.track.write(Frame {
 			timestamp,
+			decode: None,
 			payload,
 			keyframe,
 			duration: None,

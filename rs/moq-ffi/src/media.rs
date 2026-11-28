@@ -1768,6 +1768,7 @@ mod read_tests {
 					&mut group,
 					&[moq_mux::container::Frame {
 						timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+						decode: None,
 						payload: bytes::Bytes::from_static(b"media"),
 						keyframe: true,
 						duration: None,
@@ -1835,6 +1836,7 @@ mod read_tests {
 				&mut first,
 				&[moq_mux::container::Frame {
 					timestamp: timestamp(10_000),
+					decode: None,
 					payload: bytes::Bytes::from_static(b"encoded"),
 					keyframe: true,
 					duration: None,
@@ -1854,6 +1856,7 @@ mod read_tests {
 				&mut marker,
 				&[moq_mux::container::Frame {
 					timestamp: timestamp(20_000),
+					decode: None,
 					payload: bytes::Bytes::new(),
 					keyframe: false,
 					duration: None,
@@ -1874,6 +1877,7 @@ mod read_tests {
 				&mut resumed,
 				&[moq_mux::container::Frame {
 					timestamp: timestamp(20_001),
+					decode: None,
 					payload: bytes::Bytes::from_static(b"resumed"),
 					keyframe: true,
 					duration: None,
@@ -2222,6 +2226,7 @@ mod timebase_tests {
 				0,
 				&[moq_mux::container::Frame {
 					timestamp: moq_net::Timestamp::from_scale(seconds, 1).unwrap(),
+					decode: None,
 					payload: bytes::Bytes::from(vec![tag]),
 					keyframe: true,
 					duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),

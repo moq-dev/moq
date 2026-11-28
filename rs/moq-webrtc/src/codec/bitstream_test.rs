@@ -221,6 +221,7 @@ async fn egress_opus_reads_the_rendition_container() {
 	writer
 		.write(moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(20_000).unwrap(),
+			decode: None,
 			duration: None,
 			payload: payload.clone(),
 			keyframe: true,
@@ -319,6 +320,7 @@ async fn egress_h264_avc1_counts_the_payload_as_read() {
 	writer
 		.write(moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::ZERO,
+			decode: None,
 			duration: None,
 			payload: Bytes::from(stored.clone()),
 			keyframe: true,

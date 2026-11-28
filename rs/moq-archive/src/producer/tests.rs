@@ -223,13 +223,13 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
-	// Timestamps repeat and go backward, as decode order allows.
+	// Timestamps repeat, as decode order allows; a group's never decrease.
 	let frames = [
 		(0, "0"),
 		(1000, "1"),
 		(2000, "2"),
 		(2000, "3"),
-		(1500, "4"),
+		(2000, "4"),
 		(4000, "5"),
 		(4000, "6"),
 	];

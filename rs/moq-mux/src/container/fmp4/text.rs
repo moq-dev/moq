@@ -111,6 +111,7 @@ impl Track {
 		};
 		self.producer.write(crate::container::Frame {
 			timestamp,
+			decode: None,
 			duration: Some(duration),
 			keyframe: true,
 			payload,

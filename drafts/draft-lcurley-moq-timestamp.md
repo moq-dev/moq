@@ -1,5 +1,5 @@
 ---
-title: "MoQ Group ID Timescale"
+title: "MoQ ID Timestamps"
 abbrev: "moq-timestamp"
 category: info
 
@@ -18,14 +18,15 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
-  loc: I-D.ietf-moq-loc
 
 informative:
+  loc: I-D.ietf-moq-loc
 
 --- abstract
 
-This document specifies the transport-level use of the TIMESCALE property registered by {{loc}}: a track that declares it numbers its groups in those units, so each Group ID is the group's start time.
-Exposing media time in the Group ID lets relays make consistent age-based decisions (e.g. dropping stale groups) without parsing the media container or any object property, and it remains consistent across hops regardless of buffering or jitter.
+This document specifies how a {{moqt}} track carries transport-level decode timestamps in its Group IDs and Object IDs using two MOQ Properties: `ID_TIMESCALE` (`0x40B70`, Track scope) and `TIMESTAMP_TIE` (`0x40B72`, Object scope).
+On a track declaring `ID_TIMESCALE`, each Group ID is the group's start time and each object's timestamp is `Group ID + Object ID - TIMESTAMP_TIE` (with absent `TIMESTAMP_TIE` equal to `0`).
+Exposing media time in IDs avoids per-object property overhead in the common case, coexists cleanly with {{loc}}, and lets relays make consistent age-based drop decisions without inspecting payloads.
 
 --- note_Note_to_Readers
 
@@ -39,106 +40,140 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 
 # Introduction
-{{moqt}} treats object payloads as opaque, leaving timing to the application's container format.
-This works for endpoints that parse the media, but not for relays.
-A relay frequently needs a notion of *when* a group is meant to be presented:
+{{moqt}} treats object payloads as opaque, leaving media timing to application containers.
+Relays still need to know *when* a group and its objects occur (for age-based dropping, consistent expiration across hops regardless of buffering or jitter, time-based addressing, and low-overhead containers that derive presentation time from transport timestamps) without inspecting payloads.
 
-- **Age-based dropping**: a relay serving a live subscription wants to drop groups too old to be useful. Wall-clock arrival time drifts across hops and is corrupted by buffering and jitter.
-- **Consistent expiration across hops**: a time carried in the Group ID is identical at every hop, so every relay makes the same drop decision.
-- **Addressing by time**: a subscriber can start at, or fetch from, a point in time by naming the Group ID.
+This document gives Group IDs and Object IDs a unit via one track-level property, **ID_TIMESCALE** (`0x40B70`), paired with one optional object-level tie-breaker property, **TIMESTAMP_TIE** (`0x40B72`).
+Using a dedicated Track Property instead of {{loc}}'s `TIMESCALE` (`0x08`) lets {{loc}} tracks and ID-timed tracks coexist without ambiguity: LOC's `0x08` and `0x10` properties pass through relays opaquely.
 
-This document gives a Group ID a unit with one track-level Key-Value-Pair ({{moqt}} Section 2.5), the **Timescale**.
-The transport does not interpret the *meaning* of the timeline; it only compares Group IDs.
-Group IDs already ascend, need no per-object property, and survive every hop and every cache unchanged, so the time costs nothing on the wire.
-Groups need not be consecutive: a track keyed by time skips most Group IDs, and a publisher MAY say so with Prior Group ID Gap ({{moqt}}).
+Group IDs and Object IDs already ascend on the wire, require no per-object property bytes when timestamps strictly increase, and survive every hop and cache unchanged.
+Groups and objects need not be consecutive: a timed track skips unused Group IDs (and MAY declare group gaps with Prior Group ID Gap per {{moqt}}) and skips unused Object IDs between timestamps.
 
-The property is self-describing and requires no SETUP negotiation: a receiver that understands it uses it directly, and one that does not ignores it per {{moqt}}.
-TIMESCALE is what opts a track in: a track that carries it has Group IDs in the stated units, and a track without it has no timeline at all.
-There is deliberately no default timescale; a wrong guess is off by a factor of 1000 rather than detectably broken.
+No SETUP negotiation is required: a peer that understands `ID_TIMESCALE` uses it, and one that does not ignores both properties per {{moqt}}.
+There is deliberately no default timescale; a track without `ID_TIMESCALE` is untimed.
 
 
-# TIMESCALE Track Property
-The TIMESCALE property opts a track into a timeline and establishes the units of its Group IDs.
-It is a track-level Key-Value-Pair, carried with the track's properties (see {{moqt}} Section 2.5 and Section 12).
-Because the value is a single integer, TIMESCALE uses an even Type so the value is a bare varint with no length prefix:
+# Properties
+
+## ID_TIMESCALE Track Property {#id-timescale}
+`ID_TIMESCALE` is a track-level Key-Value-Pair carried in Track Properties (in `SUBSCRIBE_OK`, `PUBLISH`, or `REQUEST_OK` for `FETCH` or `TRACK_STATUS`, per {{moqt}}).
+Because its type is even, its value is a bare varint:
 
 ~~~
-TIMESCALE Track Property {
-  Type (vi64) = 0x08
-  Value (vi64)  ; units per second
+ID_TIMESCALE Track Property {
+  Type (vi64) = 0x40B70,
+  Value (vi64),  ; Group ID and Object ID units per second
 }
 ~~~
 
-**Value**:
-The number of Group ID units per second.
-Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (a typical audio sample rate), and `90000` (the RTP video clock).
-A value of `0` is invalid; a receiver MUST treat a track that declares it as carrying no timeline.
+Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
+A value of `0` is invalid; a receiver MUST treat a track declaring `0` as untimed.
 
-Each Group ID on a track that declares TIMESCALE is the presentation time of the group's start, in those units.
-Every object in the group takes that time: this document carries no finer time, which stays in the media container.
-A receiver MAY refuse a group whose Group ID is too large to represent as a time.
+`ID_TIMESCALE` is fixed for the lifetime of the track and MUST NOT change.
+A receiver decides whether a track is timed when it accepts the track; a track accepted without Track Properties (for example, via `INCLUDE_PROPERTIES=0`) is untimed.
 
-Absence is meaningful and is not an error.
-A track with no TIMESCALE is untimed ({{untimed}}): a receiver MUST NOT infer units for its Group IDs.
+## TIMESTAMP_TIE Object Property {#timestamp-tie}
+`TIMESTAMP_TIE` is an optional object-level Key-Value-Pair carried in an object's Properties (or inside `IMMUTABLE_PROPERTIES` `0x0b`).
+Because its type is even, its value is a bare varint:
 
-The Timescale is fixed for the lifetime of the track and MUST NOT change.
-{{loc}} also registers TIMESCALE with Object scope.
-Whether a track is timed, and its units, are properties of the track, so a receiver MUST ignore an object-scope TIMESCALE, and a publisher SHOULD NOT send one.
+~~~
+TIMESTAMP_TIE Object Property {
+  Type (vi64) = 0x40B72,
+  Value (vi64),  ; ticks subtracted from (Group ID + Object ID)
+}
+~~~
 
-The track's properties are delivered in SUBSCRIBE_OK, FETCH_OK, or TRACK_STATUS ({{moqt}} Section 12).
-A receiver decides whether a track is timed when it accepts the track; a track accepted without its properties is untimed.
+A publisher omits `TIMESTAMP_TIE` when its value is `0`, and MUST NOT include it more than once on an object (whether mutable or sealed).
+Receivers treat an absent `TIMESTAMP_TIE` as `0`, and MUST treat a duplicate `TIMESTAMP_TIE` or a value exceeding `Group ID + Object ID` as a malformed track.
 
-## The TIMESTAMP Property
-{{loc}} also registers an object-level TIMESTAMP (0x10).
-This document gives it no transport meaning: a publisher following it sends none, and a receiver neither reads one nor lets one change an object's time.
-A relay forwards one it receives like any other object property ({{moqt}} Section 2.5).
+
+# Timestamp Encoding and Decoding {#encoding}
+
+On a track declaring `ID_TIMESCALE`:
+
+- **Group ID**: the group's start time in `ID_TIMESCALE` ticks.
+- **Object timestamp (decode time)**: for each object in a group with `Group ID`, `Object ID`, and `TIMESTAMP_TIE` (`0` when absent):
+
+~~~
+timestamp = Group ID + Object ID - TIMESTAMP_TIE
+~~~
+
+## Publisher Assignment
+A group's timestamps never decrease: a publisher MUST NOT write an object whose timestamp is below its predecessor's in the same group.
+Because {{moqt}} requires Object IDs within a subgroup to strictly increase, consecutive frames that share the same decode timestamp (a tie) cannot reuse the same Object ID.
+For each frame with decode timestamp `dts` in a group starting at `group_id` (with `prev_oid` being the prior frame's Object ID, or unset for frame 0):
+
+1. `min_oid = 0` for frame 0, or `prev_oid + 1` thereafter.
+2. `oid = max(max(dts - group_id, 0), min_oid)`.
+3. `tie = (group_id + oid) - dts`.
+4. Emit the object with Object ID `oid`; attach `TIMESTAMP_TIE = tie` if and only if `tie > 0`.
+
+In the common case where frame 0 has `dts == group_id` and subsequent frames advance by at least 1 tick, `tie == 0` on every frame and zero object-property bytes are sent.
+When three consecutive frames tie at `dts = group_id` (e.g., parameter sets or multi-slice pictures), they take Object IDs `0, 1, 2` with `TIMESTAMP_TIE` omitted (`0`), `1`, and `2`, each decoding to `group_id`.
+A stream with B-frames stamps decode time and carries each frame's presentation offset in its media container (e.g., a `CTS` offset added to the transport timestamp).
+
+## Datagrams
+An `OBJECT_DATAGRAM` carries `Object ID = 0` (typically omitted) and `Group ID` equal to the datagram's timestamp in `ID_TIMESCALE` ticks (so `Group ID + 0 - 0 = Group ID`).
+
+## Receivers and Relays
+A receiver computes `timestamp = Group ID + Object ID - tie` in `ID_TIMESCALE` units for every subgroup object, fetch object, and datagram.
+A receiver MAY refuse an object whose computed timestamp exceeds its representable range.
+A relay forwarding a timed track preserves `Group ID`, `Object ID`, and `TIMESTAMP_TIE` unchanged between {{moqt}} peers, and converts directly to or from transport timestamps when bridging with other MoQ dialects.
+
+An object's ID depends on every earlier object in its group, so a relay assigns them from the group's first object in order.
+Any copy of a group then yields the same Object ID and `TIMESTAMP_TIE` for each object, including after failing over to another upstream.
+A relay holding a group without its first object cannot derive them, so it fetches the missing prefix or refuses the request rather than guessing.
+
+
+# Untimed Tracks and Age-Based Dropping
 
 ## Untimed Tracks {#untimed}
-A track that declares no TIMESCALE is untimed: it has no media timeline, and none of its groups has a media time.
-A track is either timed or untimed for its whole lifetime.
-A receiver MUST NOT substitute a time for an untimed group, such as its arrival time, and a relay MUST forward an untimed track untimed, declaring no TIMESCALE downstream.
-Arrival time differs at every hop and changes when a route fails over, so a substituted time would not be the same timeline downstream.
+A track without `ID_TIMESCALE` is untimed for its entire lifetime.
+A receiver MUST NOT substitute a synthetic timeline such as arrival time, and a relay MUST forward an untimed track without declaring `ID_TIMESCALE` downstream.
+`TIMESTAMP_TIE` has no timing meaning on an untimed track.
 
-Age-based dropping ({{age}}) does not apply to an untimed group.
-A relay MAY instead drop a group of an untimed track once its immediate successor arrived at it at least the threshold ago, measured on its own clock.
+Media-time expiration ({{age}}) does not apply to untimed groups.
+A relay MAY still drop an untimed group once its immediate successor arrived at least the age threshold ago on the relay's own clock.
 
 ## Age-Based Dropping {#age}
-Given two groups on the same timed track, a relay computes their relative age as the difference of their Group IDs divided by the Timescale.
-A relay serving a live subscription MAY drop a group once a newer group supersedes it and either of these bounds reaches its age threshold:
+On a timed track, the relative age between two groups is the difference of their Group IDs divided by `ID_TIMESCALE`.
+A relay serving a live subscription MAY drop a group once a newer group supersedes it and either bound reaches its age threshold:
 
-- Its reach, bounded by its immediate successor's Group ID, trails the live media edge by at least the threshold.
-- Its immediate successor arrived at this hop at least the threshold ago, measured on the hop's clock.
+- Its reach (bounded by its immediate successor's Group ID) trails the live media edge by at least the threshold.
+- Its immediate successor arrived at this hop at least the threshold ago on the hop's clock.
 
-The newest group has no successor and MUST NOT expire under either bound, including when the threshold is zero.
-Media time permits dropping an old backlog immediately; the hop's clock also bounds untimed groups and a stalled media timeline.
-
-A relay MUST NOT use Group IDs to reorder delivery beyond what {{moqt}} already permits; this property informs *dropping*, not transmission order.
+The newest group has no successor and MUST NOT expire under either bound, even when the threshold is zero.
+A relay MUST NOT use Group IDs to reorder delivery beyond what {{moqt}} already permits; `ID_TIMESCALE` informs dropping, not transmission order.
 
 
 # Security Considerations
-A timescale exposes the media timeline to relays, which is the point of the extension, but a relay still treats payloads as opaque and gains no access to media content.
-
-A malicious publisher could choose misleading Group IDs (e.g. far in the future) to defeat age-based dropping.
-A receiver SHOULD bound the age it computes and SHOULD NOT make security decisions based on it.
-Because age-based dropping only affects which groups a live subscription receives, the worst case is degraded delivery for that track, not a cross-track effect.
+`ID_TIMESCALE` and Object IDs expose the media timeline to relays without exposing payload content.
+A malicious publisher can choose misleading Group IDs, Object IDs, or `TIMESTAMP_TIE` values (such as far-future values or overflowing sums) to defeat age-based dropping or trigger arithmetic errors; receivers MUST use checked arithmetic, bound computed ages, and MUST NOT make security decisions from them.
+Degraded dropping affects only that track.
 
 
 # IANA Considerations
 
-This document requests no registrations.
-The property it uses is already registered by {{loc}} in the "MOQ Properties" registry ({{moqt}} Section 15.8), and this document changes neither its code point nor its value encoding:
+Provisional registrations in the "MOQ Properties" registry ({{moqt}}) from the First Come First Served range (even values outside the Mandatory Track Property range `0x4000`–`0x7FFF` and avoiding GREASE values `0x7F * N + 0x9D`):
 
-| Value | Name      | Scope         | Reference |
-|:------|:----------|:--------------|:----------|
-| 0x08  | TIMESCALE | Track, Object | {{loc}}   |
-
-An earlier version of this document requested its own code points (`0x915C0` and `0x915C2`); they are abandoned.
+| Value | Name | Scope | Encoding | Reference |
+| :--- | :--- | :--- | :--- | :--- |
+| `0x40B70` | `ID_TIMESCALE` | Track | varint | {{id-timescale}} |
+| `0x40B72` | `TIMESTAMP_TIE` | Object | varint | {{timestamp-tie}} |
 
 
 --- back
 
 # Appendix A: Changelog
 {:numbered="false"}
+
+## moq-timestamp-03
+{:numbered="false"}
+
+- Replaced LOC's `TIMESCALE` (`0x08`) with dedicated Track Property `ID_TIMESCALE` (`0x40B70`) so ID-timed tracks and LOC tracks coexist cleanly.
+- Added per-object transport decode timestamps via `Object ID` and optional `TIMESTAMP_TIE` (`0x40B72`): `timestamp = Group ID + Object ID - TIMESTAMP_TIE`.
+- A group's timestamps never decrease; B-frame streams stamp decode time.
+- Object IDs are derived from a group's first object, so every copy of a group yields the same IDs.
 
 ## moq-timestamp-02
 {:numbered="false"}

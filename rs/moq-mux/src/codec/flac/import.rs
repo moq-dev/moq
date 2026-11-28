@@ -109,6 +109,7 @@ impl Import {
 			.and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), self.sample_rate.into()).ok());
 		self.track.write(Frame {
 			timestamp,
+			decode: None,
 			payload,
 			keyframe,
 			duration: None,

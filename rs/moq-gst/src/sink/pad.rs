@@ -205,6 +205,7 @@ impl Text {
 
 		self.producer.write(moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(start_micros)?,
+			decode: None,
 			duration: None,
 			payload: Bytes::from(payload.into_bytes()),
 			keyframe: true,

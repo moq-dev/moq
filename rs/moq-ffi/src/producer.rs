@@ -1098,8 +1098,11 @@ impl MoqGroupProducer {
 	/// Write `frame` into this group.
 	///
 	/// A timestamp at another scale than the track's is converted to it, rounding down. The frame must
-	/// match its track's timedness, otherwise it is refused with
-	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
+	/// match its track's timedness and not fall below the group's previous frame, otherwise it is
+	/// refused with
+	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch). A
+	/// reordered (B-frame) stream publishes through a media container whose payload carries its
+	/// presentation time.
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let timestamp = frame.timestamp.try_into()?;
