@@ -22,6 +22,12 @@
 (* route no longer served evicts, up to MaxEvicts groups in all, and a     *)
 (* group a route evicted is owed only by the routes still holding it: a    *)
 (* cursor of its own would ask a fill for it, which is not modelled.       *)
+(*                                                                         *)
+(* A publisher may skip a group: declare it never produced, which is final *)
+(* for the track whichever route carries it. Routes learn it one by one    *)
+(* (`Skip`, up to MaxSkips route-group pairs in all), so one route may     *)
+(* still wait for a group another proved skipped. The reader waits on no   *)
+(* copy for a group a copy it holds declared skipped (`Retain::skipped`).  *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -31,6 +37,7 @@ CONSTANTS
     MaxSwitches,  \* front switches to a live route other than a failed one
     Hold,         \* whether the reader holds a group while it reads it, keeping its copy
     MaxEvicts,    \* groups the caches of routes no longer served evict, in all
+    MaxSkips,     \* groups a route learns the publisher skipped, summed over routes
     ReArm         \* whether an eviction re-arms the backfill; FALSE only to see a rule fail
 
 Groups == 0 .. G - 1
@@ -49,7 +56,7 @@ Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 Max2(a, b) == IF a >= b THEN a ELSE b
 
 VARIABLES
-    trk,       \* trk[t]: route t's track: made, failed, fin, arr (arrival order), and gone (evicted)
+    trk,       \* trk[t]: route t's track: made, failed, fin, arr (arrival order), gone (evicted), and skp (declared skipped)
     front,     \* the front: cur (serving track), gen, end, switches
     rd,        \* the reader (`Reader`), see Init
     reading    \* groups handed out and still read, each holding its copy's lease
@@ -65,17 +72,23 @@ Evicted(t) == Cardinality(trk[t].gone)
 \* How many groups the caches of every route evicted, counting each route's own.
 Evictions == Cardinality(UNION {{<<u, g>> : g \in trk[u].gone} : u \in Tracks})
 Live(t) == trk[t].made /\ ~trk[t].failed
+\* The groups some route learned the publisher skipped: never produced, so no
+\* route lands one.
+AllSkips == UNION {trk[u].skp : u \in Tracks}
+\* How many groups the routes learned skipped, counting each route's own.
+Skips == Cardinality(UNION {{<<u, g>> : g \in trk[u].skp} : u \in Tracks})
 \* `track::Consumer::latest_key` (`TrackState::max_key`): the newest group the
 \* track got, which an eviction keeps.
 Latest(t) == IF Arrived(t) = {} THEN None ELSE Max(Arrived(t))
 
 \* `TrackState::is_complete`: the end is declared and the tail holds every group
-\* from where the feed starts (its first arrival) up to it. Sealing records what
-\* the track held then: a group landing below the end afterwards is not owed.
+\* from where the feed starts (its first arrival) up to it, or knows it skipped
+\* (`reaches`). Sealing records what the track held then: a group landing below
+\* the end afterwards is not owed.
 Seal(x) ==
     LET got == {x.arr[i] : i \in 1 .. Len(x.arr)} IN
     IF /\ ~x.whole /\ x.fin
-       /\ \A g \in Min(got) .. G - 1 : g \in got
+       /\ \A g \in Min(got) .. G - 1 : g \in got \/ g \in x.skp
         THEN [x EXCEPT !.whole = TRUE, !.held = got]
         ELSE x
 \* What a track owes its readers: what it held once complete, else all it holds.
@@ -136,12 +149,15 @@ Peek(c, dlv) ==
 Covers(dlv, lo, hi) == \A g \in lo .. hi - 1 : g \in dlv
 
 \* `TrackState::may_land`: a group in [lo, hi) the reader lacks may still land
-\* on the track, below its declared end. Without a floor, only from its lowest
-\* arrival on. The hour's budget is also the grace a gap is waited for.
+\* on the track, below its declared end, unless the track knows it skipped
+\* (`find_landable` walks only the gaps no drop covers). Without a floor, only
+\* from its lowest arrival on. The hour's budget is also the grace a gap is
+\* waited for.
 MayLand(t, lo, hi, floored, dlv) ==
     /\ Live(t)
     /\ \E g \in lo .. (IF hi > G THEN G ELSE hi) - 1 :
         /\ g \notin dlv
+        /\ g \notin trk[t].skp
         /\ g \notin Arrived(t)
         /\ floored \/ (Arrived(t) # {} /\ g >= Min(Arrived(t)))
 
@@ -295,16 +311,22 @@ Take(r, b) ==
               !.dup = @ \/ b.g \in r.dlv,
               !.dlv = @ \cup {b.g}]
 
+\* What the reader's copies declared skipped, which `Reader::let_go` takes once,
+\* from every copy it holds, as `Retain::skipped`.
+Known(r) == UNION {trk[r.copies[i].t].skp : i \in 1 .. Len(r.copies)}
+
 \* `Copy::retains` for a replaced copy: "wait" while it may still deliver a
 \* group the reader lacks under its cap, "keep" while it backs a group being
-\* read, else "no". The hour's budget never passes, so neither `since` (from
-\* the serving copy's edge or `Reader::drained`) nor `expired` is modelled.
-Retains(c, dlv) ==
+\* read, else "no". A group any copy the reader holds declared skipped is
+\* waited for on none, whether or not this copy may still land it. The hour's
+\* budget never passes, so neither `since` (from the serving copy's edge or
+\* `Reader::drained`) nor `expired` is modelled.
+Retains(c, dlv, known) ==
     LET backs(g) == g \in Landed(c.t)
                     \/ MayLand(c.t, g, g + 1, c.floor # None /\ c.floor <= g, {})
     IN
     IF /\ c.done = "no" /\ Bounded(c)
-       /\ \/ MayLand(c.t, Start(c), End(c), c.floor # None, dlv)
+       /\ \/ MayLand(c.t, Start(c), End(c), c.floor # None, dlv \cup known)
           \/ HasUnread(c, End(c), dlv)
         THEN "wait"
     ELSE IF \E x \in reading : x.cid = c.id \/ backs(x.g)
@@ -315,7 +337,7 @@ Retains(c, dlv) ==
 LetGo(r) ==
     LET n == Len(r.copies)
         ret == [i \in 1 .. n |->
-                    IF r.copies[i].rep THEN Retains(r.copies[i], r.dlv) ELSE "serving"]
+                    IF r.copies[i].rep THEN Retains(r.copies[i], r.dlv, Known(r)) ELSE "serving"]
         kept == {i \in 1 .. n : ret[i] # "no"}
         order == CHOOSE s \in [1 .. Cardinality(kept) -> kept] :
                     \A a, b \in 1 .. Cardinality(kept) : a < b => s[a] < s[b]
@@ -368,7 +390,7 @@ Carried ==
 \* The groups the reader lacks that a replaced copy it still holds has unread,
 \* or may still get by the rule `may_land` applies, within what it asks for.
 Late(r) ==
-    {g \in Groups \ r.dlv :
+    {g \in Groups \ (r.dlv \cup AllSkips) :
         \E i \in 1 .. Len(r.copies) :
             LET c == r.copies[i] IN
             /\ c.rep /\ c.done = "no"
@@ -383,7 +405,7 @@ Late(r) ==
 
 Init ==
     /\ trk = [t \in Tracks |-> [made |-> t = 1, failed |-> FALSE, fin |-> FALSE, arr |-> <<>>,
-                                gone |-> {}, whole |-> FALSE, held |-> {}]]
+                                gone |-> {}, skp |-> {}, whole |-> FALSE, held |-> {}]]
     /\ front = [cur |-> 1, gen |-> 1, end |-> "open", switches |-> 0]
     \* Subscribed to the serving copy at once (`Consumer::subscribe`).
     /\ rd = [gen |-> 1, next |-> 2, newest |-> None, dlv |-> {}, resumed |-> TRUE,
@@ -408,7 +430,20 @@ Down(t) ==
 Land(t, g) ==
     /\ Live(t)
     /\ g \notin Arrived(t)
+    /\ g \notin AllSkips
     /\ trk' = [trk EXCEPT ![t] = Seal([@ EXCEPT !.arr = Append(@, g)])]
+    /\ UNCHANGED <<front, rd, reading>>
+
+\* A route learns the publisher skipped a group: it was never produced, so no
+\* route holds it, or lands it from now on. The last group stays, for the end
+\* to be declared at (`Skipped::insert`, `TrackState::skip_groups`).
+Skip(t, g) ==
+    /\ Live(t)
+    /\ g < G - 1
+    /\ g \notin trk[t].skp
+    /\ \A u \in Tracks : g \notin Arrived(u)
+    /\ Skips < MaxSkips
+    /\ trk' = [trk EXCEPT ![t] = Seal([@ EXCEPT !.skp = @ \cup {g}])]
     /\ UNCHANGED <<front, rd, reading>>
 
 \* A route declares the end at G once it holds the last group (`Op::End`).
@@ -489,7 +524,7 @@ Done ==
 
 Next ==
     \/ \E t \in Tracks : Up(t) \/ Down(t) \/ Finish(t) \/ Settle(t) \/ Serve(t)
-    \/ \E t \in Tracks, g \in Groups : Land(t, g) \/ Evict(t, g)
+    \/ \E t \in Tracks, g \in Groups : Land(t, g) \/ Evict(t, g) \/ Skip(t, g)
     \/ FrontFinish \/ FrontFail
     \/ Read
     \/ \E x \in reading : Drop(x)
@@ -532,10 +567,11 @@ CleanEndIsDeclared == rd.ended = "ok" => \E t \in Tracks : trk[t].fin
 \* front's to replace.
 FailsOnlyUnroutable == rd.ended = "err" => front.end = "err"
 
-\* Once the serving route's copy is complete and the reader holds every group,
-\* a poll ends the read rather than parking on another route.
+\* Once the serving route's copy is complete and the reader holds every group
+\* the publisher did not skip, a poll ends the read rather than parking on
+\* another route, whichever copies learned of the skip.
 QuietIsSettled ==
-    (rd.ended = "no" /\ trk[front.cur].whole /\ rd.dlv = Groups) => Poll(rd).r # rd
+    (rd.ended = "no" /\ trk[front.cur].whole /\ rd.dlv \cup AllSkips = Groups) => Poll(rd).r # rd
 
 \* Flapping between routes keeps at most a route's own copy and one backfill
 \* of it still subscribed, however many times it flaps. A drained copy waits
@@ -553,6 +589,6 @@ TypeOK ==
     /\ rd.ended \in {"no", "ok", "err"}
     /\ rd.dlv \subseteq Groups
     /\ \A i \in 1 .. Len(rd.copies) : rd.copies[i].done \in {"no", "ok", "err"}
-    /\ \A t \in Tracks : trk[t].gone \subseteq Arrived(t)
+    /\ \A t \in Tracks : trk[t].gone \subseteq Arrived(t) /\ trk[t].skp \subseteq Groups
 
 =============================================================================
