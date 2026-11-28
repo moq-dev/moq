@@ -8,6 +8,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { everyRange } from "../subscription.test-util.ts";
 import { Timestamp } from "../time.ts";
 import { SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
@@ -69,7 +70,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		// Concurrent local joins coalesce into one upstream update.
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n] : []);
 		// A parameter change restates the wanted group rather than clearing it.
-		joins.push(remote.subscribe({ priority: 9 }));
+		joins.push(remote.subscribe(everyRange({}, { priority: 9 })));
 		await clock.advance(Duration.nanos(0));
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n, 1n] : []);
 		for (const join of joins) join.close();

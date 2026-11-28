@@ -1247,7 +1247,6 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 
 	consumer
 		.update(MoqSubscription {
-			priority: 10,
 			delay: MoqDelay {
 				min: Some(Duration::ZERO),
 				max: Some(Duration::from_millis(25)),
@@ -1255,8 +1254,8 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 			ranges: Some(vec![MoqRange {
 				start: Some(MoqTimestamp::unscaled(0)),
 				end: None,
+				..Default::default()
 			}]),
-			order: None,
 		})
 		.unwrap();
 
@@ -1286,13 +1285,11 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let subscription = |min: u64, ranges: Option<Vec<MoqRange>>| MoqSubscription {
-		priority: 0,
 		delay: MoqDelay {
 			min: Some(Duration::from_secs(min)),
 			max: None,
 		},
 		ranges,
-		order: None,
 	};
 	let consumer = track.consume(Some(subscription(1, None))).unwrap();
 	let joined = |min: u64, end: Option<u64>| Range {
@@ -1301,6 +1298,7 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 			max: None,
 		},
 		end,
+		..Default::default()
 	};
 	assert_eq!(consumer.control.subscription().ranges, [joined(1, None)]);
 
@@ -1314,8 +1312,13 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 	let bounded = MoqRange {
 		start: None,
 		end: Some(MoqTimestamp::unscaled(5_000_000)),
+		..Default::default()
 	};
-	let open = MoqRange { start: None, end: None };
+	let open = MoqRange {
+		start: None,
+		end: None,
+		..Default::default()
+	};
 	consumer.update(subscription(2, Some(vec![open, bounded]))).unwrap();
 	assert_eq!(
 		consumer.control.subscription().ranges,
@@ -1405,6 +1408,57 @@ async fn whole_media_frames_require_the_callers_timestamp() {
 			timestamp: us(0),
 		})
 		.unwrap();
+	media.finish().unwrap();
+	broadcast.close().unwrap();
+}
+
+/// Every binding's whole-frame audio closes a group on the frame that brings it to 100 ms without
+/// calling `cut`, and an explicit `cut` still closes one early.
+#[tokio::test(start_paused = true)]
+async fn audio_groups_close_at_one_hundred_milliseconds() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("mic".into()),
+		},
+		audio_init(MoqAudioFormat::opus(), opus_head()),
+	)
+	.unwrap();
+	let track = subscribe(&broadcast, "mic").await;
+
+	// TOC config 1, code 0: one 20 ms SILK frame.
+	let packet = vec![1 << 3, 0, 0];
+	let mut next = 0;
+	for (frames, cut) in [(5, false), (3, true), (5, false)] {
+		for _ in 0..frames {
+			media
+				.write_frame(MoqFrame {
+					payload: packet.clone(),
+					timestamp: us(next * 20_000),
+				})
+				.unwrap();
+			next += 1;
+		}
+		if cut {
+			media.cut().unwrap();
+		}
+		let group = kio::clock::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("timed out waiting for a group")
+			.unwrap()
+			.expect("expected a group");
+		let mut read = 0;
+		while kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("the group closes without another write")
+			.unwrap()
+			.is_some()
+		{
+			read += 1;
+		}
+		assert_eq!(read, frames);
+	}
 	media.finish().unwrap();
 	broadcast.close().unwrap();
 }
@@ -9484,22 +9538,20 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	}
 
 	let subscription = MoqSubscription {
-		priority: 0,
 		delay: MoqDelay {
 			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		},
 		ranges: Some(vec![MoqRange {
 			start: Some(MoqTimestamp::unscaled(0)),
-			end: None,
+			order: Some(MoqOrder::Ascending),
+			..Default::default()
 		}]),
-		order: Some(MoqOrder::Ascending),
 	};
 	let converted = moq_net::track::Subscription::try_from(subscription.clone()).unwrap();
-	assert_eq!(converted.order, moq_net::track::Order::Ascending);
 	assert_eq!(
 		converted.ranges,
-		vec![moq_net::track::Range::from(moq_net::track::Start::Time(0))]
+		vec![moq_net::track::Range::from(moq_net::track::Start::Time(0)).with_order(moq_net::track::Order::Ascending)]
 	);
 
 	let consumer = track.consume(Some(subscription)).unwrap();
@@ -9538,9 +9590,10 @@ async fn delay_min_places_a_range_with_no_start() {
 		let consumer = track
 			.consume(Some(MoqSubscription {
 				delay: MoqDelay { min, max: None },
-				ranges: Some(vec![MoqRange { start: None, end: None }]),
-				order: Some(MoqOrder::Ascending),
-				..moq_subscription_defaults()
+				ranges: Some(vec![MoqRange {
+					order: Some(MoqOrder::Ascending),
+					..Default::default()
+				}]),
 			}))
 			.unwrap();
 		kio::clock::timeout(TIMEOUT, consumer.recv_group())
@@ -9940,23 +9993,24 @@ async fn range_times_select_the_containing_groups() {
 
 	let time = |timestamp_us| Some(MoqTimestamp::unscaled(timestamp_us));
 	let subscription = |ranges| MoqSubscription {
-		priority: 0,
 		delay: MoqDelay {
 			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		},
 		ranges,
-		order: Some(MoqOrder::Ascending),
 	};
 	let between = |start, end: Option<u64>| {
 		subscription(Some(vec![MoqRange {
 			start: time(start),
 			end: end.and_then(time),
+			order: Some(MoqOrder::Ascending),
+			..Default::default()
 		}]))
 	};
 	let scaled = MoqRange {
 		start: Some(us(1_500)),
 		end: None,
+		..Default::default()
 	};
 	assert!(matches!(
 		scaled.resolve(),
@@ -9965,13 +10019,18 @@ async fn range_times_select_the_containing_groups() {
 	let scaled_end = MoqRange {
 		start: None,
 		end: Some(us(1_500)),
+		..Default::default()
 	};
 	assert!(matches!(
 		scaled_end.resolve(),
 		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
 	));
 	// No start is the range a subscription's delay places.
-	let joined = MoqRange { start: None, end: None };
+	let joined = MoqRange {
+		start: None,
+		end: None,
+		..Default::default()
+	};
 	assert_eq!(joined.resolve().unwrap(), moq_net::track::Range::ALL);
 
 	// Every group a read hands out before it ends, by start. Start order ends at the first
@@ -9993,12 +10052,14 @@ async fn range_times_select_the_containing_groups() {
 	let migrated = MoqRange {
 		start: time(1_500),
 		end: time(1_999),
+		..Default::default()
 	};
 	assert_eq!(
 		migrated.resolve().unwrap(),
 		moq_net::track::Range {
 			start: moq_net::track::Start::Time(1_500),
 			end: Some(1_999),
+			..Default::default()
 		}
 	);
 	// An exclusive end at 0 asked for nothing: an empty list, unlike the omitted default.

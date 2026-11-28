@@ -976,25 +976,30 @@ sharing one can leave a bench linked against the other tree's library.
 
 The Instructions workflow counts each deterministic bench's instructions every
 night on `main`, under stock Valgrind on a hosted runner, through
-[rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
+[swole](https://github.com/kixel-ai/swole). Each
 benchmark runs alone in its own Valgrind process, so a change of a few percent
 shows without the paired comparison's rounds. Some counts still move
 between runs of the same code: some benches read the wall clock and follow the
 host's load, by up to 32%, and some shift with the checkout's path
 ([quest](/quest/m0/repeatable-instruction-counts.md)). CI counts one benchmark
-at a time (`--jobs 1`), so a bisect step counts under the nightly's load. It does not see
-syscalls, I/O, contention, or caches, and CodSpeed's Criterion, which counts
-them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
+at a time (`--jobs 1`), so a bisect step counts under the nightly's load. Beside
+each count, swole writes its estimated cycles, which weigh Callgrind's simulated
+cache misses and branch mispredicts. It does not see syscalls, I/O, or
+contention, and CodSpeed's Criterion, which counts them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
 single-threaded targets without I/O, and Nightly keeps measuring every bench.
 Workspace benches import `criterion`, which `rs/bench-harness` resolves to
 Criterion, or to CodSpeed's instrumented Criterion under `cfg(codspeed)`, which
-rust2-bench sets. Nothing gates on it.
+swole sets. swole cannot see a CodSpeed bench's threads, so it counts each
+five times and records the median, with the least and most beside it; once the
+benches move to swole's own harness ([quest](/quest/m5/bench-harness.md)), one
+that runs alone counts once. Nothing gates on it.
 
 Each count's measure names the environment it ran in, such as `instructions
-(x86_64-ce1501c93c32)`: Valgrind's simulated CPU, glibc's tunables, the
-Valgrind version, and the library rust2-bench preloads into each counted process
-to pin its randomness and clock, which rust2's flake input pins. Counts compare
-only within one fingerprint, and a bump that moves Valgrind or the preload starts
+(x86_64-9d154cd7ab99)` and `estimated cycles (x86_64-9d154cd7ab99)`: Valgrind's
+simulated CPU, glibc's tunables, the Valgrind version, the library swole preloads
+into each counted process to pin its randomness and clock, and the cache and
+branch simulation with its cycle model, which swole's flake input pins. Counts
+compare only within one fingerprint, and a bump that moves any of them starts
 new series. A matching fingerprint does
 not yet reproduce CI's counts: two hosts sharing one agreed exactly on fewer
 than a quarter of the benchmarks. On x86-64 Linux:
@@ -1011,7 +1016,7 @@ another listed package, since Cargo's `--bench` takes no package. A name the
 commit lacks fails the run; `run` with `--allow-missing` counts the rest and
 names the missing ones on stderr and in a GitHub Actions job summary, failing
 only when the commit has none of them. `compare` counts the base and the working tree from one
-worktree under `~/.cache/rust2-bench`, so a path the build compiles in moves
+worktree under `~/.cache/swole`, so a path the build compiles in moves
 neither side, and selects each side's packages and targets from what that side
 has, so a package or target only one side has reads as added or removed. Not
 every count repeats yet (`quest/m0/repeatable-instruction-counts.md`), so recount
@@ -1029,8 +1034,8 @@ Instructions workflow on a `kixel-bisect/<run>/<commit>` branch, with its
 `benchmarks` input naming the suspects, so each step builds and counts only
 those. A step at a commit lacking some suspects counts the rest
 (`--allow-missing`), and Kixel Quest reads the missing ones as skipped there,
-not clean. The Instructions workflow uploads rust2-bench's `metrics.json`, which
-rust2-bench checks against Kixel Quest's limits as it writes it; Nightly reports
+not clean. The Instructions workflow uploads swole's `metrics.json`, which
+swole checks against Kixel Quest's limits as it writes it; Nightly reports
 every successful source's report, without its `bench-*` prefix, and each paired
 comparison's base as a second observation of that commit (`just gh
 benchmark-report nightly-metrics`). A benchmark CSV column becomes a measure of

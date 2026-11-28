@@ -11,29 +11,35 @@ need rather than a 64-slot chunk.
 
 ## Plan
 
-The 2026-11-27 idle profile ([epic](/quest/m1/idle-conn-memory/README.md))
-put 13.5 KiB per connection in TLS, 14.3 KiB in moq-quic and
-`moq-congestion`, and a 10 KiB `moq_tokio::quic::driver::ConnectionInner`
-allocation that holds moq-quic's `Connection` inline. Sites to check:
+[moq-dev/moq#9827](https://github.com/moq-dev/moq/pull/9827) landed most of it:
+a confirmed server frees its rustls session, sent-packet chunks start at 4
+slots, discarded packet spaces free their buffers, and `prev_path` is boxed. In the moq-quic sim, an idle
+server connection's heap went from 17.8 KB to 6.2 KB and its inline
+`Connection` from 8,240 B to 7,712 B.
 
-- `TlsSession::read_handshake` (`rs/moq-quic/src/crypto/rustls.rs`)
-  resizes a receive buffer to 2.6 KiB during the handshake and keeps it.
-- rustls `TlsSession` and `ServerConnectionData` (2 KiB) stay live after the
-  handshake. The session stays, since the peer identity is read from it;
-  look for handshake-only parts inside it that can go.
-- Packet and header-protection keys built in `Connection::write_crypto` and
-  by `DirectionalKeys::new` (about 3.5 KiB) are still live on an established
-  connection. The server already drops handshake-space keys on
-  confirmation, so these are likely the current and next 1-RTT generations,
-  which stay; confirm that before counting any of it as savings.
-- `connection::slots::Slots` allocates a `Box<[Option<T>; 64]>` chunk of
-  about 8 KiB for the first in-flight packet, so a keep-alive alone holds
-  one: 4.2 KiB per connection on average. A smaller first chunk, or chunks
-  sized to the packets in flight, keeps the O(1) lookups.
-- The outgoing datagram `Schedule` B-tree (1.4 KiB), the stream waits table
-  (1 KiB) and `moq_congestion::Lost` growth (1.2 KiB) on a connection that
-  sends no datagrams or streams.
+What remains is the Initial and Handshake `PacketSpace`s, 800 B each, inline
+in `Connection::spaces` for the connection's whole life. Move them behind a
+box that is freed once both are discarded. That means auditing the ~90
+`spaces[...]` index sites that can name a discarded space, since any site the
+audit misses becomes a panic a peer can trigger. One way to do it: a `Spaces`
+type whose reads of a discarded space return a shared empty space and whose
+writes cannot reach one by construction. The audit runs the `fuzz` connection
+target over the state machine before the PR is ready, so a missed site shows
+as a crash there rather than in production.
 
-Measure `ConnectionInner`'s size by field before changing it: whatever of
-the 10 KiB is fixed per-connection state stays, and the rest moves behind a
-box allocated only when used.
+The maintainer chose (2026-11-28) to do this as its own work after the 0.22.0
+cut, not in #9827 and not dropped.
+
+The scheduler's emptied B-tree roots (a 1.3 KB leaf once any stream has sent)
+also stay: freeing them whenever a queue drained cost up to five allocation
+and free pairs per paced datagram (round 1 review of #9827). Free them only on
+a signal that the connection went idle, if one appears.
+
+The rest of the profile's items stay: the current and next 1-RTT keys
+(precomputed so a spoofed key phase costs nothing), BBRv3's state, the stream
+waits table (entries live only while a waiter is), and `moq_congestion::Lost`
+(only a temporary `Vec` in `detect_lost_packets`; nothing keeps one).
+
+## Parked
+
+- until the 0.22.0 cut ships - the maintainer deferred it past the cut; move it to m3 (`quest mv`) once #9827 merges and releases the claim, then delete this section

@@ -10,6 +10,12 @@
  * a join lands doesn't depend on it, and ranges from the oldest group under the furthest end, which
  * takes in the rest.
  *
+ * All that holds within one policy, since folding a range into one at another policy would lose its
+ * priority or order. Across policies a range is dropped only once ranges at policies that
+ * {@link covers | cover} its own cover its span. With one policy there is nothing to fold, so a
+ * change costs O(log n) as above. With several, the fold is redone only when one policy's union
+ * moves, at the cost of the union's own length.
+ *
  * @module
  */
 
@@ -17,7 +23,19 @@ import type { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
 import type { Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
-import { compare, isEmpty, joinOf, maxOf, rangeBudget, rangeTime } from "./window.ts";
+import {
+	compare,
+	isEmpty,
+	joinOf,
+	maxOf,
+	policyOf,
+	policyRank,
+	rangeBudget,
+	rangeKey,
+	rangeTime,
+	rankPolicy,
+	withPolicy,
+} from "./window.ts";
 
 /** How {@link Ranges} counts one range. */
 type Shape =
@@ -44,10 +62,155 @@ function shapeOf(range: Range): Shape {
 }
 
 /**
- * Every subscriber's ranges, counted so that one change costs O(log n), folded as the window
- * module's `union` folds them.
+ * Every subscriber's ranges, counted so that one change costs O(log n) unless several policies are
+ * asked and it moves the union of its policy's ranges, folded as the window module's `union` folds
+ * them.
  */
 export class Ranges {
+	// The ranges of each policy, by its rank.
+	#classes = new Map<number, Class>();
+	// The union, until a change moves it. Kept while several policies are asked, to tell whether a
+	// change moved it.
+	#union: Range[] | undefined = [];
+
+	/** Count `range`, returning whether the union changed. */
+	add(range: Range): boolean {
+		if (isEmpty(range)) return false;
+		const rank = policyRank(policyOf(range));
+		const several = this.#classes.size > 1 || (this.#classes.size === 1 && !this.#classes.has(rank));
+		if (several) this.union();
+		let held = this.#classes.get(rank);
+		if (!held) {
+			held = new Class();
+			this.#classes.set(rank, held);
+		}
+		return held.add(range) && this.#moved(several);
+	}
+
+	/** Uncount `range`, one {@link add} counted, returning whether the union changed. */
+	remove(range: Range): boolean {
+		if (isEmpty(range)) return false;
+		const several = this.#classes.size > 1;
+		if (several) this.union();
+		const rank = policyRank(policyOf(range));
+		const held = this.#classes.get(rank);
+		if (!held) throw new Error("a counted policy");
+		const moved = held.remove(range);
+		if (held.held === 0) this.#classes.delete(rank);
+		return moved && this.#moved(several);
+	}
+
+	/** The union in a canonical order, costing its own length rather than the audience's. Read only. */
+	union(): readonly Range[] {
+		this.#union ??= this.#fold();
+		return this.#union;
+	}
+
+	// Whether a change that moved one policy's union moved the union: always with one policy asked,
+	// and otherwise only when the fold comes out different.
+	#moved(several: boolean): boolean {
+		const old = this.#union;
+		this.#union = undefined;
+		if (!several || old === undefined) return true;
+		const union = this.#fold();
+		this.#union = union;
+		return union.length !== old.length || union.some((range, index) => rangeKey(range) !== rangeKey(old[index]));
+	}
+
+	// Fold every policy's union, dropping a range that ranges at covering policies cover.
+	#fold(): Range[] {
+		const above = new Above();
+		const union: Range[] = [];
+		// Those covering others first.
+		for (const rank of [...this.#classes.keys()].sort((a, b) => b - a)) {
+			const policy = rankPolicy(rank);
+			const spans = (this.#classes.get(rank) as Class).union();
+			for (const range of spans) if (!above.covers(range)) union.push(withPolicy(range, policy));
+			above.extend(spans);
+		}
+		union.sort(compare);
+		return union;
+	}
+}
+
+/**
+ * What ranges at covering policies already ask, as a range of one policy is checked against them:
+ * the same spans {@link Class} merges ranges into.
+ */
+class Above {
+	// Whether a range from the oldest group follows the live edge, covering everything.
+	#all = false;
+	// The time spans, merged where they overlap or touch, as exclusive spans of starts in order.
+	#runs: { start: bigint; end: bigint }[] = [];
+	// The furthest end of a range from the oldest group.
+	#oldest: bigint | undefined;
+	// Live joins by lag and end, under the widest budget.
+	#joins = new Map<string, number>();
+
+	covers(range: Range): boolean {
+		if (this.#all) return true;
+		const shape = shapeOf(range);
+		switch (shape.kind) {
+			case "empty":
+				return true;
+			case "open":
+				return false;
+			case "time": {
+				// The last run starting at or before it, which alone can reach it.
+				let low = 0;
+				let high = this.#runs.length;
+				while (low < high) {
+					const mid = (low + high) >> 1;
+					if (this.#runs[mid].start <= shape.start) low = mid + 1;
+					else high = mid;
+				}
+				const run = this.#runs[low - 1];
+				return run !== undefined && shape.end <= run.end;
+			}
+			case "join":
+				return (this.#joins.get(shape.join) ?? -1) >= shape.budget;
+			case "oldest":
+				return this.#oldest !== undefined && this.#oldest >= shape.end;
+		}
+	}
+
+	// Take in one policy's union.
+	extend(ranges: readonly Range[]): void {
+		const spans = [...this.#runs];
+		for (const range of ranges) {
+			const shape = shapeOf(range);
+			switch (shape.kind) {
+				case "empty":
+					break;
+				case "open":
+					this.#all = true;
+					break;
+				case "time":
+					spans.push({ start: shape.start, end: shape.end });
+					break;
+				case "join":
+					this.#joins.set(shape.join, Math.max(this.#joins.get(shape.join) ?? -1, shape.budget));
+					break;
+				case "oldest":
+					this.#oldest = this.#oldest === undefined || shape.end > this.#oldest ? shape.end : this.#oldest;
+					break;
+			}
+		}
+		spans.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+		const runs: { start: bigint; end: bigint }[] = [];
+		for (const span of spans) {
+			const last = runs.at(-1);
+			if (!last || span.start > last.end) runs.push({ ...span });
+			else if (span.end > last.end) last.end = span.end;
+		}
+		this.#runs = runs;
+	}
+}
+
+/** The ranges of one policy, counted so that one change costs O(log n). */
+class Class {
+	/** How many non-empty ranges are counted. */
+	held = 0;
 	// Holders of a range from the oldest group following the live edge, which covers every other.
 	#open = 0;
 	// Time ranges, as spans of starts.
@@ -64,6 +227,7 @@ export class Ranges {
 	add(range: Range): boolean {
 		const shape = shapeOf(range);
 		let changed = false;
+		this.held++;
 		switch (shape.kind) {
 			case "empty":
 				break;
@@ -101,6 +265,7 @@ export class Ranges {
 	remove(range: Range): boolean {
 		const shape = shapeOf(range);
 		let changed = false;
+		this.held--;
 		switch (shape.kind) {
 			case "empty":
 				break;
@@ -137,7 +302,10 @@ export class Ranges {
 		return changed;
 	}
 
-	/** The union in a canonical order, costing its own length rather than the audience's. Read only. */
+	/**
+	 * The union at the default policy in a canonical order, costing its own length rather than the
+	 * audience's. Read only.
+	 */
 	union(): readonly Range[] {
 		this.#union ??= this.#fold();
 		return this.#union;

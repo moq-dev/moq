@@ -295,14 +295,20 @@ Announcement-interest refusal is logged and releases discovery sync. The merged
 announcement listing keeps its existing event and sync API, with no per-source
 error result, and continues receiving announcements from unrelated sources.
 
-Each subscription carries the knobs that decide behavior under congestion:
+Each subscription carries the knobs that decide behavior under congestion. Priority and
+order belong to each range, so one subscription can ask for the live edge urgently and
+backfill history in the background:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
+| **Priority** (-128..127, default 0) | Higher-priority ranges get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Ranges** | Which groups to ask for, through the group containing an end time or onward with the live edge. A range starts at the oldest group or at the group containing a time, which asks for history, or as a live join (the default joins at the live edge). Each group arrives whole, from its first frame. |
 | **Max** (live joins) | How long a non-latest group a live join reaches stays worth delivering before it is skipped. Zero means "live edge only", the default. Unset leaves the publisher's max age alone to bound it. History has none: its groups arrive in full, bounded only by the publisher's max age. |
+
+Only moq-lite 07 carries a priority and order per range. Older moq-lite and
+moq-transport carry one per subscription: the highest priority among its ranges,
+newest first if any range at that priority asks for it.
 
 A **metadata subscription** (`broadcast.meta(name)` in Rust and TypeScript) takes
 the same knobs and delivers a track's groups with each frame's timestamp and
@@ -401,9 +407,10 @@ reported as skipped, so a reader sees a gap at once. Older versions and
 moq-transport carry no end.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
-first needs a history range, or a live join whose max covers the backlog. When a relay serves subscribers of
-both orders from one upstream subscription, it asks upstream for newest first, and
-still sends each subscriber its groups in that subscriber's own order. Over
+first needs a history range, or a live join whose max covers the backlog. When a relay serves subscribers
+asking for the same groups at different priorities or orders from one upstream
+subscription, it asks upstream at the highest priority, newest first if any of those
+asks it, and still sends each subscriber its groups in that subscriber's own order. Over
 moq-transport the upstream order is fixed by whichever subscriber arrived first.
 
 A live join's max starts counting when a group's successor arrives, on two clocks, and

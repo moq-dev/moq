@@ -41,7 +41,7 @@ pub struct MoqJsonSnapshotConfig {
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqJsonSnapshotConsumerConfig {
 	/// Delivery priority of the subscription, higher first, as
-	/// [`MoqSubscription::priority`](crate::consumer::MoqSubscription::priority).
+	/// [`MoqRange::priority`](crate::consumer::MoqRange::priority).
 	#[uniffi(default = 0)]
 	pub priority: i8,
 	/// The reader's playout delay behind the live edge, the subscription's `delay.min` and

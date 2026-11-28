@@ -34,23 +34,25 @@ test("media joins live at its min delay, retunes only the join's max, and update
 	const effect = new Effect();
 
 	subscribeMedia(effect, { broadcast, track: "media", priority, delay });
-	// A live join its min delay behind the live edge, under its max.
-	const live = (max: number) => [{ start: { live: { min: Duration.millis(100), max: Duration.millis(max) } } }];
-	expect(initial).toEqual({ priority: 7, ranges: live(250) });
+	// A live join its min delay behind the live edge, under its max, at the media's priority.
+	const live = (max: number, priority = 7) => [
+		{ start: { live: { min: Duration.millis(100), max: Duration.millis(max) } }, priority },
+	];
+	expect(initial).toEqual({ ranges: live(250) });
 
 	delay.set({ min: Duration.millis(100), max: Duration.millis(500) });
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, ranges: live(500) });
+	expect(updates.at(-1)).toEqual({ ranges: live(500) });
 
 	// A new min moves no join: the range resolves once, and placing it anew would skip media
 	// buffered behind the new start.
 	delay.set({ min: Duration.millis(300), max: Duration.millis(500) });
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, ranges: live(500) });
+	expect(updates.at(-1)).toEqual({ ranges: live(500) });
 
 	priority.set(-3);
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: -3, ranges: live(500) });
+	expect(updates.at(-1)).toEqual({ ranges: live(500, -3) });
 
 	effect.close();
 });

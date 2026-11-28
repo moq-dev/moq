@@ -96,7 +96,7 @@ Deliver ==
 
 \* The publisher resets the copy's stream as too old under a budget it may
 \* still apply; `GroupRecv` aborts the group with the verdict, recorded under
-\* `SubStream::stale_budget`, the narrowest budget asked.
+\* the narrowest budget asked (`narrowest`, `Producer::judge_under`).
 Reset(b) ==
     /\ copy = "arriving" /\ b \in asked /\ StaleUnder(b)
     /\ copy' = "stale" /\ judged' = b

@@ -78,9 +78,8 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = route.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.opus(), data = opusInit))
     packets.forEachIndexed { i, packet -> // 20 ms of Opus each
+        // Five packets fill a 100 ms group, which closes on its own.
         audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960uL * i.toULong(), 48_000u)))
-        // Five packets fill a 100 ms group: audio has no keyframes, so cuts give it groups.
-        if (i % 5 == 4) audio.cut()
     }
 
     val video = dev.moq.video.Producer(
@@ -107,7 +106,7 @@ one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
 - **`end`, not `close`.** `broadcast.end()` ends a broadcast for good, retracting its route. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no other handle to it remains, such as its route or a `requests()` handle. A route is the opposite: closing it retracts it at once, so hold it while the broadcast should stay announced.
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after the frame that brings a group to about 100 ms, so a relay keeps one stream (group) per 100 ms rather than one per packet. Frames forward as they are written either way.
+- **Audio groups by time.** Video groups at its keyframes; audio closes a group on the frame that brings it to about 100 ms, so a relay keeps one stream (group) per 100 ms rather than one per packet. Frames forward as they are written either way. `cut()` closes a group early, such as at a segment boundary.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `dev.moq.media.TrackConsumer`, `dev.moq.audio.Consumer`, and `dev.moq.video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start = DecodeStart.LATEST` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `close()` each frame from a `dev.moq.video.Consumer` promptly (or `use { }` it), or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.

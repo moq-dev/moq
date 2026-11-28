@@ -128,7 +128,7 @@ test("range fills: a drained run goes once nobody reads", async () => {
 	const { recover } = recoveries();
 	const fills = new RangeFills(track, Version.DRAFT_07, recover);
 	const tail = new Tail();
-	fills.ask = { groups: [{ start: 0n, end: 1n }], priority: 0 };
+	fills.ask = { groups: [{ start: 0n, end: 1n }], priority: 0, order: "ascending" };
 	expect(fills.poll(tail, true)).toBe(false);
 	expect(fills.isEmpty()).toBe(false);
 

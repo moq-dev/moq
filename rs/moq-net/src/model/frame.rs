@@ -1808,7 +1808,7 @@ impl Consumer {
 			Resume::Route(routed) => Some(&routed.recover),
 			_ => None,
 		};
-		if !expiry.policy.is_expired(recover, waiter) {
+		if expiry.policy.is_expired(recover, waiter).is_none() {
 			return false;
 		}
 
