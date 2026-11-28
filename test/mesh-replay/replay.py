@@ -188,7 +188,7 @@ def load_mesh(path: Path) -> Mesh:
     return mesh
 
 
-KINDS = {"roll", "reopen-link", "reopen-relay", "kill", "end-source"}
+KINDS = {"roll", "reopen-link", "reopen-relay", "kill", "end-source", "hold"}
 
 
 @dataclass
@@ -233,6 +233,8 @@ def load_script(path: Path, mesh: Mesh) -> Script:
         event["times"] = int(raw.get("times", 1))
         if event["times"] < 1:
             raise ValueError(f"{path}: a {kind}'s `times` is at least 1")
+        if kind == "hold":
+            event["for"] = seconds(raw.get("for"), f"{path}: a hold's `for`")
         if kind == "roll":
             if raw.get("to") not in ("new", "old"):
                 raise ValueError(f"{path}: a roll goes `to` new or old")
@@ -578,7 +580,12 @@ class Auth:
                 self.end_headers()
                 self.wfile.write(payload)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        class Server(ThreadingHTTPServer):
+            # Every session of a mesh authenticates at once, and macOS resets a connection past a
+            # backlog of 5 instead of retrying its SYN as Linux does.
+            request_queue_size = 128
+
+        self.server = Server(("127.0.0.1", port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self) -> None:
@@ -939,7 +946,7 @@ class Run:
             "versions": versions,
             "readers": self.reader_report(start, end, targets),
         }
-        self.check(report, unfed, unrouted)
+        self.check(report, unfed, unrouted, (start, end) if kind == "hold" else None)
         self.events.append(report)
         return report
 
@@ -1051,8 +1058,11 @@ class Run:
                         )
         return unfed, unrouted
 
-    def check(self, report: dict, unfed: list[dict], unrouted: list[dict]) -> None:
-        """Record each reader with a route left unfed, and each broadcast shown with no source."""
+    def check(
+        self, report: dict, unfed: list[dict], unrouted: list[dict], hold: tuple[float, float] | None = None
+    ) -> None:
+        """Record each reader with a route left unfed, and each broadcast shown with no source,
+        and over a `hold`'s window, each reader that paused past `stall` and read again."""
         publishing = {relay.name for relay in self.relays.values() if relay.publisher.alive}
         shown = []
         for relay in self.relays.values():
@@ -1092,9 +1102,29 @@ class Run:
             self.violation(report, "unfed", items, kind, None if name == report["name"] else began)
         if shown:
             self.violation(report, "shown", shown)
+        if hold and (paused := self.paused(*hold)):
+            self.violation(report, "paused", paused)
         died = [proc.name for proc in self.procs() if proc.died]
         if died:
             self.violation(report, "died", died)
+
+    def paused(self, start: float, end: float) -> list[dict]:
+        """Readers that went quiet for longer than `stall`, and read again, inside [start, end]. No
+        fault ends a hold, so a pause that recovers on its own is the failure. One that began
+        before `start` belongs to the earlier event, and one still going at `end` to `unfed`, which
+        also owns a reader never fed. A broadcast its relay does not show may be hidden on purpose."""
+        rows = []
+        for relay in self.relays.values():
+            shows = relay.announced() if relay.proc.alive else None
+            for path, state in relay.readout.paths.items():
+                if shows is None or path not in shows:
+                    continue
+                longest = max(
+                    (finish - begin for begin, finish, _ in state.gaps if start <= begin and finish <= end), default=0.0
+                )
+                if longest > self.script.stall:
+                    rows.append({"reader": relay.name, "path": path, "s": round(longest, 2)})
+        return sorted(rows, key=lambda row: -row["s"])
 
     def violation(
         self, report: dict, check: str, items: list, kind: str | None = None, began: dict | None = None
@@ -1210,12 +1240,20 @@ class Run:
             self.shapers[link.name].send(signal.SIGCONT)
         return time.time()
 
+    def hold(self, duration: float) -> float:
+        """Let the mesh run untouched, so a stall with no fault behind it shows as a pause."""
+        time.sleep(duration)
+        return time.time()
+
     def run_event(self, event: dict) -> None:
         kind = event["kind"]
         for attempt in range(event["times"]):
             suffix = f" ({attempt + 1}/{event['times']})" if event["times"] > 1 else ""
             if kind == "roll":
                 self.roll(event["to"], event["relays"], suffix)
+                continue
+            if kind == "hold":
+                self.measure(f"hold {event['for']:g}s{suffix}", kind, lambda: self.hold(event["for"]), set())
                 continue
             relay = self.relays[event["relay"]]
             if kind == "reopen-link":

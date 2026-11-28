@@ -74,6 +74,12 @@ class MeshTest(unittest.TestCase):
         self.assertEqual([event["relays"] for event in script.events], [["a", "b"]])
         self.assertEqual(script.known, [])
 
+    def test_half_roll_hold_runs_untouched_after_the_roll(self):
+        mesh = replay.load_mesh(HERE / "ring6.toml")
+        script = replay.load_script(HERE / "half-roll-hold.toml", mesh)
+        self.assertEqual([event["kind"] for event in script.events], ["roll", "hold"])
+        self.assertEqual(script.events[1]["for"], 600.0)
+
     def test_ring(self):
         mesh = replay.load_mesh(mesh_file(RING))
         self.assertEqual(mesh.diameter(), 2)
@@ -530,6 +536,47 @@ class EventTest(unittest.TestCase):
         self.assertFalse(replay.Run.baseline(run(True, "new"), "start"))
         # The old build is written no mark, so nothing may hide its routes.
         self.assertTrue(replay.Run.baseline(run(True, "old"), "start"))
+
+
+class HoldTest(unittest.TestCase):
+    def paused(self, paths, shown=None, stall=3.0, window=(100.0, 700.0)):
+        shown = list(paths) if shown is None else shown
+        relay = SimpleNamespace(
+            name="a", readout=SimpleNamespace(paths=paths), announced=lambda: shown, proc=SimpleNamespace(alive=True)
+        )
+        run = SimpleNamespace(relays={"a": relay}, script=SimpleNamespace(stall=stall))
+        return replay.Run.paused(run, *window)
+
+    def test_a_pause_that_recovers_inside_the_hold_fails_it(self):
+        rows = self.paused({"replay/b/0": replay.Follow(gaps=[(200.0, 204.5, 45)])})
+        self.assertEqual([(r["path"], r["s"]) for r in rows], [("replay/b/0", 4.5)])
+        # At the threshold is not past it.
+        self.assertEqual(self.paused({"replay/b/0": replay.Follow(gaps=[(200.0, 203.0, 30)])}), [])
+
+    def test_a_pause_is_the_holds_only_when_it_began_and_ended_inside(self):
+        before = replay.Follow(gaps=[(90.0, 110.0, 200)])  # the roll's strand, recovering in the hold
+        after = replay.Follow(gaps=[(690.0, 710.0, 200)])  # still going at the end: unfed's
+        self.assertEqual(self.paused({"replay/b/0": before, "replay/b/1": after}), [])
+
+    def test_a_recovered_pause_counts_beside_a_later_stall(self):
+        follow = replay.Follow(gaps=[(200.0, 205.0, 50), (650.0, 750.0, 1000)])
+        self.assertEqual([r["s"] for r in self.paused({"replay/b/0": follow})], [5.0])
+
+    def test_a_broadcast_its_relay_does_not_show_is_not_paused(self):
+        follow = replay.Follow(gaps=[(200.0, 210.0, 100)])
+        self.assertEqual(self.paused({"replay/b/0": follow}, shown=[]), [])
+
+    def test_every_pause_is_reported_not_the_five_worst(self):
+        paths = {f"replay/b/{n}": replay.Follow(gaps=[(200.0, 210.0, 100)]) for n in range(8)}
+        self.assertEqual(len(self.paused(paths)), 8)
+
+    def test_a_hold_names_its_duration(self):
+        mesh = replay.load_mesh(HERE / "ring6.toml")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "script.toml"
+            path.write_text('[[events]]\nkind = "hold"\n')
+            with self.assertRaises(ValueError):
+                replay.load_script(path, mesh)
 
 
 if __name__ == "__main__":

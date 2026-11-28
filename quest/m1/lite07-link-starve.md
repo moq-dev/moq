@@ -43,12 +43,38 @@ Route-health failover would move a stalled track to another route, but it would
 hide this stall, not fix it, and the mesh's only lite-07 link has no lite-07
 alternative.
 
+Update 2026-11-28 (`/quest-start`): it did not reproduce in the replay. The new
+[`half-roll-hold.toml`](/test/mesh-replay/half-roll-hold.toml) (relays `a` and `b` rolled so `a-b`
+is the only lite-07 link, then a 10-minute `hold` that fails on any reader pause past `stall`)
+ran clean, 4 broadcasts per relay, on a loaded macOS host at:
+
+- `5d86f05321` built whole (relay, `moq-bench`, and shaper from that commit, the replay harness
+  copied over it), one run;
+- `main` at `f24ac5065e`, 4 and 32 broadcasts, two runs.
+
+The original three runs' mesh, broadcast count, and logs are unknown, and Nightly's mesh replays
+also passed at `5d86f05321`. A relay built at an older commit run against this checkout's
+`moq-bench` starves every reader from the first roll, but that is skew, not this bug: the client
+sends lite-07's `Meta` byte (added in `eed4c1850c`) and the older relay answers PROTOCOL_VIOLATION.
+Build both from one commit when replaying an old build.
+
+The hold runs only when started by hand: Nightly's mesh replays play the default script. What
+remains is the maintainer's pick under Waiting, which revisits the 2026-11-25 decision to keep
+this quest.
+
 If the fix needs a change to the lite-07-wip wire, that part joins m2 under
 its own m2 quest required by [lite-07 finalize](/quest/m2/lite07-finalize.md), per the milestone
 rules in [the questline](/quest/README.md), and this quest keeps any non-wire
 part.
 
 Decided 2026-11-25 (maintainer, `/quest-plan`): ✅ keep (rejected: drop).
+
+## Waiting
+
+- Maintainer: the stall did not reproduce at `5d86f05321` built whole or on `main`, and the hold that would catch it runs only by hand. This revisits the 2026-11-25 decision to keep the quest. What now?
+  - Delete the quest (Recommended) - nothing reproduces it and its original runs' logs are gone; rerun `half-roll-hold.toml` by hand and reopen the quest if it ever fails
+  - Delete it and add a nightly cell that plays the hold - catches a return on Linux at 32 broadcasts, for 10 more minutes of a nightly runner a night
+  - Keep it open until a few nightly hold runs on Linux come back clean - same cost, quest stays in m1
 
 ## Related
 
