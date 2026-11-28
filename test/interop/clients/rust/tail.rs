@@ -43,17 +43,33 @@ fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Re
 	// Declare the end before the final group's payload is even available.
 	track.finish_at(moq_net::track::Position::group(GROUPS))?;
 	for sequence in 0..GROUPS {
-		let mut group = track.append_group(at(sequence))?;
 		if mode == Some("drop") && sequence == 1 {
-			group.abort(moq_net::Error::App(1))?;
+			// Cut while its first frame is still arriving.
+			let size = frames(sequence, mode)[0].len() as u64;
+			let frame = track.append_frame(moq_net::frame::Info {
+				timestamp: at(sequence),
+				size,
+			})?;
+			frame.abort(moq_net::Error::App(1))?;
 			continue;
 		}
-		for frame in frames(sequence, mode) {
-			group.write_frame(at(sequence), frame)?;
-		}
-		group.finish()?;
+		append(track, sequence, frames(sequence, mode))?.finish()?;
 	}
 	Ok(())
+}
+
+/// Append group `sequence` with `frames`, its first frame creating it.
+fn append(
+	track: &moq_net::track::Producer,
+	sequence: u64,
+	frames: impl IntoIterator<Item = Vec<u8>>,
+) -> anyhow::Result<moq_net::group::Producer> {
+	let mut frames = frames.into_iter();
+	let mut group = track.append_group(at(sequence), frames.next().context("a group has a frame")?)?;
+	for frame in frames {
+		group.write_frame(at(sequence), frame)?;
+	}
+	Ok(group)
 }
 
 /// Where group `sequence` starts: its key, in the track's milliseconds, which the groups count up
@@ -166,11 +182,7 @@ async fn main() -> anyhow::Result<()> {
 				}
 				let mut head = None;
 				if late {
-					let mut group = track.append_group(at(0))?;
-					for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
-						group.write_frame(at(0), frame)?;
-					}
-					head = Some(group);
+					head = Some(append(&track, 0, frames(0, mode).into_iter().take(LATE_HEAD))?);
 				}
 				let session = client
 					.clone()
@@ -190,11 +202,7 @@ async fn main() -> anyhow::Result<()> {
 					}
 					group.finish()?;
 					for sequence in 1..LATE_GROUPS {
-						let mut group = track.append_group(at(sequence))?;
-						for frame in frames(sequence, mode) {
-							group.write_frame(at(sequence), frame)?;
-						}
-						group.finish()?;
+						append(&track, sequence, frames(sequence, mode))?.finish()?;
 					}
 					_finished = Some(track.finish()?);
 				} else if !cached {

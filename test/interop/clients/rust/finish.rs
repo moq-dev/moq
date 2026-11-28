@@ -106,8 +106,7 @@ async fn main() -> anyhow::Result<()> {
 			.create_track("live", moq_net::track::Info::default())
 			.context("the track already exists")?;
 		let start = moq_net::Timestamp::unscaled(0);
-		let mut group = track.append_group(start)?;
-		group.write_frame(start, b"session-alive".to_vec())?;
+		let group = track.append_group(start, b"session-alive".to_vec())?;
 		group.finish()?;
 		let _track = track.finish()?;
 		health.announce()?;

@@ -232,8 +232,7 @@ async fn produce(track: track::Producer, interval: Duration) -> anyhow::Result<(
 		let start = previous.map_or(millis(), |previous| millis().max(previous + 1));
 		previous = Some(start);
 		let start = moq_net::Timestamp::from_millis(start)?;
-		let mut group = track.append_group(start)?;
-		group.write_frame(start, Bytes::copy_from_slice(&sequence.to_be_bytes()))?;
+		let group = track.append_group(start, Bytes::copy_from_slice(&sequence.to_be_bytes()))?;
 		group.finish()?;
 	}
 	Ok(())
