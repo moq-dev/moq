@@ -32,6 +32,8 @@ FPS=60
 INTERVAL=5
 # Live heap bytes each group may leave behind in a process, on average, before the run fails.
 PER_GROUP_ALLOCATED=32
+# Samples each process needs after warm-up for its slope.
+MIN_SAMPLES=10
 # Bytes a second the import must read and the export write in every interval: the media moves
 # about 130 KiB/s, while each tick's heap dump and log lines add under 4 KiB/s on their own.
 MIN_FLOW=32768
@@ -82,6 +84,11 @@ done
 
 if ((WARMUP >= SECONDS_RUN)); then
     echo "error: --warmup ($WARMUP) must be shorter than --seconds ($SECONDS_RUN)" >&2
+    exit 2
+fi
+# Ticks land at k*INTERVAL for k = 0..SECONDS_RUN/INTERVAL; the judge keeps those at or after WARMUP.
+if ((SECONDS_RUN / INTERVAL - (WARMUP + INTERVAL - 1) / INTERVAL + 1 < MIN_SAMPLES)); then
+    echo "error: --seconds, --warmup and --interval leave fewer than $MIN_SAMPLES samples after warm-up" >&2
     exit 2
 fi
 
@@ -192,7 +199,8 @@ fi
 if ((status == 0)); then
     python3 "$STEADY_DIR/../lib/growth.py" judge "$HARNESS_RUN/samples.jsonl" --warmup "$WARMUP" \
         --max "allocated=$((PER_GROUP_ALLOCATED * FPS))" \
-        --flow import=rchar --flow export=wchar --min-flow "$MIN_FLOW" --report "$HARNESS_RUN/report.json" || status=$?
+        --flow import=rchar --flow export=wchar --min-flow "$MIN_FLOW" \
+        --min-samples "$MIN_SAMPLES" --report "$HARNESS_RUN/report.json" || status=$?
 fi
 
 if ((status != 0)); then
