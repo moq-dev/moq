@@ -5263,12 +5263,15 @@ mod tests {
 		assert!(matches!(wait(&mut client, new, 2000), Poll::Pending));
 		assert_eq!(client.credit_stats().leased, 2 * WINDOW);
 
-		stop(&mut client, old, 0);
+		let max_data = client.local_max_data;
+		let pending = stop(&mut client, old, 0);
 		assert_eq!(
 			client.credit_stats().leased,
 			WINDOW,
 			"the dropped lease's credit returned"
 		);
+		assert_eq!(client.local_max_data, max_data + WINDOW, "and granted to the peer");
+		assert!(pending.max_data, "in a MAX_DATA frame");
 		assert!(matches!(wait(&mut client, new, 2000), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
 	}

@@ -451,10 +451,6 @@ pub struct moq_video_config {
 	pub broadcast: *const c_char,
 	/// Length of `broadcast` in bytes.
 	pub broadcast_len: usize,
-	/// The stream identity `broadcast` must resolve to, or NULL for whichever resolves first.
-	pub identity: *const c_char,
-	/// Length of `identity` in bytes.
-	pub identity_len: usize,
 	/// The track's name in its broadcast, or NULL when it is `name`.
 	pub track: *const c_char,
 	/// Length of `track` in bytes.
@@ -537,10 +533,6 @@ pub struct moq_audio_config {
 	pub broadcast: *const c_char,
 	/// Length of `broadcast` in bytes.
 	pub broadcast_len: usize,
-	/// The stream identity `broadcast` must resolve to, or NULL for whichever resolves first.
-	pub identity: *const c_char,
-	/// Length of `identity` in bytes.
-	pub identity_len: usize,
 	/// The track's name in its broadcast, or NULL when it is `name`.
 	pub track: *const c_char,
 	/// Length of `track` in bytes.
@@ -2915,7 +2907,7 @@ pub unsafe extern "C" fn moq_identity_text(identity: u32, dst: *mut moq_string) 
 
 /// Whether a session minted the identity for a route whose wire carries none: 1 if minted, 0 if
 /// named, or a negative code on failure. A minted identity names the announcement, not the
-/// publisher's stream, so signing refuses it and a catalog's identity check skips it.
+/// publisher's stream, so signing refuses it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_identity_minted(identity: u32) -> i32 {
 	ffi::enter(move || {
@@ -3480,10 +3472,9 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		video.coded_width = (config.coded_width > 0).then_some(config.coded_width);
 		video.coded_height = (config.coded_height > 0).then_some(config.coded_height);
 		video.container = unsafe { parse_container(&config.container)? };
-		(video.broadcast, video.identity, video.track) = unsafe {
+		(video.broadcast, video.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
-				(config.identity, config.identity_len),
 				(config.track, config.track_len),
 			)?
 		};
@@ -3492,12 +3483,8 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 	})
 }
 
-/// A rendition's broadcast reference, identity, and track name.
-type Reference = (
-	Option<moq_net::path::Relative>,
-	Option<moq_net::Identity>,
-	Option<String>,
-);
+/// A rendition's broadcast reference and track name.
+type Reference = (Option<moq_net::path::Relative>, Option<String>);
 
 /// A rendition's reference fields, as [moq_video_config] and [moq_audio_config] carry them.
 ///
@@ -3505,7 +3492,6 @@ type Reference = (
 /// - Each non-NULL pointer must be valid for its length.
 unsafe fn parse_reference(
 	broadcast: (*const c_char, usize),
-	identity: (*const c_char, usize),
 	track: (*const c_char, usize),
 ) -> Result<Reference, Error> {
 	let broadcast = unsafe { ffi::parse_str_optional(broadcast.0, broadcast.1)? }
@@ -3513,15 +3499,10 @@ unsafe fn parse_reference(
 		.map(moq_net::path::Relative::new)
 		.transpose()
 		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
-	let identity = unsafe { ffi::parse_str_optional(identity.0, identity.1)? }
-		.filter(|identity| !identity.is_empty())
-		.map(moq_net::Identity::from_str)
-		.transpose()
-		.map_err(|err| Error::InvalidConfig(err.to_string()))?;
 	let track = unsafe { ffi::parse_str_optional(track.0, track.1)? }
 		.filter(|track| !track.is_empty())
 		.map(str::to_string);
-	Ok((broadcast, identity, track))
+	Ok((broadcast, track))
 }
 
 /// Add or replace an audio rendition in a broadcast's catalog.
@@ -3571,10 +3552,9 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 		audio.warmup = config
 			.has_warmup
 			.then(|| std::time::Duration::from_micros(config.warmup_us));
-		(audio.broadcast, audio.identity, audio.track) = unsafe {
+		(audio.broadcast, audio.track) = unsafe {
 			parse_reference(
 				(config.broadcast, config.broadcast_len),
-				(config.identity, config.identity_len),
 				(config.track, config.track_len),
 			)?
 		};

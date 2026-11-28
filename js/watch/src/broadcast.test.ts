@@ -7,7 +7,6 @@ import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { key } from "../../json/src/key.test-util.ts";
-import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
 import { defined } from "./defined.test-util.ts";
@@ -359,54 +358,7 @@ describe("relativeBroadcast", () => {
 		}
 	});
 
-	it("reads a reference only from the identity it names, best effort against a minted one", async () => {
-		const owner = new Origin.Producer();
-		const [catalogIdentity, siblingIdentity, other] = [
-			Moq.Identity.random(),
-			Moq.Identity.random(),
-			Moq.Identity.random(),
-		];
-		const catalogRoute = owner.route(Path.from("a/b"), { identity: { id: catalogIdentity, epoch: 0n } });
-		const catalog = catalogRoute.broadcast;
-		const siblingRoute = owner.route(Path.from("a/source"), { identity: { id: siblingIdentity, epoch: 0n } });
-		const sibling = siblingRoute.broadcast;
-		// A route over a wire that carries no identity has one its session minted.
-		const plainRoute = owner.route(Path.from("a/plain"), { identity: { id: Mint.fresh(), epoch: 0n } });
-		const plain = plainRoute.broadcast;
-		const source = new Broadcast({
-			origin: owner,
-			name: Path.from("a/b"),
-			enabled: true,
-			follow: false,
-			catalogFormat: "manual",
-		});
-		const effect = new Effect();
-		try {
-			await settle();
-			const rel = Path.normalizeRelative("./source");
-			expect(source.relativeBroadcast(effect, rel)?.identity).toBe(siblingIdentity);
-			expect(source.relativeBroadcast(effect, rel, siblingIdentity)?.identity).toBe(siblingIdentity);
-			const own = source.out.active.peek();
-			expect(own?.identity).toBe(catalogIdentity);
-			expect(source.relativeBroadcast(effect, undefined, catalogIdentity)).toBe(own);
-			withoutWarnings(() => {
-				expect(source.relativeBroadcast(effect, rel, other)).toBeUndefined();
-				expect(source.relativeBroadcast(effect, undefined, other)).toBeUndefined();
-				expect(source.relativeBroadcast(effect, Path.normalizeRelative("./b"), other)).toBeUndefined();
-			});
-			// A minted identity cannot prove the stream, so the named identity cannot refuse it.
-			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./plain"), other)).toBeDefined();
-		} finally {
-			effect.close();
-			source.close();
-			plain.close();
-			sibling.close();
-			catalog.close();
-			owner.close();
-		}
-	});
-
-	it("follows a replaced sibling only for a reference that names no identity", async () => {
+	it("follows a replaced sibling", async () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldIdentity, newIdentity] = [Moq.Identity.random(), Moq.Identity.random()];
@@ -421,59 +373,21 @@ describe("relativeBroadcast", () => {
 		const effect = new Effect();
 		const rel = Path.normalizeRelative("./source");
 		let following: Moq.Broadcast.Consumer | undefined;
-		let pinned: Moq.Broadcast.Consumer | undefined;
 		effect.run((nested) => {
 			following = source.relativeBroadcast(nested, rel);
-		});
-		effect.run((nested) => {
-			pinned = withoutWarnings(() => source.relativeBroadcast(nested, rel, oldIdentity));
 		});
 		try {
 			await settle();
 			expect(following?.identity).toBe(oldIdentity);
-			expect(pinned?.identity).toBe(oldIdentity);
 
-			// The announcement is the online signal: the plain reference follows the restart,
-			// while one naming the old identity never reads the new one.
+			// The announcement is the online signal: the reference follows the restart.
 			const replacementRoute = owner.route(Path.from("a/source"), { identity: { id: newIdentity, epoch: 0n } });
 			const replacement = replacementRoute.broadcast;
 			await settle();
 			expect(following?.identity).toBe(newIdentity);
-			expect(pinned).toBeUndefined();
 			replacement.close();
 		} finally {
 			effect.close();
-			source.close();
-			old.close();
-			main.close();
-			owner.close();
-		}
-	});
-
-	it("drops a rendition from the catalog while its broadcast proves another identity", async () => {
-		const owner = new Origin.Producer();
-		const main = publish(owner, Path.from("a/b"));
-		const [oldIdentity, newIdentity] = [Moq.Identity.random(), Moq.Identity.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { identity: { id: oldIdentity, epoch: 0n } });
-		const old = oldRoute.broadcast;
-		const named = { ...video("avc1.64001f", "./source"), identity: oldIdentity } as Catalog.VideoConfig;
-		const source = new Broadcast({
-			origin: owner,
-			name: Path.from("a/b"),
-			enabled: true,
-			catalogFormat: "manual",
-			catalog: { video: { renditions: { plain: video("avc1.64001f", "./source"), named } } } as Catalog.Root,
-		});
-		try {
-			await settle();
-			expect(videoRenditions(source)).toEqual(["named", "plain"]);
-
-			const replacementRoute = owner.route(Path.from("a/source"), { identity: { id: newIdentity, epoch: 0n } });
-			const replacement = replacementRoute.broadcast;
-			await withoutWarnings(settle);
-			expect(videoRenditions(source)).toEqual(["plain"]);
-			replacement.close();
-		} finally {
 			source.close();
 			old.close();
 			main.close();

@@ -34,8 +34,7 @@ impl MoqIdentity {
 	}
 
 	/// Whether a session minted this identity for a route whose wire carries none. It names the
-	/// announcement rather than the publisher's stream, so signing refuses it and a catalog's
-	/// identity check skips it.
+	/// announcement rather than the publisher's stream, so signing refuses it.
 	pub fn is_minted(&self) -> bool {
 		self.0.is_minted()
 	}

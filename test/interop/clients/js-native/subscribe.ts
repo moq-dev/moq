@@ -48,8 +48,10 @@ const MAX_DELAY = Duration.millis(1000);
 // Audio is checked for gaps, which a reader skipping behind live would cause itself: the matrix
 // starts every subscriber at once, and a runtime starved by the others can fall a second behind.
 // That is this reader's speed, not the delivery under test, so it gets a wider budget. A track's
-// max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
-const AUDIO_MAX_DELAY = Duration.millis(5000);
+// max-age caps it, so interop.sh's Rust publisher keeps its media at least this long. It joins at
+// the live edge: a join reaching back the whole budget starts on a group less than one group from
+// stale, which a starved reader still draining the backlog loses as a gap.
+const AUDIO_DELAY: Container.Delay = { min: Duration.ZERO, max: Duration.millis(5000) };
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -190,14 +192,8 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 		description: config.codec === "opus" || !config.description ? undefined : Hex.toBytes(config.description),
 	});
 
-	const sub = bc.track(name).subscribe({
-		priority: Catalog.PRIORITY.audio,
-		ranges: [{ start: { live: { min: AUDIO_MAX_DELAY, max: AUDIO_MAX_DELAY } } }],
-	});
-	const consumer = new Container.Consumer(sub, {
-		format: containerFormat(config, "audio"),
-		delay: { min: null, max: AUDIO_MAX_DELAY },
-	});
+	const sub = bc.track(name).subscribe(Container.subscription(AUDIO_DELAY, { priority: Catalog.PRIORITY.audio }));
+	const consumer = new Container.Consumer(sub, { format: containerFormat(config, "audio"), delay: AUDIO_DELAY });
 	const feed = (async () => {
 		// The consumer also hands back the backlog the relay served behind the live edge, older
 		// groups after newer ones. A player places those by timestamp; a stateful Opus decoder can
@@ -208,7 +204,11 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 			if (!next) throw new Error("audio track ended early");
 			// The reader saw media go missing, such as groups a relay shed behind newer ones. Fail
 			// here, as the other clients do, so the cell names the hole rather than tone.py's gap.
+			// The frames queued ahead of it may already hold the requested audio, still decoding
+			// in a starved runtime, so the hole fails only if they fall short.
 			if (next.kind === "gap") {
+				await decoder.flush();
+				if (decoded >= want) return;
 				throw new Error(
 					`audio gap after ${decoded} samples, at ${next.timestamp.asMicros()}us for ${next.duration.asMicros()}us`,
 				);
@@ -300,6 +300,9 @@ async function run(): Promise<void> {
 		// process.exit; otherwise the relay times the connection out.
 		await connection.close();
 		await connection.closed;
+		// Every await is behind us and process.exit follows, so a reader the harness times out
+		// after this line hung in the runtime's native exit teardown, not in the session's close.
+		console.error("session closed");
 		origin.close();
 	}
 }

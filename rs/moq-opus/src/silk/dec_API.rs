@@ -400,8 +400,7 @@ pub unsafe fn silk_Decode(
 			samplesOut1_tmp_storage2.as_mut_ptr() as *mut core::ffi::c_void,
 			samplesOut as *const core::ffi::c_void,
 			(((*decControl).nChannelsInternal * ((*channel_state.offset(0 as isize)).frame_length + 2)) as u64)
-				.wrapping_mul(::core::mem::size_of::<i16>() as u64)
-				.wrapping_add((0 * samplesOut1_tmp_storage2.as_mut_ptr().offset_from(samplesOut) as i64) as u64),
+				.wrapping_mul(::core::mem::size_of::<i16>() as u64),
 		);
 		samplesOut1_tmp[0 as usize] = samplesOut1_tmp_storage2.as_mut_ptr();
 		samplesOut1_tmp[1 as usize] = samplesOut1_tmp_storage2

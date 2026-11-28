@@ -11,9 +11,12 @@ use bytes::Bytes;
 use moq_net::{Client, Server, Timestamp, Version, cache, origin, transport::memory};
 
 /// An origin whose cache holds what the model scenario's does, so neither the relay's nor a
-/// viewer's grows with the groups a run delivers.
-fn origin() -> origin::Producer {
+/// viewer's grows with the groups a run delivers. A relay `proxy`s: on lite-07 an origin
+/// that doesn't sends its peers only its own claims, so the viewers would never be told of
+/// the publisher's broadcast and setup would hang.
+fn origin(proxy: bool) -> origin::Producer {
 	let mut config = origin::Config::default();
+	config.proxy = proxy;
 	config.pool = cache::Pool::new(cache::Config::default().with_capacity(64 * 1024));
 	let (producer, driver) = origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
@@ -51,8 +54,8 @@ fn main() {
 		.build()
 		.unwrap();
 	runtime.block_on(async move {
-		let relay = origin();
-		let publisher = origin();
+		let relay = origin(true);
+		let publisher = origin(false);
 		let ingest = link(
 			version,
 			Client::new()
@@ -70,7 +73,7 @@ fn main() {
 
 		let mut audience = Vec::new();
 		for _ in 0..viewers {
-			let local = origin();
+			let local = origin(false);
 			let sessions = link(
 				version,
 				Client::new()
