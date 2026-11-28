@@ -58,7 +58,7 @@ import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounc
 import { AnnounceStream } from "./announce_stream.ts";
 import { Answer } from "./answer.ts";
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
-import { closeViolation } from "./error.ts";
+import { closeViolation, servedError } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -1604,7 +1604,7 @@ export class Publisher {
 		} catch (err: unknown) {
 			// The served track's error, such as a malformed group upstream, ends only this
 			// subscription: its decoder (`SubscriptionControls`) closes the session for its own input.
-			const e = error(err);
+			const e = servedError(error(err));
 			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
 			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
@@ -1762,7 +1762,7 @@ export class Publisher {
 			await acknowledged(stream.writer);
 		} catch (err: unknown) {
 			// Nothing here decodes: an error is the served group's, which ends only this fetch.
-			const e = error(err);
+			const e = servedError(error(err));
 			abandon ??= e;
 			releaseFetched(e);
 			stream.abort(e);
@@ -3350,7 +3350,7 @@ export class Publisher {
 			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = servedError(error(err));
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
 			if (hasReliableReset(this.version) && (await accounts(stream, held))) {
