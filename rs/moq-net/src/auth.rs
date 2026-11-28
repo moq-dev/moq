@@ -171,8 +171,9 @@ pub(crate) struct State {
 	/// Every token the application added that it has not withdrawn.
 	tokens: BTreeMap<u64, Entry>,
 	next_link: u64,
-	/// Every session built on this handle that has not dropped, oldest first.
-	links: BTreeMap<u64, Attached>,
+	/// Every session built on this handle that has not dropped, oldest first. Boxed because
+	/// a map holds one entry almost always, and a B-tree leaf reserves eleven inline slots.
+	links: BTreeMap<u64, Box<Attached>>,
 	/// What the peer's connection credential lets it do, in the peer's terms: `None` (only
 	/// the origin handles bound it) until [`Handle::authorize`] sets it; the grant it was
 	/// last called with.
@@ -465,7 +466,11 @@ impl Attached {
 impl State {
 	/// The session the handle backs now: the newest one still open.
 	fn live(&self) -> Option<&Attached> {
-		self.links.values().rev().find(|link| link.closed.is_none())
+		self.links
+			.values()
+			.rev()
+			.map(|link| &**link)
+			.find(|link| link.closed.is_none())
 	}
 
 	/// Record a session's answer to token `id`: an acceptance settles [`Credential::answered`],
@@ -754,7 +759,7 @@ impl Handle {
 			return Err(err.clone());
 		}
 		// A draining session takes no new tokens, and a handle of its own has no successor.
-		if state.bound && !state.links.values().any(Attached::active) {
+		if state.bound && !state.links.values().any(|link| link.active()) {
 			return Err(Error::GoingAway);
 		}
 		let id = state.present(token);
@@ -925,7 +930,7 @@ impl Link {
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
 		}
-		if state.links.values().any(Attached::active) {
+		if state.links.values().any(|link| link.active()) {
 			return Err(Error::Duplicate);
 		}
 		let id = state.next_link;
@@ -937,7 +942,7 @@ impl Link {
 			.filter(|(_, token)| token.ended.is_none())
 			.filter_map(|(token_id, token)| Some((*token_id, link.offer(*token_id, &token.value)?)))
 			.collect();
-		state.links.insert(id, link);
+		state.links.insert(id, Box::new(link));
 		for (token_id, answer) in answers {
 			state.answer(token_id, answer.map(|()| Answer::Requests));
 		}
@@ -1565,7 +1570,7 @@ impl Link {
 }
 
 /// A session's side of the handle, which lives as long as any [`Link`] to it.
-fn attached(links: &mut BTreeMap<u64, Attached>, id: u64) -> &mut Attached {
+fn attached(links: &mut BTreeMap<u64, Box<Attached>>, id: u64) -> &mut Attached {
 	links.get_mut(&id).expect("a link outlives its session's state")
 }
 
