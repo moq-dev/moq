@@ -115,11 +115,15 @@ Steps:
 
 - moq-dev/moq: the first scheduled Nightly on `main` after the shallow-writer
   fix merges shows no job loading a manifest that matches none of its build.
-  Check with `gh run list --workflow nightly.yml --branch main --event
-  schedule` for the first run started after the fix's merge commit, then
-  `gh run view <id> --log | grep "loaded, but none matched"`: no match
-  clears this item, and steps 2 to 4 follow. A match means another cause;
-  bring it to the maintainer before deleting anything.
+  Find the first run started after the fix's merge commit with `gh run list
+  --workflow nightly.yml --branch main --event schedule`, list its jobs with
+  `gh api --paginate repos/moq-dev/moq/actions/runs/<id>/jobs`, and fetch
+  each job's log with `gh api repos/moq-dev/moq/actions/jobs/<job>/logs`.
+  It clears only when every log was fetched, every job that ran the Rust
+  cache logged an `mbx[cache]: object cache` line, and no log has "loaded,
+  but none matched"; steps 2 to 4 follow. A failed fetch leaves it
+  unchecked. A match means another cause: bring it to the maintainer before
+  deleting anything.
 
 ## Related
 

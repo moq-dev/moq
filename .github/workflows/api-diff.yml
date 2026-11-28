@@ -59,9 +59,10 @@ jobs:
           access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
       # The JS baseline is rendered from `release`'s source.
+      # No --depth: a shallow boundary would hide the Cargo.lock history the Rust cache seeds from.
       - name: Fetch release
         if: ${{ !steps.mode.outputs.skip }}
-        run: git fetch --no-tags --depth=1 origin +refs/heads/release:refs/remotes/origin/release
+        run: git fetch --no-tags origin +refs/heads/release:refs/remotes/origin/release
       - name: Diff against the last release
         id: diff
         if: ${{ !steps.mode.outputs.skip }}
