@@ -10,17 +10,11 @@ here; the cut after m2's sorts them by kind into m1, m2, and m3.
 
 ## Plan
 
-Decided 2026-11-28 (maintainer, /quest-run): ✅ m0 to m2 focus on the lite-07
-freeze and the `0.22.0` cut. A quest stays in m0 to m2 only when the
-[cut](/quest/m3/release/cut.md)'s `Required` (all of m2, rind-adapters, and the
-interop-green and nightly epics) or [lite-07 finalization](/quest/m2/lite07-finalize.md)
-needs it, directly or transitively, or when it makes a semver-breaking API or
-wire change. The rest moved to [m3](/quest/m3/README.md) and ships later in a
-patch version; additive API (a new field on a `#[non_exhaustive]` struct, a new
-flag or function) moves too. (Rejected: moving only m1; keeping all of m0 as an
-ops bucket.) A quest an open PR claims stays where it is, since `quest mv`
-refuses to move a claimed quest; once its claim ends, move what remains with
-`quest mv`.
+Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
+to m2 hold only what the cut or lite-07 finalization needs, plus
+semver-breaking API or wire changes; every other quest moved to m3 and ships
+later in a patch version (rejected: moving only m1; keeping all of m0 as an
+ops bucket). The [questline](/quest/README.md) states the rule.
 
 Moved here: audit-instructions, front-drop-with-next-group, go-module-proxy,
 mediacodec-resume-after-flush, owed-group-pass-over,
