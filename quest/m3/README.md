@@ -4,10 +4,24 @@
 
 Work that follows the next breaking release and has someone waiting on it:
 release execution after the cut, quests a named consumer needs, including downstream deployments, and bug fixes in
-shipped code. Additive, API, and wire work mix here; the cut after m2's sorts
-them by kind into m1, m2, and m3.
+shipped code, plus every m0 to m2 quest that need not block the `0.22.0`
+cut, which ships later in a patch version. Additive, API, and wire work mix
+here; the cut after m2's sorts them by kind into m1, m2, and m3.
 
 ## Plan
+
+Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
+to m2 hold only what the cut or lite-07 finalization needs, plus
+semver-breaking API or wire changes; every other quest moved to m3 and ships
+later in a patch version (rejected: moving only m1; keeping all of m0 as an
+ops bucket). The [questline](/quest/README.md) states the rule.
+
+Moved here: audit-instructions, front-drop-with-next-group, go-module-proxy,
+mediacodec-resume-after-flush, owed-group-pass-over,
+quic-ack-packing-and-pto-duplication, quic-path-return, split-moq-net-tests,
+tracks-limit, ts-unpadded-audio-buffer, and vr-demo-try from m1;
+js-listing-synced-order and release-attest-backport from m0; and
+hls-group-end-timing from m2.
 
 Decided 2026-11-05 (maintainer, milestone re-cut): the old m2 ("later work")
 split in half by priority into m3 and m4. A quest joined m3 when a named
