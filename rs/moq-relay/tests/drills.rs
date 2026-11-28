@@ -1588,3 +1588,112 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	drop(publish_session);
 	path.verify();
 }
+
+/// Drill: a peer link that goes quiet demotes its routes, and only while it is quiet.
+///
+/// An edge relay dials the origin as a cluster peer with `[limits.peer.quic]`'s keep-alive.
+/// Cutting the link leaves the edge's session up, still within `keep_alive_hard`, but once
+/// `keep_alive_soft` passes unheard the edge ranks the routes it learned there as draining,
+/// which a lite-07 subscriber of the edge sees on the route itself. Restoring the link brings
+/// the route back undrained, the session never having closed.
+#[tokio::test]
+async fn a_stale_peer_link_drains_its_routes_until_heard() {
+	const SOFT: Duration = Duration::from_secs(1);
+	const HARD: Duration = Duration::from_secs(10);
+	let relay_quic = || {
+		let mut quic = quic();
+		quic.idle_timeout = Some(HARD.into());
+		quic
+	};
+	let mut config = relay_config();
+	config.quic = relay_quic();
+	let origin = RelayHost::start(config).await;
+	// Cutting the link takes a shaper on it, which otherwise forwards untouched.
+	let peer = Path::through(&origin, Default::default(), seed(Lane::Loopback)).await;
+
+	let mut peer_url = peer.url.clone();
+	peer_url.set_path("/");
+	let mut config = relay_config();
+	config.quic = relay_quic();
+	config.connect = dial();
+	config.limits.peer.quic.keep_alive_soft = Some(SOFT.into());
+	config.limits.peer.quic.keep_alive_hard = Some(HARD.into());
+	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
+	// lite-07 is work in progress and off by default.
+	let lite07: moq_net::Version = "moq-lite-07-wip".parse().expect("parse version");
+	config.listen.version = vec![lite07, "moq-lite-06".parse().expect("parse version")];
+	let edge = RelayHost::start(config).await;
+
+	let publisher = moq_tokio::origin::spawn();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	broadcast.announce().expect("announce");
+	let _publish = kio::clock::timeout(
+		TIMEOUT,
+		client(&origin.url())
+			.with_publisher(&publisher)
+			.with_reconnect(false)
+			.connect(origin.url())
+			.established(),
+	)
+	.await
+	.expect("publisher connect timed out")
+	.expect("publisher connect failed");
+
+	// lite-07 carries a route's drain to the subscriber; older versions keep it to the relay.
+	let subscriber = moq_tokio::origin::spawn();
+	let mut announced = subscriber.consume().routes();
+	let mut dialing = dial();
+	dialing.url = Some(edge.url());
+	dialing.version = vec![lite07];
+	let _subscribe = kio::clock::timeout(
+		TIMEOUT,
+		dialing
+			.init(quic())
+			.expect("client init")
+			.with_subscriber(subscriber)
+			.with_reconnect(false)
+			.connect(edge.url())
+			.established(),
+	)
+	.await
+	.expect("subscriber connect timed out")
+	.expect("subscriber connect failed");
+
+	// The next route at `live`, which must stay announced throughout.
+	let mut next = async || loop {
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
+			.await
+			.expect("no route change in time")
+			.expect("the announcement stream closed");
+		if update.prefix.as_str() == "live" {
+			assert!(active, "the route ended rather than drained");
+			return update.route;
+		}
+	};
+	let mut route = next().await;
+	while route.draining() {
+		route = next().await;
+	}
+
+	let outage = peer.shaper.as_ref().expect("a shaper on the link").cut();
+	let cut = kio::clock::now();
+	// Well inside `HARD`, so a route that never drains fails here rather than ending.
+	kio::clock::timeout(HARD / 2, async {
+		while !route.draining() {
+			route = next().await;
+		}
+	})
+	.await
+	.expect("the route never drained");
+	println!("drained {:?} after the cut", kio::clock::now() - cut);
+
+	drop(outage);
+	let healed = kio::clock::now();
+	while route.draining() {
+		route = next().await;
+	}
+	println!("restored {:?} after healing", kio::clock::now() - healed);
+	peer.verify();
+}
