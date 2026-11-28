@@ -16344,6 +16344,46 @@ mod test {
 		}
 	}
 
+	/// Late groups that land on a replaced copy only after it expired, so no read of it ever
+	/// looked at them, stay owed past the serving copy's hand-out to a later widened budget, as
+	/// one track's arrivals do.
+	#[kio::test]
+	async fn a_widened_budget_reads_late_groups_landing_on_an_expired_copy_past_a_hand_out() {
+		let ms = Duration::from_millis;
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(if routed { &logical } else { &a }, ms(1000));
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed once it expires.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			if routed {
+				routes.serve(b.consume());
+			}
+			let serving = if routed { &b } else { &a };
+			write(serving, 6);
+			kio::clock::sleep(ms(900)).await;
+			assert_eq!(drain(&mut sub, false), [6]);
+			// A budget past 6 superseding it, the replaced copy expires and goes unread.
+			kio::clock::sleep(ms(1500)).await;
+			assert!(sub.poll_recv_group(&fresh()).is_pending());
+			for key in [4, 2, 1] {
+				write(&a, key);
+			}
+			write(serving, 7);
+			// Newest first, so the late groups are left unread.
+			assert_eq!(recv(&mut sub).start, 7, "routed {routed}");
+			// Wide enough to read the copy again and keep 2 and 1, not 4: 5 arrived past it.
+			sub.update(Subscription::default().with_max(ms(2000))).unwrap();
+			assert_eq!(drain(&mut sub, false), [2, 1], "routed {routed}");
+		}
+	}
+
 	/// A replaced copy's unread late groups stay owed while it is past the reader's budget, so a
 	/// later widened budget still reads them though the serving copy handed out groups meanwhile,
 	/// as one track's skipped groups stay owed to a wider budget.

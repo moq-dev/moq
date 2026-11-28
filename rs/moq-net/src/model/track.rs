@@ -11714,19 +11714,33 @@ impl Cursor {
 	/// The lowest group at or above `from` this read holds unread that `delivered` lacks, past
 	/// any one stale even at the track's max age bound, judged within this read's own window
 	/// and cap: no budget reads one stale there.
+	///
+	/// Counts what arrived since the read last took arrivals in too, which it owes once it
+	/// does: nothing polls a copy past its reader's budget, yet a widened budget reads the
+	/// groups that landed on it meanwhile. Costs those arrivals, which the cache bounds.
 	fn lowest_owed(&self, mut from: u64, delivered: &Delivered) -> Option<u64> {
 		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, &kio::Waiter::noop()) else {
 			return None;
 		};
 		let bound = drift.bound.unwrap_or(Duration::MAX);
-		let stale = |key: u64| self.state.read().is_stale(key, &drift.edge, bound);
+		let owed = |key: u64| !delivered.contains(key) && !self.state.read().is_stale(key, &drift.edge, bound);
+		// Only the keys it appends matter here, not whether the track ended.
+		let mut arrived = Vec::new();
+		let _ =
+			(self.state.read()).poll_arrivals(&Cell::new(self.index), self.floor(), &self.filter.window, &mut arrived);
+		let arrived = (arrived.into_iter())
+			.filter(|key| *key >= from && self.admits(*key) && owed(*key))
+			.min();
 		while let Some(group) = self.lowest_unread(from) {
-			if !delivered.contains(group.start) && !stale(group.start) {
+			if arrived.is_some_and(|arrived| arrived < group.start) {
+				break;
+			}
+			if owed(group.start) {
 				return Some(group.start);
 			}
 			from = group.start.checked_add(1)?;
 		}
-		None
+		arrived
 	}
 
 	/// The groups this reader reads, and its cap; see [`Coverage`].
