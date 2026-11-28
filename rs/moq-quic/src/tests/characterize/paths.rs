@@ -87,13 +87,8 @@ impl crypto::Session for LimitedSession {
 	fn is_valid_retry(&self, orig_dst_cid: ConnectionId, header: &[u8], payload: &[u8]) -> bool {
 		self.0.is_valid_retry(orig_dst_cid, header, payload)
 	}
-	fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), crypto::ExportKeyingMaterialError> {
-		self.0.export_keying_material(output, label, context)
+	fn confirmed(&mut self) {
+		self.0.confirmed()
 	}
 }
 
