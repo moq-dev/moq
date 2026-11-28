@@ -374,6 +374,24 @@ test("readers wait for the lister to sync", async () => {
 	expect(lister.wanted.peek()).toBe(false);
 });
 
+test("a removal re-added after sync keeps synced behind the changes queued before it", async () => {
+	const broadcast = new BroadcastProducer();
+	const lister = wireOf(broadcast).lister();
+	const tracks = list(broadcast);
+	lister.add("a", { info: INFO });
+	expect(await tracks.drain()).toEqual(["+a"]);
+	lister.remove("a");
+	lister.add("b", { info: INFO });
+	lister.synced();
+	// Churn coalesces in place, so it owes synced nothing extra.
+	for (let round = 0; round < 3; round++) {
+		lister.add("a", { info: INFO });
+		lister.remove("a");
+	}
+	lister.add("a", { info: INFO });
+	expect(await tracks.drain()).toEqual(["-a", "+a", "+b", "synced"]);
+});
+
 test("a name listed by both is reported once", async () => {
 	const broadcast = new BroadcastProducer();
 	defined(broadcast.createTrack("a"));

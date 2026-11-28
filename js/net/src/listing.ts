@@ -34,9 +34,10 @@ export type Listed = { datagrams?: false; info: track.Info } | { datagrams: true
  * What a {@link Tracks} listing reports, in order.
  *
  * `added`: a track the broadcast lists, with its kind and fixed properties. `synced`: every
- * track listed once the listing was complete (at once for a local broadcast, on its upstream's
- * SYNCED for a session's copy), and still listed, was reported; sent once, and later events are
- * live. `removed`: a track an earlier `added` reported is no longer listed,
+ * track listed once the listing was complete (at once for a local broadcast, on its moq-lite
+ * upstream's SYNCED for a session's copy), and still listed, was reported; sent once, and later
+ * events are live. A session over moq-transport fails the listing instead, since that upstream
+ * never signals a complete list. `removed`: a track an earlier `added` reported is no longer listed,
  * unfinished: its producer aborted, or the answer that listed it withdrew it; a handler may still
  * serve its name on request. `finished`: a track an earlier `added` reported is no longer listed
  * because it finished. A removal of a datagram track sets `datagrams`, as its `added` did.
@@ -117,15 +118,26 @@ class Queue {
 	add(key: string, listed: Listed) {
 		// A track is listed once at a time, so only its removal can be pending.
 		const pending = this.pending.get(key);
-		if (pending?.kind === "remove") this.pending.set(key, { kind: "readd", finished: pending.finished, listed });
-		else this.pending.set(key, { kind: "add", listed });
+		if (pending?.kind === "remove") {
+			this.pending.set(key, { kind: "readd", finished: pending.finished, listed });
+			// The readd's extra event must not use up the count owed to changes queued behind it.
+			if (!this.synced && this.bound !== undefined) this.bound += 1;
+		} else {
+			this.pending.set(key, { kind: "add", listed });
+		}
 		this.wake();
 	}
 
 	remove(key: string, finished: boolean) {
-		// Never read: the two cancel. Otherwise the removal replaces a pending re-add in place.
-		if (this.pending.get(key)?.kind === "add") this.pending.delete(key);
-		else this.pending.set(key, { kind: "remove", finished });
+		const pending = this.pending.get(key);
+		// Never read: the two cancel.
+		if (pending?.kind === "add") {
+			this.pending.delete(key);
+		} else {
+			// Read, then re-added unread: the reader sees only the last removal, one event fewer.
+			if (pending?.kind === "readd" && !this.synced && this.bound) this.bound -= 1;
+			this.pending.set(key, { kind: "remove", finished });
+		}
 		this.wake();
 	}
 

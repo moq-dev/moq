@@ -85,7 +85,9 @@ pub enum TracksEvent {
 	},
 	/// Every track this hop listed once its listing was complete, and still lists, has been
 	/// reported: at once without a [`Lister`], else once it [`synced`](Lister::synced), as a
-	/// relay's copy does on its upstream's SYNCED. Sent once; later events are live.
+	/// relay's copy does on its moq-lite upstream's SYNCED. A copy of a moq-transport upstream
+	/// syncs at once with the tracks this hop already knows, since that upstream never signals a
+	/// complete list. Sent once; later events are live.
 	Synced,
 	/// A track is no longer listed, unfinished: its producer dropped or aborted before
 	/// declaring its end, or the route or handler that listed it withdrew. A handler may still
