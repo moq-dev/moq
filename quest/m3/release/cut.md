@@ -158,8 +158,11 @@ From the 2026-10-25 pre-cut run:
   and would otherwise be missed by automated migration generation (found 2026-11-28, design-gate audit).
 - Before cutting `0.22.0`, verify the `release`-line Go proxy prerequisites from
   [Go module proxy](/quest/m0/go-module-proxy.md): [moq-dev/moq#9844](https://github.com/moq-dev/moq/pull/9844)
-  is on `release` (`git show origin/release:sh/go/ffi-origin.sh` succeeds) and `moq.dev/moq-ffi@v0.4.28`
-  is backfilled and verified on `go.moq.dev` (`just infra go backfill && just infra go verify --proxy direct`).
+  is on `release` (`git show origin/release:sh/go/ffi-origin.sh` succeeds), `go.moq.dev`'s `@v/list`
+  explicitly lists `v0.4.28` and any later mirror-only `moq-ffi` tags (so an interrupted upload whose
+  `.info` already exists cannot hide a missing `@v/list` entry from a rerun of `backfill`), and
+  explicit versioned verification passes (`just infra go backfill && just infra go verify --proxy direct v0.4.28`
+  plus any later mirror-only tags).
   The whole `go-module-proxy` quest is intentionally not in `Required` below because its final mirror-archival
   step happens after `0.22.0`'s `moq-ffi` release publishes through `go.moq.dev`.
 
