@@ -139,7 +139,7 @@ class SmokeTest {
     fun `stream abort preserves protocol details`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("errors", null)
-            val producer = track.appendGroup(Timestamp.unscaled(0uL))
+            val producer = track.appendGroup(Frame(ByteArray(0), Timestamp.unscaled(0uL)))
             val group = broadcast.consume().fetchGroup("errors", 0uL, FetchGroupOptions())
             producer.abort(404u)
             val error = assertFailsWith<MoqException.Protocol> { group.readFrame() }
@@ -325,13 +325,13 @@ class SmokeTest {
                     "events",
                     TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
                 )
-            val group = track.appendGroup(Timestamp(0uL, 1_000_000uL))
-            group.writeFrame(
-                Frame(
-                    payload = "cached".encodeToByteArray(),
-                    timestamp = Timestamp(0uL, 1_000_000uL),
+            val group =
+                track.appendGroup(
+                    Frame(
+                        payload = "cached".encodeToByteArray(),
+                        timestamp = Timestamp(0uL, 1_000_000uL),
+                    )
                 )
-            )
             group.finish()
 
             val fetched =
@@ -359,10 +359,13 @@ class SmokeTest {
             val meta = broadcast.consume().subscribeMeta("video", null)
             assertEquals(1_000_000uL, meta.info().timescale)
 
-            val group = track.appendGroup(Timestamp(0uL, 1_000_000uL))
-            group.writeFrame(
-                Frame(payload = "key".encodeToByteArray(), timestamp = Timestamp(0uL, 1_000_000uL))
-            )
+            val group =
+                track.appendGroup(
+                    Frame(
+                        payload = "key".encodeToByteArray(),
+                        timestamp = Timestamp(0uL, 1_000_000uL),
+                    )
+                )
             group.writeFrame(Frame(payload = ByteArray(0), timestamp = Timestamp(1uL, 1_000_000uL)))
             group.finish()
             track.finish()
@@ -396,10 +399,10 @@ class SmokeTest {
                     TrackInfo(maxAge = null, timescale = 1_000_000uL),
                 )
             for (ms in 0uL until 3uL) {
-                val group = track.appendGroup(Timestamp(ms, 1_000uL))
-                group.writeFrame(
-                    Frame(payload = "x".encodeToByteArray(), timestamp = Timestamp(ms, 1_000uL))
-                )
+                val group =
+                    track.appendGroup(
+                        Frame(payload = "x".encodeToByteArray(), timestamp = Timestamp(ms, 1_000uL))
+                    )
                 group.finish()
             }
             val consumer =
@@ -447,29 +450,6 @@ class SmokeTest {
                 assertEquals("served again", late.readFrame()?.payload?.decodeToString())
                 late.cancel()
             }
-        }
-    }
-
-    @Test
-    fun `readFrame skips empty then populated groups`() = runTest {
-        BroadcastProducer().use { broadcast ->
-            val track =
-                broadcast.publishTrack(
-                    "status",
-                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
-                )
-            val consumer = track.consume(null)
-            track.appendGroup(Timestamp(0uL, 1_000_000uL)).finish()
-            track.appendGroup(Timestamp(1_000uL, 1_000_000uL)).finish()
-            track.writeFrame(
-                Frame(
-                    payload = "populated".encodeToByteArray(),
-                    timestamp = 2.milliseconds.toTimestamp(),
-                )
-            )
-            val frame = consumer.readFrame()
-            assertEquals("populated", frame?.payload?.decodeToString())
-            assertEquals(Timestamp(2_000uL, 1_000_000uL), frame?.timestamp)
         }
     }
 
@@ -978,7 +958,7 @@ class SmokeTest {
     fun `a flow releases its handle however collection ends`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("thrown", null)
-            track.appendGroup(Timestamp.unscaled(0uL)).finish()
+            track.appendGroup(Frame(ByteArray(0), Timestamp.unscaled(0uL))).finish()
             // Finished, so a handle left open would read the end instead of failing.
             track.finish()
             val consumer = broadcast.consume().subscribeTrack("thrown", null)
@@ -1241,10 +1221,12 @@ class SmokeTest {
     fun `raw track supports sparse groups and a known end`() {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("sparse", null)
-            track.createGroup(2uL).finish()
+            track.createGroup(Frame(ByteArray(0), Timestamp.unscaled(2uL))).finish()
             track.finishAt(5uL)
-            track.createGroup(4uL).finish()
-            assertFailsWith<MoqException> { track.createGroup(5uL) }
+            track.createGroup(Frame(ByteArray(0), Timestamp.unscaled(4uL))).finish()
+            assertFailsWith<MoqException> {
+                track.createGroup(Frame(ByteArray(0), Timestamp.unscaled(5uL)))
+            }
             track.finish()
         }
     }

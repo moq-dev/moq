@@ -79,10 +79,13 @@ Future<void> throughput(
     final readers = [for (final consumer in consumers) read(consumer, n)];
     for (final track in tracks) {
       final group = track.appendGroup(
-        start: Timestamp(value: n * c.frames, scale: 1000000),
+        frame: Frame(
+          payload: payload,
+          timestamp: Timestamp(value: n * c.frames, scale: 1000000),
+        ),
       );
       try {
-        for (var f = 0; f < c.frames; f++) {
+        for (var f = 1; f < c.frames; f++) {
           group.writeFrame(
             frame: Frame(
               payload: payload,
@@ -158,7 +161,9 @@ Future<void> main() async {
   }
   final broadcast = BroadcastProducer();
   final track = broadcast.publishTrack(name: 'calls', info: null);
-  final producer = track.appendGroup(start: Timestamp.unscaled(0));
+  final producer = track.appendGroup(
+    frame: Frame(payload: Uint8List(0), timestamp: Timestamp.unscaled(0)),
+  );
   final group = producer.consume();
   final consumer = track.consume(subscription: null);
   void call(String name, Object? Function() fn) {

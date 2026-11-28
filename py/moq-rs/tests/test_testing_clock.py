@@ -19,6 +19,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
         from datetime import timedelta
 
         import moq
+        import pytest
         from clock import Clock
 
         clock = Clock()
@@ -32,13 +33,16 @@ def test_a_pending_timer_waits_for_advance() -> None:
             # delay.max keeps; a timed start would be history, which never goes stale.
             consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1))))
 
-            # Group 0 stalls with no frame, so the in-order read waits on it until
-            # group 1 has been out for delay.max: a native timer is pending.
-            _stalled = track.append_group(moq.Timestamp.unscaled(0))
-            later = track.append_group(moq.Timestamp.unscaled(1))
-            later.write_frame(b"later", moq.Timestamp.unscaled(later.start))
+            # Group 0 stalls after its first frame, so a read of its next frame waits
+            # until group 1 has been out for delay.max: a native timer is pending.
+            _stalled = track.append_group(b"stalled", moq.Timestamp.unscaled(0))
+            stalled = await asyncio.wait_for(consumer.next_group(), timeout=5)
+            assert stalled is not None
+            first = await stalled.read_frame()
+            assert first is not None and first.payload == b"stalled"
+            later = track.append_group(b"later", moq.Timestamp.unscaled(1))
             later.finish()
-            pending = asyncio.ensure_future(consumer.read_frame())
+            pending = asyncio.ensure_future(stalled.read_frame())
 
             # Real time passing is the stimulus here, not a synchronization: paused
             # tokio would jump to the timer within this window, while the test clock
@@ -53,8 +57,11 @@ def test_a_pending_timer_waits_for_advance() -> None:
             await asyncio.sleep(0.05)
             assert not pending.done()
 
+            # Stale, group 0 is dropped and the read moves on to group 1.
             clock.advance(0.001)
-            frame = await asyncio.wait_for(pending, timeout=5)
+            with pytest.raises(moq.Error):
+                await asyncio.wait_for(pending, timeout=5)
+            frame = await asyncio.wait_for(consumer.read_frame(), timeout=5)
             assert frame is not None and frame.payload == b"later"
             assert clock.time() == 1
 

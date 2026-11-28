@@ -121,8 +121,8 @@ void throughput(Case c, double budget, std::vector<Result> &results)
 			readers.push_back(read(c, consumer, payload, n).completion);
 		}
 		for (auto &track : tracks) {
-			auto group = ok(track->append_group(moq::Timestamp{n * c.frames(), 1000000}));
-			for (int f = 0; f < c.frames(); ++f)
+			auto group = ok(track->append_group({payload, moq::Timestamp{n * c.frames(), 1000000}}));
+			for (int f = 1; f < c.frames(); ++f)
 				ok(group->write_frame({payload, moq::Timestamp{n * c.frames() + f, 1000000}}));
 			ok(group->finish());
 		}
@@ -183,7 +183,7 @@ int main()
 
 	auto broadcast = ok(moq::BroadcastProducer::init());
 	auto track = ok(broadcast->publish_track("calls", {}));
-	auto producer = ok(track->append_group(moq::Timestamp{0, std::nullopt}));
+	auto producer = ok(track->append_group({{}, moq::Timestamp{0, std::nullopt}}));
 	auto group = ok(producer->consume());
 	auto consumer = ok(track->consume({}));
 	auto call = [&](const char *name, auto fn) {

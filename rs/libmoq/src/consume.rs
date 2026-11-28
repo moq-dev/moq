@@ -1613,10 +1613,23 @@ mod rendition_tests {
 	}
 }
 
+/// A group of `track` whose first frame is `payload` at `at`, in the hang `legacy` container.
+#[cfg(test)]
+fn legacy_group(
+	track: &moq_net::track::Producer,
+	at: moq_net::Timestamp,
+	payload: bytes::Bytes,
+) -> moq_net::group::Producer {
+	let mut encoded = bytes::BytesMut::new();
+	hang::container::Frame { timestamp: at, payload }
+		.encode(&mut encoded)
+		.unwrap();
+	track.create_group(at, encoded.freeze()).unwrap()
+}
+
 #[cfg(test)]
 mod read_tests {
 	use super::*;
-	use moq_mux::container::Container as _;
 
 	extern "C" fn received(data: *mut std::ffi::c_void, code: i32) {
 		// The vector is held until run_track completes on this thread.
@@ -1642,34 +1655,19 @@ mod read_tests {
 			format(),
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
-		let write = |start, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
-			format()
-				.write(
-					&mut group,
-					&[moq_mux::container::Frame {
-						timestamp: timestamp(us),
-						decode: None,
-						payload,
-						keyframe: true,
-						duration: None,
-					}],
-				)
-				.unwrap();
-			group.finish().unwrap();
-		};
+		let write = |us, payload: bytes::Bytes| legacy_group(&track, timestamp(us), payload).finish().unwrap();
 		let mut ids = Vec::<i32>::new();
 		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
 		let (_close, closed) = oneshot::channel();
 		let mut run = std::pin::pin!(Consume::run_track(callback, consumer, closed));
-		write(0, 10_000, bytes::Bytes::from_static(b"encoded"));
+		write(10_000, bytes::Bytes::from_static(b"encoded"));
 		std::future::poll_fn(|cx| {
 			assert!(run.as_mut().poll(cx).is_pending());
 			Poll::Ready(())
 		})
 		.await;
 		assert_eq!(ids.len(), 1);
-		write(2, 20_000, bytes::Bytes::new());
+		write(20_000, bytes::Bytes::new());
 		let _track = track.finish().unwrap();
 		run.await.unwrap();
 		assert_eq!(ids.len(), 3);
@@ -1782,14 +1780,10 @@ mod tests {
 		}
 
 		fn write(&mut self, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: micros }).unwrap();
-			hang::container::Frame {
-				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
-				payload: bytes::Bytes::from_static(b"frame"),
-			}
-			.write_to(&mut group)
-			.unwrap();
-			group.finish().unwrap();
+			let at = moq_net::Timestamp::from_micros(micros).unwrap();
+			legacy_group(&self.track, at, bytes::Bytes::from_static(b"frame"))
+				.finish()
+				.unwrap();
 		}
 
 		/// The next frame's timestamp, past any gap between groups.

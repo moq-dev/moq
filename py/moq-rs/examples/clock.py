@@ -25,8 +25,7 @@ async def publish(url: str, broadcast_name: str, track_name: str, insecure: bool
         while True:
             now = datetime.now(timezone.utc).replace(microsecond=0)
             timestamp = moq.Timestamp(int(now.timestamp()), 1)
-            group = track.append_group(timestamp)
-            group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp)
+            group = track.append_group(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp)
 
             current_minute = now.minute
             while now.minute == current_minute:

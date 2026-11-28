@@ -333,14 +333,6 @@ public enum Media {
             try ffi.cut()
         }
 
-        /// Draw a group boundary and start the next group at `start`.
-        ///
-        /// ``cut()`` with an explicit start, for a publisher whose group starts have to be
-        /// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
-        public func seek(_ start: UInt64) throws {
-            try ffi.seek(start: start)
-        }
-
         /// Finish the track and finalize encoding.
         public func finish() throws {
             try ffi.finish()
@@ -373,11 +365,6 @@ public enum Media {
         /// doesn't; formats with no segment concept (MKV, TS, FLV) ignore it.
         public func cut() throws {
             try ffi.cut()
-        }
-
-        /// Start a new segment and start its groups at `start`.
-        public func seek(_ start: UInt64) throws {
-            try ffi.seek(start: start)
         }
 
         /// Finish every track this container publishes.

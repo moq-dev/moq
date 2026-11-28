@@ -495,14 +495,6 @@ func (m *TrackProducer) Cut() error {
 	return m.inner.Cut()
 }
 
-// Seek draws a group boundary and starts the next group at start.
-//
-// Cut with an explicit start, for a publisher whose group starts have to be
-// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
-func (m *TrackProducer) Seek(start uint64) error {
-	return m.inner.Seek(start)
-}
-
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
 // request for it while a request handler is live. The producer is unusable afterwards.
@@ -537,11 +529,6 @@ func (c *ContainerProducer) Write(payload []byte) error {
 // only needed when it doesn't; MKV, TS, and FLV ignore it.
 func (c *ContainerProducer) Cut() error {
 	return c.inner.Cut()
-}
-
-// Seek starts a new segment and starts its groups at start.
-func (c *ContainerProducer) Seek(start uint64) error {
-	return c.inner.Seek(start)
 }
 
 // Finish finishes every track this container publishes.

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:moq_ffi/moq_ffi.dart';
 import 'package:test/test.dart';
@@ -21,7 +22,10 @@ void main() {
     );
     final consumer = track.consume(subscription: null);
     final producer = track.appendGroup(
-      start: MoqTimestamp(value: 0, scale: null),
+      frame: MoqFrame(
+        payload: Uint8List(0),
+        timestamp: MoqTimestamp(value: 0, scale: null),
+      ),
     );
     final group = await consumer.nextGroup();
     producer.abort(errorCode: 404);
@@ -55,9 +59,6 @@ void main() {
     final nextGroup = consumer.nextGroup();
 
     final producer = track.appendGroup(
-      start: MoqTimestamp(value: 0, scale: 1000000),
-    );
-    producer.writeFrame(
       frame: MoqFrame(
         payload: utf8.encode('dart'),
         timestamp: MoqTimestamp(value: 0, scale: 1000000),

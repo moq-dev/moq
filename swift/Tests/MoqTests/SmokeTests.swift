@@ -74,7 +74,7 @@ final class SmokeTests: XCTestCase {
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "errors")
-        let producer = try track.appendGroup(start: .unscaled(0))
+        let producer = try track.appendGroup(Data(), timestamp: .unscaled(0))
         let consumer = try broadcast.consume()
         let group = try await consumer.fetchGroup(name: "errors", start: 0)
         try producer.abort(errorCode: 404)
@@ -94,8 +94,7 @@ final class SmokeTests: XCTestCase {
         let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
         let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
-            let group = try track.appendGroup(start: micros(ms * 1_000))
-            try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
+            let group = try track.appendGroup(Data("x".utf8), timestamp: micros(ms * 1_000))
             try group.finish()
         }
         let consumer = try track.consume(
@@ -677,8 +676,7 @@ final class SmokeTests: XCTestCase {
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
-        let group = try track.appendGroup(start: micros(0))
-        try group.writeFrame(Data("cached".utf8), timestamp: micros(0))
+        let group = try track.appendGroup(Data("cached".utf8), timestamp: micros(0))
         try group.finish()
 
         let consumer = try broadcast.consume()
@@ -700,8 +698,7 @@ final class SmokeTests: XCTestCase {
         let meta = try await broadcast.consume().subscribeMeta(name: "video")
         XCTAssertEqual(meta.info().timescale, 1_000_000)
 
-        let group = try track.appendGroup(start: micros(0))
-        try group.writeFrame(Data("key".utf8), timestamp: micros(0))
+        let group = try track.appendGroup(Data("key".utf8), timestamp: micros(0))
         try group.writeFrame(Data(), timestamp: micros(1))
         try group.finish()
         try track.finish()
@@ -957,9 +954,8 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(frame.timestamp.scale)
         XCTAssertNil(consumer.info().timescale)
         // A group's frames carry that group's key, and only it.
-        let group = try track.createGroup(start: 1)
+        let group = try track.createGroup(Data("grouped".utf8), timestamp: .unscaled(1))
         XCTAssertThrowsError(try group.writeFrame(Data("other".utf8), timestamp: .unscaled(2)))
-        try group.writeFrame(Data("grouped".utf8), timestamp: .unscaled(group.start))
         try group.finish()
         let grouped = try await consumer.readFrame()
         XCTAssertEqual(grouped?.timestamp, .unscaled(1))
@@ -1015,10 +1011,9 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(frame?.payload, payload)
         XCTAssertEqual(frame?.timestamp, micros(12_345))
 
-        let group = try track.appendGroup(start: micros(23_456))
-        let groupConsumer = try group.consume()
         let groupPayload = Data("group".utf8)
-        try group.writeFrame(groupPayload, timestamp: micros(23_456))
+        let group = try track.appendGroup(groupPayload, timestamp: micros(23_456))
+        let groupConsumer = try group.consume()
         try group.finish()
 
         let groupFrame = try await groupConsumer.readFrame()
@@ -1090,33 +1085,16 @@ final class SmokeTests: XCTestCase {
         }
     }
 
-    func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
-        let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
-        let consumer = try track.consume()
-
-        try track.appendGroup(start: micros(0)).finish()
-        try track.appendGroup(start: micros(1_000)).finish()
-        try track.writeFrame(Data("populated".utf8), timestamp: micros(2_000))
-
-        let frame = try await consumer.readFrame()
-        XCTAssertEqual(frame?.payload, Data("populated".utf8))
-        XCTAssertEqual(frame?.timestamp, micros(2_000))
-
-        try track.finish()
-        try broadcast.close()
-    }
-
     func testSparseGroupsAndKnownEnd() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "sparse")
-        let group = try track.createGroup(start: 2)
+        let group = try track.createGroup(Data(), timestamp: .unscaled(2))
         XCTAssertEqual(group.start, 2)
         try group.finish()
 
         try track.finish(at: 5)
-        try track.createGroup(start: 4).finish()
-        XCTAssertThrowsError(try track.createGroup(start: 5))
+        try track.createGroup(Data(), timestamp: .unscaled(4)).finish()
+        XCTAssertThrowsError(try track.createGroup(Data(), timestamp: .unscaled(5)))
         try track.finish()
         try broadcast.close()
     }
