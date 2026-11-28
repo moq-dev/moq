@@ -55,7 +55,11 @@ moq <MoQ side> fetch <track> [options]
 The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path), `--connect-token`
 presents a token (repeat it to present several, see
-[Tokens](/bin/relay/auth#tokens)), and `--broadcast <name>` names the
+[Tokens](/bin/relay/auth#tokens)), `--connect-subscribe-token` presents one on
+each moq-transport subscription a reader opens rather than in SETUP (a track
+listing's own requests stay tokenless; on `moq-lite-07-wip`, which must be
+selected explicitly, it rides AUTH; earlier moq-lite versions send nothing),
+and `--broadcast <name>` names the
 broadcast. A `?jwt=` in the URL still works, and is how a token reaches a
 relay that predates `--connect-token`. A process can
 instead host sessions with `--listen`, or both at once, admitting clients the

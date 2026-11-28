@@ -720,6 +720,8 @@ fn confining(prefixes: &Prefixes) -> Option<Vec<crate::Path>> {
 #[derive(Clone, Default)]
 pub struct Handle {
 	state: kio::Shared<State>,
+	/// The credential this side's subscriptions carry; see [`Self::set_subscribe_auth`].
+	subscribe: kio::Producer<Option<Credential>>,
 }
 
 impl Handle {
@@ -765,6 +767,35 @@ impl Handle {
 				link: None,
 			}),
 		})
+	}
+
+	/// Name the credential this side's subscriptions carry on every session of this handle,
+	/// one [`Self::add`] issued: the moq-transport `AUTHORIZATION TOKEN` on each SUBSCRIBE,
+	/// standalone FETCH, and TRACK_STATUS sent from now on. `None`, the default, sends them
+	/// under the session's scope.
+	///
+	/// Swapping it renews in place: each live subscription that went out with a token sends the
+	/// new one in a REQUEST_UPDATE, and one the peer refuses ends alone. A subscription that
+	/// went out without a token keeps the session's scope, since no update moves a request to a
+	/// token's authority, and clearing the credential leaves the token a subscription holds.
+	/// A credential from another handle is never sent (the rule
+	/// [`Route::set_auth`](crate::origin::Route::set_auth) follows), nor one that ended: set a
+	/// fresh one. Discovery requests (SUBSCRIBE_NAMESPACE,
+	/// and the paused subscriptions a track listing opens) stay under the session's scope.
+	///
+	/// On moq-lite the handle's credentials ride AUTH and join the session's grant, which
+	/// already covers its subscriptions, so this sends nothing there.
+	pub fn set_subscribe_auth(&self, auth: Option<Credential>) {
+		let Ok(mut current) = self.subscribe.write() else {
+			return;
+		};
+		if *current == auth {
+			return;
+		}
+		let replaced = std::mem::replace(&mut *current, auth);
+		// Withdrawing a token takes the handle's lock, so the old one drops outside this one.
+		drop(current);
+		drop(replaced);
 	}
 
 	/// Answer every token the peer presents, instead of the default acceptor; see
@@ -909,6 +940,7 @@ impl Link {
 				bound: true,
 				..Default::default()
 			}),
+			subscribe: Default::default(),
 		};
 		Self::attach(&handle, supported, requests).expect("a fresh handle backs no session")
 	}
@@ -1052,6 +1084,34 @@ impl Link {
 			let slot = link.slots.get(&auth.presented.id)?;
 			slot.phase.ended().is_none().then(|| slot.token.clone())
 		})
+	}
+
+	/// The credential a subscription written now carries, with its token, or `None` when it
+	/// goes out under the session's scope; see [`Handle::set_subscribe_auth`].
+	pub(crate) fn subscribe_auth(&self) -> Option<(Credential, Bytes)> {
+		let auth = self.handle.subscribe.read().clone()?;
+		let token = self.token(&auth)?;
+		Some((auth, token))
+	}
+
+	/// Wait for a credential to renew a subscription that went out with `sent`: one that
+	/// replaced it and that this session can send.
+	pub(crate) fn poll_subscribe_renewal(&self, waiter: &kio::Waiter, sent: &Credential) -> Poll<(Credential, Bytes)> {
+		let renewal = |current: &Option<Credential>| {
+			let auth = current.as_ref().filter(|auth| *auth != sent)?;
+			Some((auth.clone(), self.token(auth)?))
+		};
+		match self
+			.handle
+			.subscribe
+			.poll_ref(waiter, |current| match renewal(current) {
+				Some(renewal) => Poll::Ready(renewal),
+				None => Poll::Pending,
+			}) {
+			Poll::Ready(Ok(renewal)) => Poll::Ready(renewal),
+			// The handle is gone, so nothing will replace the credential.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// Verify a request token once per session while any naming request remains open.

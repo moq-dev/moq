@@ -710,6 +710,7 @@ impl Subscriber {
 		let parked = TrackState {
 			alias: held.alias,
 			tail: std::mem::take(&mut held.tail),
+			auth: held.auth.take(),
 			..TrackState::pending(
 				std::mem::take(&mut held.name),
 				held.broadcast.clone(),
@@ -740,7 +741,7 @@ impl Subscriber {
 				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
 				forward: Some(forward.forward),
 				filter: forward.filter,
-				authorization_token: None,
+				authorization_token: forward.authorization_token.clone(),
 				new_group: forward.new_group,
 				fill: forward.fill,
 			},
@@ -1788,6 +1789,9 @@ pub(super) struct Forward {
 	/// The aggregate priority, in the model's higher-first terms.
 	pub(super) priority: Option<i8>,
 	pub(super) new_group: Option<u64>,
+	/// A token renewing the one the subscription named, for one resumed after its credential
+	/// was replaced.
+	pub(super) authorization_token: Option<crate::ietf::token::RequestToken>,
 }
 
 /// What a subscription resuming a held one keeps of it.
@@ -1830,6 +1834,11 @@ mod tests {
 	}
 
 	fn harness_with(version: Version, config: memory::Config) -> Harness {
+		harness_on(version, config, None)
+	}
+
+	/// [`harness_with`], on the session side of `auth` when given.
+	fn harness_on(version: Version, config: memory::Config, auth: Option<crate::auth::Link>) -> Harness {
 		let (session, peer) = memory::pair(config);
 		let (tasks, mut task_set) = TaskSet::new();
 		let driver = kio::clock::sim::spawn(async move { kio::wait(|waiter| task_set.poll(waiter)).await });
@@ -1846,6 +1855,10 @@ mod tests {
 			tasks,
 			Default::default(),
 		);
+		let subscriber = match auth {
+			Some(auth) => subscriber.with_auth(auth),
+			None => subscriber,
+		};
 		let broadcast = crate::broadcast::Info::default().produce();
 		let lister = Arc::new(broadcast.requests().lister().unwrap());
 		let tracks = broadcast.consume().tracks().unwrap();
@@ -1905,6 +1918,10 @@ mod tests {
 			let msg: ietf::SubscribeTracks = body.message(self.version).unwrap();
 			assert_eq!(msg.prefix.as_str(), "bcast");
 			assert!(!msg.forward, "the listing asks for every track's objects");
+			assert!(
+				msg.authorization_token.is_none(),
+				"a listing is discovery, under the session's scope"
+			);
 			let ok = ietf::RequestOk {
 				active: None,
 				largest: None,
@@ -2209,6 +2226,35 @@ mod tests {
 		// The subscription waits out its data streams before it ends.
 		kio::clock::sleep(Duration::from_secs(5)).await;
 		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_ready());
+	}
+
+	/// A listing stays under the session's scope with a subscribe credential set: neither
+	/// SUBSCRIBE_TRACKS nor the paused SUBSCRIBE it opens for a skipped track carries a token.
+	#[kio::test]
+	async fn a_listing_carries_no_subscribe_credential() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let link = crate::auth::Link::ietf();
+			let credential = link.handle().add("cred").unwrap();
+			link.handle().set_subscribe_auth(Some(credential));
+			let mut h = harness_on(version, memory::Config::default(), Some(link));
+			let mut listing = h.establish().await;
+			let skipped = ietf::PublishSkipped {
+				suffix: Path::from_static(""),
+				track_name: "audio".into(),
+			};
+			write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
+			let mut stream = kio::clock::timeout(
+				TIMEOUT,
+				Stream::accept(&mut crate::driver::Transport::new(h.peer.clone()), version),
+			)
+			.await
+			.expect("no paused SUBSCRIBE")
+			.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::Subscribe::ID, "{version}");
+			let msg: ietf::Subscribe = body.message(version).unwrap();
+			assert!(msg.authorization_token.is_none(), "{version}");
+		}
 	}
 
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.

@@ -1004,6 +1004,13 @@ impl Connection {
 		let state = producer.consume();
 		let tokens = moq_net::auth::Tokens::new(client.tokens.clone());
 		let auth = tokens.handle();
+		if let Some(token) = &client.subscribe_token {
+			// A fresh handle has no session to drain, so it takes the token.
+			let credential = auth
+				.add(token.as_str().to_owned())
+				.expect("a fresh handle takes tokens");
+			auth.set_subscribe_auth(Some(credential));
+		}
 		// Built before the task, so dials it takes close with it even if the task never runs.
 		let policy = Self::policy(&client, &addrs, &tokens);
 
@@ -2526,6 +2533,66 @@ mod tests {
 		// Not `Cancel`, which reads as the peer ending the grant cleanly.
 		let closed = kio::clock::timeout(WAIT, token.closed()).await.unwrap();
 		assert!(matches!(closed, moq_net::Error::Closed), "{closed:?}");
+	}
+
+	/// A configured subscribe token rides the connection's moq-transport SUBSCRIBE, apart from the
+	/// connection credential.
+	#[tokio::test]
+	async fn a_subscribe_token_rides_each_subscribe() {
+		kio::clock::host_time(); // real TCP sockets
+		const WAIT: Duration = Duration::from_secs(10);
+		let version: moq_net::Version = "moq-transport-22".parse().unwrap();
+
+		let publisher = crate::origin::spawn();
+		let route = publisher
+			.route("room", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let track = route
+			.broadcast()
+			.create_track("video", moq_net::track::Info::default())
+			.unwrap();
+
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.version = vec![version];
+		let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let addr = listener.tcp_local_addr().unwrap();
+
+		let config = crate::connect::Config {
+			version: vec![version],
+			subscribe_token: Some("sub".parse().unwrap()),
+			..Default::default()
+		};
+		let received = crate::origin::spawn();
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(received.clone())
+			.connect(url(&format!("tcp://{addr}/")));
+
+		let request = kio::clock::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+		let mut request = request.with_publisher(&publisher);
+		let mut requests = request.requests();
+		let _session = request.ok().await.unwrap();
+
+		let remote = kio::clock::timeout(WAIT, received.consume().follow("room", None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let subscribe = tokio::spawn(async move {
+			remote
+				.track("video")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+		});
+		let presented = kio::clock::timeout(WAIT, requests.next()).await.unwrap().unwrap();
+		assert_eq!(presented.token().as_ref(), b"sub");
+		let _grant = presented.accept(moq_net::auth::Grant::all());
+		kio::clock::timeout(WAIT, subscribe).await.unwrap().unwrap().unwrap();
+		drop(track);
+		drop(connection);
 	}
 
 	/// Ending the connection's auth handle ends the loop at its next reconnect, rather than

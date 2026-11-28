@@ -43,6 +43,7 @@ export namespace Auth {
 		abort(err?: Error): void;
 		add(token: string | Uint8Array): Auth.Credential;
 		get grant(): Signals.Getter<Auth.Grant | undefined>;
+		setSubscribeAuth(auth?: Auth.Credential): void;
 	}
 	export class Unsupported extends Error {
 		constructor(message?: string);

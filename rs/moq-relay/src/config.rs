@@ -184,7 +184,7 @@ pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 
 /// The `[connect]` flags a relay refuses: cluster dials take their peers and
 /// credentials from `[cluster]`.
-const REFUSED_CONNECT: [&str; 2] = ["connect", "connect-token"];
+const REFUSED_CONNECT: [&str; 3] = ["connect", "connect-token", "connect-subscribe-token"];
 
 /// Every setting the relay merges, as its flags declare them.
 pub(crate) const fn registry() -> usage_rs::config::Registry {
@@ -394,6 +394,12 @@ impl Config {
 			refused.push(
 				"--connect-token / MOQ_CONNECT_TOKEN / connect.tokens: give peers a credential with \
 				 --cluster-token / MOQ_CLUSTER_TOKEN / cluster.token, or a `token` on a cluster.connect peer",
+			);
+		}
+		if self.connect.subscribe_token.is_some() {
+			refused.push(
+				"--connect-subscribe-token / MOQ_CONNECT_SUBSCRIBE_TOKEN / connect.subscribe_token: \
+				 a cluster dial's subscriptions run under its connection credential",
 			);
 		}
 		anyhow::ensure!(
@@ -790,7 +796,7 @@ mod tests {
 	/// what replaces each, while the rest of `[connect]` still resolves.
 	#[test]
 	fn connect_url_and_tokens_refuse_to_boot() {
-		if !test_env::Env::without(&["MOQ_CONNECT", "MOQ_CONNECT_TOKEN"]).isolate() {
+		if !test_env::Env::without(&["MOQ_CONNECT", "MOQ_CONNECT_TOKEN", "MOQ_CONNECT_SUBSCRIBE_TOKEN"]).isolate() {
 			return;
 		}
 		let refusal = |config: Config| config.resolve().expect_err("must refuse").to_string();
@@ -801,6 +807,9 @@ mod tests {
 		let flags = Config::parse_and_merge(["moq-relay", "--connect-token", "secret"]).unwrap();
 		let err = refusal(flags);
 		assert!(err.contains(REFUSED_TOKENS) && !err.contains("connect.url"), "{err}");
+		let flags = Config::parse_and_merge(["moq-relay", "--connect-subscribe-token", "secret"]).unwrap();
+		let err = refusal(flags);
+		assert!(err.contains("connect.subscribe_token"), "{err}");
 
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("relay.toml");
@@ -849,7 +858,9 @@ mod tests {
 			.to_string();
 		assert!(help.contains("--connect-bind"), "{help}");
 		assert!(
-			!help.contains("--connect <") && !help.contains("--connect-token"),
+			!help.contains("--connect <")
+				&& !help.contains("--connect-token")
+				&& !help.contains("--connect-subscribe-token"),
 			"{help}"
 		);
 	}

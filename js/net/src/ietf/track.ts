@@ -7,6 +7,7 @@ import { type MessageLocation, Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { RequestOk } from "./request.ts";
 import { Subscribe } from "./subscribe.ts";
+import { tokenIntoRequest } from "./token.ts";
 import type { IetfVersion } from "./version.ts";
 
 export class TrackStatusRequest {
@@ -17,22 +18,27 @@ export class TrackStatusRequest {
 	trackName: string;
 	/** Whether the requester wants Track Properties on the answer (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
+	/** The AUTHORIZATION TOKEN to send, a value agreed out of band. Decoding leaves it unset. */
+	token?: Uint8Array;
 
 	constructor({
 		requestId,
 		trackNamespace,
 		trackName,
 		propertiesWanted = true,
+		token,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
 		trackName: string;
 		propertiesWanted?: boolean;
+		token?: Uint8Array;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.propertiesWanted = propertiesWanted;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -43,6 +49,7 @@ export class TrackStatusRequest {
 		// INCLUDE_PROPERTIES as unknown, which is a protocol violation.
 		const params = new Parameters();
 		if (!this.propertiesWanted && Filter.isDraft20(version)) params.includeProperties = false;
+		if (this.token) tokenIntoRequest(params, this.token);
 		await params.encode(w, version);
 	}
 

@@ -7,6 +7,7 @@ import * as Namespace from "./namespace.ts";
 import { type MessageLocation, Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
+import { tokenIntoRequest } from "./token.ts";
 import type { IetfVersion } from "./version.ts";
 
 /**
@@ -95,6 +96,9 @@ export class Subscribe {
 	/** Whether RENDEZVOUS_TIMEOUT requested a wait; never encoded. */
 	rendezvous: boolean;
 
+	/** The AUTHORIZATION TOKEN to send, a value agreed out of band. Decoding leaves it unset. */
+	token?: Uint8Array;
+
 	constructor({
 		requestId,
 		trackNamespace,
@@ -107,6 +111,7 @@ export class Subscribe {
 		forward,
 		rangeFilters,
 		rendezvous,
+		token,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
@@ -119,6 +124,7 @@ export class Subscribe {
 		forward?: boolean;
 		rangeFilters?: boolean;
 		rendezvous?: boolean;
+		token?: Uint8Array;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
@@ -131,6 +137,7 @@ export class Subscribe {
 		this.forward = forward ?? true;
 		this.rangeFilters = rangeFilters ?? false;
 		this.rendezvous = rendezvous ?? false;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -158,6 +165,7 @@ export class Subscribe {
 				params.includeProperties = false;
 			}
 		}
+		if (this.token) tokenIntoRequest(params, this.token);
 
 		await params.encode(w, version);
 	}

@@ -1,7 +1,7 @@
 import { Duration, yieldNow } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
-import type { Grant } from "../auth.ts";
+import type { Credential, Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Goaway } from "../connection/goaway.ts";
@@ -72,7 +72,7 @@ import { type Framed, malformed, RequestStream, refuseReserved, refuseUpdate } f
 import type { Session } from "./session.ts";
 import { joinFilter, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
-import { MalformedAuthToken } from "./token.ts";
+import { MalformedAuthToken, tokenIntoRequest } from "./token.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { isDraft23 } from "./version.ts";
 
@@ -131,6 +131,8 @@ type SubscribeSetupState = {
 	rejected?: boolean;
 	/** Hands a draft-22 fill stream that overtook SUBSCRIBE_OK the subscription it heads, or nothing. */
 	fill?: (subscription: Subscription | undefined) => void;
+	/** The credential the SUBSCRIBE's token named, which a renewal replaces. */
+	auth?: Credential;
 };
 
 /** An announced path: each live advertisement referencing it, oldest first, and the route it holds. */
@@ -981,7 +983,7 @@ export class Subscriber {
 				stream,
 				requestId,
 				producer,
-				priority,
+				{ priority, auth: state.auth },
 				unanswered,
 				race([done, stopped.promise]),
 			);
@@ -1093,6 +1095,7 @@ export class Subscriber {
 						requestId: id,
 						trackNamespace: broadcast,
 						trackName: request.name,
+						token: this.#requestToken(),
 					}),
 					this.#session.version,
 				);
@@ -1257,6 +1260,7 @@ export class Subscriber {
 				Fetch.id,
 				new Fetch({
 					requestId: id,
+					token: this.#requestToken(),
 					subscriberPriority: toWire(fill.priority),
 					groupOrder: "ascending",
 					type: isDraft20(version)
@@ -1426,16 +1430,26 @@ export class Subscriber {
 	}
 
 	/**
+	 * The AUTHORIZATION TOKEN a SUBSCRIBE, standalone FETCH, or TRACK_STATUS written now carries, or
+	 * undefined to send it under the session's scope; see `Handle.setSubscribeAuth`.
+	 */
+	#requestToken(): Uint8Array | undefined {
+		return this.#auth?.carried(this.#auth.subscribeAuth.peek());
+	}
+
+	/**
 	 * Follow the aggregate subscriber priority upstream until `done` settles with REQUEST_UPDATE,
-	 * each under a Request ID of its own. The answer comes back on this stream, so one update is
-	 * in flight at a time and changes meanwhile coalesce. No draft lets an update change the
-	 * group order, so it stays as asked.
+	 * each under a Request ID of its own, and renew a subscription's token once its credential is
+	 * replaced. The answer comes back on this stream, so one update is in flight at a time and
+	 * changes meanwhile coalesce. No draft lets an update change the group order, so it stays as
+	 * asked. A subscription that went out without a token is never renewed: no update moves it
+	 * to a token's authority.
 	 */
 	async #runUpdates(
 		stream: RequestStream,
 		requestId: bigint,
 		producer: track.Producer,
-		sent: number,
+		sent: { priority: number; auth?: Credential },
 		unanswered: Signal<number>,
 		done: Promise<unknown>,
 	): Promise<void> {
@@ -1452,13 +1466,18 @@ export class Subscriber {
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = hooks.requested(producer).peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			if (!subscription || wanted === sent || unanswered.peek() > 0) {
+			const current = this.#auth?.subscribeAuth.peek();
+			const renewal = sent.auth && current !== sent.auth ? this.#auth?.carried(current) : undefined;
+			const changed = wanted !== sent.priority || renewal !== undefined;
+			if (!subscription || !changed || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
 						hooks.requested(producer).changed(() => resolve()),
 						unanswered.changed(() => resolve()),
 					);
+					const auth = this.#auth?.subscribeAuth;
+					if (auth) disposes.push(auth.changed(() => resolve()));
 				});
 				await race([wake, stopped]);
 				for (const dispose of disposes) dispose();
@@ -1475,7 +1494,8 @@ export class Subscriber {
 			if (own === undefined) return;
 
 			const parameters = new Parameters();
-			parameters.subscriberPriority = wanted;
+			if (wanted !== sent.priority) parameters.subscriberPriority = wanted;
+			if (renewal) tokenIntoRequest(parameters, renewal);
 			const update = new SubscribeUpdate({ requestId: own, parameters });
 			let message: Uint8Array;
 			try {
@@ -1494,8 +1514,9 @@ export class Subscriber {
 				// The publisher stopped reading; its responses decide how the track ends.
 				return;
 			}
-			sent = wanted;
-			console.debug(`subscribe update: id=${requestId} priority=${wanted}`);
+			sent.priority = wanted;
+			if (renewal) sent.auth = current;
+			console.debug(`subscribe update: id=${requestId} priority=${wanted} renewed=${renewal !== undefined}`);
 		}
 	}
 
@@ -1614,6 +1635,8 @@ export class Subscriber {
 		const ranges = placedAsTimes(held.ranges, held.placed);
 		const bounds = wireSpan(ranges);
 		const start = wireStart(ranges);
+		// Read once, so the credential recorded is the one whose token went out.
+		const auth = this.#auth?.subscribeAuth.peek();
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1626,7 +1649,9 @@ export class Subscriber {
 			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
 			// the subscription's life.
 			...joinFilter(version, start),
+			token: this.#auth?.carried(auth),
 		});
+		if (msg.token) state.auth = auth;
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
 			const accepted = Promise.withResolvers<Subscription | undefined>();
