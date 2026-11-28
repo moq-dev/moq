@@ -33,9 +33,12 @@ Decided 2026-11-27 (maintainer, via
 the run-time reads, with a check that catches new `env!("CARGO_MANIFEST_DIR")`
 (rejected: no check; drop).
 
-Decided 2026-11-27 (`/quest-plan`, headless, the maintainer's pre-approval
-taking each recommendation):
+Decided 2026-11-28 (maintainer, /quest-run in kixel-ai/rust2,
+[moq-dev/moq#9841](https://github.com/moq-dev/moq/pull/9841)), accepting each
+recommendation the headless `/quest-plan` of 2026-11-27 made:
 
+- ✅ The check alone (rejected: converting more sites), since #9779 already
+  converted every one the check would flag.
 - ✅ A `forbid` line in `sh/text.sh`, which `just check` and the merge queue
   already run (rejected: clippy's `disallowed-macros`, which matches `env!`
   by path and so would ban `env!("CARGO_PKG_VERSION")` too; a custom lint,
@@ -48,6 +51,9 @@ taking each recommendation):
   `interop.sh` pass the script directory to the clients). Only the interop
   harness builds them, and it would need new plumbing for three small
   examples.
+- ✅ m1, since the check is additive and nothing is broken now (rejected:
+  m0's CI epic, which is for what is broken or slow today; m4, which would
+  leave the gap open while new tests keep landing).
 
 Validation: the check passes on `main` and fails, naming the line, on a
 planted `env!("CARGO_MANIFEST_DIR")` in a moq-tokio integration test.

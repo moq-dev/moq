@@ -45,8 +45,9 @@ get there. ✅ Replace `Path`'s unsafe storage with a safe representation
 this quest (rejected: its own quest; drop). Weigh the safe form's performance
 cost, which this quest measures, against moq's benches.
 
-Decided 2026-11-27 (`/quest-plan`, headless, the maintainer's pre-approval
-taking each recommendation):
+Decided 2026-11-28 (maintainer, /quest-run in kixel-ai/rust2,
+[moq-dev/moq#9841](https://github.com/moq-dev/moq/pull/9841)), accepting each
+recommendation the headless `/quest-plan` of 2026-11-27 made:
 
 - ✅ Try `Static` plus `Shared` alone first, dropping `Inline` (rejected:
   starting with a checked inline form, `str::from_utf8(..).expect(..)` on
