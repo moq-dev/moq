@@ -290,36 +290,46 @@ impl MediaFoundation {
 	/// Hold the stream to `bitrate`, moving from `from` (`None` before the
 	/// stream starts): the mean, the peak in peak-constrained VBR, and the
 	/// buffer. A raise sets the peak first and a cut sets the mean first, so the
-	/// mean never passes the peak in between, and a refusal of the second puts
-	/// the first back, so the MFT runs at the rate the encoder reports.
+	/// mean never passes the peak in between. A refusal puts back what this call
+	/// already set, so the MFT runs at the rate the encoder reports.
 	fn set_rate(&self, bitrate: u32, from: Option<u32>) -> Result<(), Error> {
-		// `true` sets the peak (only in peak-constrained VBR), `false` the mean.
-		let set = |peak: bool, rate: u32| match (peak, self.rate.mode) {
-			(false, _) => self.require(&CODECAPI_AVEncCommonMeanBitRate, rate, "mean bitrate"),
-			(true, Mode::Capped) => self.require(&CODECAPI_AVEncCommonMaxBitRate, rate, "peak bitrate"),
-			(true, Mode::Constant) => Ok(()),
+		let mut knobs = match from.is_some_and(|from| bitrate < from) {
+			true => vec![Knob::Mean, Knob::Peak],
+			false => vec![Knob::Peak, Knob::Mean],
 		};
-		let peak_first = !from.is_some_and(|from| bitrate < from);
-		set(peak_first, bitrate)?;
-		if let Err(err) = set(!peak_first, bitrate) {
-			// The error already reports the retune failed; a refused restore on
-			// top of it is a second failure with nothing left to try.
-			if let Some(from) = from {
-				let _ = set(peak_first, from);
-			}
-			return Err(err);
-		}
+		knobs.retain(|knob| *knob != Knob::Peak || self.rate.mode == Mode::Capped);
 		// Mid-stream, only where the MFT says the buffer can change now: one
 		// that cannot keeps the buffer it opened with, and the mean and peak
 		// still hold the cap.
 		if self.rate.buffer && (from.is_none() || self.modifiable(&CODECAPI_AVEncCommonBufferSize)) {
-			self.require(
+			knobs.push(Knob::Buffer);
+		}
+		for (done, knob) in knobs.iter().enumerate() {
+			if let Err(err) = self.set_knob(*knob, bitrate) {
+				// The error already reports the retune failed; a refused restore
+				// on top of it is a second failure with nothing left to try.
+				if let Some(from) = from {
+					for knob in knobs[..done].iter().rev() {
+						let _ = self.set_knob(*knob, from);
+					}
+				}
+				return Err(err);
+			}
+		}
+		Ok(())
+	}
+
+	/// Set one rate control to what holds the stream to `bitrate`.
+	fn set_knob(&self, knob: Knob, bitrate: u32) -> Result<(), Error> {
+		match knob {
+			Knob::Mean => self.require(&CODECAPI_AVEncCommonMeanBitRate, bitrate, "mean bitrate"),
+			Knob::Peak => self.require(&CODECAPI_AVEncCommonMaxBitRate, bitrate, "peak bitrate"),
+			Knob::Buffer => self.require(
 				&CODECAPI_AVEncCommonBufferSize,
 				buffer_bytes(bitrate, self.framerate),
 				"rate control buffer",
-			)?;
+			),
 		}
-		Ok(())
 	}
 
 	/// Whether the MFT accepts `api` in its current state. Only `S_OK` says so,
@@ -832,6 +842,14 @@ struct Rate {
 	/// Whether the MFT supports sizing the buffer, set at [`BUFFER_FRAMES`];
 	/// otherwise it keeps its own.
 	buffer: bool,
+}
+
+/// One of the codec properties `set_rate` moves with the bitrate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Knob {
+	Mean,
+	Peak,
+	Buffer,
 }
 
 /// The rate control mode.
