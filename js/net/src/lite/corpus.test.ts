@@ -9,12 +9,13 @@ import { isDecodeError } from "../util/decode_error.ts";
 import { AnnounceInit, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { ClientSetup } from "./compat.ts";
 import { Group } from "./group.ts";
+import { Subscribe } from "./subscribe.ts";
 import { Version, versionName } from "./version.ts";
 
 interface Case {
 	name: string;
 	version: string;
-	message: "announce" | "announce_init" | "group" | "client_setup";
+	message: "announce" | "announce_init" | "group" | "subscribe" | "client_setup";
 	hex: string;
 	/** `announce_init`: the announce slots left, unbounded when absent. */
 	budget?: number;
@@ -44,6 +45,10 @@ async function decode(c: Case, r: Reader, v: Version): Promise<(w: Writer) => Pr
 		}
 		case "group": {
 			const msg = await Group.decode(r, v);
+			return (w) => msg.encode(w, v);
+		}
+		case "subscribe": {
+			const msg = await Subscribe.decode(r, v);
 			return (w) => msg.encode(w, v);
 		}
 		case "client_setup": {

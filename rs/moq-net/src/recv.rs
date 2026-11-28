@@ -26,9 +26,23 @@ impl Group {
 		self.handle.frame_count()
 	}
 
-	/// Whether the parent track compresses, readable while a frame holds the writer.
+	/// Whether frames arrive as compressed slices, readable while a frame holds the writer.
 	pub fn compressed(&self) -> bool {
 		self.handle.compressed()
+	}
+
+	/// Whether this is a metadata copy, whose frames arrive as their headers alone.
+	pub fn is_meta(&self) -> bool {
+		self.handle.is_meta()
+	}
+
+	/// Write a metadata copy's next frame header, as [`group::Producer::write_header`].
+	#[cfg(feature = "async")]
+	pub fn write_header(&mut self, header: frame::Header) -> Result<(), Error> {
+		self.writer
+			.as_mut()
+			.expect("group writer is available between frames")
+			.write_header(header)
 	}
 
 	/// The relay state of the group, readable while a frame holds the writer.
@@ -72,7 +86,16 @@ impl Group {
 		self.writer
 			.as_ref()
 			.expect("group writer is available between frames")
-			.poll_paced(waiter, header.info.size.saturating_add(metadata), window)
+			.poll_paced(waiter, self.payload(header).saturating_add(metadata), window)
+	}
+
+	/// The payload bytes the frame `header` opens stores: none on a metadata copy, whatever
+	/// size it declares.
+	pub fn payload(&self, header: &frame::Header) -> u64 {
+		match self.is_meta() {
+			true => 0,
+			false => header.info.size,
+		}
 	}
 
 	/// How many more bytes the writer may take, a frame's included, before
@@ -137,6 +160,14 @@ impl Group {
 				Ok(())
 			}
 		}
+	}
+
+	/// Close a lite-07 group that ended with bare FIN (no GROUP_END) under a mid-group
+	/// Position End cap, marking it back-cut so a later switch-back fetches the remaining
+	/// frames rather than reusing the truncated slice.
+	pub fn end_slice(self) -> Result<(), Error> {
+		self.handle.bound_back();
+		self.finish()
 	}
 
 	/// Abort with the receive error instead of cancellation.

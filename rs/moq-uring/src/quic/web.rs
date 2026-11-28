@@ -349,7 +349,7 @@ struct State {
 	ready_bi: VecDeque<(driver_send::Stream, driver_recv::Stream)>,
 	/// Streams held open, never read: control and QPACK, ours and theirs.
 	held_recv: [Option<driver_recv::Stream>; 3],
-	_control_send: Option<driver_send::Stream>,
+	control_send: Option<driver_send::Stream>,
 	/// The CONNECT stream's send half; taken exactly once by the close path.
 	connect_send: Option<driver_send::Stream>,
 }
@@ -468,7 +468,7 @@ impl Session {
 				ready_uni,
 				ready_bi: VecDeque::new(),
 				held_recv: held,
-				_control_send: Some(control),
+				control_send: Some(control),
 				connect_send: Some(send),
 			}),
 			closed: RefCell::new(None),
@@ -665,6 +665,12 @@ impl Session {
 		}
 	}
 	/// Close the session with an application code and reason.
+	///
+	/// Over HTTP/3, every stream either side sends on, the HTTP/3 ones aside, is first ended with
+	/// `WT_SESSION_GONE`: writers see their streams stopped, and the close capsule waits until the
+	/// peer acknowledged what was written and reset its own streams, for up to the close's 1 s
+	/// grace, since Chrome crashes on a capsule arriving under live streams
+	/// (<https://issues.chromium.org/issues/589817008>).
 	pub fn close(&self, code: u32, reason: &str) {
 		close(&self.conn, self.web.as_ref(), code, reason);
 	}
@@ -773,11 +779,36 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(Self::receive_window(self))
 	}
+	/// Only raw QUIC: a browser's WebTransport API may discard a reset stream's prefix unread
+	/// even when its QUIC stack negotiated RESET_STREAM_AT, and nothing here tells a browser apart.
+	fn reliable_reset(&self) -> bool {
+		self.web.is_none() && self.conn.reset_stream_at()
+	}
 	/// The connection's limits, which every WebTransport session on it shares.
 	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
 		let mut quic = super::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Self::set_limits(self, quic).map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
+	}
+	/// The connection's keep-alive, which every WebTransport session on it shares.
+	fn set_keep_alive(
+		&self,
+		keep_alive: moq_net::transport::KeepAlive,
+	) -> Result<(), moq_net::transport::KeepAliveError> {
+		self.conn
+			.set_keep_alive(super::KeepAlive::new(keep_alive.soft, keep_alive.hard))
+			.map_err(|err| moq_net::transport::KeepAliveError::Refused(err.to_string()))
+	}
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.conn.poll_stale(waiter, stale).map(|stale| match stale {
+			true => moq_net::transport::Liveness::Stale,
+			false => moq_net::transport::Liveness::Live,
+		})
 	}
 }
 
@@ -803,6 +834,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		conn.close_code(http3, reason);
 		return;
 	};
+	let connect = send.id();
 
 	// The capsule is what carries the code and reason to a browser
 	// (`WebTransport.closed`); the connection close alone would lose the
@@ -818,7 +850,13 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	encode_varint(payload.len() as u64, &mut frame);
 	frame.extend_from_slice(&payload);
 
-	// Finish the capsule and then give the peer a moment to act on it,
+	// First end every stream either side sends on: Chrome's renderer crashes
+	// when the capsule arrives while the page still reads and writes streams
+	// (https://issues.chromium.org/issues/589817008). The session is closed,
+	// so the resets and stops carry WT_SESSION_GONE. A peer that leaves its
+	// streams open past the grace gets the capsule anyway.
+	//
+	// Then finish the capsule and give the peer a moment to act on it,
 	// closing either way once the grace period is up. The write goes in
 	// the task rather than here because flow control can take it in
 	// pieces, and abandoning a partial frame would leave the browser with
@@ -833,16 +871,28 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	let web = web.clone();
 	owner.spawn(async move {
 		let mut frame = Bytes::from(frame);
-		// Taken to finish once the frame is all written, and kept until the close.
-		let mut send = Some(send);
-		let mut finished = None;
+		// Only empty mid-transition.
+		let mut closing = Some(Closing::Quiescing(send));
 		kio::wait(|waiter| {
 			// Stop writing once the connection is gone; the deadline is the
 			// only other thing that ends this.
 			if conn.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
-			if let Some(stream) = &mut send {
+			if let Some(Closing::Quiescing(_)) = closing {
+				match quiesce(&conn, &web, connect, waiter) {
+					Poll::Ready(Ok(())) => {}
+					Poll::Ready(Err(_)) => return Poll::Ready(()),
+					Poll::Pending => {
+						ready!(deadline.poll(waiter));
+						tracing::debug!("peer left streams open past the grace; closing anyway");
+						abandon_quiesce(&conn, &web, connect);
+					}
+				}
+				closing = closing.take().map(Closing::write);
+				deadline.set(conn.owner().now().checked_add(CLOSE_GRACE));
+			}
+			if let Some(Closing::Writing(stream)) = &mut closing {
 				while frame.has_remaining() {
 					match stream.poll_write_buf(waiter, &mut frame) {
 						Poll::Ready(Ok(_)) => {}
@@ -853,7 +903,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 					}
 				}
 				if !frame.has_remaining() {
-					finished = send.take().map(driver_send::Stream::finish);
+					closing = closing.take().map(Closing::finish);
 				}
 			}
 
@@ -862,8 +912,84 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		.await;
 		conn.close_code(http3, &reason);
 		// Only now, so the critical streams end with the connection.
-		drop((web, finished));
+		drop((web, closing));
 	});
+}
+
+/// Where a close's CONNECT stream is: waiting for the session's streams to
+/// end, carrying the capsule, then finished and kept until the connection
+/// closes.
+enum Closing {
+	Quiescing(driver_send::Stream),
+	Writing(driver_send::Stream),
+	Finished(
+		#[allow(dead_code, reason = "held so the finished stream lives until the connection closes")]
+		driver_send::Finished,
+	),
+}
+
+impl Closing {
+	/// On to writing the capsule.
+	fn write(self) -> Self {
+		match self {
+			Self::Quiescing(stream) => Self::Writing(stream),
+			other => other,
+		}
+	}
+
+	/// Finish the stream, the capsule all written.
+	fn finish(self) -> Self {
+		match self {
+			Self::Writing(stream) => Self::Finished(stream.finish()),
+			other => other,
+		}
+	}
+}
+
+/// End every stream either side sends on, as [`Connection::poll_quiesce`] does
+/// with WT_SESSION_GONE, sparing the CONNECT stream, `connect`, which carries
+/// the capsules, and the control and QPACK streams, since ending one ends the
+/// HTTP/3 connection before the capsule.
+///
+/// Nobody else accepts once the session closed, so this accepts and classifies
+/// the peer's streams itself; the session's own wait in their queues to be
+/// ended like any other. A stream still mid-header may be a QPACK stream, so
+/// it is spared, without waiting on it: Chrome opens its QPACK streams without
+/// writing to them, and waiting out the grace lets the page open more streams
+/// under the capsule.
+fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	web.state.poll(waiter, |state, cx| {
+		while let Poll::Ready(Ok(recv)) = conn.poll_accept_uni(state.uni_park.hold(cx)) {
+			state.pending_uni.push(PendingUni::new(recv));
+		}
+		while let Poll::Ready(Ok((send, recv))) = conn.poll_accept_bi(state.bi_park.hold(cx)) {
+			state.pending_bi.push(PendingBi::new(send, recv));
+		}
+		classify_uni(web.session_id, state, cx);
+		classify_bi(web.session_id, state, cx);
+		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &quiesce_keep(state, connect))
+			.map_err(Error::from)
+	})
+}
+
+/// Give up a [`quiesce`] that is not ready, as [`Connection::abandon_quiesce`]
+/// does, sparing what it last spared.
+fn abandon_quiesce(conn: &Connection, web: &Web, connect: super::stream::Id) {
+	let keep = quiesce_keep(&web.state.lock(), connect);
+	conn.abandon_quiesce(http3_code(WT_SESSION_GONE), &keep);
+}
+
+// The streams a quiesce spares: `connect`, the control and QPACK streams, and
+// those still mid-header.
+fn quiesce_keep(state: &State, connect: super::stream::Id) -> Vec<super::stream::Id> {
+	let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
+	let pending = state.pending_uni.iter().filter_map(|header| header.recv.as_ref());
+	let pending = pending.chain(state.pending_bi.iter().filter_map(|header| header.recv.as_ref()));
+	let ours = state.control_send.iter().map(driver_send::Stream::id);
+	held.chain(pending.map(driver_recv::Stream::id))
+		.chain(ours)
+		.chain([connect])
+		.collect()
 }
 
 /// What every session clone and stream it handed out shares: the last to drop

@@ -31,7 +31,7 @@ pub struct Config {
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset), announced under a fresh [`Instance`](moq_net::Instance) each time. Also the
+	/// `node` is unset), announced under a fresh [`Identity`](moq_net::Identity) each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
 	/// more stats.
 	pub prefix: Path,
@@ -385,7 +385,7 @@ struct Stamp {
 /// never moves a timestamp back.
 fn since_epoch(at: Instant) -> Duration {
 	let (instant, wall) = kio::clock::origin();
-	let base = wall.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH);
+	let base = wall.saturating_duration_since(moq_net::time::EPOCH);
 	match at.checked_duration_since(instant) {
 		Some(after) => base + after,
 		None => base.saturating_sub(instant.saturating_duration_since(at)),
@@ -687,18 +687,10 @@ impl<T: Serialize> Snapshot<T> {
 		Ok(self.track.clone().finish().map(drop)?)
 	}
 
-	/// End the track, unlisting it, only while nobody wants it, returning whether it ended. The
-	/// check and the end are one step on the track, so a reader joining in between keeps it
-	/// instead of finding it ended. Nobody reads the abort that ends it.
-	fn reclaim(&mut self) -> bool {
-		if self.track.clone().abort_unwanted(moq_net::Error::Cancel).is_err() {
-			return false;
-		}
-		// The track's abort already failed the open group.
-		if let Some(group) = self.group.take() {
-			let _ = group.abort(moq_net::Error::Cancel);
-		}
-		true
+	/// Whether nobody wants the track, so dropping it ends it. A reader joining before the drop
+	/// is handed back to the broadcast's handler as a fresh request.
+	fn unwanted(&self) -> bool {
+		!self.track.demand().wanted()
 	}
 }
 
@@ -761,9 +753,9 @@ impl<V: Serialize> Output<V> {
 		}
 	}
 
-	/// End the track if nobody wants it, returning whether it ended; see [`Snapshot::reclaim`].
-	fn reclaim(&mut self) -> bool {
-		self.snapshot.reclaim()
+	/// Whether nobody wants the track, so dropping it ends it; see [`Snapshot::unwanted`].
+	fn unwanted(&self) -> bool {
+		self.snapshot.unwanted()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -925,7 +917,7 @@ fn tier_entry<'a, V: Default>(tiers: &'a mut HashMap<Tier, V>, tier: &Tier) -> &
 }
 
 /// The always-present `totals.json` track and its per-tier sums. Never pruned
-/// while the broadcast lives, so it is cumulative within the broadcast instance.
+/// while the broadcast lives, so it is cumulative within the broadcast identity.
 struct TotalsTrack {
 	output: Output<Totals>,
 	sums: Cumulative<Totals>,
@@ -1255,7 +1247,7 @@ impl NodePublisher {
 	/// Announce a broadcast at `advertised` with its totals track and, at depth 0,
 	/// the one bucket's track, which both live for the publisher's life.
 	fn create(task: &Task, advertised: &Path) -> Option<Self> {
-		// A fresh instance per announcement: a restart is a new broadcast, so no relay
+		// A fresh identity per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
 		let route = match task.origin.route(advertised, origin::RouteOptions::default()) {
 			Ok(route) => route,
@@ -1435,10 +1427,10 @@ impl NodePublisher {
 	/// Any other name is rejected: a bucket's track is served only while it is
 	/// listed.
 	fn serve_requests(&mut self, report: &Report, tick: u64, stamp: Stamp) {
-		// Reclaim before adopting, so a request for a track just reclaimed is
+		// Drop the unwanted before adopting, so a reader that joined as one dropped is
 		// served again by this very drain.
-		self.presence.retain(|_, track| !track.output.reclaim());
-		self.prefixes.retain(|_, track| !track.output.reclaim());
+		self.presence.retain(|_, track| !track.output.unwanted());
+		self.prefixes.retain(|_, track| !track.output.unwanted());
 
 		// Pop everything queued, keeping one request per name so each track is
 		// built from an actual request.
@@ -1639,28 +1631,33 @@ mod tests {
 		}
 	}
 
-	/// Reclaiming ends a track only while nobody wants it, in one step with a reader's
-	/// arrival: a reader that joined since the last drain keeps the track open and live.
-	#[test]
-	fn reclaim_spares_a_track_a_reader_joined() {
+	/// Dropping a track nobody wants ends it cleanly, and a reader that joined before the drop
+	/// is handed to the broadcast's handler as a fresh request rather than failing.
+	#[kio::test]
+	async fn dropping_an_unwanted_track_serves_a_late_reader_again() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("t.json", info()).unwrap();
-		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), config());
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
 		let frame = |n| Frame {
 			entries: vec![(Path::from_static("a"), n)],
 		};
+
+		let mut snapshot = Snapshot::<Frame<u64>>::new(broadcast.create_track("t.json", info()).unwrap(), config());
 		snapshot.update(&frame(1), stamp(1)).unwrap();
-		assert!(!track.demand().wanted(), "nobody reads it yet");
+		assert!(snapshot.unwanted(), "nobody reads it yet");
+		let demand = snapshot.track.demand();
+		drop(snapshot);
+		assert!(matches!(demand.closed().await, Ok(())));
 
-		// Joins after the unwanted reading a two-step check acted on.
-		let reader = track.subscribe(None);
-		assert!(!snapshot.reclaim(), "the reader keeps it");
-		assert!(!track.is_closed());
-		assert!(snapshot.update(&frame(2), stamp(2)).unwrap().is_some(), "still live");
-
+		let mut snapshot = Snapshot::<Frame<u64>>::new(broadcast.create_track("t.json", info()).unwrap(), config());
+		snapshot.update(&frame(1), stamp(1)).unwrap();
+		assert!(snapshot.unwanted());
+		// Joins after the unwanted reading the drain acted on.
+		let reader = consumer.track("t.json").unwrap().subscribe(None).await.unwrap();
+		drop(snapshot);
+		let again = requests.requested_track().await.unwrap();
+		assert_eq!(again.name(), "t.json");
 		drop(reader);
-		assert!(snapshot.reclaim(), "unwanted again");
-		assert!(track.is_closed());
 	}
 
 	/// A joiner once the deltas outweigh the track's ratio gets a fresh snapshot group in
@@ -2013,7 +2010,7 @@ mod tests {
 	use std::collections::BTreeMap;
 
 	use moq_net::stats::{Registry, Tier};
-	use moq_net::{Instance, Timestamp, broadcast, track};
+	use moq_net::{Identity, Timestamp, broadcast, track};
 
 	use super::*;
 	use crate::{PrefixFrame, PresenceFrame, TotalsFrame};
@@ -2312,46 +2309,46 @@ mod tests {
 		))
 	}
 
-	/// A producer restarted on the same origin ends its old instance and announces
+	/// A producer restarted on the same origin ends its old identity and announces
 	/// the same path under a new one.
 	#[tokio::test(start_paused = true)]
-	async fn restarted_producer_announces_a_new_instance() {
+	async fn restarted_producer_announces_a_new_identity() {
 		let origin = produce_origin();
 		let mut events = origin.consume().with_hidden(true).routes();
 
 		let first = node_producer(&origin);
 		drive_tick().await;
-		let [(path, true, before)] = &take_instances(&mut events)[..] else {
+		let [(path, true, before)] = &take_identities(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		assert_eq!(path, ".stats/node/sjc");
 
 		drop(first);
 		drive_tick().await;
-		assert_eq!(take_instances(&mut events), [(path.clone(), false, before.clone())]);
+		assert_eq!(take_identities(&mut events), [(path.clone(), false, before.clone())]);
 
 		let _second = node_producer(&origin);
 		drive_tick().await;
-		let [(after_path, true, after)] = &take_instances(&mut events)[..] else {
+		let [(after_path, true, after)] = &take_identities(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		assert_eq!(after_path, path);
-		assert_ne!(after, before, "a restart mints a new instance");
+		assert_ne!(after, before, "a restart mints a new identity");
 	}
 
-	/// A restart while the old instance is still announced (a route the mesh
-	/// has not withdrawn yet) takes the path at once: the newer instance restarts
+	/// A restart while the old identity is still announced (a route the mesh
+	/// has not withdrawn yet) takes the path at once: the newer identity restarts
 	/// it, so a reader re-requests the new broadcast instead of stalling on the
-	/// old one, while the old subscription stays on the old instance.
+	/// old one, while the old subscription stays on the old identity.
 	#[tokio::test(start_paused = true)]
-	async fn restart_replaces_a_still_announced_instance() {
+	async fn restart_replaces_a_still_announced_identity() {
 		let origin = produce_origin();
 		let mut events = origin.consume().with_hidden(true).routes();
 
 		let first = node_producer(&origin);
 		let _f1 = feed(first.registry(), Tier::default(), "foo/bar", true, 1, 100).await;
 		drive_tick().await;
-		let [(path, true, before)] = &take_instances(&mut events)[..] else {
+		let [(path, true, before)] = &take_identities(&mut events)[..] else {
 			panic!("expected one announce");
 		};
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
@@ -2365,8 +2362,8 @@ mod tests {
 		let second = node_producer(&origin);
 		let _f2 = feed(second.registry(), Tier::default(), "foo/bar", true, 1, 30).await;
 		drive_tick().await;
-		let [(started, true, after)] = &take_instances(&mut events)[..] else {
-			panic!("expected the new instance to restart the path");
+		let [(started, true, after)] = &take_identities(&mut events)[..] else {
+			panic!("expected the new identity to restart the path");
 		};
 		assert_eq!(started, path);
 		assert_ne!(after, before);
@@ -2392,13 +2389,13 @@ mod tests {
 
 		let _newer = node_producer(&origin);
 		drive_tick().await;
-		let [(_, true, _)] = &take_instances(&mut events)[..] else {
+		let [(_, true, _)] = &take_identities(&mut events)[..] else {
 			panic!("expected the newer producer's announce");
 		};
 
 		publisher.run().await;
 		drive_tick().await;
-		assert_eq!(take_instances(&mut events), []);
+		assert_eq!(take_identities(&mut events), []);
 	}
 
 	/// Cancelling a running publisher ends its tracks deliberately, so a reader
@@ -2731,13 +2728,13 @@ mod tests {
 	}
 
 	/// The announce events buffered so far in delivery order, as
-	/// `(path, active, instance)`.
-	fn take_instances(events: &mut origin::Routes) -> Vec<(String, bool, Instance)> {
+	/// `(path, active, identity)`.
+	fn take_identities(events: &mut origin::Routes) -> Vec<(String, bool, Identity)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
-			let instance = update.route.instance().clone();
-			out.push((update.prefix.as_str().to_string(), active, instance));
+			let identity = update.route.identity().clone();
+			out.push((update.prefix.as_str().to_string(), active, identity));
 		}
 		out
 	}

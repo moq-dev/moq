@@ -50,7 +50,7 @@ impl Properties {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TrackProperties {
 	/// The draft the publisher spoke, which serialized these and every object's [`Block`]
-	/// and gives each property its meaning. A publisher on another draft is a new instance.
+	/// and gives each property its meaning. A publisher on another draft is a new identity.
 	pub version: crate::ietf::Version,
 	/// The Track Properties moq-net does not interpret, in arrival order, which is
 	/// ascending, with Immutable Properties (0x0b) as its serialized bytes.

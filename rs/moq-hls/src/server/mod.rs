@@ -5,19 +5,21 @@
 //! ```text
 //! GET /{broadcast}/master.m3u8
 //! GET /{broadcast}/manifest.mpd
-//! GET /{broadcast}/@{instance}/{kind}/{rendition}/media.m3u8
-//! GET /{broadcast}/@{instance}/{kind}/{rendition}/init.{hash}.mp4
-//! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{tag}.{segment}.m4s
-//! GET /{broadcast}/@{instance}/{kind}/{rendition}/seg/{tag}.t{pts}.m4s
+//! GET /{broadcast}/@{token}/{kind}/{rendition}/media.m3u8
+//! GET /{broadcast}/@{token}/{kind}/{rendition}/init.{hash}.mp4
+//! GET /{broadcast}/@{token}/{kind}/{rendition}/seg/{tag}.{segment}.m4s
+//! GET /{broadcast}/@{token}/{kind}/{rendition}/seg/{tag}.t{pts}.m4s
 //! ```
 //!
 //! The master playlist and manifest list the stream serving the broadcast now, and every
-//! URL they list is under that `@{instance}`: its instance, which a session mints for a route
-//! whose wire carries none. A publisher that restarts gets its own URLs, so a playlist URL
-//! never resets its media sequence. A replaced instance keeps serving its URLs while its
-//! broadcast stays open, but its playlists end at the segments listed before the replacement,
-//! even if its publisher keeps sending, so a player already on it plays those out and then
-//! reloads the master to reach the replacement. A recording cursor on it ends there too.
+//! URL they list is under that `@{token}`: a 64-bit hash of its identity, which a session
+//! mints for a route whose wire carries none, together with whether it was minted, so a minted
+//! identity and a named one with the same text never share URLs. A publisher that restarts gets
+//! its own URLs, so a playlist URL never resets its media sequence. A replaced identity keeps
+//! serving its URLs while its broadcast stays open, but its playlists end at the segments listed
+//! before the replacement, even if its publisher keeps sending, so a player already on it plays
+//! those out and then reloads the master to reach the replacement. A recording cursor on it
+//! ends there too.
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
 //! name address distinct resources. The two `seg/` forms name the same bytes: HLS
@@ -31,7 +33,7 @@
 //! Every request is served. To gate access, wrap [`Server::router`] in your own
 //! [`axum`] middleware. It runs before routing, so a rejected request never reaches
 //! the origin, but it also sees the raw request URI rather than the path segments
-//! the server decodes. A broadcast occupies every segment before the instance (or the
+//! the server decodes. A broadcast occupies every segment before the `@{token}` (or the
 //! master and manifest), still percent-encoded: `/project/li%76e/master.m3u8` serves the
 //! broadcast `project/live`. Decode each segment before matching it against a policy, or a
 //! name can be encoded past the check.
@@ -95,74 +97,77 @@ struct Inner {
 	broadcasts: Mutex<HashMap<String, Arc<Followed>>>,
 }
 
-/// The publisher instances serving one broadcast path.
+/// The publisher identities serving one broadcast path.
 struct Followed {
-	instances: Mutex<Instances>,
+	identities: Mutex<Identities>,
 	/// Follows the path. Aborted with the last handle, so a dropped server stops following.
 	task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-struct Instances {
-	/// The instance the master playlist and manifest list: the latest to take over.
+struct Identities {
+	/// The identity the master playlist and manifest list: the latest to take over.
 	current: Broadcaster,
-	/// Every instance a listed URL still names, the current one included. A replaced instance
+	/// Every identity a listed URL still names, the current one included. A replaced identity
 	/// stays until its broadcast closes, so a player already on it plays out what it listed.
 	by_id: HashMap<Arc<str>, Broadcaster>,
 }
 
 impl Followed {
 	fn new(current: Broadcaster) -> Self {
-		let by_id = HashMap::from([(current.instance().clone(), current.clone())]);
+		let by_id = HashMap::from([(current.token().clone(), current.clone())]);
 		Self {
-			instances: Mutex::new(Instances { current, by_id }),
+			identities: Mutex::new(Identities { current, by_id }),
 			task: Mutex::new(None),
 		}
 	}
 
 	fn current(&self) -> Broadcaster {
-		self.instances.lock().unwrap().current.clone()
+		self.identities.lock().unwrap().current.clone()
 	}
 
-	fn instance(&self, id: &str) -> Option<Broadcaster> {
-		self.instances.lock().unwrap().by_id.get(id).cloned()
+	fn identity(&self, id: &str) -> Option<Broadcaster> {
+		self.identities.lock().unwrap().by_id.get(id).cloned()
 	}
 
-	/// List `broadcaster` from now on. An instance returning after a gap keeps its instance, and
+	/// List `broadcaster` from now on. An identity returning after a gap keeps its identity, and
 	/// so its id, which then names the new broadcaster.
 	///
 	/// One still open is being replaced: its playlists and recordings end at what it listed so
 	/// far, even while its publisher keeps sending. It is cut before the replacement is listed,
 	/// so no reader that sees the replacement finds the old playlists still growing. The
 	/// replacement never waits on that drain.
-	/// If that instance takes the path back, it is served afresh under the same id: it reads the
+	/// If that identity takes the path back, it is served afresh under the same id: it reads the
 	/// same records, so its segment URLs name the same bytes, and playlists are never cached, so
 	/// only a player that reloads its ended playlist sees it go on.
 	fn start(&self, broadcaster: Broadcaster) {
-		let mut instances = self.instances.lock().unwrap();
-		if !instances.current.is_clone(&broadcaster) && !instances.current.is_closed() {
-			instances.current.replaced();
+		let mut identities = self.identities.lock().unwrap();
+		if !identities.current.is_clone(&broadcaster) && !identities.current.is_closed() {
+			identities.current.replaced();
 		}
-		instances
+		identities
 			.by_id
-			.insert(broadcaster.instance().clone(), broadcaster.clone());
-		instances.current = broadcaster;
+			.insert(broadcaster.token().clone(), broadcaster.clone());
+		identities.current = broadcaster;
 	}
 
-	/// Keep serving every instance of `replaced` still open, unless this one lists its id.
+	/// Keep serving every identity of `replaced` still open, unless this one lists its id.
 	fn adopt(&self, replaced: &Followed) {
-		let replaced = replaced.instances.lock().unwrap();
-		let mut instances = self.instances.lock().unwrap();
+		let replaced = replaced.identities.lock().unwrap();
+		let mut identities = self.identities.lock().unwrap();
 		for (id, broadcaster) in &replaced.by_id {
 			if !broadcaster.is_closed() {
-				instances.by_id.entry(id.clone()).or_insert_with(|| broadcaster.clone());
+				identities
+					.by_id
+					.entry(id.clone())
+					.or_insert_with(|| broadcaster.clone());
 			}
 		}
 	}
 
-	/// Forget every instance whose broadcast closed, registering `waiter` on the rest.
+	/// Forget every identity whose broadcast closed, registering `waiter` on the rest.
 	fn forget_closed(&self, waiter: &kio::Waiter) {
-		let mut instances = self.instances.lock().unwrap();
-		instances
+		let mut identities = self.identities.lock().unwrap();
+		identities
 			.by_id
 			.retain(|_, broadcaster| broadcaster.poll_closed(waiter).is_pending());
 	}
@@ -196,31 +201,31 @@ impl Server {
 		routes::router(self.clone())
 	}
 
-	/// The [`Broadcaster`] for the publisher instance serving `name` now, following each
-	/// instance that takes over. Returns `None` if the broadcast is not announced once the
+	/// The [`Broadcaster`] for the publisher identity serving `name` now, following each
+	/// identity that takes over. Returns `None` if the broadcast is not announced once the
 	/// origin has synced with the relay.
 	///
-	/// Once another instance takes over, the one returned here ends: its playlists and its
+	/// Once another identity takes over, the one returned here ends: its playlists and its
 	/// [`renditions`](Broadcaster::renditions) and [`segments`](crate::export::Rendition::segments)
 	/// cursors finish cleanly after the segments it listed before the takeover, even if its
 	/// publisher keeps sending. Ask again for the replacement, which starts at once.
 	///
-	/// Spawns the path's follower and each instance's driver on the tokio runtime, since the
+	/// Spawns the path's follower and each identity's driver on the tokio runtime, since the
 	/// server is an axum edge. The follower ends once the path is forgotten or the server
 	/// drops; a driver lasts while its [`Broadcaster`] or renditions are held.
 	pub async fn broadcaster(&self, name: &str) -> Option<Broadcaster> {
 		Some(self.followed(name).await?.current())
 	}
 
-	/// The [`Broadcaster`] for the publisher instance `id` of `name`, until its broadcast
+	/// The [`Broadcaster`] for the publisher identity `id` of `name`, until its broadcast
 	/// closes.
-	pub(crate) async fn instance(&self, name: &str, id: &str) -> Option<Broadcaster> {
-		self.followed(name).await?.instance(id)
+	pub(crate) async fn identity(&self, name: &str, id: &str) -> Option<Broadcaster> {
+		self.followed(name).await?.identity(id)
 	}
 
-	/// Follow `name` from the instance serving it now, unless it is followed already.
+	/// Follow `name` from the identity serving it now, unless it is followed already.
 	async fn followed(&self, name: &str) -> Option<Arc<Followed>> {
-		// Once the listed instance closes, its follower is about to move on or forget the path, so
+		// Once the listed identity closes, its follower is about to move on or forget the path, so
 		// resolve whatever serves the path now instead.
 		if let Some(followed) = self.inner.broadcasts.lock().unwrap().get(name)
 			&& !followed.current().is_closed()
@@ -228,7 +233,7 @@ impl Server {
 			return Some(followed.clone());
 		}
 
-		let instances = self
+		let identities = self
 			.inner
 			.origin
 			.follow(name, None)
@@ -257,7 +262,7 @@ impl Server {
 				if !existing.current().is_closed() {
 					return Some(existing.clone());
 				}
-				// A player may still be on a replaced instance of another instance, which the
+				// A player may still be on a replaced identity of another identity, which the
 				// fresh resolution does not list.
 				followed.adopt(existing);
 			}
@@ -268,7 +273,7 @@ impl Server {
 			inner: Arc::downgrade(&self.inner),
 			name: name.to_string(),
 			followed: Arc::downgrade(&followed),
-			instances,
+			identities,
 			served: Some(broadcast),
 		};
 		let task = tokio::spawn(kio::wait(move |waiter| follow.poll(waiter)));
@@ -278,9 +283,9 @@ impl Server {
 }
 
 impl Inner {
-	/// A broadcaster serving the instance `broadcast`.
+	/// A broadcaster serving the identity `broadcast`.
 	///
-	/// Its driver runs on its own task rather than the path's follower: a replaced instance
+	/// Its driver runs on its own task rather than the path's follower: a replaced identity
 	/// keeps serving after the follower that started it moves on, and the driver ends with the
 	/// broadcaster.
 	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Broadcaster {
@@ -291,20 +296,20 @@ impl Inner {
 	}
 }
 
-/// Follows `name`'s instances into `followed` until nothing serves the path, then forgets it, so
+/// Follows `name`'s identities into `followed` until nothing serves the path, then forgets it, so
 /// the next request follows the path afresh. Holds both weakly, so it never keeps the server's
-/// state alive; dropping `followed` aborts it. `served` is the instance `followed` starts on, which
+/// state alive; dropping `followed` aborts it. `served` is the identity `followed` starts on, which
 /// the follower hands out first unless another took over since, or folds away if it closed first.
 struct Follow {
 	inner: Weak<Inner>,
 	name: String,
 	followed: Weak<Followed>,
-	instances: moq_net::origin::Following,
+	identities: moq_net::origin::Following,
 	served: Option<moq_net::broadcast::Consumer>,
 }
 
 impl Follow {
-	/// The next instance event, or `None` once `followed` is gone.
+	/// The next identity event, or `None` once `followed` is gone.
 	fn poll_next(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -313,11 +318,11 @@ impl Follow {
 			return Poll::Ready(None);
 		};
 		followed.forget_closed(waiter);
-		if let Poll::Ready(next) = self.instances.poll_available(waiter) {
+		if let Poll::Ready(next) = self.identities.poll_available(waiter) {
 			return Poll::Ready(Some(next));
 		}
-		// The follower folds away an instance that started and ended before its first poll,
-		// so the served instance closing before it is handed out means nothing serves the path.
+		// The follower folds away an identity that started and ended before its first poll,
+		// so the served identity closing before it is handed out means nothing serves the path.
 		match &self.served {
 			Some(served) => served.poll_closed(waiter).map(|()| Some(Ok(None))),
 			None => Poll::Pending,
@@ -481,7 +486,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn broadcaster_replaces_finished_cached_instance() {
+	async fn broadcaster_replaces_finished_cached_identity() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let stale = closed_broadcaster().await;
@@ -544,48 +549,48 @@ mod tests {
 		panic!("never happened");
 	}
 
-	/// A replacement becomes the instance the entry points list, under its own id, while the old
-	/// instance keeps serving its URLs until its broadcast closes. Once nothing serves the path,
+	/// A replacement becomes the identity the entry points list, under its own id, while the old
+	/// identity keeps serving its URLs until its broadcast closes. Once nothing serves the path,
 	/// the server forgets it.
 	#[tokio::test(start_paused = true)]
-	async fn a_replaced_instance_serves_until_it_closes() {
+	async fn a_replaced_identity_serves_until_it_closes() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let old = origin
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
-		let old_instance = old.instance();
+		let old_token = crate::export::token(&old.identity());
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
-		assert_eq!(first.instance().as_ref(), old_instance.as_str());
+		assert_eq!(first.token(), &old_token);
 
 		let new = origin
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
-		let new_instance = new.instance();
+		let new_token = crate::export::token(&new.identity());
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
-			current.instance().as_ref() == new_instance.as_str()
+			*current.token() == new_token
 		})
 		.await;
-		let kept = server.instance("live", old_instance.as_str()).await;
+		let kept = server.identity("live", &old_token).await;
 		assert!(
 			kept.is_some_and(|kept| kept.is_clone(&first)),
-			"the old instance serves"
+			"the old identity serves"
 		);
 
 		drop(old);
-		eventually(async || server.instance("live", old_instance.as_str()).await.is_none()).await;
-		assert!(server.instance("live", new_instance.as_str()).await.is_some());
+		eventually(async || server.identity("live", &old_token).await.is_none()).await;
+		assert!(server.identity("live", &new_token).await.is_some());
 
 		drop(new);
 		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;
 	}
 
-	/// An instance that goes before the follower first runs is folded away by it, so the served
-	/// instance closing is what tells the server that nothing serves the path.
+	/// An identity that goes before the follower first runs is folded away by it, so the served
+	/// identity closing is what tells the server that nothing serves the path.
 	#[tokio::test(start_paused = true)]
-	async fn an_instance_gone_before_the_follower_runs_is_forgotten() {
+	async fn an_identity_gone_before_the_follower_runs_is_forgotten() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let publication = origin
@@ -600,11 +605,11 @@ mod tests {
 		assert!(broadcaster.is_closed());
 	}
 
-	/// A request that finds the listed instance closed before the follower does resolves the path
-	/// afresh, yet a replaced instance still open keeps its URLs: its instance names them, so the
+	/// A request that finds the listed identity closed before the follower does resolves the path
+	/// afresh, yet a replaced identity still open keeps its URLs: its identity names them, so the
 	/// fresh resolution of that same stream serves them on.
 	#[tokio::test]
-	async fn a_closed_current_instance_keeps_the_open_ones() {
+	async fn a_closed_current_identity_keeps_the_open_ones() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default()).unwrap();
 		let _old = origin
@@ -613,7 +618,7 @@ mod tests {
 		settle().await;
 		let open = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 
-		// The follower has not yet seen the takeover instance close.
+		// The follower has not yet seen the takeover identity close.
 		let followed = Followed::new(open.clone());
 		followed.start(closed_broadcaster().await);
 		server
@@ -625,10 +630,10 @@ mod tests {
 
 		let current = server.broadcaster("live").await.expect("broadcast announced");
 		assert!(!current.is_closed());
-		let kept = server.instance("live", open.instance()).await;
+		let kept = server.identity("live", open.token()).await;
 		assert!(
-			kept.is_some_and(|kept| kept.instance() == open.instance() && !kept.is_closed()),
-			"the open instance lost its URLs"
+			kept.is_some_and(|kept| kept.token() == open.token() && !kept.is_closed()),
+			"the open identity lost its URLs"
 		);
 	}
 }

@@ -110,7 +110,7 @@ test("a frame read late keeps the instant it landed, plain, compressed, or resum
 		replacement.writeFrame(textFrame("b"));
 		hooks.recoverGroup(resumed, {
 			changed: new Signal(0),
-			wants: (failed) => failed !== undefined,
+			wants: (cause) => cause.kind === "failed",
 			replace: async () => ({
 				group: replacement.mirror(),
 				expiry: { expired: () => false, changed: [] },
@@ -155,7 +155,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		replacement.writeFrame(textFrame("b"));
 		hooks.recoverGroup(resumed, {
 			changed: new Signal(0),
-			wants: (failed) => failed !== undefined,
+			wants: (cause) => cause.kind === "failed",
 			replace: async () => ({
 				group: replacement.mirror(),
 				expiry: { expired: () => false, changed: [] },
@@ -764,7 +764,7 @@ test("a group that ends on its own abandons the replacement it asked for", async
 	hooks.recoverGroup(consumer, {
 		changed: route,
 		// A stall looks past the copy once the route moved.
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		replace: (_index, _failed, abort) => {
 			signal = abort;
 			return new Promise(() => {});
@@ -799,7 +799,7 @@ test.each([false, true])("a group ending beside its replacement discards it (con
 		close: () => {
 			released++;
 		},
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		replace: () =>
 			new Promise((r) => {
 				resolve = r;
@@ -843,7 +843,7 @@ test("a group recovered twice reads on and settles", async () => {
 	let next = 0;
 	hooks.recoverGroup(consumer, {
 		changed: route,
-		wants: (failed) => failed !== undefined,
+		wants: (cause) => cause.kind === "failed",
 		replace: async () => ({
 			group: replacements[next++].mirror(),
 			expiry: { expired: () => false, changed: [] },
@@ -878,6 +878,43 @@ test("a group recovered twice reads on and settles", async () => {
 	expect(await consumer.closed).toBeNull();
 });
 
+// A metadata Group Stream reads headers alone, so a copy that fails partway through a frame
+// leaves no payload torn, and the group reads on from the route that replaced it.
+test("a header read takes a frame cut short without tearing it", async () => {
+	const producer = new Producer(0n);
+	const consumer = producer.mirror();
+	const replacement = new Producer(0n);
+	hooks.recoverGroup(consumer, {
+		changed: new Signal(0),
+		wants: (cause) => cause.kind === "failed",
+		replace: async () => ({
+			group: replacement.mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {},
+			discard: () => {},
+		}),
+	});
+	// A publisher races its writes against `closed`, so it exists before any read.
+	const closed = consumer.closed;
+	const at = Timestamp.unscaled(producer.start);
+	producer.writeFrame(textFrame("a", at));
+	producer.createFrame({ size: 10, timestamp: at }).write(new Uint8Array(4));
+	producer.abort(new Error("route failed"));
+
+	const header = () => hooks.readGroupFrame(consumer, false, 0, true);
+	expect((await header())?.index).toBe(0);
+	const cut = await header();
+	expect(cut?.index).toBe(1);
+	expect(cut?.chunks?.size).toBe(10);
+	expect(closed.peek()).toBeUndefined();
+
+	for (const text of ["a", "0123456789", "c"]) replacement.writeFrame(textFrame(text, at));
+	replacement.finish();
+	expect((await header())?.index).toBe(2);
+	expect(await header()).toBeUndefined();
+	expect(await closed).toBeNull();
+});
+
 test("a stalled group whose copy then fails asks again with the failure", async () => {
 	const producer = new Producer(0n);
 	const consumer = producer.mirror();
@@ -885,7 +922,7 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 	const verdict = new Error("refused");
 	hooks.recoverGroup(consumer, {
 		changed: route,
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		// A stall waits for the route; a failure gets the route's verdict.
 		replace: (_index, cause) => (cause.kind === "failed" ? Promise.reject(verdict) : new Promise(() => {})),
 	});

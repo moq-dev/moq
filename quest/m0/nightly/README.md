@@ -193,7 +193,7 @@ the mesh replay's reader stranded after every link of its source's relay reopene
 ([moq-dev/moq#9236](https://github.com/moq-dev/moq/pull/9236)). Owned by open PRs or
 quests: the 11-22 resume mutants
 ([moq-dev/moq#9393](https://github.com/moq-dev/moq/pull/9393),
-[resume and route mutants](/quest/m0/nightly/resume-route-mutants.md)), quic-interop's
+[moq-dev/moq#9750](https://github.com/moq-dev/moq/pull/9750)), quic-interop's
 lossy handshake cells ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
 [moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
 [moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)), the TLA+ failover model's
@@ -212,3 +212,88 @@ holds it makes the lagging stream's older batch a real change, which marks the c
 so the relay works its ways out again, a constant cost per step. The bench's comment now
 says so. Nightly compares against a base that already carries the cost, so it will not
 flag it again.
+
+Triaged 2026-11-25 (pre-0.22 recurring audits), from run
+[45242597151](https://github.com/moq-dev/moq/actions/runs/45242597151) (`b29b90be29`):
+`Tests (test resume-model)` at seed `1465722607` was fixed by
+[moq-dev/moq#9509](https://github.com/moq-dev/moq/pull/9509); `Nightly (JS coverage)`'s
+`widened_max_age.test.ts` failure is
+[moq-dev/moq#9607](https://github.com/moq-dev/moq/pull/9607); and
+`Shipping sizes`' +10% `moq_ffi.dll.lib` is the Windows import library growing with the
+exports [moq-dev/moq#9359](https://github.com/moq-dev/moq/pull/9359) added, while every
+shipped library stayed under the 5% bound. Already owned: `Tests (rs quic-sim)`'s
+`many_groups_carry_bulk_transfers_losslessly` by
+[moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439), and the paired benchmark
+regressions by [perf-recheck](/quest/m3/release/perf-recheck.md).
+
+Triaged 2026-11-26 (maintainer, /quest-plan), from Nightly runs
+[45667362304](https://github.com/moq-dev/moq/actions/runs/45667362304) (`420b8dcb0d`) and
+[45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463) (`4fba5df73f`),
+scheduled Interop [45873739689](https://github.com/moq-dev/moq/actions/runs/45873739689), and
+TS [45872586504](https://github.com/moq-dev/moq/actions/runs/45872586504). New children: the
+JS resume model's failed final group, the route sweep's job split, the bursty audio rows, and
+the 11-26 paired regressions; two Interop children went to
+[interop green](/quest/m0/interop-green/README.md), and the Pages deploy to
+[CI](/quest/m0/ci/README.md). The macOS moq-cli tarball's crc-fast link failure is fixed by
+[moq-dev/moq#9728](https://github.com/moq-dev/moq/pull/9728). Fixed on `main` since: the track
+bench ([moq-dev/moq#9635](https://github.com/moq-dev/moq/pull/9635); 11-26 failed only on its
+base), `widened_max_age` ([moq-dev/moq#9607](https://github.com/moq-dev/moq/pull/9607)),
+cli-export ([moq-dev/moq#9662](https://github.com/moq-dev/moq/pull/9662)), and the TS
+congested path ([moq-dev/moq#9621](https://github.com/moq-dev/moq/pull/9621)). Owned by open
+PRs: Windows' CRLF crate names ([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545))
+and quic-interop's lossy handshakes ([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
+[moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
+[moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)); the 11-26 mutants went to
+[moq-dev/moq#9750](https://github.com/moq-dev/moq/pull/9750). Dropped as one-night
+failures (re-check if one repeats): `benchmark_receive_windows`' `group timed out` on a
+non-skipped cell, the Firefox player's `after resume` tone at 65/75 samples, Interop's
+Chromium `volume 0.25` at 27/31 samples, Interop's `finish go -> *` gst reader on 11-25, and
+the supplemental benchmarks' 55-minute step timeout on 11-25 (28 minutes compiling).
+
+Bisected 2026-11-27 (maintainer away; agent recommendation, for review), the paired
+regressions Nightly [45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463)
+confirmed, still on `main` at `83e10f008a`. Counted in user instructions per iteration on one
+pinned core, since wall time on the shared host varied by up to 30% between runs:
+
+- `moq-audio/capture` `capture_fanout/*`: from
+  [moq-dev/moq#9675](https://github.com/moq-dev/moq/pull/9675). Once kio left the workspace,
+  `cargo hakari` unified its test-only `sim` and `manual` features into the workspace-hack,
+  so every bench and test build compiled kio's per-poll accounting: 13 more instructions per
+  read, +3.9% to +9.7% per cell. Release builds never carried it. [moq-dev/moq#9747](https://github.com/moq-dev/moq/pull/9747) excludes kio from the
+  workspace-hack (`.config/hakari.toml`), which restores every cell's count to the base's.
+- `moq-net/session` `session_delivery_group_cost_cpu/moq-lite-07-wip/.../publishers=16/.../viewers=1`:
+  from [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529), not #9686 (about 1,000
+  instructions). It cost every version 6 allocations and about 11,000 instructions (+2.3%)
+  per viewer-group: 487,300 at the base, 500,200 on `main`. [moq-dev/moq#9747](https://github.com/moq-dev/moq/pull/9747) removes the
+  allocations (a `Vec` per arrival walk, and a group consumed only to judge it stale),
+  leaving 498,500. Accepted: the remaining 2.3% pays for serving held groups in Group
+  Order, where a newest-first read judges the oldest group it holds before handing out a
+  newer one. Fastest-of-six cycles agree: +2.4% on `main`, +1.4% with #9747, not +11%.
+
+Triaged 2026-11-27 (maintainer, /quest-plan). No scheduled run had finished since 11-26's
+[45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463), and the 11 dispatched
+runs since are the automated bisect of its paired regressions, at commits from before the 11-27
+fixes, so the triage read them only for failures that predate no fix. New children: the Firefox
+player's lifecycle steps, which failed 6 of 15 runs at a different step almost every time
+([interop green](/quest/m0/interop-green/README.md); every failure predates
+[moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561)'s 100 ms audio groups, so
+[moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809) deleted it), and the MediaCodec
+keyframe test (fixed by [moq-dev/moq#9814](https://github.com/moq-dev/moq/pull/9814)). Fixed by
+[moq-dev/moq#9785](https://github.com/moq-dev/moq/pull/9785): `Features (rs features)`'s
+`concurrent_ephemeral_groups_all_bind`, where an ephemeral group failed with `Overlap` on a port
+another address's group had locked. Fixed on `main` since: the resume model's seed `478520378`
+(passes at `f7a41c3ea5`), moq-ffi's `server_client_run_end_draft22`
+([moq-dev/moq#9722](https://github.com/moq-dev/moq/pull/9722)), and the benches, cli-export, and
+route-sweep, which failed only at commits before
+[moq-dev/moq#9747](https://github.com/moq-dev/moq/pull/9747),
+[moq-dev/moq#9662](https://github.com/moq-dev/moq/pull/9662), and
+[moq-dev/moq#9751](https://github.com/moq-dev/moq/pull/9751). Owned by open PRs: Audio quality
+([moq-dev/moq#9783](https://github.com/moq-dev/moq/pull/9783)), mutants
+([moq-dev/moq#9750](https://github.com/moq-dev/moq/pull/9750),
+[moq-dev/moq#9623](https://github.com/moq-dev/moq/pull/9623)), Windows
+([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545)), and quic-interop
+([moq-dev/moq#9445](https://github.com/moq-dev/moq/pull/9445),
+[moq-dev/moq#9447](https://github.com/moq-dev/moq/pull/9447),
+[moq-dev/moq#9453](https://github.com/moq-dev/moq/pull/9453)). Scheduled run
+[46038678705](https://github.com/moq-dev/moq/actions/runs/46038678705) (`f7a41c3ea5`), the first
+with those fixes, goes to the next triage.

@@ -321,6 +321,58 @@ pub enum LimitsError {
 	Refused(String),
 }
 
+/// How long a session may go without hearing from its peer: [`Stale`](Liveness::Stale) after
+/// `soft`, closed as [`Error::IdleTimeout`](crate::Error::IdleTimeout) after `hard`.
+///
+/// The transport probes a peer that stays quiet for half of `soft`, and any packet the peer
+/// sends counts as hearing it, so a busy session pays nothing. Set it with
+/// `Client::with_keep_alive` or `Server::with_keep_alive`, and watch `Session::liveness`.
+/// Native QUIC and qmux (draft-01 and newer) can probe; any other transport refuses it when the
+/// session opens, as does a `hard` longer than the transport's idle timeout, which stays in
+/// force as a backstop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct KeepAlive {
+	/// How long the peer may go unheard before it counts as stale.
+	pub soft: std::time::Duration,
+	/// How long the peer may go unheard before the session closes.
+	pub hard: std::time::Duration,
+}
+
+impl KeepAlive {
+	/// Stale after `soft` unheard, closed after `hard`.
+	pub fn new(soft: std::time::Duration, hard: std::time::Duration) -> Self {
+		Self { soft, hard }
+	}
+}
+
+/// Whether a session heard from its peer within its [`KeepAlive`]'s `soft` limit.
+///
+/// Evidence about the whole session, never one track: a quiet track on a live session stays
+/// live.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Liveness {
+	/// The peer was heard within `soft`.
+	#[default]
+	Live,
+	/// `soft` passed without hearing from the peer; the session closes if `hard` does too.
+	Stale,
+}
+
+/// Why a transport refused a [`KeepAlive`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum KeepAliveError {
+	/// The transport cannot probe its peer, such as browser WebTransport or qmux draft-00.
+	#[error("the transport cannot probe its peer")]
+	Unsupported,
+	/// The transport refused the values, with its reason, such as a hard limit past its idle
+	/// timeout.
+	#[error("keep-alive refused: {0}")]
+	Refused(String),
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -523,6 +575,14 @@ pub mod poll {
 			None
 		}
 
+		/// Whether [`SendStream::reset_at`] still delivers its prefix to the peer's reader, such as
+		/// over raw QUIC with RESET_STREAM_AT negotiated, but never over WebTransport, whose browser
+		/// API may discard it anyway. A plain RESET_STREAM lets the peer discard bytes it has not
+		/// read, even acknowledged ones, so the default is `false`.
+		fn reliable_reset(&self) -> bool {
+			false
+		}
+
 		/// Apply `limits` to the live session, such as to open the receive window a server held
 		/// back until it admitted the peer.
 		///
@@ -532,6 +592,26 @@ pub mod poll {
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			let _ = limits;
 			Err(super::LimitsError::Unsupported)
+		}
+
+		/// Start `keep_alive`: probe the peer once half of its `soft` passes unheard, report it
+		/// [`Stale`](super::Liveness::Stale) through [`poll_liveness`](Self::poll_liveness)
+		/// once all of `soft` does, and close as an idle timeout once `hard` does. Any packet the
+		/// peer sends counts as hearing it, so a busy session sends no probe.
+		///
+		/// Errors with [`KeepAliveError::Unsupported`](super::KeepAliveError::Unsupported) when
+		/// the transport cannot probe its peer, which is the default, so the option never passes
+		/// silently.
+		fn set_keep_alive(&self, keep_alive: super::KeepAlive) -> Result<(), super::KeepAliveError> {
+			let _ = keep_alive;
+			Err(super::KeepAliveError::Unsupported)
+		}
+
+		/// Poll until the peer's liveness differs from `last`, returning it. Pending forever
+		/// without a keep-alive.
+		fn poll_liveness(&self, waiter: &kio::Waiter, last: super::Liveness) -> Poll<super::Liveness> {
+			let _ = (waiter, last);
+			Poll::Pending
 		}
 
 		/// Accept the next unidirectional stream opened by the peer.
@@ -739,8 +819,20 @@ pub mod poll {
 			(**self).receive_window()
 		}
 
+		fn reliable_reset(&self) -> bool {
+			(**self).reliable_reset()
+		}
+
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
+		}
+
+		fn set_keep_alive(&self, keep_alive: super::KeepAlive) -> Result<(), super::KeepAliveError> {
+			(**self).set_keep_alive(keep_alive)
+		}
+
+		fn poll_liveness(&self, waiter: &kio::Waiter, last: super::Liveness) -> Poll<super::Liveness> {
+			(**self).poll_liveness(waiter, last)
 		}
 	}
 
@@ -906,6 +998,15 @@ pub mod poll {
 		/// and so it matches [`finish`](Self::finish), which must not consume the stream
 		/// for exactly that reason.
 		fn reset(&mut self, code: u32);
+
+		/// Like [`reset`](Self::reset), but still deliver every byte before `offset`.
+		///
+		/// The peer reads those bytes before the reset's error only where the session's
+		/// [`reliable_reset`](Session::reliable_reset) says so; otherwise the transport may send a
+		/// plain reset once it delivered them, which lets the peer discard any it has not read. A
+		/// peer that stopped the stream gets the reset without them. Takes `&mut self` for the
+		/// same reasons as [`reset`](Self::reset).
+		fn reset_at(&mut self, offset: &Self::Offset, code: u32);
 
 		/// Poll until the stream is closed by either side.
 		///

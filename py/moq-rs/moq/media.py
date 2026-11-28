@@ -222,9 +222,10 @@ class TrackProducer:
         """Draw a group boundary here.
 
         Audio has no boundary of its own (every packet is independently
-        decodable), so this is the only thing that gives it groups: call it
-        after every frame for one group (one QUIC stream) the relay forwards
-        without waiting, or at a segment cadence to align with video. Video
+        decodable), so this is the only thing that gives it groups (one QUIC
+        stream each): call it after the frame that brings a group to about
+        100 ms, so the relay sees the group finish at once. Frames forward as
+        they are written either way. Video
         groups at its own keyframes and needs this only to override that.
         """
         self._inner.cut()
@@ -237,16 +238,6 @@ class TrackProducer:
         consumer can fail over between them.
         """
         self._inner.seek(start)
-
-    def abort_unwanted(self, error_code: int) -> bool:
-        """Abort this track with an application error code, but only while nobody wants it.
-
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
-        the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
-        returned ``None`` misses a reader that came and went, and waits on.
-        """
-        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
@@ -320,16 +311,6 @@ class TrackStreamProducer:
         """
         self._inner.set_enabled(enabled)
 
-    def abort_unwanted(self, error_code: int) -> bool:
-        """Abort this track with an application error code, but only while nobody wants it.
-
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
-        the track is closed, and ``False``, leaving the track open, when a reader joined since;
-        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
-        returned ``None`` misses a reader that came and went, and waits on.
-        """
-        return self._inner.abort_unwanted(error_code)
-
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
@@ -392,16 +373,18 @@ class GroupConsumer(_Stream[MediaFrame]):
     async context manager that cancels on exit.
     """
 
-    def __init__(self, group: _subscribe.GroupConsumer, container: Container) -> None:
-        """Decode ``group`` with the track's container, as each frame lands.
+    def __init__(self, group: _subscribe.GroupConsumer, id: str, rendition: Video | Audio) -> None:
+        """Decode ``group`` with the catalog rendition ``id``'s container and media role, as each frame lands.
 
+        Only the rendition's role and container are used, since ``group`` is
+        already the track's; the role tells an endpoint marker from a frame.
         Frame timestamps are container media time, not the transport's. Which
         groups arrive, and how long a stalled one stays readable, is the
         subscription's ``delay.max``. Takes over ``group``, whose handle is
         closed afterward; raises ``Error.AlreadyCommitted`` if it has already
         read a frame.
         """
-        self._inner = MoqMediaGroupConsumer(group._inner, container)
+        self._inner = MoqMediaGroupConsumer(group._inner, _rendition(id, rendition))
 
     @classmethod
     def _from_inner(cls, inner: MoqMediaGroupConsumer) -> GroupConsumer:

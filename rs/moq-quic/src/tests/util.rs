@@ -243,7 +243,28 @@ impl Pair {
 		self.drive();
 		let server_ch = self.server.assert_accept();
 		self.finish_connect(client_ch, server_ch);
+		self.settle_pacing();
 		(client_ch, server_ch)
+	}
+
+	/// Advance time until each connection's pacer holds a whole burst, as after the pause any
+	/// connection gets before the application writes. The MTU probes that end a handshake are
+	/// paced, so they leave the pacer spent at the instant the pair goes idle.
+	pub(super) fn settle_pacing(&mut self) {
+		loop {
+			let now = self.time;
+			let release = self
+				.client
+				.connections
+				.values_mut()
+				.chain(self.server.connections.values_mut())
+				.filter_map(|conn| conn.pacing_release(now))
+				.max();
+			match release {
+				Some(release) => self.time = release,
+				None => return,
+			}
+		}
 	}
 
 	/// Just start connecting the client

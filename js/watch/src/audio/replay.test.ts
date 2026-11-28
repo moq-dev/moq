@@ -20,6 +20,18 @@ function paced(seconds: number, lateness: (i: number) => number): Arrival[] {
 const observed = (seconds: number) => seconds * 1000 + 20;
 
 /**
+ * Seconds a replay graded once settled runs. Every simulated second costs real CPU against the test
+ * timeout, which a loaded host stretches, so a replay runs no longer than its settled state needs.
+ */
+const STEADY = 15;
+
+/**
+ * When a replay at auto has settled, in ms: the estimator spends its prior within six seconds of
+ * 500 ms folds, and the playhead rests on the clock by eight.
+ */
+const SETTLED = 10_000;
+
+/**
  * Quanta that came back short or empty once the ring had first played. A ring that runs dry
  * re-stalls until it refills, and that refill is silence too.
  */
@@ -86,8 +98,9 @@ describe("replay", () => {
 			return last;
 		};
 		expect(await counted(paced(10, () => 30))).toBe(0);
-		expect(await counted(trace)).toBeGreaterThan(0);
-		expect(await counted(trace)).toBeLessThanOrEqual(2);
+		const runs = await counted(trace);
+		expect(runs).toBeGreaterThan(0);
+		expect(runs).toBeLessThanOrEqual(2);
 	});
 
 	it("holds newer groups behind a missing one until the ring could no longer play it", async () => {
@@ -108,9 +121,11 @@ describe("replay", () => {
 	// missing media are owed. Media that overlaps the group below counts as back to back, as the consumer
 	// reads it.
 	it("waits out only the keys around missing media when groups are keyed by timestamp", async () => {
-		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) };
+		// A second is enough to play past the gap: the replay costs CPU per simulated second, and four of
+		// them run here.
+		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(1) };
 		const keyed = (duration: number) =>
-			paced(10, () => 30).map((arrival) => ({ ...arrival, group: arrival.timestamp * 1000, duration }));
+			paced(1, () => 30).map((arrival) => ({ ...arrival, group: arrival.timestamp * 1000, duration }));
 		// Audio heard, in ms: owed keys nobody sends would starve the whole replay.
 		const heard = async (trace: Arrival[]) => {
 			let samples = 0;
@@ -118,10 +133,10 @@ describe("replay", () => {
 			return (samples * 1000) / RATE;
 		};
 		const whole = await heard(keyed(20));
-		expect(whole).toBeGreaterThan(9000);
+		expect(whole).toBeGreaterThan(850);
 		expect(await heard(keyed(22))).toBe(whole);
 		expect(await underruns(keyed(20), options)).toBe(0);
-		const missing = keyed(20).filter((arrival) => arrival.timestamp !== 5000);
+		const missing = keyed(20).filter((arrival) => arrival.timestamp !== 500);
 		expect(await underruns(missing, options)).toBeGreaterThan(0);
 	});
 
@@ -203,8 +218,8 @@ describe("replay against the shared clock", () => {
 		["flushed five frames at a time", (i: number) => 30 + (4 - (i % 5)) * 20],
 	] as const) {
 		it(`plays ${name} frames on the clock at auto`, async () => {
-			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(60) };
-			const { lags, underruns } = await lag(paced(60, lateness), options, 30_000);
+			const options: Options = { rate: RATE, config: CONFIG, delay: "auto", duration: observed(STEADY) };
+			const { lags, underruns } = await lag(paced(STEADY, lateness), options, SETTLED);
 			expect(lags.length).toBeGreaterThan(0);
 			expect(lags[0]).toBeGreaterThanOrEqual(-HOP);
 			expect(lags.at(-1)).toBeLessThanOrEqual(HOP);
@@ -213,8 +228,8 @@ describe("replay against the shared clock", () => {
 	}
 
 	// 80 ms of spread against a fixed 40 ms target: every flush runs a ring dry that cannot fall behind.
-	const flushed = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
-	const fixed = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
+	const flushed = paced(STEADY, (i) => 30 + (4 - (i % 5)) * 20);
+	const fixed = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(STEADY) };
 
 	// A late burst lands out of order: the group before lands a moment after the one past it, which the
 	// clock already passed. The ring still plays audio trailing the clock within the stretch, so the
@@ -234,7 +249,7 @@ describe("replay against the shared clock", () => {
 	});
 
 	it("underruns a fixed target short of the spread with the stretch off, rather than trailing the clock", async () => {
-		const { lags, median, underruns, accelerated } = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
+		const { lags, median, underruns, accelerated } = await lag(flushed, { ...fixed, stretch: 0 }, SETTLED);
 		expect(underruns).toBeGreaterThanOrEqual(flushed.length / 5);
 		// Each refill skips back onto the clock within the frame after it, never by a whole flush.
 		expect(median).toBeLessThanOrEqual(20);
@@ -245,10 +260,10 @@ describe("replay against the shared clock", () => {
 	// The stretch raises no target, so the flushes still underrun, but what arrives late plays and is
 	// caught up by speeding up, where a zero stretch skips it.
 	it("keeps the audio a fixed target short of the spread receives late, where a zero stretch skips it", async () => {
-		const off = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
-		const on = await lag(flushed, fixed, 30_000);
-		// A zero stretch skips most of every flush; the stretch skips only the backlog it joins on.
-		expect(off.trimmed).toBeGreaterThan(20_000);
+		const off = await lag(flushed, { ...fixed, stretch: 0 }, SETTLED);
+		const on = await lag(flushed, fixed, SETTLED);
+		// A zero stretch skips over a third of the audio; the stretch skips only the backlog it joins on.
+		expect(off.trimmed).toBeGreaterThan((flushed.length * 20) / 3);
 		expect(on.trimmed).toBeLessThanOrEqual(40);
 		expect(on.accelerated).toBeGreaterThan(0);
 	});
@@ -263,18 +278,18 @@ describe("replay at auto", () => {
 		return delay;
 	}
 
-	// A minute, so the estimator has long since spent its prior and settled.
+	// Past the estimator's prior, so the target is the arrivals' own evidence.
 	it("sizes the target from the arrival spread, not a round trip", async () => {
 		// Evenly paced, the target is the estimator's 20 ms floor plus one frame.
-		expect(await settled(60, () => 30)).toBe(40);
+		expect(await settled(STEADY, () => 30)).toBe(40);
 		// Five frames flushed at once: 80 ms of spread to cover, plus one frame.
-		expect(await settled(60, (i) => 30 + (4 - (i % 5)) * 20)).toBeGreaterThanOrEqual(100);
+		expect(await settled(STEADY, (i) => 30 + (4 - (i % 5)) * 20)).toBeGreaterThanOrEqual(100);
 	});
 });
 
 describe("recorded frame durations", () => {
 	it("keeps missing packets out of the codec term even when most packets are absent", async () => {
-		const trace = Array.from({ length: 600 }, (_, i) => ({
+		const trace = Array.from({ length: STEADY * 10 }, (_, i) => ({
 			at: i * 100,
 			timestamp: i * 100,
 			group: 0,
@@ -285,28 +300,29 @@ describe("recorded frame durations", () => {
 			rate: RATE,
 			config: CONFIG,
 			delay: "auto",
-			duration: 60_000,
+			duration: STEADY * 1000,
 		}))
 			delay = quantum.delay;
 		expect(delay).toBe(40);
 	});
 
 	it("updates the codec term when the packet duration changes", async () => {
-		const trace = Array.from({ length: 600 }, (_, i) => ({
+		// The duration changes once the target settled, and the new one has as long again to settle.
+		const trace = Array.from({ length: SETTLED / 50 }, (_, i) => ({
 			at: i * 100,
 			timestamp: i * 100,
 			group: 0,
-			duration: i < 300 ? 20 : 10,
+			duration: i < SETTLED / 100 ? 20 : 10,
 		}));
 		const targets: number[] = [];
 		for await (const quantum of replay(trace, {
 			rate: RATE,
 			config: CONFIG,
 			delay: "auto",
-			duration: 60_000,
+			duration: 2 * SETTLED,
 		})) {
-			if (quantum.at >= 29_000 && quantum.at <= 29_100) targets.push(quantum.delay);
-			if (quantum.at >= 59_000) targets.push(quantum.delay);
+			if (quantum.at >= SETTLED - 1000 && quantum.at <= SETTLED - 900) targets.push(quantum.delay);
+			if (quantum.at >= 2 * SETTLED - 1000) targets.push(quantum.delay);
 		}
 		expect(new Set(targets)).toEqual(new Set([40, 30]));
 	});
@@ -409,16 +425,16 @@ describe("buffered replay against the shared clock", () => {
 
 	it("catches up after a stall", async () => {
 		// Five seconds in, 400 ms of frames are held and land at once.
-		const trace = paced(30, (i) => 30 + (i >= 250 && i < 270 ? (270 - i) * 20 : 0)).sort((a, b) => a.at - b.at);
+		const trace = paced(STEADY, (i) => 30 + (i >= 250 && i < 270 ? (270 - i) * 20 : 0)).sort((a, b) => a.at - b.at);
 		const options: Options = {
 			rate: RATE,
 			config: CONFIG,
 			delay: Duration.millis(100),
 			lookahead: 500,
-			duration: observed(30),
+			duration: observed(STEADY),
 		};
-		// Speeding up at the cap gains 100 ms a second, so the stall's lag is gone well before 20 s.
-		const result = await play(trace, options, (at) => (at >= 2000 && at < 5000) || at >= 20_000);
+		// Speeding up at the cap gains 100 ms a second, so the stall's lag is gone by 10 s.
+		const result = await play(trace, options, (at) => (at >= 2000 && at < 5000) || at >= 12_000);
 		expect(result.min).toBeGreaterThanOrEqual(-HOP);
 		expect(result.max).toBeLessThanOrEqual(HOP);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
@@ -426,16 +442,18 @@ describe("buffered replay against the shared clock", () => {
 	});
 
 	// The rate is the lag over 500 ms, so a clock running 1% fast leaves audio trailing it by about 1% of
-	// that, and a splice every second or so: within a 20 ms frame. Graded until the last arrival, past
-	// which audio slows down as it runs out, as far as the splice's phase there leaves it.
+	// that, and a splice every second or so: within a 20 ms frame. The clock follows the publisher once
+	// the delay and the lookahead are full, which a 100 ms lookahead takes some 14 s to reach. Graded
+	// until the last arrival, past which audio slows down as it runs out, as far as the splice's phase
+	// there leaves it.
 	it("follows a publisher clock running 1% fast at auto", async () => {
-		const trace = paced(60, (i) => 30 - (i * 20) / 101);
+		const trace = paced(20, (i) => 30 - (i * 20) / 101);
 		const options: Options = {
 			rate: RATE,
 			config: CONFIG,
 			delay: "auto",
-			lookahead: 500,
-			duration: observed(60),
+			lookahead: 100,
+			duration: observed(20),
 		};
 		const last = trace[trace.length - 1].at;
 		const result = await play(trace, options, (at) => at >= 10_000 && at < last);
@@ -446,25 +464,25 @@ describe("buffered replay against the shared clock", () => {
 	});
 
 	it("plays every word of an utterance that stalls mid-burst, catching up after", async () => {
-		// Forty seconds of speech generated four times faster than real time, held for 3.5 s after its
-		// first two seconds, so playback runs dry and resumes about two seconds behind the clock, inside
-		// the lookahead: at the cap that takes some 20 s to catch up. The utterance's last moments slow
-		// down as it runs out, which no declared end explains.
-		const trace = paced(40, (i) => (i < 100 ? 30 : 3500) - i * 15);
+		// Twenty seconds of speech generated four times faster than real time, held for 2.5 s after its
+		// first two seconds, so playback runs dry and resumes about a second behind the clock, inside the
+		// lookahead: at the cap that takes some 10 s to catch up. The utterance's last moments slow down
+		// as it runs out, which no declared end explains.
+		const trace = paced(20, (i) => (i < 100 ? 30 : 2500) - i * 15);
 		const options: Options = {
 			rate: RATE,
 			config: CONFIG,
 			delay: Duration.millis(100),
 			lookahead: 60_000,
-			duration: 42_000,
+			duration: 22_000,
 		};
-		const result = await play(trace, options, (at) => at >= 30_000 && at < 39_000);
+		const result = await play(trace, options, (at) => at >= 15_000 && at < 19_000);
 		expect(result.min).toBeGreaterThanOrEqual(-HOP);
 		expect(result.max).toBeLessThanOrEqual(HOP);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		// Every frame played: what was heard and what the stretch shortened cover the utterance. A
 		// slow-down only adds to what is heard.
-		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(40_000);
+		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(20_000);
 		expect(warn).not.toHaveBeenCalled();
 	});
 });

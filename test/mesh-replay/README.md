@@ -37,7 +37,7 @@ presenting the token `peer.<relay>` as a cluster peer.
 
 On each relay, `moq-bench replay` publishes the relay's broadcasts
 (`replay/<relay>/<n>`, one single-frame group every 100ms) and another follows every
-other relay's, across every instance that serves it, the way a viewer waiting on a
+other relay's, across every identity that serves it, the way a viewer waiting on a
 stream would. The reader writes when its groups paused or skipped, and every second
 its state, which is how a stall is told apart from a route that is gone.
 
@@ -58,10 +58,16 @@ queue = "250ms"  # how long a datagram waits behind the rate limit before it is 
 dial = "a"
 accept = "b"
 cost = 2         # optional, ?cost on the dialer's peer URL
+cost_build = "new"  # optional: only a dialer on this build prices it; the other dials it unpriced
 upstream = true  # optional: `dial` marks `accept` upstream, on the new build only
 shape = { delay = "40ms" }   # optional, over [shape]
 build = "new"    # optional: only a dialer on this build dials it
 ```
+
+A link naming a `cost_build` models a roll that also prices its links, such as a new build
+whose relays dial a measured cost while the old build's dial unpriced: the old fleet keeps
+routing by fewest links until it rolls. It needs a `cost`, and a link naming a `build` can
+only name that one.
 
 A link naming a `build` models a roll that also changes the graph, such as a new
 build that renders its dial set by a new rule: mid-roll, a link exists while its
@@ -137,7 +143,7 @@ reports and logs together with `HARNESS_KEEP=1`. For each event:
   out, and the column reads n/a when none had one.
 - **Readers hit**: reader paths that paused longer than 0.5s, of them **bystanders**,
   whose relay and source were both outside the fault, the **longest** pause, and the
-  groups **missed** within one instance.
+  groups **missed** within one identity.
 
 For a roll it also reports, per link of the drained relay, whether the neighbour heard a
 GOAWAY before the link closed (DRAIN) or only saw it close (DEAD), read from the

@@ -121,6 +121,52 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
 
+### Health
+
+`hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
+consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
+pair of `.echo` snapshots. Each report names the broadcast it was read from
+(its path and identity), which observed every number in it; the caller states the
+interval between the two and how long ago the newer one arrived, as a `Duration`
+in both languages. Both languages compute the same result from the shared
+fixtures in `rs/hang/fixtures/health.json`.
+
+The result holds the deltas over the interval (frames, bytes, and bitrate per
+rendition; lost bytes and packets for the connection) and a verdict for the
+connection and each rendition: `unknown`, `healthy`, `degraded`, or
+`unhealthy`. Each verdict carries its evidence, every input with its value and
+grade, and is the worst graded input. An input the report cannot show is
+listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
+publisher that knows only its PROBE RTT grades its connection on RTT alone. A report older
+than the stale limit is `unknown` throughout, as is a transport sample whose
+`age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
+path or identity (`replaced`) or a decreasing counter (`decrease`) is a reset:
+the deltas start over, so only gauges are graded until the next pair.
+Container sections such as `mpegts` are not read.
+
+| Input | Role | Value | Degraded | Unhealthy |
+| --- | --- | --- | --- | --- |
+| `rtt` | both | Round-trip time, ms. | 300 | 800 |
+| `loss` | publisher | Transport bytes lost per media byte sent. | 0.02 | 0.1 |
+| `headroom` | publisher | Estimated `rate` over the media bitrate sent. | below 1.5 | below 1 |
+| `skipped` | publisher | Frames skipped, as a share of frames sent or skipped. | 0.01 | 0.05 |
+| `late` | viewer | Late frames per frame received. | 0.01 | 0.05 |
+| `errors` | viewer | Decode errors per frame received. | 0.01 | 0.05 |
+| `stalled` | viewer | The share of the interval spent stalled. | 0.01 | 0.05 |
+
+These are defaults the caller can override, as is the five-second stale limit.
+A viewer's loss counters describe its own uplink, so they are reported but not
+graded. Loss and headroom divide the connection's transport counters by the
+report's own media, so they hold when the broadcast is the only one its
+connection publishes. The transport limits were measured on one paced TS feed
+through a shaped link over five-second intervals. The rendition limits are not
+measured against real traffic, and no CLI viewer reports `late`, `errors`, or
+`stalled`.
+
+A publisher whose link falls below its media rate sends no report at all,
+since its report track sits below every media track. Its health goes stale
+and reads `unknown`; only its viewers' playout counters can show the damage.
+
 ## Broadcasts
 
 Each node publishes one broadcast under a prefix, `.stats` by default, which
@@ -138,22 +184,22 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one.
 
 The broadcast stays announced for the producer's life. Each announcement
-carries a fresh [instance](/concept/moq-lite#publisher-instances) on its
+carries a fresh [identity](/concept/moq-lite#publisher-identities) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
-old one, and no relay serves it groups cached under the old instance. A relay
+old one, and no relay serves it groups cached under the old identity. A relay
 taking over through [handoff](/bin/relay/config#handoff) announces its broadcast
-only once the relay it replaced exits, so a node has one instance at a time;
+only once the relay it replaced exits, so a node has one identity at a time;
 its counters run from its start, and its first publish carries them. A reader
-treats each instance as its own set of counters. The instance rides moq-lite 07
+treats each identity as its own set of counters. The identity rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
-A minted instance also changes on every reconnect, so it cannot tell a restart from a
-redial. When a minted instance follows a minted one while the departed one is still
+A minted identity also changes on every reconnect, so it cannot tell a restart from a
+redial. When a minted identity follows a minted one while the departed one is still
 within the aggregating reader's grace ([`Config::grace`](https://docs.rs/moq-stats/latest/moq_stats/aggregate/struct.Config.html#structfield.grace)),
 its first frame decides: counters that continue are the same node, and a new bucket
 epoch or a counter going down is a restart, which adds to the old counters. A return
 after the grace starts over, so its earlier traffic counts twice.
-An aggregating reader pins each node's subscription to its instance.
+An aggregating reader pins each node's subscription to its identity.
 
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix
 reads every bucket's tracks; scope by bucket with an aggregating reader instead.
@@ -173,7 +219,7 @@ no root's traffic. Traffic another root's session causes on the root's paths,
 such as reading them through a grant's mount, counts on those paths; what the
 root's own sessions read through a mount counts on the mount's target instead.
 Each node announces a root's broadcast while it serves a session scoped to
-exactly that root, plus the linger, so a returning root is a new instance.
+exactly that root, plus the linger, so a returning root is a new identity.
 
 The relay publishes each root's broadcast at
 `<prefix>/root/<root>/node/<node>`, with the root escaped into one segment, and
@@ -252,7 +298,7 @@ its publish's scheduled time divided by the interval, so the interval is its
 timescale. Publishes are scheduled at least an interval
 apart, even after a late one, so each opens its groups in an interval of its
 own, and a track recreated later numbers its groups past every group its
-earlier instance wrote.
+earlier identity wrote.
 
 ### Totals
 
@@ -285,14 +331,14 @@ node stays announced. Billing reads this track.
 }
 ```
 
-`epoch` is a UUIDv7 minted for each instance of the bucket's track, and a
-reader keeps each epoch's counters apart, as it does for a broadcast's instances.
+`epoch` is a UUIDv7 minted for each identity of the bucket's track, and a
+reader keeps each epoch's counters apart, as it does for a broadcast's identities.
 `tiers` maps each tier the bucket recorded on since then. Its top-level
 `publisher`, `subscriber`, and `sessions` are the bucket's [totals](#totals), so
 a totals reader parses them unchanged, and like the node's totals they keep
 every entry that ended. A lingering bucket's frames repeat its final totals: a
 reader that misses every frame from the bucket's last change until it is
-unlisted loses that instance's tail, so a meter reads the node's totals.
+unlisted loses that identity's tail, so a meter reads the node's totals.
 
 `paths` holds each broadcast path's egress (`publisher`) and ingress
 (`subscriber`) [Traffic](#traffic). A path appears from its first nonzero
@@ -539,12 +585,12 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A new instance starts every counter from zero, so a reader summing a node over
-time adds each instance's counters rather than diffing across them. Within one
-instance the totals never go down. A bucket's path or label counter going **down**
+A new identity starts every counter from zero, so a reader summing a node over
+time adds each identity's counters rather than diffing across them. Within one
+identity the totals never go down. A bucket's path or label counter going **down**
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
-rather than a negative rate. On a route whose instance a session minted (an older relay, or
+rather than a negative rate. On a route whose identity a session minted (an older relay, or
 a session older than moq-lite 07), a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and

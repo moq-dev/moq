@@ -211,8 +211,12 @@ Zero admits no entries of that kind, not unlimited entries.
 `live_edges` bounds the newest group of every track a session publishes to the
 relay. The cache keeps that group whatever its `capacity` or `headroom`, so a
 publisher holding many quiet tracks would otherwise hold one group each past
-any budget. Past the bound, the frames of the session's own live edges are
-shed, the one that moved longest ago first. A viewer reaching a shed frame
+any budget. Past the bound, the session's own live edges are shed in delivery's
+priority order: the lowest-priority track first, and among equals the edge that
+moved longest ago. Frames viewers already read go before any frame a viewer is
+still owed, a compressed track's decoded copies included, except where other
+fetches share the group's content: those go with their whole edge. A viewer
+reaching a shed frame
 meets it as it would any frame the cache dropped; the group's place on the
 timeline stays, so live joins land where they did. Another session's edges
 are never touched. Here zero means no bound.
@@ -360,8 +364,13 @@ publisher is trusted.
 that stalls but stays connected still has its idle groups reclaimed. Set
 explicitly, it also caps how long a superseded group stays fresh, whatever max
 age the publisher declared; unset, each track keeps its own max age. The latest
-group of every track, and any group still being read, is kept past `capacity` but
-sheds its oldest frames instead. Whatever the capacity, a group holds at most its
+group of every track is kept past `capacity`: whole once it finished, so a new
+viewer always gets it, a catalog included. While it is still arriving, it and any
+group still being read shed their oldest frames instead. When the latest groups
+alone exceed the target, every older group goes but no viewer is ended for them,
+and a viewer that falls behind skips what it missed, since nothing else fits. A
+group refetched for a viewer that missed it is kept until that viewer reads it,
+one per viewer, while those fit the capacity. Whatever the capacity, a group holds at most its
 newest 32 MB. A reader that reaches a shed frame, such as a late joiner of a long
 group, replays it through a flight: a separate copy fetched from the upstream hop
 from that frame, paced by its fastest reader and held to its own 32 MB. Readers
@@ -400,7 +409,7 @@ roots = true                         # Also give each root its own stats under <
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
+Each run announces under a fresh [identity](/concept/moq-lite#publisher-identities),
 so a restart is a new broadcast at the same path. Each bucket is a
 [track](/concept/stats#bucket-tracks) of that broadcast, and one returning after
 its linger restarts its counters under a new run id without an announce. The

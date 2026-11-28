@@ -22,6 +22,10 @@ use crate::refresh::Refresh;
 /// when creating it, or joins never ask.
 ///
 /// Cheaply clonable: clones share one underlying track and window, like other MoQ producers.
+///
+/// [`finish`](Self::finish) or [`abort`](Self::abort) the window: dropping the last clone
+/// unfinished is not supported, and once it published, its readers read
+/// [`moq_net::Error::Dropped`].
 pub struct Producer<T> {
 	inner: Arc<Mutex<Inner<T>>>,
 	_marker: PhantomData<fn(T)>,
@@ -130,24 +134,6 @@ impl<T> Producer<T> {
 	/// it closed: their next edit fails with `err`.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		self.inner.lock().unwrap().abort(err.into());
-		Ok(())
-	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
-	/// [`abort`](Self::abort) leaves it.
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		let mut inner = self.inner.lock().unwrap();
-		// The check and the abort are one step on the track; the rest is the same cleanup.
-		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
-			drop(inner);
-			return Err(self);
-		}
-		inner.abort(err.into());
 		Ok(())
 	}
 }
@@ -439,6 +425,23 @@ impl Track {
 	}
 }
 
+// Records are indexed across the window's groups, and the next producer of this track would
+// number its own from zero, so a reader handed over would take them for records it already has:
+// an unfinished window that published a header ends with `Dropped` instead of being requested
+// again.
+impl Drop for Track {
+	fn drop(&mut self) {
+		if self.largest.is_none() || self.inner.finished().is_some() {
+			return;
+		}
+		if let Some(group) = self.group.take() {
+			let _ = group.abort(moq_net::Error::Dropped);
+		}
+		// A track already closed keeps its first reason.
+		let _ = self.inner.clone().abort(moq_net::Error::Dropped);
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::task::Poll;
@@ -446,6 +449,34 @@ mod tests {
 	use serde_json::{Value, json};
 
 	use super::*;
+
+	/// A reader of a window dropped unfinished reads `Dropped`, not the next producer's records.
+	#[test]
+	fn a_dropped_window_ends_rather_than_restarting() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let _requests = broadcast.requests();
+		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, Config::default());
+		producer
+			.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the window's group");
+		};
+		drop(producer);
+		let ended = loop {
+			match group.poll_read_frame(&waiter) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				other => break other,
+			}
+		};
+		assert!(matches!(ended, Poll::Ready(Err(moq_net::Error::Dropped))), "{ended:?}");
+		let next = groups.poll_recv_group(&waiter);
+		assert!(matches!(next, Poll::Ready(Err(moq_net::Error::Dropped))));
+	}
 
 	/// A previous group already aborted fails the next header, which aborts the group it just
 	/// published with the same error rather than dropping it as `Dropped`.
@@ -455,7 +486,9 @@ mod tests {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut groups = track.subscribe(None);
+		// Oldest first, as published.
+		let mut groups =
+			track.subscribe(moq_net::track::Subscription::default().with_order(moq_net::track::Order::Ascending));
 		let mut producer = Producer::<Value>::new(track, Config::default());
 		producer
 			.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))

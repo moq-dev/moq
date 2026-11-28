@@ -85,6 +85,8 @@ asyncio.run(main())
    TrackConsumer
    DatagramConsumer
    GroupConsumer
+   MetaConsumer
+   MetaGroup
 ```
 
 ## Bandwidth
@@ -242,7 +244,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    TrackRefresh
    FetchGroupOptions
    RouteInfo
-   Instance
+   Identity
    ConnectionStats
 ```
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- An ingest's tracks shift through one timebase onto the catalog's clock, its first frame landing at its arrival, so `sync.clock` times its frames, including on a clock fixed before the session.
+
 ## [0.3.12](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.11...moq-rtc-v0.3.12) - 2026-10-06
 
 ### Other

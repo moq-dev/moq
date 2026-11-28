@@ -56,6 +56,8 @@ pub struct Client {
 	connect: Option<Url>,
 	/// The credentials each new connection starts presenting.
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
+	/// Where the next connection asks for each dial's tokens instead, from [`Client::with_dials`].
+	pub(crate) dials: Option<crate::connection::Dials>,
 	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
 	pub(crate) policy: moq_net::reconnect::Config,
 	/// Whether dials present an mTLS client certificate, refusing schemes that can't.
@@ -121,6 +123,7 @@ impl Client {
 
 		quic.validate()?;
 		config.backoff.validate()?;
+		config.websocket.validate()?;
 
 		// Only the rustls-backed transports use this. The plaintext qmux
 		// transports must not require a rustls crypto provider.
@@ -169,6 +172,7 @@ impl Client {
 			versions,
 			connect: config.url,
 			tokens: config.tokens,
+			dials: None,
 			policy,
 			client_cert,
 			failover_delay,
@@ -263,6 +267,17 @@ impl Client {
 	/// connection's with [`Connection::tokens`].
 	pub fn with_tokens(mut self, tokens: Vec<moq_net::auth::Token>) -> Self {
 		self.tokens = tokens;
+		self
+	}
+
+	/// Ask `dials` for the tokens of every dial the next [`Connection`] makes, as the dial starts,
+	/// instead of presenting [`with_tokens`](Self::with_tokens)' fixed ones: for a credential that
+	/// must be fresh when it is presented. See [`Dials`](crate::connection::Dials).
+	///
+	/// They serve one connection: the first this client or a clone of it connects takes them,
+	/// and a later one ends at once with [`Failure::Taken`](moq_net::reconnect::Failure::Taken).
+	pub fn with_dials(mut self, dials: crate::connection::Dials) -> Self {
+		self.dials = Some(dials);
 		self
 	}
 
@@ -447,7 +462,7 @@ impl Client {
 	pub(crate) async fn probe(
 		&self,
 		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
-	) -> crate::Result<std::pin::Pin<Box<crate::connection::Dial>>> {
+	) -> crate::Result<std::pin::Pin<Box<crate::connection::Handshake>>> {
 		let (addr, client) = self.attempt(&attempt);
 		let url = addr.url().clone();
 		let transport = quic_transport(&url);
@@ -1425,9 +1440,9 @@ mod tests {
 		assert!(matches!(value, super::TransportRace::Quic("quic")));
 	}
 
-	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm
-	/// gives up on its own, but the WebSocket arm has no deadline of its own, so the
-	/// race stays pending forever. Without the connect timeout this test hangs.
+	/// A peer that completes the TCP handshake and then never speaks: both arms give up
+	/// on their own handshake timeouts, but an attempt must still end at the connect
+	/// timeout when that is shorter. Without the connect timeout this test hangs.
 	///
 	/// That is what wedged a publisher against a livelocked relay: [`Connection`] only
 	/// re-arms its backoff (and checks its give-up timeout) *between* attempts, so an
@@ -1437,7 +1452,8 @@ mod tests {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 
-		let timeout = crate::connect::DEFAULT_TIMEOUT;
+		// Shorter than qmux's handshake timeout, which would otherwise end the attempt first.
+		let timeout = std::time::Duration::from_secs(5);
 		let mut config = crate::connect::Config {
 			timeout: Some((timeout).into()),
 			..Default::default()

@@ -84,6 +84,9 @@ pub(crate) struct Dial {
 	pub(crate) token: Option<String>,
 	/// The connection credential, held out of band rather than in an AUTH stream.
 	connection: Option<String>,
+	/// The set a [`Dials`](crate::reconnect::Dials) answer signed for this dial alone, which
+	/// replaces every token once it is committed.
+	signed: Option<Vec<Token>>,
 }
 
 impl Tokens {
@@ -106,23 +109,9 @@ impl Tokens {
 	/// Replace every token, reaching the live session at once and every later dial.
 	pub fn set(&self, tokens: Vec<Token>) {
 		let mut state = self.handle.state.lock();
-		let configured = state.configured.as_ref().expect("built by Tokens::new");
-		if configured.tokens == tokens {
-			return;
+		if state.replace(tokens) {
+			state.hold();
 		}
-		// A token still waiting on its verdict stays fresh when the new set keeps it.
-		let fresh = dedup(&tokens)
-			.into_iter()
-			.filter(|token| {
-				!configured.tokens.contains(token)
-					|| (configured.fresh.contains(token) && configured.verdict(&state, token).is_none())
-			})
-			.collect();
-		let configured = state.configured.as_mut().expect("built by Tokens::new");
-		configured.fresh = fresh;
-		configured.tokens = tokens;
-		configured.answer = None;
-		state.hold();
 	}
 
 	/// The peer's first verdict on the tokens the last [`set`](Self::set) newly presented,
@@ -162,14 +151,34 @@ impl Tokens {
 		let state = self.handle.state.read();
 		let configured = state.configured.as_ref().expect("built by Tokens::new");
 		let (token, connection) = credential(url, &configured.tokens);
-		Dial { token, connection }
+		Dial {
+			token,
+			connection,
+			signed: None,
+		}
+	}
+
+	/// What a dial to `url` presenting `tokens`, signed for it alone, would present. Committing
+	/// it replaces every token, under the same lock that makes it the latest dial, so its
+	/// connection credential never rides AUTH on a session still draining.
+	pub(crate) fn preview_signed(url: &Url, tokens: Vec<Token>) -> Dial {
+		let (token, connection) = credential(url, &tokens);
+		Dial {
+			token,
+			connection,
+			signed: Some(tokens),
+		}
 	}
 
 	/// Make `dial` the latest, holding every token but its connection credential in band on the
 	/// session it builds.
 	pub(crate) fn commit(&self, dial: &Dial) {
 		let mut state = self.handle.state.lock();
+		// The verdict so far belongs to the set being replaced, so it is recorded first.
 		state.record();
+		if let Some(tokens) = &dial.signed {
+			state.replace(tokens.clone());
+		}
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
 		configured.dialed = Some(dial.connection.clone());
 		configured.session = None;
@@ -326,6 +335,27 @@ impl Configured {
 }
 
 impl State {
+	/// Replace every configured token with `tokens`, returning whether that changed them. A
+	/// token still waiting on its verdict stays fresh when the new set keeps it.
+	fn replace(&mut self, tokens: Vec<Token>) -> bool {
+		let configured = self.configured.as_ref().expect("built by Tokens::new");
+		if configured.tokens == tokens {
+			return false;
+		}
+		let fresh = dedup(&tokens)
+			.into_iter()
+			.filter(|token| {
+				!configured.tokens.contains(token)
+					|| (configured.fresh.contains(token) && configured.verdict(self, token).is_none())
+			})
+			.collect();
+		let configured = self.configured.as_mut().expect("built by Tokens::new");
+		configured.fresh = fresh;
+		configured.tokens = tokens;
+		configured.answer = None;
+		true
+	}
+
 	/// Whether token `id` is one a [`Tokens`] holds in band.
 	pub(super) fn configured(&self, id: u64) -> bool {
 		self.configured
@@ -658,6 +688,53 @@ mod tests {
 		session.link.grant(id(&set, "new"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
+	}
+
+	/// A dial built on a signed set, as [`dial`] is on the configured one.
+	fn signed(set: &Tokens, names: &[&str]) -> Session {
+		let url = "moqt://relay.example.com/".parse().unwrap();
+		set.commit(&Tokens::preview_signed(&url, tokens(names)));
+		let link = Link::attach(&set.handle, true, false).unwrap();
+		let credential = Some(link.present(Bytes::new(), true).unwrap());
+		set.connect(link.id(), credential.as_ref());
+		Session { link, credential }
+	}
+
+	/// A refusal of the set a signed dial replaced stays that set's: the new one is judged alone.
+	#[test]
+	fn a_signed_set_is_judged_apart_from_the_set_it_replaced() {
+		let set = Tokens::new(Vec::new());
+		let first = signed(&set, &["first", "extra-1"]);
+		first.grant_credential();
+		first.refuse(id(&set, "extra-1"), SessionError::Unauthorized);
+		refused(&set, SessionError::Unauthorized);
+		first.lost();
+
+		let second = signed(&set, &["second", "extra-2"]);
+		assert!(
+			answered(&set).is_pending(),
+			"the replaced set's refusal answered the new one"
+		);
+		second.grant_credential();
+		second.link.grant(id(&set, "extra-2"), Grant::all());
+		ok(&set);
+	}
+
+	/// A signed set replaces the tokens only as its dial commits, so a session still draining
+	/// never takes the new connection credential in band, and its own was never held.
+	#[test]
+	fn a_signed_dial_replaces_the_tokens_as_it_commits() {
+		let set = Tokens::new(Vec::new());
+		let _draining = dial(&set, true, false);
+		let url = "moqt://relay.example.com/".parse().unwrap();
+		let signed = Tokens::preview_signed(&url, tokens(&["proof-2", "extra"]));
+		assert_eq!(signed.token.as_deref(), Some("proof-2"));
+		assert!(held(&set).is_empty(), "a preview changed the held tokens");
+
+		set.commit(&signed);
+		assert_eq!(held(&set), ["extra"], "the connection credential rode AUTH");
+		let state = set.handle.state.read();
+		assert_eq!(state.configured.as_ref().unwrap().tokens, tokens(&["proof-2", "extra"]));
 	}
 
 	/// Previewing a dial, as a probe does, leaves the live session's grant alone: a rotated

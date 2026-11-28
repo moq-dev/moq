@@ -37,7 +37,7 @@ pub use driver::{Connection, recv, send};
 pub use endpoint::Endpoint;
 /// The flow-control limits and bitrate caps a live connection can change; see
 /// [`Connection::set_limits`].
-pub use moq_quic::{Limits, LimitsError, Rate};
+pub use moq_quic::{KeepAlive, KeepAliveError, Limits, LimitsError, Rate};
 /// Stream identity, and the varint every QUIC code is.
 pub use moq_quic::{VarInt, stream};
 

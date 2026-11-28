@@ -205,7 +205,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut latest = None;
 		while let Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
-			latest = Some(catalog);
+			latest = Some(catalog.value);
 		}
 
 		let catalog = latest.expect("catalog published");
@@ -282,7 +282,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut latest = None;
 		while let Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
-			latest = Some(catalog);
+			latest = Some(catalog.value);
 		}
 
 		let catalog = latest.expect("catalog published");

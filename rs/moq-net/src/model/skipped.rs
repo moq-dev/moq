@@ -11,8 +11,9 @@ use super::subscription::Budget;
 /// judged under, as runs of consecutive keys.
 ///
 /// Only a widening reverses a stale verdict, so a run comes back once the budget grows
-/// past the one it was judged under. A run is kept only while one of its groups is cached:
-/// a group gone from the cache cannot be offered again, so its verdict is final.
+/// past the one it was judged under. A run is kept only while one of its groups is cached,
+/// or lost to the pool's debt, which a reader asks for again: any other group gone from the
+/// cache cannot be offered again, so its verdict is final.
 ///
 /// Boxed on the first skip: most readers never skip one, and the cursor holding it is hot.
 #[derive(Default)]
@@ -120,10 +121,10 @@ impl Skipped {
 		skipped.runs.first_range_value().map(|(run, _)| *run.start())
 	}
 
-	/// Drop the lowest runs `gone` says no longer hold a cached group, and every such run
-	/// once the runs outnumber `cached` twice over, so each kept run holds a distinct cached
-	/// group and pruning costs O(1) per skip amortized.
-	pub fn prune(&mut self, cached: usize, mut gone: impl FnMut(&RangeInclusive<u64>) -> bool) {
+	/// Drop the lowest runs `gone` says no longer hold a group, and every such run once the
+	/// runs outnumber `held` twice over, so each kept run holds a distinct group and pruning
+	/// costs O(1) per skip amortized.
+	pub fn prune(&mut self, held: usize, mut gone: impl FnMut(&RangeInclusive<u64>) -> bool) {
 		let Some(skipped) = &mut self.0 else {
 			return;
 		};
@@ -135,7 +136,7 @@ impl Skipped {
 			skipped.runs.remove(run.clone());
 			skipped.released.insert(run);
 		}
-		if skipped.runs.len() > cached.saturating_mul(2) {
+		if skipped.runs.len() > held.saturating_mul(2) {
 			let gone: Vec<_> = skipped
 				.runs
 				.iter()
@@ -158,13 +159,24 @@ impl Skipped {
 			.map(|(run, _)| run.end().saturating_add(1))
 	}
 
-	/// Forget every run below `floor`, which a fold settled.
-	pub fn forget_below(&mut self, floor: u64) {
+	/// The lowest key from `key` on that was skipped.
+	pub fn next_from(&self, key: u64) -> Option<u64> {
+		let skipped = self.0.as_ref()?;
+		skipped
+			.runs
+			.overlapping(&(key..=u64::MAX))
+			.next()
+			.map(|(run, _)| (*run.start()).max(key))
+	}
+
+	/// Forget every run in `groups`, which a fold settled.
+	pub fn forget(&mut self, groups: std::ops::Range<u64>) {
 		if let Some(skipped) = &mut self.0
-			&& let Some(below) = floor.checked_sub(1)
+			&& let Some(last) = groups.end.checked_sub(1)
+			&& !groups.is_empty()
 			&& !skipped.runs.is_empty()
 		{
-			skipped.runs.remove(0..=below);
+			skipped.runs.remove(groups.start..=last);
 		}
 	}
 

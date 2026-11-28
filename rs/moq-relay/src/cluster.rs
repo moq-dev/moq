@@ -616,7 +616,8 @@ struct Dialers {
 }
 
 enum DialersPhase {
-	Open(DialersState),
+	/// Boxed: kio's sim build adds a `Vec` to `Tasks`, so inline it would dwarf `Closing`.
+	Open(Box<DialersState>),
 	/// Closed, which refuses any further dial. The shutdown the first close
 	/// started, which every close awaits, so none returns before it is done.
 	Closing(futures::future::Shared<futures::future::BoxFuture<'static, ()>>),
@@ -643,7 +644,7 @@ impl DialersState {
 impl Dialers {
 	fn new() -> Self {
 		Self {
-			state: Arc::new(Mutex::new(DialersPhase::Open(DialersState::new()))),
+			state: Arc::new(Mutex::new(DialersPhase::Open(Box::new(DialersState::new())))),
 			stop: Arc::new(tokio::sync::watch::Sender::new(false)),
 		}
 	}
@@ -704,7 +705,7 @@ impl Dialers {
 			match &mut *phase {
 				DialersPhase::Closing(closing) => closing.clone(),
 				DialersPhase::Open(state) => {
-					let state = std::mem::replace(state, DialersState::new());
+					let state = std::mem::replace(&mut **state, DialersState::new());
 					let closing = Self::shutdown(state, self.stop.clone()).boxed().shared();
 					*phase = DialersPhase::Closing(closing.clone());
 					closing
@@ -2587,8 +2588,8 @@ impl Cluster {
 		// the drained session leaves within its handover. A redial that reaches the
 		// draining process again is drained at once, and serves on until the node
 		// closes it rather than redialing for the rest of its window; its routes
-		// already rank below every other, and the redial after that close finds the
-		// replacement.
+		// already rank as draining, below the replacement's once those are eligible in the
+		// same claim, and the redial after that close finds the replacement.
 		let client = client.with_reconnect(true).with_restart(moq_tokio::Restart::Handoff);
 		let connect = |id: u64, tokens: Vec<moq_net::auth::Token>| {
 			Leg::new(id, client.clone().with_tokens(tokens).connect(addrs.clone()))
@@ -3323,7 +3324,7 @@ mod tests {
 		.expect("stats broadcast announced within 5s")
 		.expect("stats broadcast resolves")
 		.unwrap();
-		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
+		assert!(broadcast.info().identity.is_some(), "stats announce under an identity");
 
 		// Several publish intervals (1s each by default) later, the task is still
 		// running and its broadcast still announced: a request refuses a front whose

@@ -284,9 +284,9 @@ static void start_audio(ctx_t *c, int32_t catalog) {
     }
 }
 
-// Delivers a broadcast handle for each publisher instance serving the path, then
+// Delivers a broadcast handle for each publisher identity serving the path, then
 // the follow's end. Store the first handle and wake main; one frame is all this
-// client reads, so a later instance's handle is freed unread.
+// client reads, so a later identity's handle is freed unread.
 static void on_broadcast(void *ud, moq_follow_event event, int32_t broadcast) {
     ctx_t *c = (ctx_t *)ud;
     // Going offline is how a finished broadcast withdraws, and the stored handle's
@@ -312,7 +312,7 @@ static void on_broadcast(void *ud, moq_follow_event event, int32_t broadcast) {
     if (!first) {
         if (c->finish.enabled) {
             pthread_mutex_lock(&c->mu);
-            c->finish.failed = 1; // A replacement instance cannot finish this fixture.
+            c->finish.failed = 1; // A replacement identity cannot finish this fixture.
             pthread_cond_broadcast(&c->cv);
             pthread_mutex_unlock(&c->mu);
         }

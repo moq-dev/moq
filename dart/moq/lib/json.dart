@@ -44,7 +44,9 @@ typedef SnapshotConfig = MoqJsonSnapshotConfig;
 /// A snapshot consumer's subscription priority and playout delay.
 typedef SnapshotConsumerConfig = MoqJsonSnapshotConsumerConfig;
 
-/// Publishes a lossless stream of JSON records on a track it takes over.
+/// Publishes a lossless stream of JSON records on a track it takes over. Once
+/// it appended a record, finish it: disposing it unfinished is not supported,
+/// and aborts its track with `Dropped`.
 typedef StreamProducer = MoqJsonStreamProducer;
 
 /// Consumes a lossless stream of JSON records from a track it takes over.
@@ -55,7 +57,9 @@ typedef StreamConsumer = MoqJsonStreamConsumer;
 typedef Value = MoqJsonValue;
 
 /// Publishes a sliding window of JSON records on a track it takes over, pushed
-/// at the back and popped from the front.
+/// at the back and popped from the front. Once it pushed a record, finish it:
+/// disposing it unfinished is not supported, and aborts its track with
+/// `Dropped`.
 typedef WindowProducer = MoqJsonWindowProducer;
 
 /// Consumes each push, pop, and skip of a JSON window from a track it takes

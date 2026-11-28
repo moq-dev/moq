@@ -826,9 +826,9 @@ async fn a_backlog_stays_in_the_source_until_due() {
 	}
 }
 
-/// The instance that takes the path once the first stops, and when.
+/// The identity that takes the path once the first stops, and when.
 struct Restart {
-	instance: moq_net::Instance,
+	identity: moq_net::Identity,
 	/// How long after the first's last object it starts.
 	after: Duration,
 	/// How far behind the first's last object its clock starts, or `None` to carry on from the
@@ -839,10 +839,10 @@ struct Restart {
 }
 
 impl Restart {
-	/// `instance` a second after the first stops, on the source's clock.
-	fn new(instance: moq_net::Instance) -> Self {
+	/// `identity` a second after the first stops, on the source's clock.
+	fn new(identity: moq_net::Identity) -> Self {
 		Self {
-			instance,
+			identity,
 			after: Duration::from_secs(1),
 			back: None,
 			from: 3,
@@ -850,12 +850,12 @@ impl Restart {
 	}
 }
 
-/// A clip into its second group published as instance `first`, ending as `ending` says, then
+/// A clip into its second group published as identity `first`, ending as `ending` says, then
 /// from a later group on as `second` says, released through a [`Follower`](super::Follower)
-/// with `stitch`. Returns what it released, how it ended, and the objects each instance
+/// with `stitch`. Returns what it released, how it ended, and the objects each identity
 /// published.
 async fn follow(
-	first: moq_net::Instance,
+	first: moq_net::Identity,
 	ending: Ending,
 	second: Restart,
 	stitch: bool,
@@ -870,7 +870,7 @@ async fn follow(
 	let mut groups: Vec<u64> = objects.iter().map(|object| object.group).collect();
 	groups.dedup();
 	assert!(groups.len() >= 5, "{} groups", groups.len());
-	// The first instance stops partway into its second group.
+	// The first identity stops partway into its second group.
 	let before = objects.iter().position(|object| object.group == groups[1]).unwrap() + 2;
 	let from = objects
 		.iter()
@@ -889,7 +889,7 @@ async fn follow(
 	let paced = pcr(head[0].micros);
 	let _first = republish_route(
 		&origin,
-		moq_net::origin::RouteOptions::default().with_instance(first, 0),
+		moq_net::origin::RouteOptions::default().with_identity(first, 0),
 		head.clone(),
 		move |i, object| paced(i, object) + Duration::from_millis(40),
 		ending,
@@ -914,13 +914,13 @@ async fn follow(
 		}
 	});
 
-	// The second instance starts after the first's last object, at its own PCR pace.
+	// The second identity starts after the first's last object, at its own PCR pace.
 	let down = Duration::from_micros(head.last().unwrap().micros - head[0].micros) + second.after;
 	kio::clock::sleep(down).await;
 	let paced = pcr(tail[0].micros);
 	let _second = republish_route(
 		&origin,
-		moq_net::origin::RouteOptions::default().with_instance(second.instance, 0),
+		moq_net::origin::RouteOptions::default().with_identity(second.identity, 0),
 		tail.clone(),
 		move |i, object| paced(i, object) + Duration::from_millis(40),
 		Ending::Finish,
@@ -930,11 +930,11 @@ async fn follow(
 }
 
 /// An import killed under the release leaves its route lingering, silent, while its restart, a
-/// new instance, takes the path: stitching, the release switches to it at once and writes its
-/// packets from its first group, after everything the first instance delivered, none of it late.
+/// new identity, takes the path: stitching, the release switches to it at once and writes its
+/// packets from its first group, after everything the first identity delivered, none of it late.
 #[tokio::test(start_paused = true)]
 async fn a_stitched_release_carries_on_into_a_restarted_import() {
-	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
+	let (first, second) = (moq_net::Identity::random(), moq_net::Identity::random());
 	let (released, end, head, tail) = follow(first, Ending::Silent, Restart::new(second), true).await;
 	assert_paced(&released, &[&head, &tail]);
 	let pauses = released.windows(2).map(|pair| pair[1].0.duration_since(pair[0].0));
@@ -944,7 +944,7 @@ async fn a_stitched_release_carries_on_into_a_restarted_import() {
 	);
 	assert!(
 		matches!(end, Some(Ok(()))),
-		"the second instance's finish ends it: {end:?}"
+		"the second identity's finish ends it: {end:?}"
 	);
 }
 
@@ -954,10 +954,10 @@ async fn a_stitched_release_carries_on_into_a_restarted_import() {
 /// them, on its own pace and none of it late.
 #[tokio::test(start_paused = true)]
 async fn a_stitched_release_carries_on_into_a_rewound_clock() {
-	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
+	let (first, second) = (moq_net::Identity::random(), moq_net::Identity::random());
 	// It starts at once, while the first's last objects still wait out the delay.
 	let second = Restart {
-		instance: second,
+		identity: second,
 		after: Duration::from_millis(40),
 		back: Some(Duration::from_millis(300)),
 		from: 3,
@@ -967,43 +967,45 @@ async fn a_stitched_release_carries_on_into_a_rewound_clock() {
 	assert!(matches!(end, Some(Ok(()))), "{end:?}");
 }
 
-/// Without stitching the release stays on the silent instance, so the restart is never written.
+/// Without stitching the release stays on the silent identity, so the restart is never written.
 #[tokio::test(start_paused = true)]
-async fn an_unstitched_release_stays_on_the_instance_it_started_on() {
-	let (first, second) = (moq_net::Instance::random(), moq_net::Instance::random());
+async fn an_unstitched_release_stays_on_the_identity_it_started_on() {
+	let (first, second) = (moq_net::Identity::random(), moq_net::Identity::random());
 	let (released, end, head, _) = follow(first, Ending::Silent, Restart::new(second), false).await;
 	assert!(payloads(&released) == bytes(head.iter().map(|object| &object.payload)));
-	assert!(end.is_none(), "still waiting on the first instance: {end:?}");
+	assert!(end.is_none(), "still waiting on the first identity: {end:?}");
 }
 
-/// The same instance returning on a new route after its first went resumes on the same clock:
+/// The same identity returning on a new route after its first went resumes on the same clock:
 /// what it missed is a gap, and both runs go out, stitching or not. What the release buffered
-/// when the route went still goes out on its pace, not in a burst once the instance returns.
+/// when the route went still goes out on its pace, not in a burst once the identity returns.
 #[tokio::test(start_paused = true)]
-async fn the_same_instance_returning_resumes_the_release() {
-	let instance = moq_net::Instance::random();
+async fn the_same_identity_returning_resumes_the_release() {
+	let identity = moq_net::Identity::random();
 	let gone = Ending::Abort(moq_net::Error::Unroutable);
-	let (released, end, head, tail) = follow(instance.clone(), gone, Restart::new(instance), false).await;
+	let (released, end, head, tail) = follow(identity.clone(), gone, Restart::new(identity), false).await;
 	assert_paced(&released, &[&head, &tail]);
 	assert!(matches!(end, Some(Ok(()))), "the return's finish ends it: {end:?}");
 }
 
-/// The same instance returning, while what it last delivered still waits out the delay, with the
-/// group it was reading published again from its start: the release carries on past that group
-/// rather than writing again the objects it already took from it.
+/// The same identity returning, while what it last delivered still waits out the delay, with the
+/// group it was reading published again from its start: the release carries on within that group
+/// right after the objects it already took from it, writing none of them again and losing none
+/// after them.
 #[tokio::test(start_paused = true)]
-async fn the_same_instance_returning_skips_the_group_it_was_reading() {
-	let instance = moq_net::Instance::random();
+async fn the_same_identity_returning_carries_on_within_the_group_it_was_reading() {
+	let identity = moq_net::Identity::random();
 	let gone = Ending::Abort(moq_net::Error::Unroutable);
 	let again = Restart {
-		instance: instance.clone(),
+		identity: identity.clone(),
 		after: Duration::from_millis(300),
 		back: None,
 		from: 1,
 	};
-	let (released, end, head, tail) = follow(instance, gone, again, false).await;
+	let (released, end, head, tail) = follow(identity, gone, again, false).await;
 	let reading = head.last().unwrap().group;
-	let past: Vec<Object> = tail.into_iter().filter(|object| object.group != reading).collect();
-	assert_paced(&released, &[&head, &past]);
+	let taken = head.iter().filter(|object| object.group == reading).count();
+	assert!(tail[..taken].iter().all(|object| object.group == reading));
+	assert_paced(&released, &[&head, &tail[taken..]]);
 	assert!(matches!(end, Some(Ok(()))), "{end:?}");
 }

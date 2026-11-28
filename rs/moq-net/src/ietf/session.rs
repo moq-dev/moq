@@ -2170,7 +2170,9 @@ mod tests {
 			assert_eq!(log.bi_opens(), opened, "{version:?} overlapped the narrower request");
 			let ended = log.trail().into_iter().any(|(_, sent)| match sent {
 				crate::lite::test_transport::Sent::Finish => super::super::request_stream::fin_cancels(version),
-				crate::lite::test_transport::Sent::Reset(_) => !super::super::request_stream::fin_cancels(version),
+				crate::lite::test_transport::Sent::Reset(_) | crate::lite::test_transport::Sent::ResetAt { .. } => {
+					!super::super::request_stream::fin_cancels(version)
+				}
 				crate::lite::test_transport::Sent::Write(_) => false,
 			});
 			assert!(ended, "{version:?} did not end the narrower request: {:?}", log.trail());

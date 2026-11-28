@@ -48,9 +48,9 @@ pub(crate) fn validate_rate(rate: u32) -> Result<(), Error> {
 	)))
 }
 
-pub(crate) fn validate_channels(count: u32) -> Result<i32, Error> {
+pub(crate) fn validate_channels(count: u32) -> Result<u8, Error> {
 	match count {
-		1 | 2 => Ok(count as i32),
+		1 | 2 => Ok(count as u8),
 		other => Err(Error::Unsupported(format!(
 			"opus only supports 1 or 2 channels (got {other})"
 		))),
@@ -73,10 +73,10 @@ pub(crate) fn frame_size(sample_rate: u32, duration: Duration) -> Result<usize, 
 /// Only a rejected argument or an unimplemented feature is a configuration libopus
 /// refuses. An allocation, internal, or state failure is a fault in the codec, which
 /// no other configuration is more likely to avoid.
-pub(crate) fn error(code: i32, context: &str) -> Error {
-	let message = format!("libopus {context} failed (code {code})");
-	match code {
-		unsafe_libopus::OPUS_BAD_ARG | unsafe_libopus::OPUS_UNIMPLEMENTED => Error::Unsupported(message),
+pub(crate) fn error(err: moq_opus::Error, context: &str) -> Error {
+	let message = format!("libopus {context} failed: {err}");
+	match err {
+		moq_opus::Error::BadArg | moq_opus::Error::Unimplemented => Error::Unsupported(message),
 		_ => Error::Codec(message),
 	}
 }
@@ -85,11 +85,11 @@ pub(crate) fn error(code: i32, context: &str) -> Error {
 ///
 /// Only a rejected packet is the stream's problem and worth skipping; the rest
 /// mean we handed libopus something wrong, which no later packet fixes.
-pub(crate) fn decode_error(code: i32) -> Error {
-	if code == unsafe_libopus::OPUS_INVALID_PACKET {
-		return Error::Decode(format!("libopus rejected the packet (code {code})"));
+pub(crate) fn decode_error(err: moq_opus::Error) -> Error {
+	if err == moq_opus::Error::InvalidPacket {
+		return Error::Decode(format!("libopus rejected the packet: {err}"));
 	}
-	error(code, "opus_multistream_decode_float")
+	error(err, "decode")
 }
 
 /// Classify a packet, preserving DTX across packet loss.
@@ -135,10 +135,10 @@ fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 		if last {
 			return carries_nothing(packet);
 		}
-		let Some((silent, offset)) = self_delimited(packet) else {
+		let Some((largest, offset)) = self_delimited(packet) else {
 			return false;
 		};
-		if !silent {
+		if largest > 0 {
 			return false;
 		}
 		packet = &packet[offset..];
@@ -146,19 +146,16 @@ fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 	false
 }
 
-/// One self-delimited Opus packet at the front of `data`: whether every frame is
-/// empty, and how many bytes it occupies, including its trailing padding.
+/// One self-delimited Opus packet at the front of `data`: its largest frame in bytes,
+/// and how many bytes it occupies, including its trailing padding.
 ///
 /// `None` when the bytes are not that packet. The length of the last frame is
 /// coded where libopus puts it, before the frame payloads.
-fn self_delimited(data: &[u8]) -> Option<(bool, usize)> {
+fn self_delimited(data: &[u8]) -> Option<(usize, usize)> {
 	if data.is_empty() {
 		return None;
 	}
-	let framesize = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(data.as_ptr(), 48_000) };
-	if framesize <= 0 {
-		return None;
-	}
+	let framesize = moq_opus::packet::samples_per_frame(data, 48_000).filter(|&size| size > 0)?;
 
 	let toc = data[0];
 	let mut pos = 1usize;
@@ -193,7 +190,7 @@ fn self_delimited(data: &[u8]) -> Option<(bool, usize)> {
 			pos += 1;
 			len -= 1;
 			let count = (ch & 0x3f) as usize;
-			if count == 0 || count > sizes.len() || framesize as usize * count > 5760 {
+			if count == 0 || count > sizes.len() || framesize * count > 5760 {
 				return None;
 			}
 			if ch & 0x40 != 0 {
@@ -258,8 +255,8 @@ fn self_delimited(data: &[u8]) -> Option<(bool, usize)> {
 	if offset == 0 || offset > data.len() {
 		return None;
 	}
-	let silent = sizes[..count].iter().all(|&frame| frame == 0);
-	Some((silent, offset))
+	let largest = sizes[..count].iter().copied().max()?;
+	Some((usize::try_from(largest).ok()?, offset))
 }
 
 /// The self-delimited length prefix (RFC 6716 §3.2.5), or `None` when it is cut off.
@@ -288,37 +285,10 @@ fn parse_size(data: &[u8]) -> Option<(usize, i32)> {
 /// marked packet, so it reads as active. Erring that way keeps the rule from
 /// ever calling real audio silence, which is the direction that matters.
 pub(crate) fn carries_nothing(packet: &[u8]) -> bool {
-	let Some((sizes, count)) = frame_sizes(packet) else {
-		return false;
-	};
-
-	match sizes.get(..count) {
-		Some(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
-		None => false,
+	match moq_opus::packet::frame_sizes(packet) {
+		Ok(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
+		Err(_) => false,
 	}
-}
-
-/// Sizes of the coded frames in an accepted packet, with padding parsed off.
-fn frame_sizes(packet: &[u8]) -> Option<([i16; 48], usize)> {
-	let len = i32::try_from(packet.len()).ok()?;
-
-	// An Opus packet holds at most 48 frames (RFC 6716 section 3.2.5).
-	let mut sizes = [0i16; 48];
-	// SAFETY: `sizes` has libopus's maximum frame count, and it bounds the count
-	// it writes by that. Passing null for the TOC and frame pointers asks it to
-	// skip them, which it checks for; only `size` is required.
-	let count = unsafe {
-		unsafe_libopus::opus_packet_parse(
-			packet.as_ptr(),
-			len,
-			std::ptr::null_mut(),
-			std::ptr::null_mut(),
-			sizes.as_mut_ptr(),
-			std::ptr::null_mut(),
-		)
-	};
-
-	Some((sizes, usize::try_from(count).ok()?))
 }
 
 /// The lowest bitrate that still codes audio, in bits per second.
@@ -340,19 +310,11 @@ mod tests {
 
 	#[test]
 	fn only_argument_failures_are_unsupported() {
-		assert!(matches!(
-			error(unsafe_libopus::OPUS_BAD_ARG, "ctx"),
-			Error::Unsupported(_)
-		));
-		assert!(matches!(
-			error(unsafe_libopus::OPUS_UNIMPLEMENTED, "ctx"),
-			Error::Unsupported(_)
-		));
-		assert!(matches!(error(unsafe_libopus::OPUS_ALLOC_FAIL, "ctx"), Error::Codec(_)));
-		assert!(matches!(
-			error(unsafe_libopus::OPUS_INTERNAL_ERROR, "ctx"),
-			Error::Codec(_)
-		));
+		use moq_opus::Error as Opus;
+		assert!(matches!(error(Opus::BadArg, "ctx"), Error::Unsupported(_)));
+		assert!(matches!(error(Opus::Unimplemented, "ctx"), Error::Unsupported(_)));
+		assert!(matches!(error(Opus::AllocFail, "ctx"), Error::Codec(_)));
+		assert!(matches!(error(Opus::Internal, "ctx"), Error::Codec(_)));
 	}
 
 	#[test]

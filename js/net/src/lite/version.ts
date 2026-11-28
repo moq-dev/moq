@@ -12,7 +12,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream instance, and the Auth Stream.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the stream identity, and the Auth Stream.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -67,6 +67,22 @@ export function hasTrackStream(version: Version): boolean {
 			return false;
 		default:
 			return true;
+	}
+}
+
+/**
+ * Whether the session supports the FETCH control stream (0x3).
+ *
+ * Present in lite-05 and lite-06; lite-07 removes FETCH in favor of bounded one-shot SUBSCRIBE
+ * streams.
+ */
+export function hasFetch(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return true;
+		default:
+			return false;
 	}
 }
 
@@ -362,10 +378,10 @@ export function keepsSubscribeOpen(version: Version): boolean {
 	return hasRanges(version);
 }
 
-/** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
- * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
- * mints an instance for each announcement. */
-export function hasInstance(version: Version): boolean {
+/** Whether announcements carry their identity and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
+ * the identity they pin. Added in lite-07. Older versions carry nothing, so the receiving session
+ * mints an identity for each announcement. */
+export function hasIdentity(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -385,6 +401,25 @@ export function hasInstance(version: Version): boolean {
  * datagram its inflated size. Added in lite-07.
  */
 export function hasCompression(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether SUBSCRIBE carries a `Meta` byte, and a metadata subscription's FRAMEs their header
+ * alone. Added in lite-07; an earlier subscription always carries the payload.
+ */
+export function hasMeta(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -525,7 +560,7 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry a non-empty `[Group Start, Group End)` with an
+ * Whether SUBSCRIBE_DROP carries a non-empty `[Group Start, Group End)` with an
  * exclusive end. Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
  */
 export function hasGroupSpan(version: Version): boolean {
@@ -544,10 +579,9 @@ export function hasGroupSpan(version: Version): boolean {
 }
 
 /**
- * Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
- * SUBSCRIBE_DROP, which names the `Update` in effect when it was given up; SUBSCRIBE and
- * SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07; earlier versions name every
- * hole in SUBSCRIBE_DROP.
+ * Whether holes distinguish declared skips (SUBSCRIBE_DROP with error code SKIP) from drops
+ * with an error code; added in lite-07. Earlier versions drop every hole without a distinct skip
+ * code.
  */
 export function hasSkip(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -677,6 +711,25 @@ export function hasLengthFirst(version: Version): boolean {
  * earlier versions end every group with a bare FIN and count the first delta from 0.
  */
 export function hasGroupEnd(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether a publisher resets an opened Group Stream reliably, still delivering its GROUP header,
+ * which then accounts for the group, so no SUBSCRIBE_DROP names it. Added in lite-07; earlier
+ * versions name every group whose stream failed in SUBSCRIBE_DROP.
+ */
+export function hasReliableReset(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

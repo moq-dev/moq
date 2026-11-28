@@ -209,28 +209,6 @@ impl Publisher {
 			Codecs::H265 { import, .. } => import.abort(err),
 		}
 	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the publisher back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the publisher back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
-		let codecs = match self.codecs {
-			Codecs::H264 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| Codecs::H264 { split, import }),
-			Codecs::H265 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| Codecs::H265 { split, import }),
-		};
-		codecs.map_err(|codecs| Self { codecs })
-	}
 }
 
 /// A video track whose [`Producer`](super::Producer) or [`Publisher`] finished it: every frame

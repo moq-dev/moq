@@ -301,3 +301,116 @@ fn spawn<D: moq_net::time::Driver + Unpin + 'static>(mut driver: D) {
 		moq_net::time::Driver::poll(&mut driver, now, waiter)
 	})));
 }
+
+/// A session's keep-alive: stale after this long unheard, closed after [`HARD`]
+const SOFT: Duration = Duration::from_secs(2);
+const HARD: Duration = Duration::from_secs(10);
+
+/// Collapse a path's rate to nothing: its queue holds one packet and drops the rest, as a
+/// bufferbloated link does once its queue fills
+fn collapse(network: &Network) {
+	for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+		network.path(from, to, |path| {
+			path.link.bottleneck = Some(Bottleneck::timed(1, Duration::from_millis(200)))
+		});
+	}
+}
+
+fn heal(network: &Network) {
+	for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+		network.path(from, to, |path| path.link = Link::default());
+	}
+}
+
+/// Both sides of a session under a keep-alive stay live while idle, turn stale within `soft`
+/// once the path collapses into a full queue, live again once it heals before `hard`, and close
+/// as an idle timeout once it stays dead past `hard`.
+#[test]
+fn keep_alive() {
+	use moq_net::transport::{KeepAlive, Liveness};
+	for version in VERSIONS {
+		let version: Version = version.parse().unwrap();
+		kio::clock::sim::run(async move {
+			let network = Network::new(3);
+			for (from, to) in [(CLIENT, SERVER), (SERVER, CLIENT)] {
+				network.path(from, to, |path| path.latency = Duration::from_millis(20));
+			}
+			let (server_config, client_config) = tls(version);
+			let server =
+				driver::endpoint::Endpoint::new(endpoint(3, 1).with_server(server_config), network.bind(SERVER))
+					.unwrap();
+			let client = driver::endpoint::Endpoint::new(endpoint(3, 2), network.bind(CLIENT)).unwrap();
+			let keep_alive = KeepAlive::new(SOFT, HARD);
+			let publisher = origin_producer();
+			let viewer = origin_producer();
+
+			let accept = async {
+				let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
+				let (session, driver) = moq_net::Server::new()
+					.with_versions(version.into())
+					.with_publisher(publisher.consume())
+					.with_keep_alive(keep_alive)
+					.accept(kio::clock::now(), web::Session::raw(conn))
+					.await
+					.unwrap();
+				spawn(driver);
+				session
+			};
+			let connect = async {
+				let conn = client
+					.connect(&client_config, SERVER, "localhost")
+					.unwrap()
+					.await
+					.unwrap();
+				let (session, driver) = moq_net::Client::new()
+					.with_versions(version.into())
+					.with_subscriber(viewer.clone())
+					.with_keep_alive(keep_alive)
+					.connect(kio::clock::now(), web::Session::raw(conn))
+					.await
+					.unwrap();
+				spawn(driver);
+				session
+			};
+			let (server, client) = futures::join!(accept, connect);
+
+			// Idle well past `soft`: the probes keep both sides live.
+			kio::clock::sleep(5 * SOFT).await;
+			assert_eq!(client.liveness(), Some(Liveness::Live), "{version}");
+			assert_eq!(server.liveness(), Some(Liveness::Live), "{version}");
+
+			collapse(&network);
+			let collapsed = kio::clock::now();
+			let stale = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Live)).await;
+			assert_eq!(stale, Ok(Some(Liveness::Stale)), "{version}");
+			let after = kio::clock::now() - collapsed;
+			// Packets already past the queue still arrive, a round trip at most.
+			assert!(
+				after <= SOFT + Duration::from_millis(40),
+				"{version}: stale {after:?} after the collapse"
+			);
+
+			heal(&network);
+			let healed = kio::clock::now();
+			let live = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;
+			assert_eq!(live, Ok(Some(Liveness::Live)), "{version}");
+			let after = kio::clock::now() - healed;
+			assert!(
+				after <= SOFT / 2 + Duration::from_millis(100),
+				"{version}: live {after:?} after healing"
+			);
+
+			collapse(&network);
+			let collapsed = kio::clock::now();
+			let err = kio::clock::timeout(2 * HARD, client.closed()).await.unwrap();
+			assert!(matches!(err, moq_net::Error::IdleTimeout), "{version}: {err:?}");
+			let after = kio::clock::now() - collapsed;
+			assert!(
+				after > HARD - SOFT && after <= HARD + Duration::from_millis(40),
+				"{version}: closed {after:?} after the collapse"
+			);
+			let ended = kio::clock::timeout(HARD, client.liveness_changed(Liveness::Stale)).await;
+			assert_eq!(ended, Ok(None), "{version}");
+		});
+	}
+}

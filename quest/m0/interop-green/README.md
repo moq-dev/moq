@@ -20,12 +20,10 @@ so it only needs to stay green.
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
-  so the pass now runs the datagram step; the `replacement` case runs by
-  default on both engines and every wire. Decided 2026-11-09 (maintainer, AFK, accepting the
-  recommendation): close this quest on a pass, which the maintainer set with
-  those cases skipped; the pass that closes it runs all but `replacement`.
-  Release remeasure measures stale planned-break pins after publication and
-  opens the pin PR on its `release-remeasure` branch.
+  so the pass now runs the datagram step, and the `replacement` case runs by
+  default on both engines and every wire since
+  [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293). Close this quest
+  once a scheduled Interop run on `main` passes green.
 
 ## Plan
 
@@ -108,8 +106,44 @@ The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 1
 [moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300). Each time an unrelated page
 underflowed with it, so the ARM runner starved;
 [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) idles the lifecycle pages through
-the section, and the [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) child
-owns the lite-06 fallback audio that remains.
+the section. Measured on that runner class
+([run 45309593159](https://github.com/moq-dev/moq/actions/runs/45309593159), 20 of 20 focused
+runs passed), the `moq-lite-06` fallback takes 719 to 1028 ms against the 1039 ms bound
+(lite-07 314 to 438 ms, moq-transport 214 to 319 ms). A lite-06 SUBSCRIBE states no lag, so the
+viewer's audio join is a live join from the oldest group with the player's 2.13 s Max Age (2 s
+past its delay, so its jitter estimator sees every arrival), and the incumbent's
+`onDemand: "retain"` audio encodes those 2.13 s of retained PCM before its first live frame.
+Decided 2026-11-23 (maintainer, [moq-dev/moq#9511](https://github.com/moq-dev/moq/pull/9511)):
+that replay is correct, since the join gets exactly what it asks for; the quest that owned the
+fallback closed on the 20 of 20 (rejected: encoding live audio before the replay; a looser
+lite-06 bound; replaying nothing).
+
+After [moq-dev/moq#9508](https://github.com/moq-dev/moq/pull/9508), every full Firefox run on ARM
+failed `lifecycle player returns`, the reattach after the lifecycle pages idle through the
+replacement section. The relay's TRACK reached the fixture ahead of its SUBSCRIBE, and since #9508
+that held lookup counts as demand. So the retaining audio encoder replayed its whole 30 s retention
+as fresh groups ahead of the live edge. [moq-dev/moq#9572](https://github.com/moq-dev/moq/pull/9572)
+replays retained audio only for a live subscription, in JS and Rust: 20 of 20 runs that reached the
+return passed it, against 1 of 24 without the fix. Its validation left 5 of 24 runs failing the
+earlier rejoin or reattach step. Remeasured on `main` in
+[moq-dev/moq#9620](https://github.com/moq-dev/moq/pull/9620), both steps passed in all 12 ARM runs,
+so the child that owned them was deleted (decided 2026-11-26, maintainer). Its trace showed a
+lite-06 cold join replays about 2 s of retained audio that the player skips through; that waits
+for lite-07, whose joins state their lag (rejected: fixing it for lite-06).
+
+The 2026-11-27 Nightly triage then found `Media (firefox player)` failing 6 of 15 runs at a
+different lifecycle step almost every time (`rejoin reaches live`, `reattach reaches live`, and the
+tone after a resume, rejoin, or reattach). Every one of those runs was at a commit before
+[moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561), which grew the JS publisher's audio
+groups from 20 ms to 100 ms. Measured on the Nightly's ARM runner class with the whole `media`
+lane in [moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809): `main` passed 64 of 64
+runs, the last failing Nightly commit (`7297210187`) failed 3 of 24, and `main` with the fixture's
+audio groups set back to 20 ms failed 10 of 56 (7 of 32 beside `main`'s 32 of 32 in one batch), at
+the same steps. The `reaches live` failures found the 4-vCPU host saturated (idle near 0%, the
+debug-built relay near a whole core) while a resubscription replayed retained audio as a stream
+per 20 ms group. The child quest was deleted, since its failures no longer
+occur (decided 2026-11-28, AFK recommendation; rejected: profiling the player's per-group cost
+against a 20 ms publisher, and building the media lane's relay in release).
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

@@ -5,7 +5,7 @@ import { type Instant, now, sleepUntil } from "@moq/clock";
 import { type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "../error.ts";
 import { fillChanged, wantedRuns } from "../fill.ts";
-import { hooks, insertRun, type Run, removeRun, runGaps } from "../internal.ts";
+import { hooks, insertRun, type Run, removeRun, runGaps, subtractRuns } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import type { Tail } from "../tail.ts";
 import type * as track from "../track.ts";
@@ -121,7 +121,9 @@ export interface FillAsk {
  * refuses a fill. A range start speaks only for its range: once the range retires, a later one
  * asking for the same groups may start lower. A group it drops as stale is officially dropped,
  * and one it already accounted for (delivered before and since evicted) it never sends again, so
- * a recovery asks for either on its own history subscription, once. Nothing newer
+ * a recovery asks for either on its own history subscription: a stale run once, and an
+ * accounted group as often as it is evicted again before its fill answers. This cache evicts only
+ * groups idle past their expiry, so each recovery lands a group its fill answers. Nothing newer
  * judges it stale there, so once every hop forgot a run, a narrow reader takes its stale groups.
  *
  * A group stays asked until its stream finishes, since narrowing the subscription under a stream
@@ -244,7 +246,8 @@ export class RangeFills {
 	poll(tail: Tail, read: boolean): boolean {
 		const empty = this.isEmpty();
 		// The groups the subscription already accounted for, which it never sends again, are
-		// recovered on their own, once.
+		// recovered on their own, as often as the cache evicts them before a reader takes them: a key
+		// a reader is owed is never lost to the cache. Mirrors the Rust `RangeFills::poll`.
 		const asked: Run[] = [];
 		for (const fill of this.#held) {
 			const run = nextRun(fill);
@@ -252,17 +255,9 @@ export class RangeFills {
 		}
 		for (const run of asked) {
 			for (const gone of tail.accounted(run.start, run.end)) {
-				for (const gap of runGaps(this.#recovering, gone.start, gone.end)) {
-					const done = clip(this.#recovered, gap.start, gap.end);
-					for (const again of done) {
-						// Recovered once for these fills; a later request may recover it again.
-						if (!this.#refusal(again.start))
-							this.#setRefused(again.start, again.end, passing(new NotFound(`group ${again.start}`)));
-					}
-					for (const fresh of runGaps(done, gap.start, gap.end)) {
-						if (!this.#refusal(fresh.start)) insertRun(this.#toRecover, fresh.start, fresh.end);
-					}
-				}
+				for (const gap of runGaps(this.#recovering, gone.start, gone.end))
+					for (const owed of this.#unrefused(gap.start, gap.end))
+						insertRun(this.#toRecover, owed.start, owed.end);
 			}
 		}
 		// Each stale run goes out on its own history subscription, once, with the priority
@@ -379,8 +374,8 @@ export class RangeFills {
 
 		// A run stays asked whole while a fill still owes any of it, so the subscription changes once
 		// as a run is asked and once as it is done, and the streams of its answered groups keep
-		// arriving. One no fill owes stays while any of its streams is still arriving, each group
-		// searched for once.
+		// arriving. One no fill owes stays while any of its streams is still arriving and someone
+		// reads the track, each group searched for once.
 		for (const [key, closed] of this.#reading) if (closed.peek() !== undefined) this.#reading.delete(key);
 		const groups = ask.groups.map((run) => ({ ...run }));
 		const draining: Run[] = [];
@@ -389,6 +384,7 @@ export class RangeFills {
 				insertRun(groups, run.start, run.end);
 				continue;
 			}
+			if (!read) continue;
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for (const gap of runGaps(this.#draining, run.start, run.end)) {
 				for (const key of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
@@ -418,12 +414,14 @@ export class RangeFills {
 		return true;
 	}
 
-	/** Resolves once any input {@link poll} reads may have changed. */
-	changed(tail: Tail): Promise<unknown> {
+	/** Resolves once any input {@link poll} reads may have changed, whether `demand` reads among them. */
+	changed(tail: Tail, demand: track.Demand): Promise<unknown> {
 		const wakes: unknown[] = [
 			Signal.race(
 				this.#bumped,
 				tail.changed,
+				demand.wanted,
+				hooks.demandReleased(demand),
 				...[...this.#recoveries].flatMap((recovery) => [
 					recovery.handle.changed,
 					recovery.handle.readingChanged,
@@ -449,6 +447,13 @@ export class RangeFills {
 	/** Whether {@link close} was called. */
 	get closed(): boolean {
 		return this.#closed;
+	}
+
+	// The keys of `[start, end)` neither the subscription nor a recovery said it will not deliver,
+	// nor the subscriber's own range starts past: a refusal answers only its own keys, so a group
+	// past a skipped run is still owed.
+	#unrefused(start: bigint, end: bigint): Run[] {
+		return subtractRuns(subtractRuns([{ start, end }], this.#refused), this.#skipped);
 	}
 
 	// Why the subscription or a recovery will not deliver the run of groups from `first`, if it

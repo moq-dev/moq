@@ -114,8 +114,24 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.receive_window()
 	}
 
+	fn reliable_reset(&self) -> bool {
+		self.0.reliable_reset()
+	}
+
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
+	}
+
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), moq::KeepAliveError> {
+		self.0.set_keep_alive(keep_alive)
+	}
+
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		self.0.poll_liveness(waiter, last)
 	}
 }
 
@@ -154,6 +170,10 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 
 	fn reset(&mut self, code: u32) {
 		self.0.reset(code)
+	}
+
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		self.0.reset_at(offset, code)
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {

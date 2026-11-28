@@ -2270,6 +2270,7 @@ mod tests {
 			Ok(())
 		}
 		fn reset(&mut self, _: u32) {}
+		fn reset_at(&mut self, _: &(), _: u32) {}
 		fn poll_closed(&self, _: &kio::Waiter) -> std::task::Poll<Result<(), ScriptedError>> {
 			std::task::Poll::Pending
 		}

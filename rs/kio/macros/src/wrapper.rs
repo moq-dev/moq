@@ -24,7 +24,7 @@ pub(crate) fn expand(args: TokenStream, method: &ImplItemFn) -> syn::Result<Toke
 			"#[kio::wrapper] cannot wrap a `const fn`",
 		));
 	}
-	if let Some(token) = &sig.unsafety {
+	if let syn::Safety::Unsafe(token) = &sig.safety {
 		return Err(syn::Error::new_spanned(
 			token,
 			"#[kio::wrapper] cannot wrap an `unsafe fn`",
@@ -68,7 +68,7 @@ pub(crate) fn expand(args: TokenStream, method: &ImplItemFn) -> syn::Result<Toke
 
 	let mut inputs = sig.inputs.iter();
 	let receiver = match inputs.next() {
-		Some(FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.colon_token.is_none() => receiver,
+		Some(FnArg::Receiver(receiver)) if matches!(receiver.kind, syn::ReceiverKind::Reference(..)) => receiver,
 		Some(FnArg::Receiver(receiver)) => {
 			return Err(syn::Error::new_spanned(
 				receiver,

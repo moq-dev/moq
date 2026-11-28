@@ -73,8 +73,12 @@ pub(crate) struct Waits {
 	accept: [WaiterList; 2],
 	/// For stream credit, per direction
 	open: [WaiterList; 2],
+	/// For a receive stream to end: its final size arriving, or its state being freed
+	ended: WaiterList,
 	/// For a received datagram
 	datagram: WaiterList,
+	/// For the peer to turn stale or live again under a keep-alive
+	stale: WaiterList,
 	/// For something to transmit: the driver, woken by whatever the application queues
 	transmit: WaiterList,
 	handshake_data: Latch,
@@ -133,6 +137,20 @@ impl Waits {
 		self.accept[dir as usize].wake();
 	}
 
+	/// Register `waiter` for a receive stream to end
+	pub(crate) fn register_ended(&mut self, waiter: &Waiter) {
+		waiter.register(&mut self.ended);
+	}
+
+	/// A receive stream learned its final size or was freed
+	///
+	/// Free while no quiesce waits, so the receive path may call it on every FIN.
+	pub(crate) fn wake_ended(&mut self) {
+		if !self.ended.is_empty() {
+			self.ended.wake();
+		}
+	}
+
 	/// Register `waiter` for credit to open a stream in `dir`
 	pub(crate) fn register_open(&mut self, dir: Dir, waiter: &Waiter) {
 		waiter.register(&mut self.open[dir as usize]);
@@ -151,6 +169,16 @@ impl Waits {
 	/// A datagram arrived
 	pub(crate) fn wake_datagram(&mut self) {
 		self.datagram.wake();
+	}
+
+	/// Register `waiter` for the peer to turn stale or live again
+	pub(crate) fn register_stale(&mut self, waiter: &Waiter) {
+		waiter.register(&mut self.stale);
+	}
+
+	/// The peer turned stale or live again
+	pub(crate) fn wake_stale(&mut self) {
+		self.stale.wake();
 	}
 
 	/// Register `waiter` for something to transmit
@@ -240,7 +268,9 @@ impl Waits {
 		for list in self.accept.iter_mut().chain(&mut self.open) {
 			list.wake();
 		}
+		self.ended.wake();
 		self.datagram.wake();
+		self.stale.wake();
 		// A close still owes the peer its CONNECTION_CLOSE.
 		self.transmit.wake();
 		self.handshake_data.waiters.wake();

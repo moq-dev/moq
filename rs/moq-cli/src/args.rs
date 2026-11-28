@@ -1314,21 +1314,24 @@ pub struct Transport {
 	#[usage(long, default = "1s")]
 	pub delay: moq_tokio::cli::Duration,
 
-	/// How long to wait for the same publisher instance, or with `--stitch` a replacement, to
+	/// How long to wait for the same publisher identity, or with `--stitch` a replacement, to
 	/// come back once the broadcast ends (e.g. `10s`), then carry on with the same stream.
-	/// Zero follows only an instance already serving. A replacement exits 1 unless `--stitch` is
+	/// Zero follows only an identity already serving. A replacement exits 1 unless `--stitch` is
 	/// passed. A failure other than the publisher leaving exits at once.
 	#[usage(long, default = "0s")]
 	pub follow: moq_tokio::cli::Duration,
 
-	/// Follow another publisher instance that replaces the broadcast, as a full program switch:
+	/// Follow another publisher identity that replaces the broadcast, as a full program switch:
 	/// a new PMT from its catalog, flagged as a break on every PID.
 	#[usage(long)]
 	pub stitch: bool,
 
 	/// Pad the output with null packets to this constant rate, in bits per second.
 	/// Defaults to the multiplex rate the catalog recorded from a constant-rate
-	/// source (`mpegts.muxRate`); without either the output is unpadded.
+	/// source (`mpegts.muxRate`), plus 60,160 b/s (a packet every 25 ms slot) for
+	/// the export's own clock and framing, and below 50 ms of `--delay` at least two
+	/// AAC frames a slot; without either the output is unpadded. A rate given here is
+	/// used as is.
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
 
@@ -2126,13 +2129,13 @@ mod tests {
 
 	#[test]
 	fn independent_importers_cannot_select_a_shared_instance() {
-		let instance = moq_net::Instance::random().to_string();
+		let identity = moq_net::Identity::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"http://relay/anon",
-			"--instance",
-			&instance,
+			"--identity",
+			&identity,
 			"import",
 			"ts",
 		]);

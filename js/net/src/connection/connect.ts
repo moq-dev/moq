@@ -5,6 +5,7 @@ import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
 import type { Viewers } from "../bandwidth.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
+import type { Cost } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
@@ -15,7 +16,8 @@ import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { checkCost, DEFAULT_TIMEOUT, exchangeSetup, handsOff, type Link, link } from "./handshake.ts";
+import * as KeepAlive from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
@@ -77,6 +79,15 @@ export interface WebSocketProps {
 
 	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
+
+	/**
+	 * How long the session may go without a frame before it closes, like `moq-tokio`'s
+	 * `connect.websocket.idle_timeout` (default: 30 s). It keeps a quiet session alive with a ping
+	 * every third of it. `null` turns it off when the server's is off too, so a quiet session sends
+	 * nothing and a dead link surfaces only as the WebSocket closing. Only QMux drafts 01 and later
+	 * negotiate it: a `qmux-00` session runs no idle timer. Must be positive.
+	 */
+	idleTimeout?: Duration | null;
 }
 
 /**
@@ -196,6 +207,13 @@ export function normalizeVersions(props?: {
 		if (value !== undefined && !(Number.isSafeInteger(value) && value > 0))
 			throw new RangeError(`websocket.${key} must be a positive safe integer: ${value}`);
 	}
+	const idleTimeout = props?.websocket?.idleTimeout;
+	if (
+		idleTimeout !== undefined &&
+		idleTimeout !== null &&
+		!(!idleTimeout.isZero() && Number.isSafeInteger(Math.ceil(idleTimeout.asMillis())))
+	)
+		throw new RangeError(`websocket.idleTimeout must be positive or null: ${idleTimeout}`);
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
@@ -254,6 +272,16 @@ export interface ConnectProps {
 	consume?: OriginProducer;
 
 	/**
+	 * Price this link, in the units the rest of the mesh uses (moq-lite-06+, and moq-transport
+	 * via the MoQ Cluster extension). Added to the route cost of every announcement the peer
+	 * sends, and declared in SETUP so the peer adds it to every announcement we send. Wins over a
+	 * price the peer declares; an unpriced link costs 1, which routes by hop count. Zero is
+	 * refused on moq-lite-07. Rank the link with {@link OriginProducer.withPriority} on
+	 * {@link ConnectProps.consume}.
+	 */
+	cost?: Cost;
+
+	/**
 	 * Credentials to present, kept apart from the URL.
 	 *
 	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
@@ -300,6 +328,13 @@ export interface ConnectProps {
 	viewers?: Viewers;
 
 	/**
+	 * Probe a quiet peer and report it through the session's `liveness` before closing on it.
+	 * WebTransport cannot probe, so the connect throws wherever it would dial WebTransport (any
+	 * browser that supports it) or is handed one as `transport`. See {@link KeepAlive.KeepAlive}.
+	 */
+	keepAlive?: KeepAlive.KeepAlive;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -327,7 +362,9 @@ type SessionProps = {
 	implementation: string;
 	/** The PROBE target to send a peer that advertised `Increase`. */
 	probeTarget?: Getter<number>;
-};
+	/** The peer's liveness, under a keep-alive. */
+	liveness?: Getter<KeepAlive.Liveness>;
+} & Link;
 
 /**
  * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
@@ -374,6 +411,8 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	signal.throwIfAborted();
 	// Fail before dialing; the session checks again when it attaches.
 	if (props.auth) vacant(props.auth);
+	checkCost(props.cost);
+	KeepAlive.check(props);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 
 	// Resolves on abort or timeout so every in-flight transport tears itself down.
@@ -488,12 +527,20 @@ async function connectInner(
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,
+		...link(props),
 	});
 
 	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
-		return [await connectTransport(url, transport, wiring(dial), offered.setup), dial];
+		let liveness: Getter<KeepAlive.Liveness> | undefined;
+		try {
+			liveness = props.keepAlive && (await KeepAlive.start(transport, props.keepAlive));
+		} catch (err) {
+			transport.close();
+			throw err;
+		}
+		return [await connectTransport(url, transport, { ...wiring(dial), liveness }, offered.setup), dial];
 	}
 
 	const websocketUrl = fallbackDial?.url ?? url;
@@ -526,7 +573,19 @@ async function connectInner(
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
 	const won = websocket && fallbackDial ? fallbackDial : dial;
-	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
+	let liveness: Getter<KeepAlive.Liveness> | undefined;
+	try {
+		liveness = props.keepAlive && (await KeepAlive.start(session as WebTransport, props.keepAlive));
+	} catch (err) {
+		session.close();
+		throw err;
+	}
+	const connection = await connectTransport(
+		url,
+		session as WebTransport,
+		{ ...wiring(won), liveness },
+		offered.setup,
+	);
 	if (websocket) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);
@@ -570,6 +629,7 @@ async function dialRace(
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,
 						),
+						idleTimeout: props.websocket?.idleTimeout,
 					},
 				})
 			: undefined;

@@ -28,6 +28,7 @@ pub struct Client {
 	allocator: Option<crate::bandwidth::Allocator>,
 	viewers: Option<crate::bandwidth::Viewers>,
 	implementation: Option<String>,
+	keep_alive: Option<crate::transport::KeepAlive>,
 }
 
 impl Client {
@@ -97,6 +98,16 @@ impl Client {
 	/// The registry the next session sends the target of.
 	fn viewers(&self) -> crate::bandwidth::Viewers {
 		self.viewers.clone().unwrap_or_default()
+	}
+
+	/// Probe a quiet peer and report it [`Stale`](crate::transport::Liveness::Stale) through
+	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::transport::KeepAlive).
+	///
+	/// Each session's connect fails with [`Error::KeepAlive`] on a transport that refuses it.
+	/// Without one, a session keeps the transport's own keep-alive and never reports staleness.
+	pub fn with_keep_alive(mut self, keep_alive: crate::transport::KeepAlive) -> Self {
+		self.keep_alive = Some(keep_alive);
+		self
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -415,6 +426,9 @@ impl Client {
 	/// Start the session the transport's ALPN picks, or begin negotiating moq-lite on a bidi
 	/// SETUP when it picks none.
 	fn start(&self, runtime: Deadlines, session: Transport) -> Result<Connect, Error> {
+		if let Some(keep_alive) = self.keep_alive {
+			session.set_keep_alive(keep_alive).map_err(Error::KeepAlive)?;
+		}
 		let peer_node = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_node);
 
@@ -962,6 +976,8 @@ mod tests {
 		}
 
 		fn reset(&mut self, _code: u32) {}
+
+		fn reset_at(&mut self, _offset: &(), _code: u32) {}
 
 		fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Ok(()))

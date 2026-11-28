@@ -1,7 +1,7 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container.ts";
 import { u53Schema } from "./integers.ts";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { RelativeBroadcastSchema } from "./path.ts";
 import { renditions } from "./section.ts";
 
 /**
@@ -36,11 +36,6 @@ export const TextConfigSchema = z.object({
 	// broadcast that served this catalog (e.g. "../source"). If unset, the track lives in the same
 	// broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The instance of the stream the reference names, when known. Absent accepts whichever stream
-	// resolves first. A route of another instance fails the entry; a route over a wire that
-	// carries no instance has one its session minted, which proves nothing, so there it is best
-	// effort. Without `broadcast`, it names the catalog's own stream.
-	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),

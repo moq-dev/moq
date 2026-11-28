@@ -14,7 +14,9 @@
 //!
 //! [`finish`](poll::SendStream::finish) closes the channel cleanly once its messages are
 //! read. A [`reset`](poll::SendStream::reset) or [`stop`](poll::RecvStream::stop) closes it
-//! with a code and drops what it queued. Closing the session keeps queued messages
+//! with a code and drops what it queued, except that a
+//! [`reset_at`](poll::SendStream::reset_at) keeps the bytes before its offset for the reader
+//! ahead of the code. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
 //! Reads return the channel's room as they go, so streams lease through
@@ -484,6 +486,11 @@ impl poll::Session for Session {
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
 		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
+
+	/// A reset queues behind the prefix it keeps, which the reader still drains.
+	fn reliable_reset(&self) -> bool {
+		true
+	}
 }
 
 /// One direction of a stream: the messages its writer queued for its reader.
@@ -546,11 +553,27 @@ impl Channel {
 	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
 	/// unless it was a finish the reader has not fully read.
 	fn abort(&mut self, end: End) {
+		self.abort_at(0, end);
+	}
+
+	/// [`Self::abort`], but keep the bytes before `offset` queued for the reader, unless a
+	/// stop already said it reads no more.
+	fn abort_at(&mut self, offset: u64, end: End) {
 		if self.end.is_none() || !self.messages.is_empty() {
 			self.end = Some(end);
 		}
-		self.messages.clear();
-		self.queued = 0;
+		let mut keep = match self.end {
+			Some(End::Stop(_)) => 0,
+			_ => offset.saturating_sub(self.taken),
+		};
+		self.messages.retain_mut(|message| {
+			let len = message.bytes.len() as u64;
+			let kept = len.min(keep);
+			message.bytes.truncate(kept as usize);
+			keep -= kept;
+			kept > 0
+		});
+		self.queued = self.messages.iter().map(|message| message.bytes.len()).sum();
 		// Nothing is left in flight for the writer to wait on.
 		self.finished = None;
 	}
@@ -562,6 +585,8 @@ impl Channel {
 			return Poll::Ready(Ok(()));
 		}
 		match self.end {
+			// The bytes a reset still delivers wait for the reader.
+			Some(End::Reset(_)) if offset <= self.taken + self.queued as u64 => Poll::Pending,
 			Some(End::Reset(_)) => Poll::Ready(Err(Error::Closed)),
 			Some(End::Stop(code)) => Poll::Ready(Err(Error::Stopped(code))),
 			_ => Poll::Pending,
@@ -683,6 +708,10 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
+		self.reset_at(&0, code);
+	}
+
+	fn reset_at(&mut self, offset: &u64, code: u32) {
 		if std::mem::replace(&mut self.done, true) {
 			return;
 		}
@@ -690,7 +719,7 @@ impl poll::SendStream for SendStream {
 		// close is checked under the channel lock so a concurrent close can't land between.
 		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			channel.abort(End::Reset(code));
+			channel.abort_at(*offset, End::Reset(code));
 		}
 		drop(channel);
 		self.credit = None;
@@ -834,8 +863,9 @@ impl poll::Chunks for Chunks {
 		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
 			return Poll::Ready(err);
 		}
+		// A reset that still delivers bytes fails only once they were read, as QUIC's does.
 		let channel = ready!(self.channel.poll(waiter, |channel| match channel.end {
-			Some(End::Reset(_)) => Poll::Ready(()),
+			Some(End::Reset(_)) if channel.messages.is_empty() => Poll::Ready(()),
 			_ => Poll::Pending,
 		}));
 		let Some(End::Reset(code)) = channel.end else {
@@ -1074,6 +1104,31 @@ mod tests {
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
 			Err(Error::Closed)
 		));
+	}
+
+	/// A reset at an offset still delivers the bytes before it, and fails the reader, or a
+	/// wait for the reset, only once they were read. A stop drops them.
+	#[test]
+	fn reset_at_delivers_the_prefix() {
+		let (a, b) = pair(buffer(64));
+		let (mut send, mut recv) = uni(&a, &b);
+
+		ready(write(&mut send, &Bytes::from_static(b"head"))).unwrap();
+		ready(write(&mut send, &Bytes::from_static(b"er-body"))).unwrap();
+		send.reset_at(&6, 7);
+		let at = 6;
+		assert!(send.poll_acked(&noop(), &at).is_pending(), "the prefix is still owed");
+		assert!(poll::RecvStream::poll_reset(&mut recv, &noop()).is_pending());
+		assert_eq!(ready(read(&mut recv, 4)).unwrap().unwrap(), "head");
+		assert_eq!(ready(read(&mut recv, usize::MAX)).unwrap().unwrap(), "er");
+		assert!(ready(send.poll_acked(&noop(), &at)).is_ok());
+		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(7))));
+
+		let (mut send, mut recv) = uni(&a, &b);
+		ready(write(&mut send, &Bytes::from_static(b"header"))).unwrap();
+		poll::RecvStream::stop(&mut recv, 3);
+		send.reset_at(&6, 7);
+		assert!(matches!(ready(send.poll_acked(&noop(), &6)), Err(Error::Stopped(3))));
 	}
 
 	/// The next chunk `recv` reads, once it lands.

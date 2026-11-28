@@ -15,9 +15,9 @@ GPU capacity and health reporting remains a separate additive follow-up.
 
 ## Required
 
-- [Vulkan Video encode on AMD](/quest/m5/vulkan-encode.md) - AMD proof
+- [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - AMD proof
 - [VA-API Vulkan import](/quest/m5/vaapi-vulkan-import.md) - Intel proof
 
 ## Related
 
-- [GPU health](/quest/m3/gpu-health.md) - later reporting, not a surface release gate
+- [GPU health](/quest/m4/gpu-health.md) - later reporting, not a surface release gate

@@ -99,7 +99,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"UnsupportedConfig", ffi.NewMoqErrorUnsupportedConfig("description"), moq.ErrUnsupportedConfig},
 		{"OutOfRange", ffi.NewMoqErrorOutOfRange("viewer"), moq.ErrOutOfRange},
 		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(""), moq.ErrInvalidPattern},
-		{"InvalidInstance", ffi.NewMoqErrorInvalidInstance(""), moq.ErrInvalidInstance},
+		{"InvalidIdentity", ffi.NewMoqErrorInvalidIdentity(""), moq.ErrInvalidIdentity},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
 		{"UnsupportedCatalog", ffi.NewMoqErrorUnsupportedCatalog(5), moq.ErrUnsupportedCatalog},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},

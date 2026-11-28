@@ -65,13 +65,6 @@ impl<T> NonZeroSlab<T> {
 	pub fn remove(&mut self, id: Id) -> Option<T> {
 		self.map.remove(&id)
 	}
-
-	/// Put back under `id` a value [`remove`](Self::remove) just took, for a call that found
-	/// it still in use. The caller holds the lock around both, so no one saw the gap.
-	pub fn restore(&mut self, id: Id, value: T) {
-		let replaced = self.map.insert(id, value);
-		debug_assert!(replaced.is_none(), "restored over a live handle");
-	}
 }
 
 impl TryFrom<i32> for Id {

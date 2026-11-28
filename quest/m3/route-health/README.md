@@ -57,6 +57,28 @@ nothing switches mode in place; the track moves as it moves between any two
 routes. The epic is deferred behind the route layer: "we don't have an
 immediate user".
 
+Decided 2026-11-23 (maintainer, /quest-run): ✅ Kixel is the immediate user
+the 2026-11-16 deferral lacked. Its robot failover
+([kixel-ai/kixel.ai#242](https://github.com/kixel-ai/kixel.ai/pull/242)) fixes
+a camera stuck on a silently dead LAN route through this epic's metadata
+standby and [failover](/quest/m3/route-health/failover.md).
+
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ move both the metadata wire/serving quest
+([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)) and the subscriber
+API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) back into `m2` on
+`moq-lite-07-wip`, reversing the 2026-11-25 deferral to `m3` / `lite-08-wip`
+(rejected: moving only the wire into `m2` and keeping the subscriber API in
+`m3`; leaving both in `m3`). `moq-hls` live and archive/VOD indexing is an
+immediate consumer, and moving both avoids breaking the C `moq_subscription`
+ABI after 0.22. [failover.md](/quest/m3/route-health/failover.md) and
+[ietf.md](/quest/m3/route-health/ietf.md) stay here in `m3`.
+
+Decided 2026-11-25 (maintainer, /quest-run): ✅ nothing refuses the mode: a
+relay whose upstream is lite-06 or earlier subscribes for payload and drops
+it, and moq-transport gets [an extension](/quest/m3/route-health/ietf.md)
+for the mode (rejected: a NOT_SUPPORTED refusal).
+
 New on 2026-11-15, from the prior art this is closest to:
 
 - The standby is a route whose path does not name this node, and one that

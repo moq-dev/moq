@@ -39,6 +39,11 @@ Decisions (maintainer, 2026-10-13):
 - Caches move to Cloudflare R2: mbx's S3 backend for Rust, and `nix.moq.dev`
   replacing Cachix for Nix. The infra lives in `infra/` beside apt and rpm,
   checked in where wrangler allows; one-time commands where it does not.
+  Superseded 2026-11-23: both move to Backblaze B2 for its startup credits.
+  The Rust cache reads and writes B2 since
+  [moq-dev/moq#9624](https://github.com/moq-dev/moq/pull/9624), with
+  [R2's teardown](/quest/m0/ci/mbx-b2.md) left. `nix.moq.dev` serves from B2
+  since [moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625), with its R2 buckets deleted.
 - Untrusted runs only read. Write credentials live in GitHub Environments
   whose deployment policy allows only `main` (plus release tags for the Nix
   signing key), so a pull request job cannot read them even from the same
@@ -48,7 +53,7 @@ Decisions (maintainer, 2026-10-13):
   PR is about to land. Rust cache writers are the jobs on `main` and in its
   queue, and no separate warm rebuilds what landed. Since
   [#6040](https://github.com/moq-dev/moq/pull/6040) the queue runs on the
-  self-hosted `moq-queue` runner with mbx's local store, so the R2 writers are
+  self-hosted `moq-queue` runner with mbx's local store, so the cache writers are
   the hosted scheduled jobs on `main`: Nightly and the workflows it calls,
   CodSpeed, Interop and TS.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
@@ -90,7 +95,7 @@ frozen. The landing quest closed 2026-11-04 with busy hours merging a median
 holds the cutover record). Decided 2026-11-06 (maintainer, /quest-unblock):
 ✅ drop the trial of a second concurrent entry, which ran out of shared runner
 disk on 2026-11-05; the queue stays at one entry. Not chosen: retrying it after
-kixel-ai/nixos#26's inode fix.
+the inode collection in kixel-ai/dotfiles `nixos/`.
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
@@ -102,7 +107,7 @@ rustc, without Cranelift (decided 2026-10-27) or the parallel frontend
 queue's test build after a moq-net edit (jobs 8, 12 CPUs, 5 interleaved
 runs each), the pinned nightly's `--jobs-frontend=8` took 15% longer and
 21% more CPU than the same nightly without it, against a 6% A/A spread, and
-did not shorten the critical `moq-net` test unit. moq-dev/rust2's nightly
+did not shorten the critical `moq-net` test unit. kixel-ai/rust2's nightly
 benchmark agrees across 8 runs: clean builds 1-7% slower, a hub edit 2-6%
 faster, for 8-15% more CPU. The ceiling is small anyway: the queue's test
 build is 37% of its job time, and cargo runs fewer than 8 units for only
@@ -161,7 +166,7 @@ so the work is making builds identical enough to hit it (flags in
 already does. Nix builds run sandboxed and cannot reach R2, so they stay on crane
 for packaging only (superseded 2026-11-13, below: per crate); CI builds with cargo
 and mbx. Decided 2026-10-26 from
-moq-dev/rust2's [Nix build benchmark](https://github.com/moq-dev/rust2/pull/63),
+kixel-ai/rust2's [Nix build benchmark](https://github.com/kixel-ai/rust2/pull/63),
 in billions of instructions over a clean build, a second package, the moq-net edit,
 and a lockfile bump: cargo with mbx totals 9,692 and crane 14,756. crate2nix built
 to the release profile totals 14,538: it wins only the lockfile bump (1,255 against
@@ -175,21 +180,21 @@ whose source, features, or dependencies moved, where crane rebuilt every
 workspace crate on any edit and every dependency on any lock change. Crates
 only the final fat-LTO link reads compile to bitcode alone, as cargo does:
 the spike measured that ~11% cheaper than crane cold and modeled it 49% cheaper
-over a week of `main`. Those builds run on free GitHub-hosted runners today,
-but many of these jobs are planned to move to self-hosted runners, where the
-saving lands on our own hosts. The generated file, and the release profile
-restated in `nix/crates.nix`, are accepted for that caching. Measured
-2026-11-14 by the [feature review](/quest/m3/release/feature-review.md): the
-Cache job's Runtime step took a median 13.1 min over 32 crane builds and
-11.9 min over 21 crate2nix builds, so the wall-time saving waits on that move,
-which no quest plans yet; per-PR cost is small (`just rs cargo-nix --check`
+over a week of `main`. Those builds run on free GitHub-hosted runners and,
+as `cache.yml` is no merge gate, may stay there (runner rule, 2026-11-26); a
+move to self-hosted runners happens only if measured to pay off. The generated
+file, and the release profile restated in `nix/crates.nix`, are accepted for
+that caching. Measured 2026-11-14 by the
+[feature review](/quest/m3/release/feature-review.md): the Cache job's Runtime
+step took a median 13.1 min over 32 crane builds and 11.9 min over 21 crate2nix
+builds, a 9% hosted wall-time saving that carries the item; per-PR cost is small (`just rs cargo-nix --check`
 takes about 3 s, and `nix/Cargo.nix` changed in 2 of the next 57 commits).
 
 Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target
 costs 3x the library. A "thin generics" profile shrinks them: generic entry
 points delegate to non-generic bodies, and BTreeMap instantiations are shared.
-moq-dev/rust2's driver lints the rule later. Making IETF support a cargo
+kixel-ai/rust2's driver lints the rule later. Making IETF support a cargo
 feature was considered and not planned: the churn outweighs the build saving.
 
 Measure each change against a current baseline and record the result in its PR.

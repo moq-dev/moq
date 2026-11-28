@@ -14,7 +14,7 @@ import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { WireRoute } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -144,7 +144,7 @@ test("copy fill: lite-07 fills below a start resolved from the budget, as far as
 	try {
 		populate(peer.track);
 		const narrow = peer.remote.track("video").subscribe(NARROW);
-		expect((await narrow.recvGroup())?.start).toBe(3n);
+		expect(sorted(await take(narrow, 2)).map(([key]) => key)).toEqual([3n, 4n]);
 		const before = peer.fetches();
 
 		// The copy cannot tell which budget picked its start, so it fills what this one reaches,
@@ -261,7 +261,7 @@ test("copy fill: lite-06 asks nothing below a start resolved from the budget, an
 	try {
 		populate(peer.track);
 		const narrow = peer.remote.track("video").subscribe(NARROW);
-		expect((await narrow.recvGroup())?.start).toBe(3n);
+		expect(sorted(await take(narrow, 2)).map(([key]) => key)).toEqual([3n, 4n]);
 		const before = peer.fetches();
 
 		// The widened budget has the publisher re-offer them: lite-06 FETCH carries no budget.
@@ -403,6 +403,150 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s recovers a run past the t
 		installed.close();
 	}
 });
+
+// The publisher finishes the track while a lite-05/06 copy still recovers a run it evicted: the
+// copy ends at once, the datagrams its subscription carried with it, and the recovery still lands.
+// Mirrors the tail case of the Rust
+// `finished_copy_history::a_finished_copy_reads_back_what_it_evicted`.
+test.each([Lite.ALPN_05, Lite.ALPN_06])("copy fill: %s ends a copy while its recovery is out", async (alpn) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let answer = () => {};
+	const peer = await peers(
+		alpn,
+		false,
+		new Promise<void>((resolve) => {
+			answer = resolve;
+		}),
+	);
+	try {
+		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
+		const first = peer.remote.track("video").subscribe(history);
+		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+		const datagrams = peer.remote.datagrams("video");
+		await datagrams.info();
+
+		// Both caches age out what nobody touched; only the live edge stays.
+		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+		write(peer.track.createGroup(4n), 4n, "live");
+		expect((await first.recvGroup())?.start).toBe(4n);
+
+		// The run goes out on a recovery the archive holds, and the publisher ends the track.
+		const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 2n, end: 3n }] });
+		const got = take(again, 2);
+		await clock.advance(Duration.millis(100));
+		peer.track.finish();
+		expect(await first.recvGroup()).toBeUndefined();
+		let ended = false;
+		const end = datagrams.recv().then((datagram) => {
+			ended = true;
+			return datagram;
+		});
+		await clock.advance(Duration.millis(100));
+		expect(ended).toBe(true);
+		expect(await end).toBeUndefined();
+
+		answer();
+		expect(sorted(await got)).toEqual([
+			[2n, "old 2"],
+			[3n, "old 3"],
+		]);
+		first.close();
+		again.close();
+		datagrams.close();
+	} finally {
+		peer.close();
+		installed.close();
+	}
+});
+
+// A finished lite-07 copy asks upstream for a time start a reader waits on that the copy can't place,
+// while a recovery is still out: its subscription stays open for the run a reader is still owed, and
+// the publisher answers a range asked after the track ended. Mirrors the Rust
+// `finished_copy_history::a_finished_copy_asks_for_a_time_it_cannot_place`.
+test("copy fill: a finished lite-07 copy asks for a time it cannot place", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let answer = () => {};
+	const peer = await peers(
+		Lite.ALPN_07_WIP,
+		false,
+		new Promise<void>((resolve) => {
+			answer = resolve;
+		}),
+	);
+	try {
+		const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
+		const first = peer.remote.track("video").subscribe(history);
+		for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+		expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+
+		// Both caches age out what nobody touched; only the live edge stays.
+		await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+		write(peer.track.createGroup(4n), 4n, "live");
+		expect((await first.recvGroup())?.start).toBe(4n);
+
+		// A run the copy evicted goes out on a recovery the archive holds, and the publisher ends the
+		// track, so the copy stays for the recovery.
+		const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 0n, end: 1n }] });
+		const recovered = take(again, 1);
+		await clock.advance(Duration.millis(100));
+		peer.track.finish();
+		expect(await first.recvGroup()).toBeUndefined();
+
+		// Time 3 lies in no group the copy holds: only upstream knows group 3 contains it.
+		const third = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 3n, end: 3n }] });
+		const placed = take(third, 1);
+		await clock.advance(Duration.millis(100));
+		answer();
+		expect(sorted(await recovered)).toEqual([[0n, "old 0"]]);
+		expect(sorted(await placed)).toEqual([[3n, "old 3"]]);
+		first.close();
+		again.close();
+		third.close();
+	} finally {
+		peer.close();
+		installed.close();
+	}
+});
+
+// The publisher finishes the track and the copy's reader reaches the end, and only then does a
+// second reader ask for a run the copy evicted: the copy's tail settled what its subscription
+// owed, not this, so the run still goes upstream. Mirrors the Rust
+// `finished_copy_history::a_finished_copy_reads_back_what_it_evicted`.
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"copy fill: %s reads back what a finished copy evicted",
+	async (alpn) => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const peer = await peers(alpn);
+		try {
+			const history: Subscription = { ranges: [{ start: 0n }], order: "ascending" };
+			const first = peer.remote.track("video").subscribe(history);
+			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
+			expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
+
+			// Both caches age out what nobody touched; only the live edge stays.
+			await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
+			write(peer.track.createGroup(4n), 4n, "live");
+			peer.track.finish();
+			expect((await first.recvGroup())?.start).toBe(4n);
+			expect(await first.recvGroup()).toBeUndefined();
+
+			const again = peer.remote.track("video").subscribe({ ...history, ranges: [{ start: 2n, end: 3n }] });
+			expect(sorted(await take(again, 2))).toEqual([
+				[2n, "old 2"],
+				[3n, "old 3"],
+			]);
+			first.close();
+			again.close();
+		} finally {
+			peer.close();
+			installed.close();
+		}
+	},
+);
 
 // Resolve once nobody reads `group` any more.
 async function unwanted(group: { demand(): { wanted: { peek(): boolean; changed(): Promise<boolean> } } }) {
@@ -581,15 +725,16 @@ test("copy fill: a group reset to make room ends", async () => {
 		live?.close();
 		// Two groups, so the fill rides the subscription's ranges.
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 1n }] });
-		const group = await history.recvGroup();
-		expect(group?.start).toBe(0n);
+		// The copy's upstream subscription keeps the live reader's Group Order, so either may land first.
+		const got = [await history.recvGroup(), await history.recvGroup()];
+		const group = got.find((held) => held?.start === 0n);
+		const one = got.find((held) => held?.start === 1n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
 		await archived;
 
 		// The session resets the group's stream to make room, so the publisher drops it on the
 		// subscription the fill rides.
-		const one = await history.recvGroup();
-		expect(one?.start).toBe(1n);
+		expect(one).toBeDefined();
 		while (await one?.readFrame());
 		// The live stream has finished, so the archived group's is the only one still open.
 		await clock.advance(Duration.ZERO);
@@ -702,7 +847,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
 				got.push(dec.decode(frame.payload));
 			expect(got).toEqual(["c0", "c1", "c2", "c3", "c4"]);
-			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual([2n]);
+			// On lite-07, fills go over SUBSCRIBE (no FETCH); on lite-06, single-group fills use FETCH.
+			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual(
+				alpn === Lite.ALPN_07_WIP ? [] : [2n],
+			);
 			bounded.close();
 			open.close();
 		} finally {
@@ -744,8 +892,8 @@ test.each([
 			broadcast = new BroadcastProducer();
 			const source = broadcast;
 			const upstream = new OriginProducer();
-			const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
-			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ instance, cost: 1n }));
+			const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
+			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ identity, cost: 1n }));
 			void (async () => {
 				for await (const request of received.requested()) request.serve(source.consume());
 			})();

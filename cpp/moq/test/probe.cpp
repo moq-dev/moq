@@ -283,11 +283,11 @@ void audio_roundtrip()
 	ok(broadcast->close(), "close audio broadcast");
 }
 
-// Over moq-lite-06, whose wire carries no instance, the session mints the announced one.
-// Passed back as is, it pins request and follow; its text, parsed, names another instance.
-void minted_instance()
+// Over moq-lite-06, whose wire carries no identity, the session mints the announced one.
+// Passed back as is, it pins request and follow; its text, parsed, names another identity.
+void minted_identity()
 {
-	CHECK(std::holds_alternative<moq::Error::kInvalidInstance>(moq::Instance::parse("").error().get_variant()));
+	CHECK(std::holds_alternative<moq::Error::kInvalidIdentity>(moq::Identity::parse("").error().get_variant()));
 
 	auto origin = moq::OriginProducer::init({});
 	auto route = ok(origin->route("live", {}), "minted route");
@@ -318,15 +318,15 @@ void minted_instance()
 	CHECK(event);
 	const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
 	CHECK(present != nullptr);
-	auto minted = present->announce.route.instance;
+	auto minted = present->announce.route.identity;
 	CHECK(minted->is_minted());
 
-	ok(consumer->request("live", minted).get(), "request the minted instance");
-	auto following = ok(consumer->follow("live", minted), "follow the minted instance");
-	CHECK(ok(following->available().get(), "available the minted instance"));
+	ok(consumer->request("live", minted).get(), "request the minted identity");
+	auto following = ok(consumer->follow("live", minted), "follow the minted identity");
+	CHECK(ok(following->available().get(), "available the minted identity"));
 
-	// A shared_ptr's == compares handles, so the generated eq() compares instances.
-	auto named = ok(moq::Instance::parse(minted->text()), "parse the minted text");
+	// A shared_ptr's == compares handles, so the generated eq() compares identities.
+	auto named = ok(moq::Identity::parse(minted->text()), "parse the minted text");
 	CHECK(!named->is_minted());
 	CHECK(named->to_string() == minted->to_string());
 	CHECK(!named->eq(minted));
@@ -351,7 +351,7 @@ int main()
 	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();
-	minted_instance();
+	minted_identity();
 	auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
 	auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
 	auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
@@ -387,7 +387,7 @@ int main()
 	moq::RouteOptions hidden;
 	hidden.hidden = true;
 	auto route = ok(origin->route("probe", hidden), "route");
-	CHECK(route->instance_id() && !route->instance_id()->is_minted());
+	CHECK(route->identity() && !route->identity()->is_minted());
 	auto broadcast = route->broadcast();
 	moq::TrackInfo info;
 	info.max_age = std::chrono::nanoseconds::zero();

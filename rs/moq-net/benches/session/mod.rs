@@ -174,6 +174,9 @@ struct Shape {
 	/// Deliver each round as `burst` datagrams of `frame` bytes per watched broadcast's
 	/// datagram track instead of groups.
 	datagrams: bool,
+	/// The metadata sweep (lite-07 only): `Some(true)` reads each group as a metadata
+	/// subscription, frame headers alone, and `Some(false)` is its payload baseline.
+	meta: Option<bool>,
 }
 
 impl Shape {
@@ -196,6 +199,7 @@ impl Shape {
 		fetch: false,
 		compress: false,
 		datagrams: false,
+		meta: None,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -221,7 +225,9 @@ impl Shape {
 	/// Whether `version` carries this shape. Datagram tracks run on moq-lite and on
 	/// moq-transport-22, which maps one to OBJECT_DATAGRAM at object ID 0.
 	fn runs_on(&self, version: &str) -> bool {
-		!self.datagrams || version.parse::<Version>().unwrap().is_lite() || version == "moq-transport-22"
+		let datagrams =
+			!self.datagrams || version.parse::<Version>().unwrap().is_lite() || version == "moq-transport-22";
+		datagrams && (self.meta.is_none() || version == "moq-lite-07-wip")
 	}
 
 	/// The broadcasts viewer `viewer` watches: a contiguous window starting at
@@ -254,6 +260,16 @@ impl Shape {
 			return format!(
 				"{version}/publishers={}/viewers={}/payload={}/cadence={}",
 				self.publishers, self.viewers, self.frame, self.burst
+			);
+		}
+		if let Some(meta) = self.meta {
+			return format!(
+				"{version}/relays={}/viewers={}/watch={}/frame={}/{}",
+				self.relays,
+				self.viewers,
+				self.watch,
+				self.frame,
+				if meta { "meta" } else { "payload" }
 			);
 		}
 		if self.fetch && self.burst > 1 {
@@ -573,6 +589,17 @@ async fn read_group(subscriber: &mut track::Subscriber) -> usize {
 	bytes
 }
 
+/// The bytes the next group's frames declare, read as a metadata subscription reads them: the
+/// same total [`read_group`] reads, with no payload behind it.
+async fn read_headers(subscriber: &mut moq_net::meta::Subscriber) -> usize {
+	let mut group = subscriber.recv_group().await.unwrap().expect("track ended");
+	let mut bytes = 0;
+	while let Some(header) = group.next_header().await.unwrap() {
+		bytes += header.size as usize;
+	}
+	bytes
+}
+
 fn path(broadcast: usize) -> String {
 	format!("room/{broadcast}")
 }
@@ -781,6 +808,7 @@ impl<B: Backend> Cluster<B> {
 		Viewer {
 			following: Vec::new(),
 			subscribers: Vec::new(),
+			metas: Vec::new(),
 			datagrams: Vec::new(),
 			fetches: Vec::new(),
 			blocked: 0,
@@ -795,6 +823,8 @@ struct Viewer {
 	/// Announcements watched without a subscription, one announce request each.
 	following: Vec<moq_net::origin::Routes>,
 	subscribers: Vec<track::Subscriber>,
+	/// Metadata subscriptions, read beside `subscribers`.
+	metas: Vec<moq_net::meta::Subscriber>,
 	/// Datagram track consumers, in the order of the broadcasts watched.
 	datagrams: Vec<datagram::Consumer>,
 	fetches: Vec<(usize, track::Consumer)>,
@@ -841,6 +871,21 @@ impl Viewer {
 		let consumer = broadcast.datagrams(DATAGRAMS).unwrap();
 		consumer.info().await.unwrap();
 		self.datagrams.push(consumer);
+	}
+
+	/// Resolve `path` and subscribe to the metadata of its `track`.
+	async fn watch_meta(&mut self, path: &str, track: &str, subscription: Option<track::Subscription>) {
+		let broadcast = self
+			.origin
+			.consume()
+			.follow(path, None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		self.metas
+			.push(broadcast.meta(track).unwrap().subscribe(subscription).await.unwrap());
 	}
 
 	/// Resolve `path` and subscribe to each of its `tracks`.
@@ -928,6 +973,8 @@ impl<B: Backend> Room<B> {
 						.unwrap()
 						.unwrap();
 					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
+				} else if shape.meta == Some(true) {
+					viewer.watch_meta(&path(broadcast), TRACK, shape.subscription()).await;
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
 				}
@@ -1091,6 +1138,9 @@ impl<B: Backend> Room<B> {
 					}
 					for subscriber in &mut viewer.subscribers {
 						bytes += read_group(subscriber).await;
+					}
+					for subscriber in &mut viewer.metas {
+						bytes += read_headers(subscriber).await;
 					}
 					bytes
 				};
@@ -1295,6 +1345,33 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 		}
 	}
 	group.finish();
+}
+
+/// Metadata subscriptions against the same rooms read with the payload, swept over relay depth,
+/// viewers, and tracks each viewer watches, at a frame large enough that payload dominates: the
+/// headers' cost must not grow with the payload they stand for.
+pub(crate) fn meta<B: Backend>(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let mut shapes = Vec::new();
+	for relays in [1, 3] {
+		for viewers in [1, 64] {
+			for watch in [1, 8] {
+				for meta in [false, true] {
+					shapes.push(Shape {
+						relays,
+						viewers,
+						watch,
+						frame: 16 * 1024,
+						meta: Some(meta),
+						..Shape::BASE
+					});
+				}
+			}
+		}
+	}
+	delivery::<B>(c, "meta", shapes);
 }
 
 /// Small-group cost over independent publisher/viewer axes, with both egress request paths.

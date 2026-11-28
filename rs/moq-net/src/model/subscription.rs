@@ -65,7 +65,7 @@ pub struct Subscription {
 	pub(crate) cap: Option<Position>,
 	/// The time starts a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
-	/// from each. Only an aggregate holds any.
+	/// from each, sorted. Only an aggregate holds any.
 	pub(crate) asks: Vec<u64>,
 	/// The live joins a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
@@ -113,9 +113,11 @@ pub(crate) fn max_of(budget: Duration) -> Option<Duration> {
 	Some(budget).filter(|budget| *budget != Duration::MAX)
 }
 
-/// Which of a subscription's pending groups the publisher sends first.
+/// Which of a subscription's groups comes first: the publisher sends its pending groups in
+/// this order, and `recv_group` hands out the groups it holds in it. Before moq-lite-07 the
+/// publisher sends newest first whatever this asks.
 ///
-/// A transmission order only: it never decides *whether* a group is delivered. A history
+/// An order only: it never decides *whether* a group is delivered. A history
 /// range ([`Start::Time`] or [`Start::Oldest`]) delivers every group it covers, and a
 /// [`Start::Live`] range skips what its `max` judges stale, so an ascending subscriber that
 /// wants a backlog drains it from a history range or a `max` that covers it.
@@ -388,8 +390,13 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 			end: end.map(|end| end - 1),
 		})
 		.collect();
-	// A range with no time start can't be placed against the time spans.
-	union.extend(ranges.iter().filter(|range| range.start == Start::Oldest));
+	// A range with no time start can't be placed against the time spans. One from the oldest
+	// group takes in every one from there ending before it.
+	union.extend(
+		(ranges.iter())
+			.filter(|range| range.start == Start::Oldest)
+			.max_by_key(|range| range.end),
+	);
 	union.extend(joins.into_iter().map(|((min, end), budget)| Range {
 		start: Start::Live {
 			min,
@@ -908,6 +915,16 @@ mod tests {
 		assert_eq!(
 			ranges(&[sub(&[ended]), joining(two)]),
 			vec![join(two, Some(Duration::ZERO)), ended]
+		);
+
+		// A range from the oldest group with an end takes in every one ending before it.
+		let oldest = |end| Range {
+			start: Start::Oldest,
+			end: Some(end),
+		};
+		assert_eq!(
+			ranges(&[sub(&[oldest(5)]), sub(&[oldest(3)]), sub(&[oldest(5)])]),
+			vec![oldest(5)]
 		);
 
 		// Empty ranges ask for nothing.

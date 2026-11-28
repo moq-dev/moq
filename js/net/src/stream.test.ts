@@ -1049,3 +1049,35 @@ for (const kind of ["uni", "bidi"] as const) {
 		}
 	});
 }
+
+test("Writer hold refuses a stream whose resets may lose what it holds", async () => {
+	const resets: (number | undefined)[] = [];
+	const stream = Object.assign(new WritableStream<Uint8Array>({ abort: () => void resets.push(undefined) }), {
+		resetAt: (offset: number) => void resets.push(offset),
+		reliableReset: false,
+	});
+	const writer = new Writer(stream, Lite.DRAFT_07);
+	await writer.u53(0);
+	expect(writer.hold()).toBe(false);
+	// Nothing is held, so the reset is plain rather than one that only looks reliable.
+	writer.reset(new Error("reset"));
+	await yieldNow();
+	expect(resets).toEqual([undefined]);
+	expect(await writer.heldAcknowledged()).toBe(false);
+});
+
+test("Writer hold refuses a stream already reset", async () => {
+	const resets: (number | undefined)[] = [];
+	const stream = Object.assign(new WritableStream<Uint8Array>({ abort: () => void resets.push(undefined) }), {
+		resetAt: (offset: number) => void resets.push(offset),
+		reliableReset: true,
+	});
+	const writer = new Writer(stream, Lite.DRAFT_07);
+	await writer.u53(0);
+	// A preemption between the header's write and the hold resets the stream plainly.
+	writer.preempt();
+	expect(writer.hold()).toBe(false);
+	writer.reset(new Error("later"));
+	await yieldNow();
+	expect(resets).toEqual([undefined]);
+});

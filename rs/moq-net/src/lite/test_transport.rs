@@ -79,6 +79,8 @@ pub struct Log {
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
 	/// Set by [`Self::fail_writes`].
 	writes_fail: Arc<AtomicBool>,
+	/// Set by [`Self::stop_sends`].
+	stop_sends: Arc<Mutex<Option<u32>>>,
 	/// How many leading bytes of each send stream the peer acknowledged, or `None` when the
 	/// transport cannot tell. Only an advance wakes a stream's delivery waiters, as a QUIC
 	/// acknowledgement does: it never wakes `poll_closed`. See [`Self::ack`].
@@ -91,6 +93,11 @@ pub enum Sent {
 	Write(Vec<u8>),
 	Finish,
 	Reset(u32),
+	/// A reset that still delivers the stream's bytes before `offset`.
+	ResetAt {
+		offset: u64,
+		code: u32,
+	},
 }
 
 /// What the streams sent ahead of the first session close. See [`Log::before_close`].
@@ -122,6 +129,12 @@ impl Log {
 	/// them (STOP_SENDING) would.
 	pub fn fail_writes(&self) {
 		self.writes_fail.store(true, Ordering::Relaxed);
+	}
+
+	/// Stop every send stream from now on (STOP_SENDING) with `code`, as a peer that read
+	/// some of each and then stopped would. A stream learns it when next polled.
+	pub fn stop_sends(&self, code: u32) {
+		*self.stop_sends.lock().unwrap() = Some(code);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -416,8 +429,14 @@ impl poll::SendStream for SinkSend {
 		self.log.record(self.id, Sent::Reset(code));
 	}
 
+	/// Recorded like [`reset`](poll::SendStream::reset), its code among [`Log::resets`] too.
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		self.log.resets.lock().unwrap().push(code);
+		self.log.record(self.id, Sent::ResetAt { offset: *offset, code });
+	}
+
 	fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
-		if let Some(code) = self.stopped {
+		if let Some(code) = self.stopped.or(*self.log.stop_sends.lock().unwrap()) {
 			return Poll::Ready(Err(SinkError {
 				code,
 				stream: Some(code),
@@ -666,6 +685,8 @@ pub struct SinkSession {
 	probe: Option<crate::transport::Probe>,
 	/// Set by [`Self::with_receive_window`], and widened by `set_limits`.
 	receive_window: Arc<Mutex<Option<crate::transport::ReceiveWindow>>>,
+	/// Set by [`Self::with_plain_reset`].
+	plain_reset: bool,
 }
 
 impl SinkSession {
@@ -674,6 +695,13 @@ impl SinkSession {
 			log,
 			..Default::default()
 		}
+	}
+
+	/// Reset like a peer without RESET_STREAM_AT, which may discard a reset stream's
+	/// unread prefix; otherwise every reset is reliable.
+	pub fn with_plain_reset(mut self) -> Self {
+		self.plain_reset = true;
+		self
 	}
 
 	/// Never acknowledge a unidirectional stream's FIN, like a congested peer, so a
@@ -895,6 +923,10 @@ impl poll::Session for SinkSession {
 
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		*self.receive_window.lock().unwrap()
+	}
+
+	fn reliable_reset(&self) -> bool {
+		!self.plain_reset
 	}
 
 	/// Set the connection window, on a transport that reports one.

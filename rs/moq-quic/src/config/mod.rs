@@ -17,7 +17,7 @@ pub enum ConfigError {
 	/// The idle timeout does not fit a QUIC varint in milliseconds
 	#[error("idle timeout out of range")]
 	IdleTimeout,
-	/// An MTU is outside 1200 to 65527 bytes
+	/// An MTU is outside 1200 to 65527 bytes, or MTU discovery's minimum change is zero
 	#[error("mtu out of range")]
 	Mtu,
 	/// The maximum UDP payload size is outside 1200 to 65527 bytes

@@ -22,7 +22,9 @@
   };
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # quest's nixpkgs, so every repository's dev shell gets the same C compiler and mbx
+    # shares build scripts, proc-macros, and the crates built on them across repositories.
+    nixpkgs.follows = "quest/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -32,8 +34,16 @@
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
       url = "github:kixel-ai/quest";
-      inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
+    };
+    # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
+    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind, or the library
+    # rust2-bench preloads into each counted process, starts new Kixel Quest series, since
+    # either can count differently.
+    rust2 = {
+      url = "github:kixel-ai/rust2";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.quest.follows = "quest";
     };
   };
 
@@ -110,24 +120,6 @@
           }
         );
 
-        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
-        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
-        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
-          finalAttrs: old: {
-            version = "6.0.0";
-            src = pkgs.fetchFromGitHub {
-              owner = "CodSpeedHQ";
-              repo = "codspeed-rust";
-              tag = "v${finalAttrs.version}";
-              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
-            };
-            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-              inherit (finalAttrs) pname version src;
-              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
-            };
-          }
-        );
-
         # Rust dependencies
         rustDeps =
           with pkgs;
@@ -162,7 +154,6 @@
             cargo-nextest
             # Mutation testing of the route and resume code (`just rs mutants`).
             cargo-mutants
-            cargo-codspeed
             # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
             release-plz
             # Source-based test coverage (`just rs coverage`).
@@ -430,7 +421,7 @@
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
         # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
         # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on, and C
-        # functions for an object's exported traits (`moq_instance_eq`). Its tags
+        # functions for an object's exported traits (`moq_identity_eq`). Its tags
         # add a `-kixelated.N` pre-release so they never collide with upstream's.
         # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
@@ -615,6 +606,22 @@
           # proof. Its own Agda pin, so neither the dev shell nor `nix flake check`
           # fetches it.
           route-proof = import ./nix/route-proof.nix { inherit system; };
+
+          # Nightly `just rs verify` proves kio's log with Verus. Its own toolchain
+          # pin (nix/verus.nix), so neither the dev shell nor `nix flake check`
+          # fetches it; Linux only, as Verus's release is.
+          verus = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            let
+              verus = pkgs.callPackage ./nix/verus.nix { inherit (pkgs) rust-bin; };
+            in
+            pkgs.mkShell {
+              packages = [
+                verus
+                verus.toolchain
+                pkgs.just
+              ];
+            }
+          );
 
           # The QUIC Interop Runner's host tools (`just test quic-interop`): tshark
           # reads its pcaps, OpenSSL makes its certificates (the dev shell's LibreSSL

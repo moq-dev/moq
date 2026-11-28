@@ -68,25 +68,25 @@ requests follow the new best route immediately. For 2 s after a relay retracts
 a broadcast, it holds back a worse path to the same publisher that a peer still
 hunting offers, instead of announcing the broadcast again.
 
-Routes carrying the same [instance](/concept/moq-lite#publisher-instances)
+Routes carrying the same [identity](/concept/moq-lite#publisher-identities)
 serve one stream. When the route serving it dies, withdraws, or is beaten by
-a cheaper one of that instance, or a higher epoch of it, each subscription
+a cheaper one of that identity, or a higher epoch of it, each subscription
 continues on the new route from the first frame its readers lack, so they see
 every frame once. A publisher whose groups restart, such as an encoder
-restarting from group 0, publishes under a new instance, which replaces the
+restarting from group 0, publishes under a new identity, which replaces the
 old broadcast instead of resuming it; the RTMP, SRT, and WHIP ingests mint one
-per connection. Among instances every relay ranks routes in [one
+per connection. Among identities every relay ranks routes in [one
 order](/concept/identity#choosing-a-route), ending in a hash of the path with
-the instance, so on moq-lite 07 the relays of a mesh agree on each path's
+the identity, so on moq-lite 07 the relays of a mesh agree on each path's
 stream and a pool's paths spread over its hosts. Seamless failover needs
 moq-lite 07 on every link the route crosses. Over moq-lite 06 and older, or
-moq-transport, the receiving relay mints an instance per announcement, so
+moq-transport, the receiving relay mints an identity per announcement, so
 failover onto such a route is announced as a restart. Viewers re-request on a restart, and a relay drops its
 copy of the old stream, including every path beneath a prefix claim when one
 of them moves to another worker.
 
 Failover routes must carry copies of one publisher's broadcast. Independent
-importers use distinct instances and switch as a restart, even when fed one stream.
+importers use distinct identities and switch as a restart, even when fed one stream.
 See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
 subscriber selection, and several routes to one publisher.
 A source whose track differs in any property, such as timescale, max age,
@@ -95,9 +95,9 @@ moq-transport link records its draft in the track's properties and carries
 refresh only as on or off, so a route crossing one does not fail over to or from
 a route that does not.
 
-A route whose original publisher (its first hop) changes under the same instance
+A route whose original publisher (its first hop) changes under the same identity
 is updated in place, so the broadcast never briefly vanishes downstream, and
-subscriptions in flight carry on through it. Under another instance that is
+subscriptions in flight carry on through it. Under another identity that is
 another stream, so it restarts.
 
 ## Topology
@@ -210,11 +210,11 @@ crossed.
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one holding an anonymous hop (0), then the lowest cost, then the shortest
 hop list. Remaining ties hash the requested path with the publisher's
-instance, so equal-cost advertisers of one prefix, such as a transcode pool,
+identity, so equal-cost advertisers of one prefix, such as a transcode pool,
 split its paths, and every relay picks the same one for a given path. Relays
-agree on that hash only where moq-lite-07-wip carries the instance. A route
+agree on that hash only where moq-lite-07-wip carries the identity. A route
 learned over an older version, and held as no moq-lite-07-wip claim, is not
-hashed, since the relay minted its instance on receipt: the route already in
+hashed, since the relay minted its identity on receipt: the route already in
 use keeps the tie. A publisher connected straight to the
 relay is not hashed at its own path: its newest session wins, so a publisher
 that restarts takes over from its lingering old session at once.
@@ -223,7 +223,7 @@ moq-lite-07-wip keeps its hop list on the route to a relay, not on each
 broadcast, so both hop-list steps drop out: the first relay ranks the claims
 covering a path the same way otherwise, and breaks remaining ties with the
 draft's [Rendezvous Hash](/draft/moq-lite#resolution) of the path and the
-claim's instance, then by node. Later hops follow their own route to the node
+claim's identity, then by node. Later hops follow their own route to the node
 it picked. Routes learned over an older version rank as above.
 
 ```toml
@@ -245,11 +245,14 @@ connect = [
 Prices aren't static. A publisher can re-price a live announcement, which is
 how a standby transcoder pool seeds a high cost and drops it once it's working.
 A GOAWAY is not a price: a relay receiving one ranks every route learned from
-that peer below every other eligible route, whatever the costs say. New
+that peer below every other available route, whatever the costs say, though
+still above a route held unavailable. New
 subscriptions go elsewhere when another route serves them, and an existing one
 moves to another route of the same stream if there is one, or else finishes on
-the draining peer. The drain is that relay's
-own state, so it still advertises the routes onward at their real cost. A
+the draining peer. The drain never changes a price: the relay still
+advertises the routes onward at their real cost. Over moq-lite 07 the claims
+it makes for them also say they drain, so its peers rank them alike; older
+wires carry only the price. A
 relay whose session to a peer draining to restart has lived past
 `backoff.healthy` redials it once, at once, which reaches a replacement serving
 beside the draining process ([handoff](/bin/relay/config#handoff)). A session

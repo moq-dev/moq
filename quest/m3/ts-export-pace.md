@@ -9,8 +9,8 @@ that sends as it reads (`tsp -O ip`, an SRT sender) needs no groomer: its
 10 ms bursts stay near the passthrough's 1.17× of the mean. Through a hole in
 the media, PCR-only slots keep leaving on time instead of up to 1 s of
 backfilled slots going out at once when media resumes. `--mux-rate 0` exports
-unpadded, as ffmpeg's `-muxrate` does. Non-goal: rendition selection for
-`export ts`, which the CLI refuses.
+unpadded, as ffmpeg's `-muxrate` does. Non-goal: track selection for
+`export ts`, which [its own quest](/quest/m3/ts-export-select.md) owns.
 
 ## Plan
 
@@ -45,9 +45,11 @@ Decided 2026-11-23 (maintainer, /quest-import):
   exports unpadded (`export.rs:1692`), but warns "ignoring invalid". Document
   it in `ts.md` and the flag's help, and make every other invalid rate, from
   the flag or the catalog, a loud error.
-- ✅ No unpadded default tied to a selection (rejected): `export ts` has no
-  selection, and toggling a rendition's `enabled` would flip the rate
-  mid-stream.
+- ✅ No unpadded default tied to toggling a rendition's `enabled`
+  (rejected), which would flip the rate mid-stream. A command-line selection
+  is fixed at start, so
+  [track selection](/quest/m3/ts-export-select.md) does default to unpadded
+  (2026-11-24).
 
 Test it with oracle-style checks like `an_object_is_spread_across_its_pcr_interval`.
 Measure the CLI piped through `tsp --realtime -O ip` the way the issue did,

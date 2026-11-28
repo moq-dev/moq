@@ -8,7 +8,9 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const TRACKS: usize = 200;
 
 fn client(url: &url::Url, mode: &str) -> std::io::Result<tokio::process::Child> {
-	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/stream-limits/client.ts");
+	let script =
+		std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+			.join("../../test/stream-limits/client.ts");
 	tokio::process::Command::new("bun")
 		.arg(script)
 		.arg(url.as_str())

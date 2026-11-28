@@ -432,7 +432,7 @@ impl<S: Stream> Client<S> {
 
 		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
 		// app and broadcast path stand in for it.
-		tracing::info!(app = %self.app, %path, instance = %publisher.route.instance(), "rtmp play accepted by remote");
+		tracing::info!(app = %self.app, %path, identity = %publisher.route.identity(), "rtmp play accepted by remote");
 
 		let result = self.pull_media(&mut publisher).await;
 		match result {
@@ -675,7 +675,7 @@ struct Publisher {
 	importer: FlvImport,
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
-	// Announces the path under this pull's fresh instance, so pulling again replaces it rather
+	// Announces the path under this pull's fresh identity, so pulling again replaces it rather
 	// than resuming into it. Closing its broadcast retracts it before the importer's fill clone drops.
 	route: moq_net::origin::Route,
 	media_deadline: kio::clock::Instant,
@@ -1087,15 +1087,15 @@ mod tests {
 		haystack.windows(needle.len()).any(|window| window == needle)
 	}
 
-	/// A push stays on the instance it resolved: a publisher taking over the path never reaches
+	/// A push stays on the identity it resolved: a publisher taking over the path never reaches
 	/// the remote, so the push never splices in another timeline or codec state, and it fails
-	/// once its instance's route dies.
+	/// once its identity's route dies.
 	#[tokio::test(start_paused = true)]
-	async fn a_push_stays_on_its_instance_until_the_route_dies() {
+	async fn a_push_stays_on_its_identity_until_the_route_dies() {
 		const OLD_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x00];
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		const NEW_IDR: &[u8] = &[0x65, 0x99, 0x99, 0x99, 0x99];
-		let publish = |origin: &origin::Producer, instance: &moq_net::Instance, idr: &[u8]| {
+		let publish = |origin: &origin::Producer, identity: &moq_net::Identity, idr: &[u8]| {
 			let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 			vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -1104,7 +1104,7 @@ mod tests {
 			let route = origin
 				.route(
 					"live/cam0",
-					moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0),
+					moq_net::origin::RouteOptions::default().with_identity(identity.clone(), 0),
 				)
 				.unwrap();
 			let catalog =
@@ -1119,7 +1119,7 @@ mod tests {
 
 		let upstream = moq_tokio::origin::spawn();
 		let downstream = moq_tokio::origin::spawn();
-		let (old_route, mut old, old_catalog) = publish(&upstream, &moq_net::Instance::random(), OLD_IDR);
+		let (old_route, mut old, old_catalog) = publish(&upstream, &moq_net::Identity::random(), OLD_IDR);
 		let (client_io, server_io) = tokio::io::duplex(64 * 1024);
 		let ingest = downstream.clone();
 		let server = tokio::spawn(async move {
@@ -1163,10 +1163,10 @@ mod tests {
 		};
 		until(OLD_IDR).await;
 
-		let instance = moq_net::Instance::random();
-		let mut instances = upstream.consume().follow("live/cam0", instance.clone()).unwrap();
-		let (_new_route, _new, _new_catalog) = publish(&upstream, &instance, NEW_IDR);
-		kio::clock::timeout(Duration::from_secs(5), instances.available())
+		let identity = moq_net::Identity::random();
+		let mut identities = upstream.consume().follow("live/cam0", identity.clone()).unwrap();
+		let (_new_route, _new, _new_catalog) = publish(&upstream, &identity, NEW_IDR);
+		kio::clock::timeout(Duration::from_secs(5), identities.available())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap()
@@ -1176,7 +1176,7 @@ mod tests {
 		delta.extend_from_slice(OLD_DELTA);
 		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
 		until(OLD_DELTA).await;
-		assert!(!contains(&received, NEW_IDR), "the push left its instance");
+		assert!(!contains(&received, NEW_IDR), "the push left its identity");
 
 		old.abort(moq_net::Error::Transport("connection lost".into()));
 		drop(old_catalog);

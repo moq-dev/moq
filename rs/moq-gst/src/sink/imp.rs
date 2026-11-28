@@ -742,8 +742,9 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
-				let pts = lifecycle.media.timeline_pts(&buffer)?;
+			// Once per buffer: an Opus packet's advances the pre-skip it clips.
+			let outcome = lifecycle.media.timeline_pts(&buffer).and_then(|pts| {
+				lifecycle.media.place_wall(&buffer, pts, sample)?;
 				lifecycle
 					.media
 					.push_buffer(data, pts, duration, current_running_time)
@@ -1367,7 +1368,7 @@ mod tests {
 				.wall
 				.place(
 					&gst::Buffer::new(),
-					Duration::ZERO,
+					gst::Signed::Positive(gst::ClockTime::ZERO),
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
 						wall: kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
@@ -1499,7 +1500,7 @@ mod tests {
 		assert_eq!(
 			first.sync.clock.unwrap().wall.as_micros().unwrap(),
 			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
-				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.saturating_duration_since(moq_net::time::EPOCH)
 				.as_micros(),
 		);
 	}
@@ -1542,7 +1543,7 @@ mod tests {
 			assert_eq!(
 				clock.wall.as_micros().unwrap(),
 				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
-					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+					.saturating_duration_since(moq_net::time::EPOCH)
 					.as_micros()
 			);
 			for (name, kind, expected) in [

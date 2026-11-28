@@ -320,6 +320,30 @@ const CONFIG_MAX_BITS: usize = 43 + 43 + 17 + 2440 + 23 + 2 + 63;
 /// The longest AudioSpecificConfig [`Config::parse_exact`] accepts, in bytes.
 pub(crate) const CONFIG_MAX_LEN: usize = CONFIG_MAX_BITS.div_ceil(8);
 
+/// The samples each frame of an AAC-LC core codes, 960 or 1024 by its frameLengthFlag, and the
+/// rate it codes them at, which SBR may double on output. `None` for another core, or a config
+/// that doesn't parse.
+pub(crate) fn frame_clock(asc: &[u8]) -> Option<(u32, u32)> {
+	// Refuses what the exact walk below doesn't check, such as a reserved channelConfiguration.
+	Config::parse(&mut &asc[..]).ok()?;
+	let mut asc = asc;
+	let mut reader = BitReader::new(&mut asc);
+	// The leading rate is the core's: explicit SBR and PS name their output rate after it.
+	let (object_type, rate, _) = read_header(&mut reader).ok()?;
+	if !matches!(object_type, OBJECT_TYPE_LC | OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
+		return None;
+	}
+	if read_core(&mut reader, object_type, rate).ok()?.0 != OBJECT_TYPE_LC {
+		return None;
+	}
+	// The GASpecificConfig's first field, ahead of any program config element.
+	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
+		0 => 1024,
+		_ => 960,
+	};
+	Some((samples, rate))
+}
+
 /// Read an AudioSpecificConfig's leading fields: the audioObjectType, sample rate, and
 /// channelConfiguration.
 fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
@@ -390,6 +414,24 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<boo
 		reader.read(14, Error::IncompleteConfig)?;
 	}
 	Ok(reader.read(1, Error::IncompleteConfig)? == 1)
+}
+
+/// How long one access unit of the AudioSpecificConfig `asc` plays: 1024 core samples, or 960 by
+/// its frameLengthFlag, at the core's rate, which SBR and PS double along with the samples. `None`
+/// for an object type that codes frames of another length, or a config that doesn't parse.
+pub(crate) fn frame_duration(mut asc: &[u8]) -> Option<moq_net::Timestamp> {
+	let mut reader = BitReader::new(&mut asc);
+	let (object_type, core_rate, _) = read_header(&mut reader).ok()?;
+	let (core, _) = read_core(&mut reader, object_type, core_rate).ok()?;
+	// Main, LC, SSR, and LTP; the GASpecificConfig leads with frameLengthFlag.
+	if !(1..=4).contains(&core) {
+		return None;
+	}
+	let samples = match reader.read(1, Error::IncompleteConfig).ok()? {
+		0 => 1024,
+		_ => 960,
+	};
+	moq_net::Timestamp::from_scale(samples, core_rate.into()).ok()
 }
 
 /// Whether the raw data block `block` leads with a program config element.
@@ -668,6 +710,15 @@ mod tests {
 		assert_eq!(cfg.channel_count, 2);
 	}
 
+	#[test]
+	fn frame_clock_reads_an_aac_lc_cores_frame_length() {
+		// frameLengthFlag lands mid-byte after an explicit 44101 Hz rate.
+		assert_eq!(frame_clock(&[0x17, 0x80, 0x56, 0x22, 0x94]), Some((960, 44_101)));
+		// AAC Main, alone and as an explicit SBR core, codes other frames.
+		assert_eq!(frame_clock(&[0x09, 0x90]), None);
+		assert_eq!(frame_clock(&[0x2b, 0x11, 0x84, 0x00]), None);
+	}
+
 	/// An explicit rate of zero, escape index 15 then 24 zero bits, describes no audio.
 	#[test]
 	fn explicit_zero_sample_rate_is_refused() {
@@ -825,6 +876,20 @@ mod tests {
 	/// HE-AACv2 is PS over a mono one.
 	const FDKAAC_HE_AAC: [u8; 4] = [0x2B, 0x11, 0x88, 0x00];
 	const FDKAAC_HE_AAC_V2: [u8; 4] = [0xEB, 0x09, 0x88, 0x00];
+
+	#[test]
+	fn frame_duration_counts_core_samples_at_the_core_rate() {
+		let micros = |asc: &[u8]| frame_duration(asc).map(|d| std::time::Duration::try_from(d).unwrap().as_micros());
+		// AAC-LC at 44.1 kHz: 1024 samples.
+		assert_eq!(micros(&[0x12, 0x10]), Some(23_219));
+		// SBR and PS over a 24 kHz core: 2048 samples at 48 kHz.
+		assert_eq!(micros(&FDKAAC_HE_AAC), Some(42_666));
+		assert_eq!(micros(&FDKAAC_HE_AAC_V2), Some(42_666));
+		// The same SBR config with frameLengthFlag set: 960 core samples.
+		assert_eq!(micros(&[0x2B, 0x11, 0x8A, 0x00]), Some(40_000));
+		// ER AAC LD codes 480 or 512 samples.
+		assert_eq!(micros(&[0xB9, 0x90, 0x00]), None);
+	}
 
 	#[test]
 	fn explicit_sbr_and_ps_parse_as_their_output() {

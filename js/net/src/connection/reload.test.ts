@@ -40,7 +40,7 @@ async function settle() {
 	await yieldNow();
 }
 
-test("equivalent URL instances do not restart a pending connection", async () => {
+test("equivalent URL identities do not restart a pending connection", async () => {
 	const original = globalThis.WebTransport;
 	let connects = 0;
 

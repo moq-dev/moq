@@ -42,16 +42,16 @@ const SPREAD: Duration = Duration::from_millis(100);
 /// output does not wait out a jump; the bytes carry the break as the source sent it.
 ///
 /// A [`Follower`](super::Follower) carries it across its broadcast's returns and, when
-/// stitching, onto another publisher instance, whose track it reads from the first group its
+/// stitching, onto another publisher identity, whose track it reads from the first group its
 /// live subscription delivers, after what was already buffered has gone out. Its packets follow
 /// verbatim, so the output shows the seam as each PID's continuity break, as the source would
 /// show a splice, and they go out on a clock of their own, as after an encoder changeover.
 pub struct Release {
 	source: crate::Source,
-	/// The format of the catalog being read, kept for following another instance.
+	/// The format of the catalog being read, kept for following another identity.
 	format: CatalogFormat,
-	/// The instance of the broadcast being read, `None` for one not resolved through an origin.
-	instance: Option<moq_net::Instance>,
+	/// The identity of the broadcast being read, `None` for one not resolved through an origin.
+	identity: Option<moq_net::Identity>,
 	catalog: Option<crate::catalog::Consumer<super::Ext>>,
 	/// The catalog last subscribed has delivered a snapshot.
 	cataloged: bool,
@@ -61,7 +61,7 @@ pub struct Release {
 	/// however long the cache held it.
 	subscribed: Instant,
 	finished: bool,
-	/// Where the track read before its instance went stopped, for that instance's return.
+	/// Where the track read before its identity went stopped, for that identity's return.
 	resume: Option<Resume>,
 	/// The publisher left with this error; it is reported once what the jitter buffer holds
 	/// has gone out on its clock.
@@ -186,7 +186,7 @@ impl Release {
 		let mut jitter = jitter::Buffer::new(delay);
 		jitter.expect([()]);
 		let release = Self {
-			instance: source.broadcast().info().instance.clone(),
+			identity: source.broadcast().info().identity.clone(),
 			source,
 			format: catalog_format,
 			catalog: Some(catalog),
@@ -410,7 +410,7 @@ impl Release {
 				let source =
 					ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
 				let source = export::skipping(source, self.delay);
-				// The instance returning carries on after the group it was reading, which it
+				// The identity returning carries on after the group it was reading, which it
 				// would otherwise replay, rather than at its live edge, which would skip the
 				// groups after it that the delay may still reach.
 				let source = match (self.resume.take(), self.replay) {
@@ -447,12 +447,20 @@ impl super::follower::sealed::Followed for Release {
 		&self.source
 	}
 
-	fn instance(&self) -> Option<&moq_net::Instance> {
-		self.instance.as_ref()
+	fn identity(&self) -> Option<&moq_net::Identity> {
+		self.identity.as_ref()
+	}
+
+	fn departed(&self) -> Option<&crate::Error> {
+		self.failed.as_ref()
+	}
+
+	fn depart(&mut self, err: crate::Error) -> crate::Result<()> {
+		self.leave(err)
 	}
 
 	/// Drop the track being read and read the passthrough track `catalog` names next. What the
-	/// jitter buffer holds still goes out on its clock. The same instance returning carries on
+	/// jitter buffer holds still goes out on its clock. The same identity returning carries on
 	/// past the group it was reading; another opens a new timeline, whose clock owes the old
 	/// one nothing.
 	fn followed(
@@ -461,7 +469,7 @@ impl super::follower::sealed::Followed for Release {
 		catalog: crate::catalog::Consumer<super::Ext>,
 		_follow: Duration,
 	) -> crate::Result<()> {
-		let same = self.instance.is_some() && broadcast.info().instance == self.instance;
+		let same = self.identity.is_some() && broadcast.info().identity == self.identity;
 		let track = self.track.take();
 		if let Some((_, track)) = &track {
 			self.gaps += track.skips() - track.markers();
@@ -478,7 +486,7 @@ impl super::follower::sealed::Followed for Release {
 			}
 		} else {
 			self.source = self.source.switched(broadcast);
-			self.instance = broadcast.info().instance.clone();
+			self.identity = broadcast.info().identity.clone();
 			self.resume = None;
 			self.restarts += 1;
 		}

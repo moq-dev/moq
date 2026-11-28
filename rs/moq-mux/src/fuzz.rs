@@ -200,7 +200,7 @@ pub fn catalog(data: &[u8]) -> bool {
 		.expect("a fresh broadcast has no catalog");
 	let mut next: Box<dyn FnMut() -> Poll<CatalogUpdate>> = if selector & 1 == 0 {
 		let mut consumer = crate::catalog::hang::Consumer::<()>::new(track.consume());
-		Box::new(move || consumer.poll_next(&waiter))
+		Box::new(move || consumer.poll_next(&waiter).map_ok(|next| next.map(|timed| timed.value)))
 	} else {
 		let mut consumer = crate::catalog::msf::Consumer::<()>::new(track.subscribe(None));
 		Box::new(move || consumer.poll_next(&waiter))
@@ -442,7 +442,9 @@ mod tests {
 	/// fixed on the stable toolchain, in the suite CI already runs.
 	#[test]
 	fn regressions() {
-		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/regressions");
+		let root =
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join("fuzz/regressions");
 
 		for (name, target) in TARGETS {
 			// Nothing has failed yet for this target; `fuzz/README.md` says what to drop in here

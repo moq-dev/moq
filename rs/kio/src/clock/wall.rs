@@ -18,12 +18,16 @@ impl Wall {
 	/// 1970-01-01T00:00:00Z.
 	pub const UNIX_EPOCH: Self = Self(0);
 
-	/// 2020-01-01T00:00:00Z, the origin MoQ media timestamps and wall-clock fields count from.
-	pub const MOQ_EPOCH: Self = Self::from_unix_secs(1_577_836_800);
-
-	/// `secs` whole seconds after the Unix epoch, for constants.
-	pub(crate) const fn from_unix_secs(secs: u64) -> Self {
-		Self(secs * 1_000_000_000)
+	/// `secs` whole seconds after the Unix epoch, for constants such as an application's own epoch.
+	///
+	/// # Panics
+	///
+	/// If the time does not fit in `u64` nanoseconds, which fails the build in a `const`.
+	pub const fn from_unix_secs(secs: u64) -> Self {
+		match secs.checked_mul(1_000_000_000) {
+			Some(nanos) => Self(nanos),
+			None => panic!("from_unix_secs overflows a Wall"),
+		}
 	}
 
 	/// The current wall time on the ambient clock.
@@ -171,6 +175,20 @@ mod tests {
 			wall.saturating_add(Duration::from_secs(1)),
 			wall + Duration::from_secs(1)
 		);
+	}
+
+	#[test]
+	fn builds_a_const_from_unix_secs() {
+		const EPOCH_2020: Wall = Wall::from_unix_secs(1_577_836_800);
+		assert_eq!(EPOCH_2020, Wall::UNIX_EPOCH + Duration::from_secs(1_577_836_800));
+		let last = u64::MAX / 1_000_000_000;
+		assert_eq!(Wall::from_unix_secs(last), Wall::UNIX_EPOCH + Duration::from_secs(last));
+	}
+
+	#[test]
+	#[should_panic(expected = "overflows a Wall")]
+	fn rejects_unix_secs_past_u64_nanos() {
+		Wall::from_unix_secs(u64::MAX / 1_000_000_000 + 1);
 	}
 
 	#[test]

@@ -121,7 +121,7 @@ fn names_the_generic_parameters() {
 }
 
 #[test]
-#[allow(deprecated, reason = "awaits the deprecated wrapper")]
+#[expect(deprecated, reason = "awaits the deprecated wrapper")]
 fn keeps_attributes() {
 	let values = Values::new(&[1, 2]);
 	assert_eq!(poll_once(values.old()), Poll::Ready(Ok(1)));

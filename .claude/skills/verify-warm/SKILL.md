@@ -1,6 +1,6 @@
 ---
 name: verify-warm
-description: Model-check whether warm pulls settle (`rs/moq-net/verify/warm/WarmSettle.tla`) with TLA+, for the rules the warmth simulator measures (`rs/moq-net/src/route/tests/warm.rs`): ranked readers, settled pulls, and the rejected price-moving pick. Use when a change touches how a relay chooses where to pull a broadcast from (its route or a neighbour's warm copy), what a warm advert or subscribe answer carries (cost, path, rank), which neighbours a relay advertises to, or when a relay chooses again, or when a warmth bug needs every ordering of adverts, answers, and ranks checked rather than a random churn sweep.
+description: Model-check warm-pull routing convergence (`rs/moq-net/verify/warm/WarmSettle.tla`) with TLA+. Use when changing relay route/warm-copy selection, warm adverts, or neighbor ranking in `rs/moq-net`.
 ---
 
 # Verify warm pulls settle
@@ -47,7 +47,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `1399add3c886f1c168f0c6ba3ba55586a04feb6c`, the base of [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986), which added the ranked rule and this model. Run `git log 1399add3c8.. -- rs/moq-net/src/route/tests/warm.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. The rule lives in the simulator only; the port in `select.md` moves it into the relay and this table with it.
+Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b.. -- rs/moq-net/src/route/tests/warm.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. The rule lives in the simulator only; the port in `select.md` moves it into the relay and this table with it.
 
 | Code | Model |
 | --- | --- |

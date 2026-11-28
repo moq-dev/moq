@@ -252,9 +252,10 @@ async fn a_live_subscriber_merged_with_one_ahead_still_gets_the_newest_group() {
 	let mut failures = Vec::new();
 
 	// In-process the start is time 4, which lies in group 3 until group 4 starts, and a time
-	// start is history, so that reader gets group 3 too. A wire carries it as group 4.
+	// start is history, so that reader gets group 3 too, after group 4 since it holds both. A
+	// wire carries it as group 4.
 	let got = ahead_then_live(None, false).await;
-	if got != (vec![3, 4], vec![3, 4]) {
+	if got != (vec![4, 3], vec![3, 4]) {
 		failures.push(format!("in-process: {got:?}"));
 	}
 	for version in LITE.iter().chain(TRANSPORT) {
@@ -696,14 +697,21 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			reader
 				.update(initial.clone().with_ranges([support::keys(future..)]))
 				.unwrap();
-			// Once the copy holds a group, its live SUBSCRIBE still covers the narrowing, and
-			// the publisher serves that as a live join.
+			// What the publisher holds once every update so far landed, whichever order the
+			// run took: waiting for it orders the last step's widening before this step's
+			// groups too.
 			let narrowed = match start {
 				0 => support::keys(future..),
-				_ => Range::from(Start::Live {
+				// The copy holds a group, so its live SUBSCRIBE still covers the narrowing, and
+				// the publisher serves that as a live join.
+				1 => Range::from(Start::Live {
 					min: Some(Duration::ZERO),
 					max: None,
 				}),
+				// The last widening asked from group 1. This narrowing asks from group 3, past
+				// every group written, and a time start there resolves to the newest group,
+				// which covers that time until a later one starts: still from group 1.
+				_ => support::keys(start - 1..),
 			};
 			kio::clock::timeout(
 				TIMEOUT,

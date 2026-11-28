@@ -22,6 +22,10 @@ use crate::{
 /// varints of at most nine bytes, and the priority byte.
 const UPDATE_FIELDS: usize = 9 * 9 + 1;
 
+/// The most one range takes besides its Range ID: each end's type, then at most three varints
+/// of nine bytes for a start and two for an end.
+const RANGE_FIELDS: usize = 2 + 5 * 9;
+
 /// What ranges may take on the wire.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Budget {
@@ -38,14 +42,19 @@ impl Budget {
 	///
 	/// Half a message, so that the ranges sent last, retired by Range ID, and the ranges
 	/// replacing them fit one SUBSCRIBE_UPDATE however little the two share: a relay never
-	/// narrows its ask in between, which would reset group streams still arriving.
+	/// narrows its ask in between, which would reset group streams still arriving. Never more
+	/// than leaves room in a SUBSCRIBE for one range past it, which [`Self::fit_after`] takes.
 	pub fn new(version: lite::Version, fields: usize, next: u64, count: usize) -> Self {
 		let form = version.into();
 		let half = (MAX_MESSAGE_SIZE - UPDATE_FIELDS) / 2;
+		let id = varint::size(next.saturating_add(count as u64), form).unwrap_or(9);
+		let room = MAX_MESSAGE_SIZE
+			.saturating_sub(fields)
+			.saturating_sub(RANGE_FIELDS + id);
 		Self {
-			bytes: half.min(MAX_MESSAGE_SIZE.saturating_sub(fields)),
+			bytes: half.min(room),
 			form,
-			id: varint::size(next.saturating_add(count as u64), form).unwrap_or(9),
+			id,
 		}
 	}
 
@@ -55,7 +64,7 @@ impl Budget {
 	}
 
 	/// As many of `ranges`, in order, as fit beside the `spent` ones, at least the first: one
-	/// range past them still fits the message, since the budget is half of it.
+	/// range past them still fits the message, which the budget leaves room for.
 	pub fn fit_after<'a>(&self, spent: impl IntoIterator<Item = &'a Range>, ranges: Vec<Range>) -> Vec<Range> {
 		let mut used = (spent.into_iter())
 			.map(|range| self.cost(range).unwrap_or(usize::MAX))
@@ -71,8 +80,8 @@ impl Budget {
 		taken
 	}
 
-	fn span(&self, start: Position, end: Option<Position>) -> usize {
-		self.cost(&span(start, end)).unwrap_or(usize::MAX)
+	fn span(&self, start: Position, end: Option<Position>, time: bool) -> usize {
+		self.cost(&make_span(start, end, time)).unwrap_or(usize::MAX)
 	}
 }
 
@@ -80,6 +89,16 @@ fn span(start: Position, end: Option<Position>) -> Range {
 	Range {
 		start: Some(Anchor::Absolute(start)),
 		end: end.map(Anchor::Absolute),
+	}
+}
+
+fn make_span(start: Position, end: Option<Position>, time: bool) -> Range {
+	match time {
+		true => Range {
+			start: Some(Anchor::Time(start.group)),
+			end: end.map(|end| Anchor::Time(end.group)),
+		},
+		false => span(start, end),
 	}
 }
 
@@ -113,26 +132,35 @@ pub(super) fn fit(
 		return Ok((demand, fills.clone()));
 	}
 
-	let mut spans = Vec::new();
+	let mut time_spans = Vec::new();
+	let mut pos_spans = Vec::new();
 	let mut others = Vec::new();
 	for range in demand {
-		match range.start {
-			Some(Anchor::Absolute(start)) => spans.push((
-				start,
-				match range.end {
-					Some(Anchor::Absolute(end)) => Some(end),
-					_ => None,
-				},
-			)),
+		match (range.start, range.end) {
+			(Some(Anchor::Time(start)), Some(Anchor::Time(end))) => {
+				time_spans.push((Position::group(start), Some(Position::group(end))));
+			}
+			(Some(Anchor::Time(start)), None) => {
+				time_spans.push((Position::group(start), None));
+			}
+			(Some(Anchor::Absolute(start)), Some(Anchor::Absolute(end))) => {
+				pos_spans.push((start, Some(end)));
+			}
+			(Some(Anchor::Absolute(start)), None) => {
+				pos_spans.push((start, None));
+			}
 			_ => others.push(range),
 		}
 	}
-	let spans = Spans::new(spans, budget, |_| false);
-	let fills = Spans::new(fills.iter().map(fill).collect(), budget, |gap| avoid.overlaps(&gap));
+	let time_spans = Spans::new(time_spans, true, budget, |_| false);
+	let pos_spans = Spans::new(pos_spans, false, budget, |_| false);
+	let fills = Spans::new(fills.iter().map(fill).collect(), false, budget, |gap| {
+		avoid.overlaps(&gap)
+	});
 
-	// The other ranges start at a time or where a live join's lag or the max age places them, so no gap
-	// between them is measured: when even one span per list leaves them no room, each kind
-	// collapses to the one range covering it.
+	// The other ranges start where a live join's lag or the max age places them (or mix
+	// anchor kinds), so no gap between them is measured: when even one span per list leaves
+	// them no room, each kind collapses to the one range covering it.
 	let cost = |ranges: &[Range]| -> usize {
 		ranges
 			.iter()
@@ -140,23 +168,31 @@ pub(super) fn fit(
 			.fold(0, usize::saturating_add)
 	};
 	if cost(&others)
-		.saturating_add(spans.least())
+		.saturating_add(time_spans.least())
+		.saturating_add(pos_spans.least())
 		.saturating_add(fills.least())
 		> budget.bytes
 	{
 		others = collapse(others);
 	}
-	let mut total = cost(&others).saturating_add(spans.total).saturating_add(fills.total);
+	let mut total = cost(&others)
+		.saturating_add(time_spans.total)
+		.saturating_add(pos_spans.total)
+		.saturating_add(fills.total);
 
-	// Close the narrowest gaps first, of either list, until everything fits.
-	let mut gaps: Vec<_> = spans.gaps(false).chain(fills.gaps(true)).collect();
+	// Close the narrowest gaps first, across all lists, until everything fits.
+	let mut gaps: Vec<_> = time_spans
+		.gaps(0)
+		.chain(pos_spans.gaps(1))
+		.chain(fills.gaps(2))
+		.collect();
 	gaps.sort_unstable();
-	let mut lists = [spans, fills];
-	for (_, fill, index) in gaps {
+	let mut lists = [time_spans, pos_spans, fills];
+	for (_, kind, index) in gaps {
 		if total <= budget.bytes {
 			break;
 		}
-		let list = &mut lists[usize::from(fill)];
+		let list = &mut lists[usize::from(kind)];
 		total -= list.total;
 		list.join(index);
 		total += list.total;
@@ -165,8 +201,12 @@ pub(super) fn fit(
 		return Err(EncodeError::TooLarge);
 	}
 
-	let [spans, fills] = lists;
-	let mut ranges: Vec<Range> = spans.ranges().map(|(start, end)| span(start, end)).collect();
+	let [time_spans, pos_spans, fills] = lists;
+	let mut ranges: Vec<Range> = time_spans
+		.ranges()
+		.map(|(start, end)| make_span(start, end, true))
+		.chain(pos_spans.ranges().map(|(start, end)| make_span(start, end, false)))
+		.collect();
 	ranges.extend(others);
 	let groups = fills
 		.ranges()
@@ -177,6 +217,8 @@ pub(super) fn fit(
 /// Disjoint spans in order, each the run of the input spans from one start to its chain's end.
 struct Spans {
 	spans: Vec<(Position, Option<Position>)>,
+	/// Whether these spans carry inclusive Time anchors rather than exclusive Position anchors.
+	time: bool,
 	/// The last span of the chain starting at each chain's first, and the first of the chain
 	/// ending at each chain's last.
 	end: Vec<usize>,
@@ -190,6 +232,7 @@ struct Spans {
 impl Spans {
 	fn new(
 		mut input: Vec<(Position, Option<Position>)>,
+		time: bool,
 		budget: Budget,
 		last: impl Fn(std::ops::Range<u64>) -> bool,
 	) -> Self {
@@ -197,8 +240,13 @@ impl Spans {
 		// Spans that overlap or touch cost less as one, and ask for nothing more.
 		let mut spans: Vec<(Position, Option<Position>)> = Vec::with_capacity(input.len());
 		for (start, end) in input {
+			let touches = |last: Option<Position>| match (last, time) {
+				(None, _) => true,
+				(Some(last), true) => last.group.saturating_add(1) >= start.group,
+				(Some(last), false) => last >= start,
+			};
 			match spans.last_mut() {
-				Some((_, last)) if last.is_none_or(|last| last >= start) => {
+				Some((_, last)) if touches(*last) => {
 					*last = match (*last, end) {
 						(Some(last), Some(end)) => Some(last.max(end)),
 						_ => None,
@@ -209,10 +257,15 @@ impl Spans {
 		}
 		let last = spans
 			.windows(2)
-			.map(|pair| last(pair[0].1.expect("only the last is open").group..pair[1].0.group))
+			.map(|pair| {
+				let end = pair[0].1.expect("only the last is open").group;
+				let gap_start = if time { end.saturating_add(1) } else { end };
+				last(gap_start..pair[1].0.group)
+			})
 			.collect();
-		let total = spans.iter().map(|(start, end)| budget.span(*start, *end)).sum();
+		let total = spans.iter().map(|(start, end)| budget.span(*start, *end, time)).sum();
 		Self {
+			time,
 			end: (0..spans.len()).collect(),
 			start: (0..spans.len()).collect(),
 			spans,
@@ -225,17 +278,22 @@ impl Spans {
 	/// What the one span covering every span costs, or nothing when there are none.
 	fn least(&self) -> usize {
 		match (self.spans.first(), self.spans.last()) {
-			(Some((start, _)), Some((_, end))) => self.budget.span(*start, *end),
+			(Some((start, _)), Some((_, end))) => self.budget.span(*start, *end, self.time),
 			_ => 0,
 		}
 	}
 
 	/// Every gap: how late it closes, `tag`, and the span before it.
-	fn gaps(&self, tag: bool) -> impl Iterator<Item = ((bool, u64), bool, usize)> + '_ {
+	fn gaps(&self, tag: u8) -> impl Iterator<Item = ((bool, u64), u8, usize)> + '_ {
 		self.spans.windows(2).enumerate().map(move |(index, pair)| {
 			let end = pair[0].1.expect("only the last is open");
+			let gap_start = if self.time {
+				end.group.saturating_add(1)
+			} else {
+				end.group
+			};
 			(
-				(self.last[index], pair[1].0.group.saturating_sub(end.group)),
+				(self.last[index], pair[1].0.group.saturating_sub(gap_start)),
 				tag,
 				index,
 			)
@@ -246,9 +304,9 @@ impl Spans {
 	fn join(&mut self, index: usize) {
 		let first = self.start[index];
 		let last = self.end[index + 1];
-		self.total -= self.budget.span(self.spans[first].0, self.spans[index].1);
-		self.total -= self.budget.span(self.spans[index + 1].0, self.spans[last].1);
-		self.total += self.budget.span(self.spans[first].0, self.spans[last].1);
+		self.total -= self.budget.span(self.spans[first].0, self.spans[index].1, self.time);
+		self.total -= self.budget.span(self.spans[index + 1].0, self.spans[last].1, self.time);
+		self.total += self.budget.span(self.spans[first].0, self.spans[last].1, self.time);
 		self.end[first] = last;
 		self.start[last] = first;
 	}
@@ -446,6 +504,28 @@ mod tests {
 			let next = wide(&mut rng, live.next(), [50, 14][round % 2]);
 			let edit = live.edit(&next).unwrap();
 			widest(edit).encode_bytes(version).unwrap();
+		}
+	}
+
+	/// The range [`Budget::fit_after`] takes past a full budget still fits the message beside
+	/// the fields a SUBSCRIBE carries, however much of it those take.
+	#[test]
+	fn a_range_past_a_full_budget_fits_the_message() {
+		let version = lite::Version::Lite07;
+		let small = span(Position::group(0), Some(Position::group(1)));
+		let probe = span(Position::group(u64::MAX - 2), Some(Position::group(u64::MAX - 1)));
+		for fields in [0, MAX_MESSAGE_SIZE / 2, MAX_MESSAGE_SIZE - 100] {
+			let budget = Budget::new(version, fields, 0, 1_000);
+			let cost = |ranges: &[Range]| ranges.iter().map(|range| budget.cost(range).unwrap()).sum::<usize>();
+			// As many as the budget holds.
+			let spent = vec![small; budget.bytes / cost(&[small])];
+			let taken = budget.fit_after(&spent, vec![probe]);
+			assert_eq!(taken, [probe], "fields {fields}");
+			assert!(
+				fields + cost(&spent) + cost(&taken) <= MAX_MESSAGE_SIZE,
+				"fields {fields}: overflows by {}",
+				fields + cost(&spent) + cost(&taken) - MAX_MESSAGE_SIZE
+			);
 		}
 	}
 

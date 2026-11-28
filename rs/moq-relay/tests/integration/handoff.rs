@@ -231,7 +231,7 @@ async fn takes_over(from: Backend, to: Backend) {
 		.expect("a third relay took over while the old one served");
 	assert!(format!("{refused:#}").contains("refused"), "{refused:#}");
 
-	// One instance of the node's stats at a time: the old relay's, so far.
+	// One identity of the node's stats at a time: the old relay's, so far.
 	let mut stats = new_origin.follow(".stats/node/test", None).unwrap();
 	assert!(
 		stats.available().now_or_never().is_none(),
@@ -384,20 +384,22 @@ fn stand_in(dir: &Path, cert: &Path, key: &Path, notify: &Path) -> StandIn {
 
 /// [`stand_in`], with a `drain_timeout` of `drain`.
 fn stand_in_draining(dir: &Path, cert: &Path, key: &Path, notify: &Path, drain: &str) -> StandIn {
-	let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq-relay"))
-		.arg("--handoff-supervise")
-		.env_clear()
-		.env("MOQ_LISTEN", "127.0.0.1:0")
-		.env("MOQ_LISTEN_TLS_CERT", cert)
-		.env("MOQ_LISTEN_TLS_KEY", key)
-		.env("MOQ_RUNTIME_WORKERS", "1")
-		.env("MOQ_AUTH_PUBLIC", "")
-		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
-		.env("NOTIFY_SOCKET", notify)
-		.env("MOQ_DRAIN_TIMEOUT", drain)
-		.kill_on_drop(true)
-		.spawn()
-		.expect("start the stand-in");
+	let child = tokio::process::Command::new(
+		std::env::var_os("CARGO_BIN_EXE_moq-relay").expect("cargo sets CARGO_BIN_EXE_moq-relay"),
+	)
+	.arg("--handoff-supervise")
+	.env_clear()
+	.env("MOQ_LISTEN", "127.0.0.1:0")
+	.env("MOQ_LISTEN_TLS_CERT", cert)
+	.env("MOQ_LISTEN_TLS_KEY", key)
+	.env("MOQ_RUNTIME_WORKERS", "1")
+	.env("MOQ_AUTH_PUBLIC", "")
+	.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
+	.env("NOTIFY_SOCKET", notify)
+	.env("MOQ_DRAIN_TIMEOUT", drain)
+	.kill_on_drop(true)
+	.spawn()
+	.expect("start the stand-in");
 	StandIn(child)
 }
 
@@ -444,21 +446,23 @@ async fn a_relay_no_successor_takes_over_from_drains() {
 /// Start a relay process with its config in the environment, serving QUIC on `port`
 /// with a shared reset key, and sessions that outlast the test unless closed.
 fn relay(dir: &Path, cert: &Path, key: &Path, port: u16, notify: &Path) -> tokio::process::Child {
-	tokio::process::Command::new(env!("CARGO_BIN_EXE_moq-relay"))
-		.env_clear()
-		.env("MOQ_LISTEN", format!("127.0.0.1:{port}"))
-		.env("MOQ_LISTEN_TLS_CERT", cert)
-		.env("MOQ_LISTEN_TLS_KEY", key)
-		.env("MOQ_LISTEN_RESET_SECRET", dir.join("reset.key"))
-		.env("MOQ_QUIC_IDLE_TIMEOUT", format!("{}s", NEVER.as_secs()))
-		.env("MOQ_DRAIN_TIMEOUT", format!("{}s", NEVER.as_secs()))
-		.env("MOQ_RUNTIME_WORKERS", "2")
-		.env("MOQ_AUTH_PUBLIC", "")
-		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
-		.env("NOTIFY_SOCKET", notify)
-		.kill_on_drop(true)
-		.spawn()
-		.expect("start the relay")
+	tokio::process::Command::new(
+		std::env::var_os("CARGO_BIN_EXE_moq-relay").expect("cargo sets CARGO_BIN_EXE_moq-relay"),
+	)
+	.env_clear()
+	.env("MOQ_LISTEN", format!("127.0.0.1:{port}"))
+	.env("MOQ_LISTEN_TLS_CERT", cert)
+	.env("MOQ_LISTEN_TLS_KEY", key)
+	.env("MOQ_LISTEN_RESET_SECRET", dir.join("reset.key"))
+	.env("MOQ_QUIC_IDLE_TIMEOUT", format!("{}s", NEVER.as_secs()))
+	.env("MOQ_DRAIN_TIMEOUT", format!("{}s", NEVER.as_secs()))
+	.env("MOQ_RUNTIME_WORKERS", "2")
+	.env("MOQ_AUTH_PUBLIC", "")
+	.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
+	.env("NOTIFY_SOCKET", notify)
+	.kill_on_drop(true)
+	.spawn()
+	.expect("start the relay")
 }
 
 /// A new relay killed while the old one drains leaves its clients to the old one,

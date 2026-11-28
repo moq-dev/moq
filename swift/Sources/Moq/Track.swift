@@ -20,8 +20,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         (try await ffi.nextGroup()).map(GroupConsumer.init)
     }
 
-    /// The next group in arrival order, which may be out of start order. `nil` once
-    /// the track ends.
+    /// The next group in arrival order, which may be out of start order: groups
+    /// already held come in the subscription's group order, newest first unless it
+    /// asks ascending. `nil` once the track ends.
     public func recvGroup() async throws -> GroupConsumer? {
         (try await ffi.recvGroup()).map(GroupConsumer.init)
     }
@@ -62,8 +63,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
-    /// Groups in arrival order, including out-of-order deliveries. The default
-    /// `AsyncSequence` iteration uses start order instead.
+    /// Groups in arrival order, including out-of-order deliveries. Groups already held come in
+    /// the subscription's order, newest first unless it asks ascending, as `recvGroup` returns
+    /// them. The default `AsyncSequence` iteration uses start order instead.
     public var groupsAsArrived: AsyncThrowingStream<GroupConsumer, Swift.Error> {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             (try await ffi.recvGroup()).map(GroupConsumer.init)
@@ -112,6 +114,82 @@ public final class GroupConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// Read side of a metadata subscription: a track's groups, each frame as its header alone.
+/// Iterating yields groups in arrival order: `for try await group in meta { ... }`.
+public final class MetaConsumer: AsyncSequence, Sendable {
+    /// The group emitted by this sequence, in arrival order.
+    public typealias Element = MetaGroup
+
+    let ffi: MoqMetaConsumer
+
+    init(_ ffi: MoqMetaConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The next group in arrival order, as `TrackConsumer.recvGroup` returns it. `nil` once
+    /// the track ends.
+    public func recvGroup() async throws -> MetaGroup? {
+        (try await ffi.recvGroup()).map(MetaGroup.init)
+    }
+
+    /// The publisher-side properties learned during subscription.
+    public func info() -> TrackInfo {
+        ffi.info()
+    }
+
+    /// Change this subscriber's delivery preferences, as `TrackConsumer.update` does.
+    public func update(subscription: Subscription) throws {
+        try checkSubscription(subscription)
+        try ffi.update(subscription: subscription)
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<MetaGroup, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            (try await ffi.recvGroup()).map(MetaGroup.init)
+        }.makeAsyncIterator()
+    }
+}
+
+/// One group of a metadata subscription. Iterating yields its frames' headers.
+public final class MetaGroup: AsyncSequence, Sendable {
+    /// The frame header emitted by this sequence.
+    public typealias Element = FrameHeader
+
+    let ffi: MoqMetaGroup
+
+    init(_ ffi: MoqMetaGroup) {
+        self.ffi = ffi
+    }
+
+    /// The start of this group within the track.
+    public var start: UInt64 {
+        ffi.start()
+    }
+
+    /// The next frame's header, without its payload, or `nil` once the group ends.
+    public func nextHeader() async throws -> FrameHeader? {
+        try await ffi.nextHeader()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<FrameHeader, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.nextHeader()
+        }.makeAsyncIterator()
+    }
+}
+
 /// A watch-only handle to whether a published track has subscribers, and when they ask for a
 /// new group.
 ///
@@ -137,8 +215,9 @@ public final class TrackDemand: Sendable {
     }
 
     /// Suspend until `wanted` changes and return it. The first call returns at once.
-    /// End a track nobody wants with `TrackProducer.abortUnwanted(errorCode:)`, which keeps it
-    /// for a reader that joined since.
+    /// End a track nobody wants by dropping every reference to its producer once this returns
+    /// false: a reader that joined since is served by the next request for the track while a
+    /// request handler is live.
     public func wantedChanged() async throws -> Bool {
         try await ffi.wantedChanged()
     }
@@ -211,15 +290,6 @@ public final class TrackProducer: Sendable {
         try ffi.abort(errorCode: errorCode)
     }
 
-    /// Abort the track with an application error code, but only while nobody wants it: call it
-    /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-    /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-    /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-    /// that came and went, and waits on.
-    public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-        try ffi.abortUnwanted(errorCode: errorCode)
-    }
-
     /// Finish the track. No more groups can be appended.
     public func finish() throws {
         try ffi.finish()
@@ -271,6 +341,12 @@ public final class GroupProducer: Sendable {
     /// Mark the group complete. No more frames can be written.
     public func finish() throws {
         try ffi.finish()
+    }
+
+    /// Mark the group complete with its exclusive `end` in the track's timescale.
+    /// No other group may start before `end`.
+    public func finish(at end: UInt64) throws {
+        try ffi.finishAt(end: end)
     }
 
     /// Abort the group with an application error code.

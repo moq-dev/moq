@@ -22,6 +22,21 @@ web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
 Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
 web-transport's `^0.3` never resolves to the new API.
+`kio` and `kio-macros` are exempt too and need the same check: crates.io has
+`kio` 0.6.4, published from the release line while `main` stayed at 0.6.2, and
+`kio-macros` 0.1.0, published from kixel-ai/kio before kio moved back
+([moq-dev/moq#9770](https://github.com/moq-dev/moq/pull/9770)). kio's Unreleased
+`MIGRATE.md` entries break its API, so set `rs/kio` to 0.7.0, `kio-macros` above
+0.1.0 if it changed, and raise the workspace `kio` and `kio-macros` requirements to
+match before publishing either or a crate that depends on them.
+Also before publishing, recreate the npm trusted publishers of `@moq/clock`,
+`@moq/libav`, `@moq/stats`, and `@moq/video`, which were claimed as `0.0.0`
+placeholders on 2026-11-24. npm expires a trusted publisher that no OIDC
+exchange has validated about 48 hours after it is created, and only the
+package's Settings page shows it as Expired. Revoke each (`npm trust list`,
+`npm trust revoke --id`) and run `npm trust github @moq/<name> --file
+release-js.yml --repository moq-dev/moq --environment npm --allow-publish
+--allow-stage-publish`, then publish within 48 hours.
 Before publishing, confirm moq-dev/web-transport's release config no longer
 publishes `@moq/qmux` or `qmux` (the freeze step of
 [qmux-js-retire](/quest/m3/release/qmux-js-retire.md) and
@@ -91,7 +106,7 @@ paragraphs, and the cut gate template with its decision:
   ready once the cycle's API breaks, wire changes, and the cut gate in m3
   have merged, and it has no `## Waiting`, since the maintainer opens the
   wire phase before that. [m5](/quest/m5/README.md) and m6 require it: the
-  gate that holds later work while m9's lab stays open. The hygiene audits
+  gate that holds later work. The hygiene audits
   and the vendor sync's children recur behind it in m4. Its PR re-creates it
   at the same path and keeps the m5 and m6 links, so the gate holds the next
   cycle too; m5's quests reach m4 in the shift, which is when they can start.
@@ -163,7 +178,7 @@ shift anyway).
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
 decision below). The gate is an epic in m3, `/quest/m3/cut-gate/`, for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the
-upstream fixes it needs, and the hand-written `moq-c` is at parity with
+upstream fixes it needs, and the hand-written `libmoq` (retired after `0.22`) is at parity with
 moq-ffi. It has no work of its own and completes when every child merges. It
 recurs once per release cycle, always in m3, and never re-creates itself: m3
 holds it and the cycle's wire cut requires m3, so a copy made before that cut
@@ -217,7 +232,8 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - ✅ The FFI's `abort_unwanted`
   ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
   method to an existing binding object, which the API diff counts as a
-  break once 0.22 is published.
+  break once 0.22 is published. Superseded 2026-11-23 (maintainer): it
+  landed, and m2 deleted it before 0.22 published it.
 - ✅ End-to-end encryption does not publish at this cut
   ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
   so `moq-e2ee` is no longer a retired name, and the paragraph above about
@@ -300,4 +316,4 @@ candidate:
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
-- [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
+- [Re-run release performance baseline](/quest/m3/release/perf-recheck.md) - fresh `main` vs `origin/release` baseline and Nightly paired regression triage once m2 finishes

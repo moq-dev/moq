@@ -236,6 +236,11 @@ impl WeakDeadlines {
 	pub(crate) fn upgrade(&self) -> Option<Deadlines> {
 		self.0.upgrade().map(Deadlines)
 	}
+
+	/// Whether this is `deadlines`' queue.
+	pub(crate) fn is(&self, deadlines: &Deadlines) -> bool {
+		std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&deadlines.0))
+	}
 }
 
 /// The [`Deadline`] behind an ambient [`Sleep`](crate::clock::Sleep) on an entered queue,
@@ -327,6 +332,9 @@ impl Deadline {
 		state.next += 1;
 		self.key = Some(key);
 		state.armed.insert(key, self.waiters.clone());
+		// A new arm is progress to the simulator's lost-wakeup probe, as a sleep's is.
+		#[cfg(feature = "sim")]
+		crate::clock::sim::event();
 		if state.armed.first_key_value().is_some_and(|(first, _)| *first == key) {
 			let mut owner = state.owner.take();
 			drop(state);
@@ -688,6 +696,24 @@ mod tests {
 			deadlines.next(),
 			Some(Instant::ZERO.saturating_add(Duration::from_secs(1)))
 		);
+	}
+
+	/// A sleep armed behind the earliest deadline leaves the parked owner asleep: it arms
+	/// its own instant, never the reached `now` it is counted from.
+	#[test]
+	fn a_later_sleep_leaves_the_owner_parked() {
+		let deadlines = Deadlines::new(Instant::ZERO);
+		let _first = Deadline::after(&deadlines, Duration::from_secs(1));
+		let (wakes, owner) = counter();
+		deadlines.advance(Instant::ZERO);
+		assert_eq!(
+			deadlines.park(&owner),
+			Some(Instant::ZERO.saturating_add(Duration::from_secs(1)))
+		);
+
+		let _entered = deadlines.enter();
+		let _sleep = crate::clock::sleep(Duration::from_secs(2));
+		assert_eq!(wakes.count.load(Ordering::SeqCst), 0, "a later sleep woke the owner");
 	}
 
 	/// Entering nests, and dropping a guard restores the queue entered before it.

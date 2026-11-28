@@ -7,7 +7,7 @@
 // presented under the reader's own prefix as the peer would present them to a request for it.
 //
 // This node is an endpoint: it declares no Node ID, so the peer sends it claims and never routes.
-// Each claim is one instance's at a path, with what the peer's own reader shows of it: its cost,
+// Each claim is one identity's at a path, with what the peer's own reader shows of it: its cost,
 // how far above the path it was made, and whether a route still reaches it.
 
 import { type Dispose, type GetPromise, type Getter, race } from "@moq/signals";
@@ -15,10 +15,18 @@ import type * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
-import { error, ProtocolViolation } from "../error.ts";
-import { routesEqual, WireRoute } from "../hop.ts";
-import type * as Instance from "../instance.ts";
-import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeOverlaps } from "../internal.ts";
+import { error, ProtocolViolation, peerEnded } from "../error.ts";
+import { Cost, routesEqual, WireRoute } from "../hop.ts";
+import type * as Identity from "../identity.ts";
+import {
+	arrival,
+	bestOfTier,
+	coveringPrefixes,
+	type Filed,
+	hiddenBelow,
+	scopeCaptures,
+	scopeOverlaps,
+} from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -40,7 +48,7 @@ export interface Request {
 	hidden: boolean;
 	/** Also report claims whose subtree overlaps the scope without matching it. */
 	covering: boolean;
-	/** Report each instance's claim at a path rather than the best one. */
+	/** Report each identity's claim at a path rather than the best one. */
 	claims: boolean;
 }
 
@@ -53,6 +61,10 @@ export interface Session {
 	slots: Slots;
 	/** Rank a route last once the peer sent GOAWAY. */
 	drained(route: WireRoute): WireRoute;
+	/** What crossing this link adds to a claim's cost, once known. */
+	cost(): Promise<Cost>;
+	/** This link's rank, which every claim through it carries at most. */
+	priority: number;
 	goaway?: GetPromise<Goaway>;
 	/** Our grant: the peer answers a prefix wider than what it lets us subscribe to region by region. */
 	grant?: Getter<Grant | undefined>;
@@ -63,8 +75,8 @@ export interface Session {
 /** One reader, and what it was last told of each path. */
 interface Reader extends Request {
 	announced: announce.Producer;
-	/** What each path reports, by instance with `claims` and otherwise under `undefined`. */
-	reported: Map<Path.Valid, Map<Instance.Valid | undefined, WireRoute>>;
+	/** What each path reports, by identity with `claims` and otherwise under `undefined`. */
+	reported: Map<Path.Valid, Map<Identity.Valid | undefined, WireRoute>>;
 	synced: boolean;
 }
 
@@ -83,13 +95,15 @@ interface Live {
 	/** Relative to the session, or undefined when it resolves to no path this node can hold,
 	 * which the claim then never has. */
 	path?: Path.Valid;
-	instance: Instance.Valid;
+	identity: Identity.Valid;
 	claim: Claim;
 	/** Whether the claim's run, its epoch and how far above its path it is, was ever told
 	 * available. A run first told unavailable is not there: nothing can serve it. */
 	taken: boolean;
 	/** Who the claim is filed under in the consume cache. */
 	owner: object;
+	/** What the claim is ranked as, renewed whenever the consume cache takes it as new. */
+	ref: object;
 }
 
 // The most a claim at `path` can be above it: a claim above the session's root covers the whole
@@ -98,6 +112,14 @@ const checkAbove = (path: Path.Valid, above: bigint) => {
 	if (above > BigInt(Path.parts(path).length))
 		throw new ProtocolViolation(`a claim at ${path} cannot be ${above} segments above it`);
 };
+
+/** A claim covering a reader's path: filed at `prefix`, and shown to the reader as `shown`. */
+interface Candidate {
+	readonly prefix: Path.Valid;
+	readonly ref: object;
+	readonly filed: WireRoute;
+	readonly shown: WireRoute;
+}
 
 /** The claims a lite-07 session's peer sends, shared by every reader of the session. */
 export class Routed {
@@ -124,6 +146,9 @@ export class Routed {
 	#byPath = new Map<Path.Valid, Set<bigint>>();
 	#history = new AnnounceHistory();
 
+	// What crossing this link costs, known before the first claim arrives.
+	#cost?: Cost;
+
 	// Set once the session lets go of its claims, which then show nothing anew.
 	#closing = false;
 	#stopDrain?: Dispose;
@@ -135,7 +160,10 @@ export class Routed {
 		// A draining peer ranks its claims last from the GOAWAY itself.
 		this.#stopDrain = session.goaway?.changed(() => {
 			if (this.#closing) return;
-			for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
+			// As one change, so a path its claims cover never passes through another route.
+			session.consumes.batch(() => {
+				for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
+			});
 		});
 		this.#granted = session.grant?.peek()?.subscribe;
 		this.#stopGrant = session.grant?.subscribe(() => {
@@ -243,9 +271,12 @@ export class Routed {
 		}
 		this.#editing = { remove, add: added };
 		console.debug(`announced: remove=${remove.join(",")} add=${add.map(({ prefix }) => prefix).join(",")}`);
-		// However large, the edit goes whole, in as many messages as it takes.
+		// However large, the edit goes whole, in as many messages as it takes. A peer that stopped
+		// the stream is leaving, which the session's own handling of the stop ends these routes for.
 		for (const part of requestParts(remove, add, this.#session.version)) {
-			this.#session.send(part).catch((err: unknown) => this.close(error(err)));
+			this.#session.send(part).catch((err: unknown) => {
+				if (!peerEnded(err)) this.close(error(err));
+			});
 		}
 	}
 
@@ -307,18 +338,18 @@ export class Routed {
 		return found;
 	}
 
-	// A claim through this session: its cost plus a local link cost of 1, which the draft lets
-	// a receiver charge in place of the peer's declared cost; ranked last while the peer or a
-	// node on its way drains, then by the lowest priority on its way, past this link's 0; and
-	// unavailable while no route reaches it.
+	// A claim through this session: its cost plus this link's; ranked below every available claim
+	// while the peer or a node on its way drains, then by the lowest priority on its way, this
+	// link's included; and unavailable while no route reaches it.
 	#candidate(live: Live, claim: Claim): WireRoute {
+		if (this.#cost === undefined) throw new Error("a claim before the link was priced");
 		return this.#session.drained(
 			WireRoute.normalize({
-				instance: live.instance,
+				identity: live.identity,
 				epoch: claim.epoch,
-				cost: claim.cost + 1n,
+				cost: Cost.charged(claim.cost, this.#cost),
 				claimed: true,
-				priority: Math.min(0, claim.priority),
+				priority: Math.min(this.#session.priority, claim.priority),
 				above: claim.above,
 				draining: claim.draining || undefined,
 				available: !claim.unavailable,
@@ -344,8 +375,12 @@ export class Routed {
 				this.#byPath.set(live.path, ids);
 			}
 			// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
-			// place, as the consume cache does. See bestCandidate.
-			if (!was || restart) ids.delete(id);
+			// place, as the consume cache does. See mostSpecific.
+			if (!was || restart) {
+				ids.delete(id);
+				live.ref = {};
+				arrival(live.ref);
+			}
 			ids.add(id);
 			consumes.announce(live.path, live.owner, this.#candidate(live, live.claim), restart);
 		} else if (was) {
@@ -368,55 +403,88 @@ export class Routed {
 		this.#serve(id, live, false, lost, was);
 	}
 
-	// The claims `reader` is shown at `path`: those at the path itself, and at the reader's own
-	// prefix each claim at or above it, as the peer presents a claim covering more than a
-	// requested prefix: that many segments more above the path, so a claim exactly there still
-	// outranks it.
-	#candidates(reader: Reader, path: Path.Valid): WireRoute[] {
-		const candidates: WireRoute[] = [];
+	// The claims `reader` is shown at `path`, each with where it is filed and how it is shown:
+	// those at the path itself, and at the reader's own prefix each claim at or above it, as the
+	// peer presents a claim covering more than a requested prefix: that many segments more above
+	// the path, so a claim exactly there still outranks it. Oldest first at each filing.
+	#candidates(reader: Reader, path: Path.Valid): Candidate[] {
+		const candidates: Candidate[] = [];
 		for (const at of path === reader.prefix ? coveringPrefixes(path) : [path]) {
 			const by = BigInt(Path.parts(path).length - Path.parts(at).length);
 			for (const id of this.#byPath.get(at) ?? []) {
 				const live = this.#claim(id);
-				const shown = by === 0n ? live.claim : { ...live.claim, above: live.claim.above + by };
-				candidates.push(this.#candidate(live, shown));
+				const filed = this.#candidate(live, live.claim);
+				const shown =
+					by === 0n ? filed : this.#candidate(live, { ...live.claim, above: live.claim.above + by });
+				candidates.push({ prefix: at, ref: live.ref, filed, shown });
 			}
 		}
 		return candidates;
 	}
 
-	// Report to `reader` the best claim at `path`, or with `claims` each instance's, and each
+	// Report to `reader` the best claim at `path`, or with `claims` each identity's, and each
 	// one's end. `lost` marks the claims leaving as let go rather than withdrawn, so they go
 	// offline rather than ending.
 	#refresh(reader: Reader, path: Path.Valid, lost: boolean) {
 		const { announced, scope } = reader;
 		if (announced.closed.peek() !== undefined) return;
-		// Keyed by instance with `claims`, and otherwise the one key `undefined`.
-		const now = new Map<Instance.Valid | undefined, WireRoute>();
+		// Keyed by identity with `claims`, and otherwise the one key `undefined`.
+		const now = new Map<Identity.Valid | undefined, WireRoute>();
 		if (visible(reader, path)) {
 			const candidates = this.#candidates(reader, path);
+			// At the reader's own prefix, the same pick a consume of `path` makes from the cache,
+			// ranked where each claim is filed, newest first at each filing. Beneath it, the best
+			// claim filed at `path`, as the origin's listing shows each row: each carries its Above,
+			// so the reader holds every filing. Ranked from the claims alone, never walking the
+			// prefixes they are not filed at, so a refresh stays linear in the claims shown.
+			const depths = new Map<Path.Valid, number>();
+			const pick = (among: Candidate[]) => {
+				// Alone, it is the pick: nothing supersedes or outranks it.
+				if (among.length === 1) return among[0];
+				const orders = new Map<Path.Valid, number>();
+				const filed: Filed<Candidate>[] = [];
+				// Newest first at each filing, as mostSpecific numbers them.
+				for (let i = among.length - 1; i >= 0; i--) {
+					const candidate = among[i];
+					const { prefix, ref } = candidate;
+					let depth = depths.get(prefix);
+					if (depth === undefined) {
+						depth = Path.parts(prefix).length;
+						depths.set(prefix, depth);
+					}
+					const order = orders.get(prefix) ?? 0;
+					orders.set(prefix, order + 1);
+					filed.push({ prefix, depth, order, arrival: arrival(ref), candidate, route: candidate.filed });
+				}
+				return bestOfTier(path, filed)?.candidate;
+			};
 			if (reader.claims) {
-				// The closest claim of each instance.
-				for (const next of candidates) {
-					const held = now.get(next.instance);
-					if (!held || (next.above ?? 0n) < (held.above ?? 0n)) now.set(next.instance, next);
+				// Each identity's pick, as a consume pinned to it makes, from one pass over the claims.
+				const identities = new Map<Identity.Valid | undefined, Candidate[]>();
+				for (const candidate of candidates) {
+					const own = identities.get(candidate.filed.identity);
+					if (own) own.push(candidate);
+					else identities.set(candidate.filed.identity, [candidate]);
+				}
+				for (const [identity, own] of identities) {
+					const best = pick(own);
+					if (best) now.set(identity, best.shown);
 				}
 			} else {
-				// The same pick a consume of `path` makes from the cache.
-				const best = bestCandidate(path, path, candidates, (next) => next);
-				if (best) now.set(undefined, best);
+				const best = pick(candidates);
+				if (best) now.set(undefined, best.shown);
 			}
 		}
 
 		const captures = scopeCaptures(scope, path);
-		const prev = reader.reported.get(path) ?? new Map<Instance.Valid | undefined, WireRoute>();
+		const prev = reader.reported.get(path) ?? new Map<Identity.Valid | undefined, WireRoute>();
 		// Arrivals first, so a reader sees a claim replaced rather than the path gone between.
 		for (const [key, next] of now) {
 			const was = prev.get(key);
 			if (was && routesEqual(was, next)) continue;
-			const restart = !!was && (was.instance !== next.instance || was.epoch !== next.epoch);
+			const restart = !!was && (was.identity !== next.identity || was.epoch !== next.epoch);
 			const kind = !was ? "start" : restart ? "restart" : "update";
-			console.debug(`announced: broadcast=${path} ${kind} instance=${next.instance}`);
+			console.debug(`announced: broadcast=${path} ${kind} identity=${next.identity}`);
 			announced.append({ prefix: path, captures, kind, route: next });
 		}
 		for (const [key, was] of prev) {
@@ -472,9 +540,12 @@ export class Routed {
 		this.#release();
 	}
 
-	/** Apply one message the peer sent on its Announce Stream as a publisher. */
+	/**
+	 * Apply one message the peer sent on its Announce Stream as a publisher. Once the peer left,
+	 * whatever it still sends about the claims that ended with it is moot.
+	 */
 	async receive(msg: AnnounceBroadcast): Promise<void> {
-		if (this.#closing) return;
+		if (this.#closing || this.#finished) return;
 		switch (msg.status) {
 			case "ok":
 				this.#ok();
@@ -491,16 +562,26 @@ export class Routed {
 				// The peer's own request is answered by the publisher half.
 				break;
 			case "start": {
+				// Every claim, and every change to one, arrives after the first start.
+				this.#cost ??= await this.#session.cost();
+				if (this.#closing || this.#finished) return;
 				// Every claim's path is relative to the session, whichever requested prefix it lies in.
 				const path = this.#history.start(msg);
 				const id = this.#history.next - 1n;
 				if (path === undefined) console.warn(`refusing a claim: claim=${id} reason=path`);
 				else checkAbove(path, msg.claim.above);
 				for (const other of path === undefined ? [] : (this.#byPath.get(path) ?? [])) {
-					if (this.#claim(other).instance === msg.instance)
-						throw new ProtocolViolation(`${path} claimed twice for one instance`);
+					if (this.#claim(other).identity === msg.identity)
+						throw new ProtocolViolation(`${path} claimed twice for one identity`);
 				}
-				const live: Live = { path, instance: msg.instance, claim: msg.claim, taken: false, owner: {} };
+				const live: Live = {
+					path,
+					identity: msg.identity,
+					claim: msg.claim,
+					taken: false,
+					owner: {},
+					ref: {},
+				};
 				this.#claims.set(id, live);
 				live.taken = !msg.claim.unavailable;
 				this.#serve(id, live, false, false, false);
@@ -526,7 +607,7 @@ export class Routed {
 			case "active":
 			case "update":
 			case "ended":
-				// Lite-07 names every claim's instance, ends one by its Announce ID, and decoding
+				// Lite-07 names every claim's identity, ends one by its Announce ID, and decoding
 				// refuses an unknown type, which only lite-06 skips.
 				throw new ProtocolViolation(`${msg.status} announcement on lite-07`);
 		}

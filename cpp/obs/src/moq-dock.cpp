@@ -1099,9 +1099,9 @@ void MoQDock::StartStream()
 	}
 
 	if (auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output))) {
-		const auto instance = moq->GetInstance();
-		if (!instance.empty())
-			publishSummary += QStringLiteral("\nInstance ") + QString::fromStdString(instance);
+		const auto identity = moq->GetIdentity();
+		if (!identity.empty())
+			publishSummary += QStringLiteral("\nIdentity ") + QString::fromStdString(identity);
 	}
 	pollTimer->start();
 

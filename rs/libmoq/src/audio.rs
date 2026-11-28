@@ -210,15 +210,40 @@ impl Audio {
 		reserve: bool,
 	) -> Result<Id, Error> {
 		let producer = moq_audio::encode::Producer::new(target.producer, target.catalog.clone(), input, &options)?;
+		self.insert(target.children, producer, &options, reserve)
+	}
+
+	/// Encode PCM frames onto the track a subscriber's `request` asks for and return its handle.
+	pub(crate) fn publish_requested(
+		&mut self,
+		requested: crate::publish::Requested,
+		input: moq_audio::encode::Input,
+		options: moq_audio::encode::Options,
+		reserve: bool,
+	) -> Result<Id, Error> {
+		let crate::publish::Requested {
+			request,
+			catalog,
+			children,
+		} = requested;
+		let producer = moq_audio::encode::Producer::requested(request, catalog, input, &options)?;
+		self.insert(&children, producer, &options, reserve)
+	}
+
+	fn insert(
+		&mut self,
+		children: &crate::publish::Children,
+		producer: moq_audio::encode::Producer,
+		options: &moq_audio::encode::Options,
+		reserve: bool,
+	) -> Result<Id, Error> {
 		let reservation = reserve.then(|| Arc::new(options.bandwidth.reserve(&producer.demand(), producer.bitrate())));
 		let encoder = Shared::new(AudioEncoder {
 			producer,
 			reservation,
-			children: target.children.clone(),
+			children: children.clone(),
 		});
-		target
-			.children
-			.insert(&mut self.producers, encoder, crate::publish::Child::Audio)
+		children.insert(&mut self.producers, encoder, crate::publish::Child::Audio)
 	}
 
 	pub(crate) fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
@@ -308,8 +333,10 @@ impl Audio {
 				_ = &mut close => return Ok(()),
 				read = consumer.read() => match read {
 					Ok(Some(moq_audio::decode::Read::Frame(frame))) => Read::Frame(frame),
-					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration })) => Read::gap(timestamp, duration)?,
-					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end),
+					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration, .. })) => Read::gap(timestamp, duration)?,
+					Ok(Some(moq_audio::decode::Read::End { end, .. })) => Read::end(end),
+					// A read this binding predates carries nothing its callback can report.
+					Ok(Some(_)) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -394,32 +421,9 @@ pub unsafe extern "C" fn moq_encode_audio(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? }.to_string();
-		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
-
-		let layout = moq_audio::Layout::from_channels(raw_input.channels)?;
-		let mut encoder_input = moq_audio::encode::Input::new(raw_input.sample_rate, layout);
-		encoder_input.format = audio_format_from_u32(raw_input.format)?;
-
-		// The C ABI takes an explicit track name and spells "unset" as 0, so map
-		// both onto the Rust options here rather than leaking either convention.
-		let mut options = moq_audio::encode::Options::default();
+		let (input, mut options) = unsafe { encode_options(input, output)? };
+		// The C ABI takes an explicit track name.
 		options.track = Some(name);
-		let codec = codec_str
-			.parse()
-			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
-		options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
-		if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
-			options.config.sample_rate = sample_rate;
-		}
-		if let Some(channels) = zeroable(raw_output.channels) {
-			options.config.layout = moq_audio::Layout::from_channels(channels)?;
-		}
-		options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		if let Some(micros) = zeroable(raw_output.frame_duration_us) {
-			options.config.frame_duration = Duration::from_micros(micros.into());
-		}
 
 		let allocator = ffi::parse_id_optional(allocator)?;
 		let mut state = State::lock();
@@ -427,8 +431,83 @@ pub unsafe extern "C" fn moq_encode_audio(
 			options.bandwidth = state.bandwidth.allocator(id)?;
 		}
 		let State { publish, audio, .. } = &mut *state;
-		audio.publish(publish.target(broadcast)?, encoder_input, options, allocator.is_some())
+		audio.publish(publish.target(broadcast)?, input, options, allocator.is_some())
 	})
+}
+
+/// Accept a track request as an audio track, encoding the PCM frames you publish to it.
+///
+/// Consumes the request handle and returns the same kind of handle as [moq_encode_audio], or a
+/// negative code on failure. The request names the track. This is how an on-demand publisher
+/// serves a track asked for again after its handle was freed while read: accept it with the
+/// configuration it was first published with. One that changes the track info its readers hold
+/// ends the track and fails here; nothing checks the codec settings, which its readers decode
+/// with, so keep those too. A configuration the codec refuses rejects the request. A failure before the request is
+/// taken, such as invalid arguments or an unknown allocator, leaves its handle open: retry, or
+/// release it with [moq_track_request_free](crate::moq_track_request_free).
+///
+/// # Safety
+/// - As [moq_encode_audio], for `input`, `output`, and `allocator`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_encode_audio(
+	request: u32,
+	input: *const moq_audio_encoder_input,
+	output: *const moq_audio_encoder_output,
+	allocator: u32,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let (input, mut options) = unsafe { encode_options(input, output)? };
+
+		let allocator = ffi::parse_id_optional(allocator)?;
+		let mut state = State::lock();
+		if let Some(id) = allocator {
+			options.bandwidth = state.bandwidth.allocator(id)?;
+		}
+		let State { publish, audio, .. } = &mut *state;
+		audio.publish_requested(
+			publish.track_request_take(request)?,
+			input,
+			options,
+			allocator.is_some(),
+		)
+	})
+}
+
+/// The encoder input and options `input` and `output` describe, with no track name.
+///
+/// # Safety
+/// - As [moq_encode_audio], for `input` and `output`.
+unsafe fn encode_options(
+	input: *const moq_audio_encoder_input,
+	output: *const moq_audio_encoder_output,
+) -> Result<(moq_audio::encode::Input, moq_audio::encode::Options), Error> {
+	let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
+
+	let layout = moq_audio::Layout::from_channels(raw_input.channels)?;
+	let mut encoder_input = moq_audio::encode::Input::new(raw_input.sample_rate, layout);
+	encoder_input.format = audio_format_from_u32(raw_input.format)?;
+
+	// The C ABI spells "unset" as 0, so map it onto the Rust options here rather than leaking
+	// the convention.
+	let mut options = moq_audio::encode::Options::default();
+	let codec = codec_str
+		.parse()
+		.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
+	options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
+	if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
+		options.config.sample_rate = sample_rate;
+	}
+	if let Some(channels) = zeroable(raw_output.channels) {
+		options.config.layout = moq_audio::Layout::from_channels(channels)?;
+	}
+	options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+	if let Some(micros) = zeroable(raw_output.frame_duration_us) {
+		options.config.frame_duration = Duration::from_micros(micros.into());
+	}
+	Ok((encoder_input, options))
 }
 
 /// This encoder's bandwidth reservation, or 0 if it was published without one.
@@ -473,47 +552,21 @@ pub unsafe extern "C" fn moq_encode_audio_demand(
 	})
 }
 
-/// End an audio track with an application error code, but only while nobody wants it.
+/// Release an audio producer without draining or finishing it, along with its bandwidth
+/// reservation; see [`crate::moq_publish_track_free`] for how its track ends.
 ///
-/// This is how an on-demand publisher ends the track once its [`moq_encode_audio_demand`]
-/// watcher reports `MOQ_DEMAND_UNWANTED`: releasing it instead fails a reader that joined in
-/// between. Returns 1 once the track is closed, which releases the handle and its bandwidth
-/// reservation like [moq_encode_audio_finish], and `0` when a reader wants it again, which
-/// leaves the handle serving: wait for `MOQ_DEMAND_UNWANTED` from a new watcher, since one that
-/// already reported it misses a reader that came and went. A negative code is a failure.
+/// Returns zero, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_encode_audio_abort_unwanted(producer: u32, error_code: u16) -> i32 {
+pub extern "C" fn moq_encode_audio_free(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(producer)?;
 		let shared = State::lock().audio.producer(id)?;
-		let closed = {
-			let mut guard = shared.lock();
-			let encoder = guard.take().ok_or(Error::MediaNotFound)?;
-			let AudioEncoder {
-				producer,
-				reservation,
-				children,
-			} = encoder;
-			match producer.abort_unwanted(moq_net::Error::App(error_code)) {
-				Ok(()) => {
-					children.forget(crate::publish::Child::Audio(id));
-					true
-				}
-				Err(producer) => {
-					*guard = Some(AudioEncoder {
-						producer,
-						reservation,
-						children,
-					});
-					false
-				}
-			}
-		};
-		if closed {
-			// A racing close may have released the id already.
-			let _ = State::lock().audio.remove(id);
-		}
-		Ok(i32::from(closed))
+		let released = shared.lock().take().ok_or(Error::MediaNotFound)?;
+		released.children.forget(crate::publish::Child::Audio(id));
+		// A racing close may have released the id already.
+		let _ = State::lock().audio.remove(id);
+		drop(released);
+		Ok(())
 	})
 }
 

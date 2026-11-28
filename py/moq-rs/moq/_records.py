@@ -22,6 +22,7 @@ from moq_ffi import (
     MoqDatagram,
     MoqDelay,
     MoqFrame,
+    MoqFrameHeader,
     MoqGrant,
     MoqOrder,
     MoqQuicConfig,
@@ -124,6 +125,22 @@ class Frame:
 
 
 @dataclass(frozen=True)
+class FrameHeader:
+    """A frame's header without its payload, as a metadata subscription reads it.
+
+    ``size`` is the declared payload size in bytes, 0 for an empty frame. On a scale-less
+    track ``timestamp`` is :meth:`Timestamp.unscaled` at the frame's group key.
+    """
+
+    size: int
+    timestamp: Timestamp
+
+    @staticmethod
+    def _from_ffi(header: MoqFrameHeader) -> FrameHeader:
+        return FrameHeader(size=header.size, timestamp=Timestamp._from_ffi(header.timestamp))
+
+
+@dataclass(frozen=True)
 class Datagram:
     """A datagram payload with its own sequence and timestamp.
 
@@ -207,8 +224,9 @@ class Subscription:
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``delay`` is where a range with no start begins and how far a non-latest group may fall
     behind before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
-    one :class:`Range` with no start. ``order`` is which pending group the publisher
-    sends first, ``None`` for newest first.
+    one :class:`Range` with no start. ``order`` is which group comes first, as the
+    publisher sends them and :meth:`recv_group` returns those held, ``None`` for newest first.
+    Before moq-lite-07 the publisher sends newest first whatever ``order`` asks.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """

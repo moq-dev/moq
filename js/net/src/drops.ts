@@ -176,6 +176,11 @@ export class DropSet {
 		return this.#runs.overlapping(start, end);
 	}
 
+	/** The run of keys given up holding `key`, whatever the reason, coalesced across reasons. */
+	keysAt(key: bigint): Run | undefined {
+		return this.#keys.at(key);
+	}
+
 	/** Where the keys given up from `from` on, whatever the reason, stop: `from` when it isn't given up. */
 	coveredFrom(from: bigint): bigint {
 		return this.#keys.at(from)?.end ?? from;

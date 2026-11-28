@@ -6,8 +6,9 @@
  * and asks one range-minimum question, whatever else the audience holds. A start between groups
  * stands for the group containing it, which a range starting at or before it covers too, so spans
  * merge as they do over starts. Ranges with no time start can't be placed on that line and are
- * counted by value instead, live joins by lag and end under the largest max among them, since where
- * a join lands doesn't depend on it.
+ * counted by value instead: live joins by lag and end under the largest max among them, since where
+ * a join lands doesn't depend on it, and ranges from the oldest group under the furthest end, which
+ * takes in the rest.
  *
  * @module
  */
@@ -16,7 +17,7 @@ import type { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
 import type { Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
-import { compare, isEmpty, joinOf, maxOf, rangeBudget, rangeKey, rangeTime } from "./window.ts";
+import { compare, isEmpty, joinOf, maxOf, rangeBudget, rangeTime } from "./window.ts";
 
 /** How {@link Ranges} counts one range. */
 type Shape =
@@ -27,8 +28,8 @@ type Shape =
 	| { kind: "time"; start: bigint; end: bigint }
 	/** A live join, by lag and end, and its budget. */
 	| { kind: "join"; join: string; min: Duration | null; budget: number }
-	/** The rest: a range from the oldest group with an end. */
-	| { kind: "other" };
+	/** A range from the oldest group, by its end. */
+	| { kind: "oldest"; end: bigint };
 
 function shapeOf(range: Range): Shape {
 	if (isEmpty(range)) return { kind: "empty" };
@@ -38,7 +39,8 @@ function shapeOf(range: Range): Shape {
 	const join = joinOf(range);
 	if (join !== undefined && typeof range.start === "object")
 		return { kind: "join", join, min: range.start.live.min, budget: rangeBudget(range) };
-	return range.start === undefined && end === undefined ? { kind: "open" } : { kind: "other" };
+	if (end === undefined) return { kind: "open" };
+	return { kind: "oldest", end };
 }
 
 /**
@@ -50,8 +52,8 @@ export class Ranges {
 	#open = 0;
 	// Time ranges, as spans of starts.
 	#time = new Cover();
-	// Ranges from the oldest group with an end, kept as they are.
-	#others = new Map<string, { range: Range; count: number }>();
+	// Ranges from the oldest group with an end, by end: the furthest takes in the rest.
+	#oldest = new Counts<bigint>();
 	// Live joins by lag and end, each with the budgets its holders ask under, and the range asking
 	// the widest.
 	#joins = new Map<string, { budgets: Counts<number>; min: Duration | null; end: bigint | undefined }>();
@@ -85,12 +87,10 @@ export class Ranges {
 				changed = (widest === undefined || shape.budget > widest) && this.#open === 0;
 				break;
 			}
-			case "other": {
-				const key = rangeKey(range);
-				const held = this.#others.get(key);
-				if (held) held.count++;
-				else this.#others.set(key, { range, count: 1 });
-				changed = !held && this.#open === 0;
+			case "oldest": {
+				const furthest = this.#oldest.last();
+				this.#oldest.add(shape.end);
+				changed = (furthest === undefined || shape.end > furthest) && this.#open === 0;
 				break;
 			}
 		}
@@ -121,13 +121,10 @@ export class Ranges {
 				changed = now !== widest && this.#open === 0;
 				break;
 			}
-			case "other": {
-				const key = rangeKey(range);
-				const held = this.#others.get(key);
-				if (!held) break;
-				const last = --held.count === 0;
-				if (last) this.#others.delete(key);
-				changed = last && this.#open === 0;
+			case "oldest": {
+				const furthest = this.#oldest.last();
+				this.#oldest.remove(shape.end);
+				changed = this.#oldest.last() !== furthest && this.#open === 0;
 				break;
 			}
 		}
@@ -151,7 +148,8 @@ export class Ranges {
 		const union: Range[] = this.#time
 			.runs()
 			.map((run) => (run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n }));
-		for (const { range } of this.#others.values()) union.push(range);
+		const furthest = this.#oldest.last();
+		if (furthest !== undefined) union.push({ end: furthest });
 		for (const { budgets, min, end } of this.#joins.values()) {
 			const widest = budgets.last();
 			if (widest === undefined) continue;

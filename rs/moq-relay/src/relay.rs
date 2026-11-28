@@ -308,7 +308,7 @@ impl Relay {
 		cluster_options.client = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		cluster_options.shutdown = Some(shutdown.clone());
-		// The node's stats broadcast has one instance at a time: the relay this one
+		// The node's stats broadcast has one identity at a time: the relay this one
 		// replaces keeps it until it exits, and its last counters are read first.
 		let alone = sockets.replacing().then(|| {
 			let (alone, hold) = tokio::sync::oneshot::channel();

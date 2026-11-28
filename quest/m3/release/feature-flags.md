@@ -46,11 +46,10 @@ judged, so this pass reads only the difference:
   media and gateway trims
   ([moq-dev/moq#8851](https://github.com/moq-dev/moq/pull/8851)).
 - Kept, with the reason a new feature has to match:
-  - `async` in kio, moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
+  - `async` in moq-net, hang, moq-json, moq-mux, moq-stats, moq-hls,
     moq-e2ee, and moq-auth: the poll-first design (decided 2026-11-05 in
     [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607)), checked
-    by `just rs coroutines`. kio's `runtime`, `macros`, `sim`, and `manual`
-    follow it.
+    by `just rs coroutines`.
   - Vendor or system: moq-video's `nvidia`, `vaapi`, `mediacodec`, `v4l2`,
     `openh264` (a vendored C++ build), `vpx` (system libvpx), `pipewire`
     (libpipewire), and `render` (wgpu); moq-audio's `capture`, `playback`,
@@ -64,7 +63,7 @@ judged, so this pass reads only the difference:
     [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855), and `e2ee`
     left with the crate move
     ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)).
-  - `serde` in kio, moq-pattern, and moq-crypto: an optional dependency, by
+  - `serde` in moq-pattern and moq-crypto: an optional dependency, by
     ecosystem convention.
   - moq-video's `capture`: device I/O the bindings deliberately leave to the
     language wrappers, and its platform frameworks would bloat mobile builds.

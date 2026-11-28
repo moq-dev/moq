@@ -29,8 +29,9 @@ Decided 2026-10-28 (maintainer): keep crossbeam-epoch rather than replace it.
 refcounted segments and per-read refcounts, it supports loom, and moka pulls
 it into moq-relay anyway.
 
-Verify on ARM: Nightly's `gate` job runs kio's log tests on
-`ubuntu-24.04-arm`. The loom model that checked this ordering is gone (decided
+Verify on ARM: no merge-gate lane runs kio on ARM, so run
+`cargo test -p kio --lib log::` on an aarch64 host (an Apple-silicon Mac or an
+aarch64 Linux machine) and record the run in the PR. The loom model that checked this ordering is gone (decided
 2026-10-31, maintainer: "Remove loom entirely"), so also confirm from the
 released `Local::pin` that it orders the epoch store before the reads it
 guards, which is what the fence restores.

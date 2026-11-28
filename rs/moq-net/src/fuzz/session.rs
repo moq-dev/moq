@@ -529,7 +529,10 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 
 /// An origin with a fixed hop, so the run does not depend on a random one.
 fn produce(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(hop.try_into().expect("a nonzero hop")));
+	let (producer, driver) = origin::Producer::new(origin::Config {
+		node: Some(hop.try_into().expect("a nonzero hop")),
+		..Default::default()
+	});
 	spawn(driver);
 	producer
 }
@@ -570,7 +573,10 @@ struct Victim {
 
 impl Relay {
 	async fn new(version: Version) -> Self {
-		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
+		let mut config = origin::Config {
+			node: Some(1.try_into().expect("a nonzero hop")),
+			..Default::default()
+		};
 		// The cache's idle expiry is the longest wait in the drain, so keep it short.
 		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
 		// A relay carries every peer's routes on to the others.
@@ -635,7 +641,7 @@ impl Relay {
 				let mut routes = origin.routes();
 				while let Some(event) = routes.next().await {
 					let path = event.announce.prefix;
-					// A restart is a new instance at the path, which the reader before it never
+					// A restart is a new identity at the path, which the reader before it never
 					// follows onto.
 					let started = matches!(event.kind, origin::RouteKind::Start | origin::RouteKind::Restart);
 					if !started || !path.as_str().starts_with(PEER) {
@@ -944,6 +950,10 @@ impl poll::Session for Recorder {
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
 	}
+
+	fn reliable_reset(&self) -> bool {
+		self.inner.reliable_reset()
+	}
 }
 
 impl Recorder {
@@ -1010,6 +1020,15 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 			code: code as u8,
 		});
 		self.inner.reset(code);
+	}
+
+	/// Recorded as a plain reset, which is all a replay can ask of its stream.
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		log(&self.log).push(Action::Reset {
+			stream: self.stream,
+			code: code as u8,
+		});
+		self.inner.reset_at(offset, code);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {

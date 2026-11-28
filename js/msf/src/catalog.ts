@@ -4,7 +4,7 @@ import * as z from "zod/mini";
 
 /** Zod schema for a track's wire packaging. Accepts known values or any future string. */
 export const PackagingSchema = z.union([
-	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline"]),
+	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline", "raw", "cts"]),
 	z.string(),
 ]);
 

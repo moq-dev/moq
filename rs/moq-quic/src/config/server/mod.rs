@@ -60,25 +60,28 @@ pub struct Config {
 	/// worst-case memory consumption, but accommodate greater application latency in handling
 	/// incoming connection attempts.
 	///
-	/// The default value is set to 65536. With a typical Ethernet MTU of 1500 bytes, this limits
-	/// memory consumption from this to under 100 MiB--a generous amount that still prevents memory
-	/// exhaustion in most contexts.
+	/// The default value is set to 65536. The bytes the attempts hold are bounded separately, so
+	/// large datagrams cannot raise memory use past the shared budget however many attempts fit.
 	pub max_incoming: usize,
 
 	/// Maximum number of received bytes to buffer for each incoming connection attempt
 	///
-	/// This limit governs packets received after the first packet and before the attempt is either
-	/// registered as an active connection or otherwise disposed of. Packets received in excess of
-	/// this limit are dropped, which may require handshake data to be retransmitted.
+	/// This limit governs the first packet and those received after it, until the attempt is either
+	/// registered as an active connection or otherwise disposed of. Each packet counts its length
+	/// plus the fixed size of the record holding it, so a flood of tiny packets is bounded by the
+	/// memory it takes. Packets received in excess of this limit are dropped, which may require
+	/// handshake data to be retransmitted.
 	///
 	/// The default value is 10 MiB. Early-data packets are discarded.
 	pub incoming_buffer_size: u64,
 
 	/// Maximum number of received bytes to buffer collectively for all incoming connection attempts
 	///
-	/// This limit governs packets received after each attempt's first packet and before the attempt
-	/// is either registered as an active connection or otherwise disposed of. Packets received in
-	/// excess of this limit are dropped, which may require handshake data to be retransmitted.
+	/// This limit governs each attempt's first packet and those received after it, counted as for
+	/// [`incoming_buffer_size`](Self::incoming_buffer_size), until the attempt is either
+	/// registered as an active connection or otherwise disposed of. An Initial that would
+	/// exceed it is dropped, as is any later packet, which may require handshake data to be
+	/// retransmitted.
 	///
 	/// The default value is set to 100 MiB--a generous amount that still prevents memory
 	/// exhaustion in most contexts.

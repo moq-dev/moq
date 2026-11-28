@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import { toHop, UNKNOWN_HOP } from "../hop.ts";
-import * as Instance from "../instance.ts";
+import * as Identity from "../identity.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -351,7 +351,7 @@ async function resolveStream(data: Uint8Array) {
 		if (!msg) return out;
 		switch (msg.status) {
 			case "start":
-				out.push({ start: history.start(msg), instance: msg.instance, claim: msg.claim });
+				out.push({ start: history.start(msg), identity: msg.identity, claim: msg.claim });
 				break;
 			case "change":
 				history.get(msg.id);
@@ -366,9 +366,9 @@ async function resolveStream(data: Uint8Array) {
 	}
 }
 
-const a = Instance.parse("a");
-const b = Instance.parse("b");
-const own = { instance: a, claim: ownClaim(0n) };
+const a = Identity.parse("a");
+const b = Identity.parse("b");
+const own = { identity: a, claim: ownClaim(0n) };
 const GOLDEN_RESOLVED = [
 	{ start: Path.from("room/a/cam"), ...own },
 	{ start: Path.from("room/a/mic"), ...own },
@@ -384,6 +384,20 @@ const GOLDEN =
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
+});
+
+// Rust's compressed output for bases that keep parts holding `\/` and `\\`, pinned by
+// `lite::compress::tests::golden_escaped_stream_is_pinned`.
+const GOLDEN_ESCAPED =
+	"001b00000f726f6f6d2f615c2f622f63616d2d3101610000000000ff00001701010b635c5c2f642f63616d2d3101610000000000ff00001102020563616d2d3201610000000000ff00000d0202016501610000000000ff00";
+
+test("AnnounceHistory resolves the Rust encoder's keeps across escapes", async () => {
+	expect(await resolveStream(unhex(GOLDEN_ESCAPED))).toEqual([
+		{ start: Path.from("room/a\\/b/cam-1"), ...own },
+		{ start: Path.from("room/c\\\\/d/cam-1"), ...own },
+		{ start: Path.from("room/a\\/b/cam-2"), ...own },
+		{ start: Path.from("room/c\\\\/e"), ...own },
+	]);
 });
 
 // JS always encodes literally. Rust's `js_literal_stream_decodes` pins the same bytes.
@@ -431,10 +445,10 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 		chain: [5n, 9n],
 	};
 	const cases: [AnnounceBroadcast, number[]][] = [
-		// Path base, path keep, the suffix, instance "b", unminted, epoch, then the claim: cost,
+		// Path base, path keep, the suffix, identity "b", unminted, epoch, then the claim: cost,
 		// above, all three flags, the priority with its sign bit flipped, and the chain.
 		[
-			{ status: "start", suffix: Path.from("x"), instance: b, claim },
+			{ status: "start", suffix: Path.from("x"), identity: b, claim },
 			[0, 15, 0, 0, 1, 0x78, 1, 0x62, 0, 7, 12, 2, 7, 0x7d, 2, 5, 9],
 		],
 		[{ status: "change", id: 1n, claim }, [2, 9, 1, 7, 12, 2, 7, 0x7d, 2, 5, 9]],
@@ -448,13 +462,13 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 	// An own claim is the bytes every endpoint sends: no cost, the top priority, no chain.
 	const start = await bytes(
 		(w) =>
-			encodeAnnounceBroadcast(w, { status: "start", suffix: Path.empty(), instance: b, claim: ownClaim(0n) }, v),
+			encodeAnnounceBroadcast(w, { status: "start", suffix: Path.empty(), identity: b, claim: ownClaim(0n) }, v),
 		v,
 	);
 	expect([...start]).toEqual([0, 12, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0, 0xff, 0]);
 
 	// Older versions have no claims, and lite-07 has nothing else.
-	const start06: AnnounceBroadcast = { status: "start", suffix: Path.from("x"), instance: b, claim };
+	const start06: AnnounceBroadcast = { status: "start", suffix: Path.from("x"), identity: b, claim };
 	await expect(
 		bytes((w) => encodeAnnounceBroadcast(w, start06, Version.DRAFT_06), Version.DRAFT_06),
 	).rejects.toThrow();
@@ -526,23 +540,25 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 	);
 });
 
-// TEMPORARY MIGRATION, delete at the next version cut and expect whole segments: the previous
-// release counts a keep by every `/`, so until it is gone this resolves what it sends.
-test("AnnounceHistory keeps raw parts across an escaped slash", () => {
+// A keep counts decoded parts: an escaped `/` stays inside its part, and a run of `\\` before a
+// `/` leaves that `/` bare. rs/moq-net's compress.rs pins the same cases.
+test("AnnounceHistory keeps whole parts across an escape", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("room/a\\/b/cam-1") });
-	// The previous release sends keep 3 for `room/a\/b/cam-2`.
-	expect(history.start({ suffix: Path.from("cam-2"), pathBase: { distance: 1n, keep: 3 } })).toBe(
+	history.start({ suffix: Path.from("room/c\\\\/d/cam-1") });
+	// `room` and `a\/b` are two parts.
+	expect(history.start({ suffix: Path.from("cam-2"), pathBase: { distance: 2n, keep: 2 } })).toBe(
 		Path.from("room/a\\/b/cam-2"),
 	);
-	// The kept `room/a\` is half an escape, which the rest completes, or nothing does and the path
-	// is refused, its id assigned all the same.
-	expect(history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 2 } })).toBe(
-		Path.from("room/a\\/c"),
+	// `c\\` ends in an escaped backslash, so its `/` separates.
+	expect(history.start({ suffix: Path.from("e"), pathBase: { distance: 2n, keep: 2 } })).toBe(
+		Path.from("room/c\\\\/e"),
 	);
-	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 3n, keep: 2 } })).toBeUndefined();
-	expect(history.next).toBe(4n);
-	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 4n, keep: 5 } })).toThrow(
+	// Three parts of `room/a\/b/cam-1` are all it has, and a fourth is refused.
+	expect(history.start({ suffix: Path.from("x"), pathBase: { distance: 4n, keep: 3 } })).toBe(
+		Path.from("room/a\\/b/cam-1/x"),
+	);
+	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 5n, keep: 4 } })).toThrow(
 		ProtocolViolation,
 	);
 });
@@ -580,14 +596,14 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	const claimed: AnnounceBroadcast = {
 		status: "start",
 		suffix: Path.from("x"),
-		instance: a,
+		identity: a,
 		claim: { ...ownClaim(0n), cost: huge },
 	};
 	expect(await roundTrip(claimed, Version.DRAFT_07)).toMatchObject({ claim: { cost: ceiling } });
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("x"), hops: [], cost: huge };
 	expect(await roundTrip(active, Version.DRAFT_06)).toMatchObject({ cost: ceiling });
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, instance "a", unminted, epoch 0, then a
+	// ANNOUNCE_START: path base, path keep, empty suffix, identity "a", unminted, epoch 0, then a
 	// cost of 2^64-1, which only lite-07's varints can carry, and the rest of an own claim.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
@@ -602,7 +618,7 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 
 test("a claim above its path travels only on lite-07", async () => {
 	const v = Version.DRAFT_07;
-	const start: AnnounceBroadcast = { status: "start", suffix: Path.empty(), instance: b, claim: ownClaim(1n, 3n) };
+	const start: AnnounceBroadcast = { status: "start", suffix: Path.empty(), identity: b, claim: ownClaim(1n, 3n) };
 	expect(await roundTrip(start, v)).toEqual(start);
 	const update: AnnounceBroadcast = { status: "change", id: 0n, claim: ownClaim(1n, 2n) };
 	expect(await roundTrip(update, v)).toEqual(update);

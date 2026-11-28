@@ -441,8 +441,11 @@ run by default:
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no
-  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
-  revision whose session API predates this harness reports it unsupported.
+  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. It
+  builds against every revision since
+  [moq-dev/moq#9386](https://github.com/moq-dev/moq/pull/9386) made `proxy` an
+  `origin::Config` field, which its relay origin sets; an older revision reports it
+  unsupported.
 - `group`, on request: every subscriber drains one finished 512-frame group in
   object batches through the relay's private reader, as moq-net's
   `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
@@ -462,7 +465,7 @@ callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
 `python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
 instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
 SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
-version (default `moq-lite-06`).
+version (default `moq-lite-06`; `moq-lite-07-wip` runs too).
 
 ### Heap
 
@@ -561,7 +564,7 @@ process CPU (user + system, every thread) per MB into
 budget (default 1); every received frame is checked byte for byte.
 
 The binding benchmark itself lives in
-[rust2](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md), with
+[rust2](https://github.com/kixel-ai/rust2/blob/main/bench/ffi/README.md), with
 the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
 runners nightly at a pinned moq revision, against the fork, and reports each
 wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
@@ -830,9 +833,8 @@ The Nightly workflow keeps history on one `gh-pages` branch, where
 `github-action-benchmark` appends each night's points to `bench/{costs,rates}/data.js`
 with its alerts, comments, and charts unused. The publisher runs only on `main`,
 serializes history writes, renders the table from that history even when every
-source failed, and deploys the branch explicitly. Re-running its job in place
-fails, because the earlier attempt's `github-pages` artifact remains; delete
-that artifact first or wait for the next Nightly.
+source failed, and deploys the branch explicitly by the uploaded artifact's ID, so
+re-running its job in place deploys that attempt's upload.
 
 The table includes these measurements:
 
@@ -970,43 +972,70 @@ under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
 `run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
 sharing one can leave a bench linked against the other tree's library.
 
-### CodSpeed
+### Instruction counts
 
-The CodSpeed workflow adds instruction counts for each landing on `main` that
-touches Rust, at <https://codspeed.io/moq-dev/moq>. A landing waits for the
-running measurement and GitHub keeps only the newest pending one, so a run may
-cover several landings. Its CPU simulation runs
-each bench under Valgrind on a hosted runner, so a change of a few percent
-shows without the paired comparison's rounds. It does not see syscalls, I/O,
-contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
-builds only single-threaded targets without I/O, and Nightly keeps measuring
-every bench. Workspace benches import `criterion`, which `rs/bench-harness`
-resolves to Criterion, or to CodSpeed's instrumented Criterion under
-`cargo codspeed`. Nothing gates on it. CI uploads three shards (`net`, `mux`,
-`rest`), since CodSpeed rejects a run of more than about 1,000 benchmarks.
+The Instructions workflow counts each deterministic bench's instructions every
+night on `main`, under stock Valgrind on a hosted runner, through
+[rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
+benchmark runs alone in its own Valgrind process, so a change of a few percent
+shows without the paired comparison's rounds. Some counts still move
+between runs of the same code: some benches read the wall clock and follow the
+host's load, by up to 32%, and some shift with the checkout's path
+([quest](/quest/m0/repeatable-instruction-counts.md)). CI counts one benchmark
+at a time (`--jobs 1`), so a bisect step counts under the nightly's load. It does not see
+syscalls, I/O, contention, or caches, and CodSpeed's Criterion, which counts
+them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
+single-threaded targets without I/O, and Nightly keeps measuring every bench.
+Workspace benches import `criterion`, which `rs/bench-harness` resolves to
+Criterion, or to CodSpeed's instrumented Criterion under `cfg(codspeed)`, which
+rust2-bench sets. Nothing gates on it.
+
+Each count's measure names the environment it ran in, such as `instructions
+(x86_64-ce1501c93c32)`: Valgrind's simulated CPU, glibc's tunables, the
+Valgrind version, and the library rust2-bench preloads into each counted process
+to pin its randomness and clock, which rust2's flake input pins. Counts compare
+only within one fingerprint, and a bump that moves Valgrind or the preload starts
+new series. A matching fingerprint does
+not yet reproduce CI's counts: two hosts sharing one agreed exactly on fewer
+than a quarter of the benchmarks. On x86-64 Linux:
 
 ```bash
-nix develop --command just rs codspeed net  # or mux, rest
-nix develop --command cargo codspeed run
+nix develop --command just rs instructions fingerprint
+nix develop --command just rs instructions run --out metrics.json
+nix develop --command just rs instructions compare origin/main  # a table of each bench's change
 ```
 
-Run locally, the benches only check that each case runs; there is no
-measurement outside CodSpeed's runner.
+Add `--benchmarks <file>`, one name a line, to count only those benchmarks and
+build only the bench targets of their names, plus any target of the same name in
+another listed package, since Cargo's `--bench` takes no package. A name the
+commit lacks fails the run; `run` with `--allow-missing` counts the rest and
+names the missing ones on stderr and in a GitHub Actions job summary, failing
+only when the commit has none of them. `compare` counts the base and the working tree from one
+worktree under `~/.cache/rust2-bench`, so a path the build compiles in moves
+neither side, and selects each side's packages and targets from what that side
+has, so a package or target only one side has reads as added or removed. Not
+every count repeats yet (`quest/m0/repeatable-instruction-counts.md`), so recount
+a change it reports with `--jobs 1`, as CI counts, before trusting it. It keeps the worktree and its build for
+the next compare; delete the directory, then `git worktree prune`, to reclaim
+them.
 
 ### Kixel Quest
 
-CodSpeed and Nightly also upload what they measured as `kixel-metrics`
-artifacts, which [Kixel Quest](https://kixel.quest) reads when the run finishes
-and turns a regression into an investigation quest in `quest/m0/`, bisected to
-the landing that caused it by dispatching CodSpeed on a `kixel-bisect/<commit>`
-branch. CodSpeed reports each bench's simulated instruction count, read from
-the Callgrind profiles its runner leaves (`just gh benchmark-report
-codspeed-metrics`); Nightly reports every successful source's report, without
-its `bench-*` prefix, and each paired comparison's base as a second observation
-of that commit (`just gh benchmark-report nightly-metrics`). A benchmark CSV
-column becomes a measure of its row. Kixel Quest reads at most 1 MiB of a run's
-metrics, and a full Nightly writes about 0.87 MiB, so the step fails rather than
-upload more.
+The Instructions workflow and Nightly upload what they measured as
+`kixel-metrics` artifacts, which [Kixel Quest](https://kixel.quest) reads when
+the run finishes and turns a regression into an investigation quest in
+`quest/m0/`. It bisects one to the landing that caused it by dispatching the
+Instructions workflow on a `kixel-bisect/<run>/<commit>` branch, with its
+`benchmarks` input naming the suspects, so each step builds and counts only
+those. A step at a commit lacking some suspects counts the rest
+(`--allow-missing`), and Kixel Quest reads the missing ones as skipped there,
+not clean. The Instructions workflow uploads rust2-bench's `metrics.json`, which
+rust2-bench checks against Kixel Quest's limits as it writes it; Nightly reports
+every successful source's report, without its `bench-*` prefix, and each paired
+comparison's base as a second observation of that commit (`just gh
+benchmark-report nightly-metrics`). A benchmark CSV column becomes a measure of
+its row. Kixel Quest reads at most 8 MiB of each metrics file, and a full Nightly
+writes about 0.87 MiB, so the step fails rather than upload more.
 
 ## Local check capacity
 

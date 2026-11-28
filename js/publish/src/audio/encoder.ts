@@ -121,7 +121,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
-	// The time between join points: a frame opens a group once it is this far past the last one's start. Defaults to 20 ms.
+	// The time between join points: the frame that brings a group to this much audio closes it. Defaults to 100 ms.
 	join?: Duration | Signal<Duration>;
 };
 
@@ -151,6 +151,8 @@ type Pipeline = {
 	channelCount: number;
 	push(frame: AudioFrame): void;
 	drain(): void;
+	// Encoding stopped: end the open group where the submitted audio ends, keeping the timeline.
+	stop(): void;
 };
 
 /**
@@ -179,10 +181,11 @@ export class Encoder {
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
-	 * The time between join points: a frame opens the next group once it is at least this far past
-	 * the open group's start, closing the previous one. Defaults to 20 ms. A longer join costs the
-	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
-	 * join that is not a positive, finite duration refuses the rendition.
+	 * The time between join points: the minimum audio each group carries. The frame that reaches it
+	 * closes the group, so the relay sees it finish without waiting for the next, and frames still
+	 * forward as they are encoded. Defaults to 100 ms ({@link Container.JOIN}). A longer join costs
+	 * the relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group.
+	 * A join that is not a positive, finite duration refuses the rendition.
 	 */
 	join: Signal<Duration>;
 
@@ -222,8 +225,8 @@ export class Encoder {
 	#pipeline: Pipeline | undefined;
 	#encoding = false;
 	// How far back retained audio is replayed (see replayBudget): the live joins' reach, and for
-	// history or fetches alone the retention. Replayed groups land as fresh arrivals, so only this
-	// cut keeps a rejoining live viewer from receiving all the retained audio before the live edge.
+	// history the retention. Replayed groups land as fresh arrivals, so only this cut keeps a
+	// rejoining live viewer from receiving all the retained audio before the live edge.
 	#budget: Duration | undefined;
 
 	// The rendition's track and producer, kept across subscriber changes.
@@ -244,7 +247,7 @@ export class Encoder {
 	#history: Duration | undefined;
 
 	// The last valid join, which #runConfig validates.
-	#join = Duration.micros(20_000);
+	#join = Container.JOIN;
 	// How far apart groups start under the resolved config, a whole number of frames, which the
 	// broadcast may declare as the catalog's join interval (see groupSpacing).
 	#spacing = new Signal<Duration | undefined>(undefined);
@@ -295,7 +298,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.join = Signal.from(props?.join ?? Duration.millis(20));
+		this.join = Signal.from(props?.join ?? Container.JOIN);
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -478,6 +481,8 @@ export class Encoder {
 			});
 		});
 
+		// Whether the previous run encoded, which this run's cleanup has already cleared from #encoding.
+		let encoding = false;
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled) && !effect.get(this.muted);
 			const capture = effect.get(this.in.capture);
@@ -488,14 +493,21 @@ export class Encoder {
 			const fatal = effect.get(this.#out.error);
 
 			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
-			const demanded = !!track && effect.get(track.demand().wanted);
-			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
-			this.#budget = replayBudget(track && effect.get(track.subscription));
+			// Only a live subscription states how far back it reaches, which sizes the replay. Other
+			// demand, such as a relay's TRACK ahead of its SUBSCRIBE or a fetch, keeps the audio
+			// retained for the subscription that follows rather than replaying all of it.
+			const subscription = track && effect.get(track.subscription);
+			this.#budget = replayBudget(subscription);
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
-			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
-			effect.set(this.#out.active, enabled && this.#encoding, false);
+			const was = encoding;
+			encoding = !!format && !!track && !fatal && (!onDemand || subscription !== undefined);
+			this.#encoding = encoding;
+			effect.set(this.#out.active, enabled && encoding, false);
 			try {
-				if (this.#encoding) this.#pipeline?.drain();
+				// Nothing reads on, so the open group ends where the submitted audio does: a reader of it,
+				// such as a fetch, finishes while the audio is retained rather than when a subscriber returns.
+				if (was && !encoding) this.#pipeline?.stop();
+				if (encoding) this.#pipeline?.drain();
 			} catch (error) {
 				this.#abort(error);
 			}
@@ -688,12 +700,22 @@ export class Encoder {
 		live.start = undefined;
 	}
 
+	// End the open group at `end` without a marker (see Container.Legacy.Producer.cut): the epoch
+	// continues, so the audio that follows opens the next group as its continuation.
+	#endGroup(end: Duration): void {
+		const live = this.#live;
+		if (!live || live.track.closed.peek() !== undefined) return;
+		live.producer.cut(end);
+		live.start = undefined;
+	}
+
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
 	#encode(order: Order, format: Format, retention: Duration, effect: Effect): void {
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
+		const duration = frameDuration(resolved);
 		// A stopped rendition stops holding the others' delay back.
 		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
@@ -725,17 +747,19 @@ export class Encoder {
 					? new Gate({ sampleRate: config.sampleRate, frame: frameDuration(resolved) })
 					: undefined;
 
-				// What the codec still owes, in submission order: each input's timestamp, or a break whose
-				// marker goes down once every chunk before it is out. Chunks are stamped from here, never
-				// by the codec: Chrome and Firefox stamp input after a gap as if it were contiguous.
-				// Every browser emits one chunk per input, in order, so a codec that holds a chunk only
-				// delays its stamp, and a break needs no flush.
-				const owed: ({ timestamp: Duration } | { cut: Duration })[] = [];
-				// Write the marker of every break the codec has caught up with.
+				// What the codec still owes, in submission order: each input's timestamp, a break whose
+				// marker goes down once every chunk before it is out, or the end of the open group when
+				// encoding stopped. Chunks are stamped from here, never by the codec: Chrome and Firefox
+				// stamp input after a gap as if it were contiguous. Every browser emits one chunk per
+				// input, in order, so a codec that holds a chunk only delays its stamp, and neither a
+				// break nor a stop needs a flush.
+				const owed: ({ timestamp: Duration } | { cut: Duration } | { close: Duration })[] = [];
+				// Write every break and group end the codec has caught up with.
 				const settle = () => {
-					for (let next = owed[0]; next && "cut" in next; next = owed[0]) {
+					for (let next = owed[0]; next && !("timestamp" in next); next = owed[0]) {
 						owed.shift();
-						this.#cut(next.cut);
+						if ("cut" in next) this.#cut(next.cut);
+						else this.#endGroup(next.close);
 					}
 				};
 
@@ -745,7 +769,7 @@ export class Encoder {
 							throw new Error("only key frames are supported");
 						}
 						const input = owed.shift();
-						if (!input || "cut" in input) {
+						if (!input || !("timestamp" in input)) {
 							this.#abort(new Error("the audio encoder emitted a chunk for no input"));
 							return;
 						}
@@ -760,13 +784,22 @@ export class Encoder {
 						const live = this.#live;
 						if (live && (this.#floor === undefined || timestamp.ge(this.#floor))) {
 							// Every audio frame decodes on its own, so any of them can open a group: the
-							// first one at or past the minimum after the open group's start. Frames forward
-							// as they are written rather than waiting for the group to fill. A dropped
-							// group leaves a gap for the codec's PLC.
-							const keyframe =
-								live.start === undefined || timestamp.saturatingSub(live.start).ge(this.#join);
-							if (keyframe) live.start = timestamp;
+							// first after a cut, or one a gap put past the join. The frame that brings the
+							// group to the join closes it, so the relay sees it finish without waiting for
+							// the next. Frames forward as they are written rather than waiting for the group
+							// to fill. A dropped group leaves a gap for the codec's PLC.
+							const open = live.start;
+							const start =
+								open !== undefined && timestamp.saturatingSub(open).lt(this.#join) ? open : timestamp;
+							const keyframe = start !== open;
 							live.producer.encode(frame, timestamp, keyframe);
+							const end = timestamp.add(duration);
+							if (end.saturatingSub(start).ge(this.#join)) {
+								live.producer.cut(end);
+								live.start = undefined;
+							} else {
+								live.start = start;
+							}
 							const history = this.#history !== undefined && timestamp.lt(this.#history);
 							if (!history && this.#estimator.write(timestamp.asMicros(), order, keyframe)) {
 								this.#estimate.set({ ...this.#estimator.estimate });
@@ -896,6 +929,16 @@ export class Encoder {
 							breakPending = false;
 							cut();
 						}
+					},
+					// Unlike a break, the next frame still continues this one, so `contiguous` stays. A
+					// stop with no input since the last one owes nothing new, so subscription churn can't
+					// grow the queue behind a chunk the codec holds.
+					stop: () => {
+						if (contiguous === undefined) return;
+						const last = owed.at(-1);
+						if (last && "close" in last) return;
+						owed.push({ close: contiguous });
+						settle();
 					},
 					push: (captured: AudioFrame) => {
 						if (paused) return;
@@ -1033,14 +1076,15 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 
 // How far back a subscription wants retained audio replayed. A live join starts its lag behind the
 // live edge, which a player states as its playout delay plus the codec's warmup, and never reaches
-// past its own max, so the largest of those bounds it; a join with no lag limit, as before lite-07,
-// reaches past every group, so only its max does. Any other range is history, which wants the whole
-// retention, as does no subscription or a join bounded by neither.
+// past its own max, so the largest of those bounds it. A join with no lag limit, as every join before
+// lite-07 is, starts from the oldest group but drops anything older than its max, so its max alone
+// bounds it. Any other range, one with an end included, is history, which wants the whole retention,
+// as does a join bounded by neither. Without a subscription nothing is replayed, so none is needed.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
 	if (!subscription) return undefined;
 	let reach: Duration | undefined;
 	for (const range of subscription.ranges ?? [{}]) {
-		if (typeof range.start !== "object") return undefined;
+		if (typeof range.start !== "object" || range.end !== undefined) return undefined;
 		const { min, max = Duration.ZERO } = range.start.live;
 		const join = max === null ? min : min === null ? max : min.min(max);
 		if (join === null) return undefined;

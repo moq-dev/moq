@@ -1,23 +1,25 @@
 import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
-import { GRACE, Ledger } from "./ledger.ts";
+import { GRACE, Ledger, MAX_RUNS } from "./ledger.ts";
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
-	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
-	grace?: () => Duration;
+	/**
+	 * How long to wait for a group that cannot be accounted for, or `undefined` to wait until the
+	 * wire accounts for it (lite-07, which names every start). Read each time it is needed.
+	 */
+	grace?: () => Duration | undefined;
 }
 
 /** A group stream a {@link Tail} counts, from its header until it is read to its end. */
 export interface Counted {
-	/** Mark it read to its end. Idempotent. */
+	/** Stop holding the end open for it: read to its end, or a drop accounted for its group. Idempotent. */
 	done(): void;
-	/**
-	 * The publisher accounted for its group another way, such as a drop, so {@link Tail.settle}
-	 * waits for it at most the grace. Idempotent.
-	 */
-	excuse(): void;
+	/** Stop holding the end open while it waits, unread, on a copy another stream delivers. Idempotent. */
+	park(): void;
+	/** Hold the end open again once it reads the group itself. Idempotent. */
+	resume(): void;
 }
 
 /**
@@ -41,11 +43,8 @@ export class Tail {
 	#active = 0;
 	// The lowest group a stream's header named, which proves the group exists.
 	#first: bigint | undefined;
-	// Streams still being read that the end waits for at most the grace, until a settle gives up
-	// on them, as the ledger does on a gap.
-	#excused = new Set<object>();
 	#changed = new Signal(0);
-	#grace: () => Duration;
+	#grace: () => Duration | undefined;
 	// Keys a drop named, so a stream whose header the drop overtook can be told from one
 	// whose gap the grace gave up on.
 	#dropped: Run[] = [];
@@ -76,21 +75,25 @@ export class Tail {
 		this.#active += 1;
 		this.#account(key, key + 1n);
 
-		let state: "held" | "excused" | "done" = "held";
-		const token = {};
+		// Parked holds nothing.
+		let state: "held" | "parked" | "done" = "held";
 		return {
 			done: () => {
 				if (state === "done") return;
 				if (state === "held") this.#active -= 1;
-				else this.#excused.delete(token);
 				state = "done";
 				this.#bump();
 			},
-			excuse: () => {
+			park: () => {
 				if (state !== "held") return;
-				state = "excused";
+				state = "parked";
 				this.#active -= 1;
-				this.#excused.add(token);
+				this.#bump();
+			},
+			resume: () => {
+				if (state !== "parked") return;
+				state = "held";
+				this.#active += 1;
 				this.#bump();
 			},
 		};
@@ -141,6 +144,7 @@ export class Tail {
 	/** Record `[start, end)` as given up by a drop, accounting for it. */
 	drop(start: bigint, end: bigint): void {
 		insertRun(this.#dropped, start, end);
+		while (this.#dropped.length > MAX_RUNS) this.#dropped.shift();
 		this.#account(start, end);
 	}
 
@@ -160,9 +164,9 @@ export class Tail {
 		return runGaps(this.#ledger.gaps(start, end), start, end);
 	}
 
-	/** Whether a group stream is still being read, an excused one included until a settle gives up on it. */
+	/** Whether a group stream is still being read. */
 	get reading(): boolean {
-		return this.#active > 0 || this.#excused.size > 0;
+		return this.#active > 0;
 	}
 
 	/** Bumped on every change {@link settle} watches. */
@@ -177,36 +181,32 @@ export class Tail {
 
 	/**
 	 * Wait until every stream is read to its end and `complete()` holds, or the grace passes
-	 * with nothing left being read but excused streams, or `closed` settles.
+	 * with nothing left being read, or `closed` settles.
 	 *
-	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
-	 * never because its track ended. The grace gives up on streams that never arrived, and on
-	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
-	 * publisher's drop already accounted for its group. `limit` caps the grace.
+	 * A stream still being read is waited for, until its own FIN or reset, or until a drop naming
+	 * its group lets go of it (see {@link Counted.done}). The grace gives up on streams that never
+	 * arrived, and `limit` caps it. With no grace nothing is timed: every start waits for the wire
+	 * to account for it.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
-		this.#ledger.expire(now(), this.#grace());
+		const grace = this.#grace();
+		this.#ledger.expire(now(), grace);
 
 		let expired = false;
 		const timer = new AbortController();
-		const grace = this.#grace();
-		void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
-			() => {
-				expired = true;
-				this.#bump();
-			},
-			() => {},
-		);
+		if (grace !== undefined) {
+			void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
+				() => {
+					expired = true;
+					this.#bump();
+				},
+				() => {},
+			);
+		}
 		try {
 			while (closed.peek() === undefined) {
-				if (this.#active === 0 && expired) {
-					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
-					// not wait another grace for them.
-					this.#excused.clear();
-					return;
-				}
-				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
+				if (this.#active === 0 && (expired || complete())) return;
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {

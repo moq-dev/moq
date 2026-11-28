@@ -95,7 +95,7 @@ typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
  */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 
-/** Follows a specific broadcast path across the publisher instances that serve it. */
+/** Follows a specific broadcast path across the publisher identities that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
 
 /**
@@ -107,7 +107,7 @@ typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
  *
- * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
+ * Another publisher identity taking a path over keeps it present: hold a [Following] to see the
  * broadcast change.
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
@@ -161,6 +161,15 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
+/**
+ * The read side of a metadata subscription: yields a track's groups in arrival order, each frame as
+ * its header alone.
+ */
+typealias MetaConsumer = uniffi.moq.MoqMetaConsumer
+
+/** One group of a metadata subscription: yields its frames' headers, without their payloads. */
+typealias MetaGroup = uniffi.moq.MoqMetaGroup
+
 // Data types.
 /**
  * A datagram payload with its own sequence and timestamp, the [unscaled] sequence on a scale-less
@@ -175,26 +184,32 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 
 /**
+ * A frame's header without its payload, as a metadata subscription reads it: the declared payload
+ * `size` in bytes (0 for an empty frame) and its timestamp.
+ */
+typealias FrameHeader = uniffi.moq.MoqFrameHeader
+
+/**
  * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null
  * `scale` and the group key (a datagram's sequence) as `value`; see [unscaled].
  */
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
- * Names one continuous stream at a path: `Instance.parse` names one, only a session mints one, and
- * equality also compares `isMinted()`, so pin a reported stream with the instance, not its text.
+ * Names one continuous stream at a path: `Identity.parse` names one, only a session mints one, and
+ * equality also compares `isMinted()`, so pin a reported stream with the identity, not its text.
  */
-typealias Instance = uniffi.moq.MoqInstance
+typealias Identity = uniffi.moq.MoqIdentity
 
 /**
  * How a [Route] advertises itself: `hidden` until `announce`, its static production cost (lower
- * wins), an optional stable [Instance] (null mints a fresh one the route keeps for its lifetime),
- * and the epoch, which only matters with a stable instance.
+ * wins), an optional stable [Identity] (null mints a fresh one the route keeps for its lifetime),
+ * and the epoch, which only matters with a stable identity.
  */
 typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
- * The read-only facts on a received route: the [Instance] of the stream it serves, static
+ * The read-only facts on a received route: the [Identity] of the stream it serves, static
  * production and link cost (lower wins), and whether a usable path reaches it.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
@@ -230,7 +245,11 @@ fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
  */
 typealias Range = uniffi.moq.MoqRange
 
-/** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
+/**
+ * Which group comes first, as the publisher sends them and `recvGroup` returns those held:
+ * `ASCENDING` or `DESCENDING`. Before moq-lite-07 the publisher sends newest first whatever this
+ * asks.
+ */
 typealias Order = uniffi.moq.MoqOrder
 
 /** A location within a track: a group start and a frame index in it. */

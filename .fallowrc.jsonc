@@ -15,7 +15,7 @@
 		"test/{datagram-tracks,max-age,stream-limits}/client.ts",
 		"test/{drain/drain,receive-credit/sender,relay-fill/relay,stream-credit/driver,worklet/matrix}.ts",
 		"test/video/renderer.browser.ts",
-		"test/interop/{auth-unsupported,bare-fin,ietf-compression,ietf-datagram,ietf-range-updates,lite-varint,track-status,tracks,varint}.ts",
+		"test/interop/{auth-unsupported,bare-fin,ietf-compression,ietf-datagram,ietf-range-updates,lite-varint,meta,track-status,tracks,varint}.ts",
 		"test/interop/compat/*.ts",
 		"test/audio-quality/clients/js/{analyze,driver,grade,native,ptt-analyze,ptt,record,replay}.ts",
 		"test/audio-quality/clients/js/src/{mic,ptt,page,recorder,tap-worklet}.ts",

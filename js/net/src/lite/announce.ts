@@ -1,10 +1,10 @@
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, MAX_HOPS, toHop, UNKNOWN_HOP, wireHop } from "../hop.ts";
-import type * as Instance from "../instance.ts";
+import type * as Identity from "../identity.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, type Reader, type Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
-import { decodeRoute, encodeRoute } from "./instance.ts";
+import { decodeRoute, encodeRoute } from "./identity.ts";
 import * as Message from "./message.ts";
 import { MAX_MESSAGE_SIZE } from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -57,11 +57,11 @@ const DRAINING = 0x2;
 const MARKED = 0x4;
 
 /**
- * What a lite-07 claim says beside its path and instance. Mirrors `route::relay::Claim` in
+ * What a lite-07 claim says beside its path and identity. Mirrors `route::relay::Claim` in
  * rs/moq-net.
  */
 export interface Claim {
-	/** Which incarnation of the instance this is. */
+	/** Which incarnation of the identity this is. */
 	epoch: bigint;
 	/** The sender's cost to the claim's publisher. */
 	cost: Cost;
@@ -127,8 +127,8 @@ export type AnnounceBroadcast =
 	 * The id stays live. */
 	| { status: "update"; id: bigint; hops?: Hop[]; cost?: Cost }
 	/** Lite07+ ANNOUNCE_START: a claim of the broadcast at `suffix`, relative to the session,
-	 * serving `instance`, which assigns it the next announce id. */
-	| { status: "start"; suffix: Path.Valid; pathBase?: Base; instance: Instance.Valid; claim: Claim }
+	 * serving `identity`, which assigns it the next announce id. */
+	| { status: "start"; suffix: Path.Valid; pathBase?: Base; identity: Identity.Valid; claim: Claim }
 	/** Lite07+ ANNOUNCE_UPDATE: the claim with this id now stands as `claim`. */
 	| { status: "change"; id: bigint; claim: Claim }
 	/** An unknown lite-06 announce type, skipped by length. Does not assign an id. lite-07 rejects it instead. */
@@ -400,7 +400,7 @@ export function requestParts(
 async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: Version) {
 	switch (msg.status) {
 		case "active":
-			if (hasRoutes(version)) throw new Error("a lite-07 claim names its instance");
+			if (hasRoutes(version)) throw new Error("a lite-07 claim names its identity");
 			await encodePath(w, version, msg.suffix, undefined);
 			await encodeRoute(w, version, undefined, undefined);
 			await encodeHops(w, version, msg.hops);
@@ -419,7 +419,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 		case "start":
 			if (!hasRoutes(version)) throw new Error("claims not supported for this version");
 			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeRoute(w, version, msg.instance, msg.claim.epoch);
+			await encodeRoute(w, version, msg.identity, msg.claim.epoch);
 			await encodeClaim(w, msg.claim);
 			break;
 		case "change":
@@ -477,10 +477,10 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			const path = await decodePath(r, version);
 			const served = await decodeRoute(r, version);
 			if (hasRoutes(version)) {
-				// Every lite-07 claim names its instance.
-				if (served.instance === undefined) throw new ProtocolViolation("a claim without an instance");
+				// Every lite-07 claim names its identity.
+				if (served.identity === undefined) throw new ProtocolViolation("a claim without an identity");
 				const claim = await decodeClaim(r, served.epoch ?? 0n);
-				return { status: "start", ...path, instance: served.instance, claim };
+				return { status: "start", ...path, identity: served.identity, claim };
 			}
 			const hops = await decodeHops(r, version);
 			return { status: "active", suffix: path.suffix, hops, cost: await decodeRouteCost(r, version) };
@@ -617,15 +617,11 @@ export class AnnounceHistory {
 		if (this.#refused.has(id)) return undefined;
 		const base = this.#live.get(id);
 		if (base === undefined) throw new ProtocolViolation(`announce base ${msg.pathBase.distance} is not live`);
-		// TEMPORARY MIGRATION, delete at the next version cut and use Path.parts: the previous
-		// release counts a keep by every `/`, escaped or not, and also speaks lite-07, so a keep
-		// counted by segment would resolve to another path on a mixed-version link, as in
-		// rs/moq-net's compress.rs.
-		const head = base === Path.empty() ? [] : base.split("/");
+		// A keep counts whole parts, so a kept head never ends inside an escape.
+		const head = Path.parts(base);
 		const keep = msg.pathBase.keep;
 		if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} parts`);
-		// Joined as text before parsing: a kept part may end in the `\` of an escaped `/`. A path
-		// that does not resolve, such as one too deep, is refused as content, as rs/moq-net does.
+		// A path that does not resolve, such as one too deep, is refused as content, as rs/moq-net does.
 		const kept = head.slice(0, keep);
 		if (suffix !== Path.empty()) kept.push(suffix);
 		return Path.tryDecode(kept.join("/"));

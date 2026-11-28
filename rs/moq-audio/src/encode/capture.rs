@@ -335,7 +335,7 @@ impl Driver {
 		let producer = self.producer.as_mut().unwrap();
 		let track = producer.track().clone();
 		let mut retention = Retention {
-			demand: track.demand(),
+			track: track.clone(),
 			retain: self.retain,
 			clock: self.clock.clone(),
 			state: &self.state,
@@ -437,7 +437,10 @@ fn stamp(clock: &moq_mux::Clock, captured: Instant) -> Result<u64, Error> {
 /// after a source failure. Publishes whether the track is live or waiting, until
 /// the source fails.
 struct Retention<'a> {
-	demand: moq_net::track::Demand,
+	/// Watched for a live subscription: only one states how far back it reaches, which sizes
+	/// the replay. Other demand, such as a relay's TRACK ahead of its SUBSCRIBE or a fetch,
+	/// keeps the audio retained for the subscription that follows rather than replaying all of it.
+	track: moq_net::track::Producer,
 	retain: bool,
 	clock: moq_mux::Clock,
 	state: &'a kio::Producer<Published>,
@@ -449,7 +452,7 @@ struct Retention<'a> {
 impl Retention<'_> {
 	/// Expire retained history, then encode one retained frame if wanted.
 	fn refresh(&self, producer: &mut Producer) -> Result<(), Error> {
-		let active = !self.retain || self.demand.wanted();
+		let active = !self.retain || self.track.subscription().is_some();
 		producer.set_active(active, self.clock.now())?;
 		if !self.failed {
 			publish_state(self.state, if active { Status::Live } else { Status::Waiting });
@@ -457,7 +460,7 @@ impl Retention<'_> {
 		Ok(())
 	}
 
-	/// Wait for a change in demand, the next expiry, or the next retained frame to encode,
+	/// Wait for a change in subscription, the next expiry, or the next retained frame to encode,
 	/// then [`refresh`](Self::refresh).
 	async fn changed(&mut self, producer: &mut Producer) -> Result<(), Error> {
 		if producer.backlog_ready() {
@@ -470,7 +473,7 @@ impl Retention<'_> {
 			.map(|at| at.saturating_sub(self.clock.now().try_into().expect("the broadcast clock is scaled")));
 
 		tokio::select! {
-			changed = self.demand.wanted_changed() => { changed?; }
+			changed = self.track.subscription_changed() => { changed?; }
 			_ = async {
 				match delay { Some(delay) => kio::clock::sleep(delay).await, None => std::future::pending().await }
 			} => {}
@@ -855,6 +858,50 @@ mod tests {
 			.await;
 	}
 
+	/// A query, such as a relay's TRACK sent ahead of its SUBSCRIBE, states no reach, so it
+	/// encodes nothing retained: the subscription that follows still gets that history, cut to
+	/// its own budget, instead of the whole retention arriving ahead of the live edge.
+	#[tokio::test(start_paused = true)]
+	async fn a_query_keeps_retained_history_for_the_subscription_that_follows() {
+		tokio::task::LocalSet::new()
+			.run_until(async {
+				let Fixture {
+					capture,
+					samples,
+					mut publication,
+					driver,
+					broadcast,
+					catalog: _catalog,
+					epoch,
+				} = fixture(true);
+				let mut observer = capture.consume();
+				let capture_task = tokio::task::spawn_local(capture.run());
+				let encode_task = tokio::spawn(driver.run());
+				status(&mut publication, |status| matches!(status, Status::Waiting)).await;
+				let mut block = Samples::plain(vec![0.25; 1920], false);
+				block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
+				samples.try_push(Ok(block)).unwrap();
+				observer.read().await.unwrap();
+				retained(&publication).await;
+
+				let query = broadcast.track("audio").unwrap().info().into_inner();
+				for _ in 0..32 {
+					tokio::task::yield_now().await;
+				}
+				assert!(matches!(publication.state().status(), Status::Waiting));
+
+				let mut track = subscribe(&broadcast, Duration::from_secs(30)).await;
+				assert_eq!(packet(&mut track).await.timestamp.as_micros().unwrap(), 100_000);
+				assert!(matches!(publication.state().status(), Status::Live));
+				drop(query);
+				encode_task.abort();
+				assert!(encode_task.await.unwrap_err().is_cancelled());
+				capture_task.abort();
+				assert!(capture_task.await.unwrap_err().is_cancelled());
+			})
+			.await;
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_source_serves_retained_history_then_ends_with_the_failure() {
 		tokio::task::LocalSet::new()
@@ -933,8 +980,8 @@ mod tests {
 	}
 
 	/// A gap resumes on the shared capture clock, unless the block before it ran past that: a
-	/// timeline only moves forward, so it then resumes just past where that block's packet ends, where
-	/// the gap's marker starts.
+	/// timeline only moves forward, so it then resumes where that block's packet ends, just past the
+	/// gap's marker.
 	#[tokio::test(start_paused = true)]
 	async fn opus_uses_the_shared_capture_clock_including_gaps_and_clamping() {
 		tokio::task::LocalSet::new()
@@ -971,12 +1018,9 @@ mod tests {
 					samples.try_push(Ok(block)).unwrap();
 					assert!(observer.read().await.unwrap().gap);
 					let next = packet(&mut track).await;
-					// The first block is one 20 ms packet. The gap's marker starts where it ends, so a
-					// resume clamped there starts a microsecond past it.
-					let resumed = match expected + 20_000 {
-						end if end >= 1_000_000 => end + 1,
-						_ => 1_000_000,
-					};
+					// The first block is one 20 ms packet, too short to fill its group, so the gap's
+					// marker starts a microsecond before the packet ends and a resume clamps to the end.
+					let resumed = (expected + 20_000).max(1_000_000);
 					assert_eq!(next.timestamp.as_micros().unwrap(), resumed);
 					encode_task.abort();
 					assert!(encode_task.await.unwrap_err().is_cancelled());

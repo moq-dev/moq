@@ -45,6 +45,7 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -348,6 +349,39 @@ class SmokeTest {
     }
 
     @Test
+    fun `a metadata subscription reads frame headers`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track =
+                broadcast.publishTrack(
+                    "video",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
+            val meta = broadcast.consume().subscribeMeta("video", null)
+            assertEquals(1_000_000uL, meta.info().timescale)
+
+            val group = track.appendGroup(Timestamp(0uL, 1_000_000uL))
+            group.writeFrame(
+                Frame(payload = "key".encodeToByteArray(), timestamp = Timestamp(0uL, 1_000_000uL))
+            )
+            group.writeFrame(Frame(payload = ByteArray(0), timestamp = Timestamp(1uL, 1_000_000uL)))
+            group.finish()
+            track.finish()
+
+            val groups = meta.groupsAsArrived().map { it.start() to it.headers().toList() }.toList()
+            assertEquals(
+                listOf(
+                    0uL to
+                        listOf(
+                            FrameHeader(size = 3uL, timestamp = Timestamp(0uL, 1_000_000uL)),
+                            FrameHeader(size = 0uL, timestamp = Timestamp(1uL, 1_000_000uL)),
+                        )
+                ),
+                groups,
+            )
+        }
+    }
+
+    @Test
     fun `a default subscription skips superseded groups at once`() {
         assertNull(Subscription.default().delay.min)
         assertEquals(java.time.Duration.ZERO, Subscription.default().delay.max)
@@ -386,27 +420,33 @@ class SmokeTest {
     }
 
     @Test
-    fun `abortUnwanted keeps a reader that joined late`() = runTest {
+    fun `releasing a producer ends an on-demand track`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", null)
-            val demand = track.demand()
-            while (demand.wantedChanged()) {}
+            broadcast.requests().use { requests ->
+                val idle = broadcast.publishTrack("idle", null)
+                val idleDemand = idle.demand()
+                while (idleDemand.wantedChanged()) {}
+                idle.close()
+                assertFailsWith<MoqException.Closed> { idleDemand.wantedChanged() }
 
-            val late = track.consume(null)
-            assertFalse(track.abortUnwanted(7u))
-            track.writeFrame(
-                Frame(
-                    payload = "still serving".encodeToByteArray(),
-                    timestamp = Timestamp.unscaled(0uL),
+                val track = broadcast.publishTrack("status", null)
+                val demand = track.demand()
+                while (demand.wantedChanged()) {}
+                val late = broadcast.consume().subscribeTrack("status", null)
+                track.close()
+
+                val request = requests.requestedTrack()
+                assertEquals("status", request.name())
+                val next = request.accept(null)
+                next.writeFrame(
+                    Frame(
+                        payload = "served again".encodeToByteArray(),
+                        timestamp = Timestamp.unscaled(0uL),
+                    )
                 )
-            )
-            assertEquals("still serving", late.readFrame()?.payload?.decodeToString())
-
-            while (!demand.wantedChanged()) {}
-            late.cancel()
-            while (demand.wantedChanged()) {}
-            assertTrue(track.abortUnwanted(7u))
-            assertFailsWith<MoqException.Closed> { track.abortUnwanted(7u) }
+                assertEquals("served again", late.readFrame()?.payload?.decodeToString())
+                late.cancel()
+            }
         }
     }
 
@@ -712,28 +752,91 @@ class SmokeTest {
         }
     }
 
+    /**
+     * A native encoder serves a track asked for again after its producer was released while read.
+     */
     @Test
-    fun `json abortUnwanted keeps a reader that joined late`() = runTest {
+    fun `native encoders serve a renewal`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track =
-                broadcast.publishTrack(
-                    "events",
-                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+            broadcast.requests().use { requests ->
+                val catalog = CatalogProducer(broadcast)
+                val mic =
+                    AudioProducerOptions(
+                        input =
+                            AudioEncoderInput(
+                                format = AudioSampleFormat.F32,
+                                sampleRate = 48_000u,
+                                channels = 1u,
+                            ),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus()),
+                    )
+                val audio = AudioProducer(catalog, mic.copy(track = "mic"))
+                var late = broadcast.consume().subscribeTrack("mic", null)
+                audio.close()
+                var request = requests.requestedTrack()
+                assertEquals("mic", request.name())
+                val served = AudioProducer.requested(catalog, request, mic)
+                repeat(3) { index ->
+                    served.write(
+                        AudioFrame(
+                            timestamp = Timestamp(index.toULong() * 960uL, 48_000uL),
+                            data = ByteArray(960 * 4),
+                        )
+                    )
+                }
+                assertNotNull(late.readFrame())
+                late.cancel()
+
+                val camera =
+                    VideoProducerOptions(
+                        input =
+                            VideoEncoderInput(
+                                format = VideoPixelFormat.rgba(),
+                                width = 320u,
+                                height = 240u,
+                                framerate = VideoFrameRate(30u, 1u),
+                            ),
+                        output =
+                            VideoEncoderOutput(codec = VideoCodec.h264(), kind = softwareEncoder),
+                    )
+                val video = VideoProducer(catalog, camera.copy(track = "camera"))
+                late = broadcast.consume().subscribeTrack("camera", null)
+                video.close()
+                request = requests.requestedTrack()
+                assertEquals("camera", request.name())
+                val next = VideoProducer.requested(catalog, request, camera)
+                next.write(
+                    VideoFrame(
+                        timestamp = Timestamp(0uL, 1_000_000uL),
+                        data = ByteArray(320 * 240 * 4) { 0x80.toByte() },
+                    )
                 )
-            val producer = StreamProducer(broadcast, track)
-            val demand = producer.demand()
-            while (demand.wantedChanged()) {}
+                next.finish()
+                assertNotNull(late.readFrame())
+                late.cancel()
+            }
+        }
+    }
 
-            val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
-            assertFalse(producer.abortUnwanted(7u))
-            producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
-            assertEquals("\"still serving\"", late.next()?.value)
+    @Test
+    fun `json release serves a reader that joined late`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.requests().use { requests ->
+                val info = TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL)
+                val producer = StreamProducer(broadcast, broadcast.publishTrack("events", info))
+                val demand = producer.demand()
+                while (demand.wantedChanged()) {}
 
-            while (!demand.wantedChanged()) {}
-            late.cancel()
-            while (demand.wantedChanged()) {}
-            assertTrue(producer.abortUnwanted(7u))
-            assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
+                val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
+                producer.close()
+
+                val request = requests.requestedTrack()
+                assertEquals("events", request.name())
+                val next = StreamProducer(broadcast, request.accept(info))
+                next.append("\"served again\"", Timestamp(0uL, 1_000uL))
+                assertEquals("\"served again\"", late.next()?.value)
+                late.cancel()
+            }
         }
     }
 
@@ -981,7 +1084,7 @@ class SmokeTest {
                 val announced = consumer.announced(AnnounceConfig())
                 val first = assertIs<AnnounceEventPresent>(announced.nextRoute())
                 assertEquals("live", first.announce.prefix)
-                assertEquals(route.instance(), first.announce.route.instance)
+                assertEquals(route.identity(), first.announce.route.identity)
 
                 route.withdraw()
                 val retracted = assertIs<AnnounceEventAbsent>(announced.nextRoute())
@@ -991,7 +1094,7 @@ class SmokeTest {
                 // Announcing again continues the same stream.
                 route.announce()
                 val again = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertEquals(route.instance(), again.announce.route.instance)
+                assertEquals(route.identity(), again.announce.route.identity)
                 consumer.request("live")
             }
         }
@@ -1049,19 +1152,19 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new instance restarts followers but stays listed`() = runTest {
+    fun `a new identity restarts followers but stays listed`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val consumer = origin.consume()
             val announced = consumer.announced(AnnounceConfig())
-            val following = consumer.follow("instance", null)
-            origin.route("instance", RouteOptions()).use { first ->
+            val following = consumer.follow("identity", null)
+            origin.route("identity", RouteOptions()).use { first ->
                 val present = assertIs<AnnounceEventPresent>(announced.nextRoute())
-                assertFalse(present.announce.route.instance.isMinted())
-                assertEquals(first.instance(), present.announce.route.instance)
+                assertFalse(present.announce.route.identity.isMinted())
+                assertEquals(first.identity(), present.announce.route.identity)
                 assertNotNull(following.available()).close()
 
-                val camera = Instance.parse("camera")
-                origin.route("instance", RouteOptions(instance = camera, epoch = 1uL)).use { second
+                val camera = Identity.parse("camera")
+                origin.route("identity", RouteOptions(identity = camera, epoch = 1uL)).use { second
                     ->
                     assertNotNull(following.available()).close()
 
@@ -1069,11 +1172,11 @@ class SmokeTest {
                     first.withdraw()
                     second.withdraw()
                     val absent = assertIs<AnnounceEventAbsent>(announced.nextRoute())
-                    assertEquals(camera, absent.announce.route.instance)
-                    assertEquals("camera", absent.announce.route.instance.toString())
+                    assertEquals(camera, absent.announce.route.identity)
+                    assertEquals("camera", absent.announce.route.identity.toString())
                 }
 
-                assertFailsWith<MoqException.InvalidInstance> { Instance.parse("") }
+                assertFailsWith<MoqException.InvalidIdentity> { Identity.parse("") }
             }
             following.cancel()
         }
@@ -1119,7 +1222,7 @@ class SmokeTest {
                 val request = assertNotNull(dynamic.requested())
                 assertEquals("live/cam", request.path())
                 request.route(RouteOptions(hidden = true)).use { job ->
-                    assertEquals(dynamic.instance(), job.instance())
+                    assertEquals(dynamic.identity(), job.identity())
                     job.broadcast().use { fill ->
                         // Only announcing answers the requester.
                         job.announce()
@@ -1284,11 +1387,11 @@ class SmokeTest {
     }
 
     /**
-     * Over moq-lite-06, whose wire carries no instance, the session mints one: passing it back pins
-     * `request` and `follow`, while its text parsed is another, named instance that nothing serves.
+     * Over moq-lite-06, whose wire carries no identity, the session mints one: passing it back pins
+     * `request` and `follow`, while its text parsed is another, named identity that nothing serves.
      */
     @Test
-    fun `an announced instance pins request and follow`() = runTest {
+    fun `an announced identity pins request and follow`() = runTest {
         val version = listOf("moq-lite-06")
         Server.listen(
                 ServerConfig(
@@ -1316,7 +1419,7 @@ class SmokeTest {
                                 val session = accepted.await()
                                 val present =
                                     assertIs<AnnounceEventPresent>(moq.announced().nextRoute())
-                                val minted = present.announce.route.instance
+                                val minted = present.announce.route.identity
                                 assertTrue(minted.isMinted())
 
                                 moq.request("live", minted)
@@ -1324,7 +1427,7 @@ class SmokeTest {
                                 assertNotNull(following.available()).close()
                                 following.cancel()
 
-                                val named = Instance.parse(minted.text())
+                                val named = Identity.parse(minted.text())
                                 assertFalse(named.isMinted())
                                 assertEquals(minted.text(), named.toString())
                                 assertNotEquals(minted, named)

@@ -2,10 +2,13 @@ use crate::Instant;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) enum Timer {
-	/// When to send an ack-eliciting probe packet or declare unacked packets lost
-	LossDetection = 0,
 	/// When to close the connection after no activity
-	Idle = 1,
+	///
+	/// Ahead of [`Self::LossDetection`], so a connection that idled out stops every timer before
+	/// loss detection spends a probe or a congestion response on it.
+	Idle = 0,
+	/// When to send an ack-eliciting probe packet or declare unacked packets lost
+	LossDetection = 1,
 	/// When the close timer expires, the connection has been gracefully terminated.
 	Close = 2,
 	/// When keys are discarded because they should not be needed anymore
@@ -20,12 +23,16 @@ pub(crate) enum Timer {
 	PushNewCid = 7,
 	/// When to send an immediate ACK if there are unacked ack-eliciting packets of the peer
 	MaxAckDelay = 8,
+	/// When a [`KeepAlive`](super::KeepAlive) marks the unheard peer stale
+	Stale = 9,
+	/// When a [`KeepAlive`](super::KeepAlive) closes on the unheard peer
+	Silent = 10,
 }
 
 impl Timer {
-	pub(crate) const VALUES: [Self; 9] = [
-		Self::LossDetection,
+	pub(crate) const VALUES: [Self; 11] = [
 		Self::Idle,
+		Self::LossDetection,
 		Self::Close,
 		Self::KeyDiscard,
 		Self::PathValidation,
@@ -33,13 +40,15 @@ impl Timer {
 		Self::Pacing,
 		Self::PushNewCid,
 		Self::MaxAckDelay,
+		Self::Stale,
+		Self::Silent,
 	];
 }
 
 /// A table of data associated with each distinct kind of `Timer`
 #[derive(Debug, Copy, Clone, Default)]
 pub(crate) struct TimerTable {
-	data: [Option<Instant>; 10],
+	data: [Option<Instant>; Timer::VALUES.len()],
 }
 
 impl TimerTable {

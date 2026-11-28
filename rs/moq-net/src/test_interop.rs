@@ -7,7 +7,10 @@ use crate::{ietf, lite};
 // Runs `test/interop/<script>.ts` with a JSON argument, returning its stdout.
 pub(crate) fn bun(script: &str, input: serde_json::Value) -> Vec<u8> {
 	let output = std::process::Command::new("bun")
-		.arg(format!("{}/../../test/interop/{script}.ts", env!("CARGO_MANIFEST_DIR")))
+		.arg(
+			std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"))
+				.join(format!("../../test/interop/{script}.ts")),
+		)
 		.arg(input.to_string())
 		.output()
 		.expect("Bun must be installed for the interop tests");
@@ -523,7 +526,7 @@ fn lite_tracks_interop() {
 	let version = lite::Version::Lite07;
 	let request = lite::Tracks {
 		broadcast: crate::Path::from_static("room"),
-		instance: None,
+		identity: None,
 		node: None,
 	}
 	.encode_bytes(version)

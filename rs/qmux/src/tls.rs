@@ -68,22 +68,28 @@ impl Client {
 
 	/// Connect to `addr` and start a client session. `server_name` is used for
 	/// SNI and certificate verification.
+	///
+	/// The TCP connect, the TLS handshake, and the wait for the peer's transport parameters
+	/// share one [`handshake_timeout`](crate::Config::handshake_timeout).
 	pub async fn connect(
 		&self,
 		addr: impl ToSocketAddrs,
 		server_name: &str,
 	) -> Result<(Session, Driver<Stream<tokio_rustls::client::TlsStream<TcpStream>>>), Error> {
-		let stream = TcpStream::connect(&addr).await?;
-		// Adopt the socket before TLS takes ownership; the kernel's view of the TCP
-		// connection is the same either side of the encryption.
-		let socket_stats = crate::tcp::adopt(&stream)?;
-
+		let deadline = self.session.handshake_deadline();
 		let server_name = rustls::pki_types::ServerName::try_from(server_name)
 			.map_err(|_| Error::InvalidServerName)?
 			.to_owned();
 
 		let entries = self.protocols.iter().map(|(a, vs)| (a.as_str(), vs.as_slice()));
 		let prefixed = alpn::build(entries, self.require_protocol);
+		// Refuse a config any offered version would refuse before dialing.
+		self.session.check_offered(&prefixed)?;
+
+		let stream = crate::config::within(deadline, TcpStream::connect(&addr)).await??;
+		// Adopt the socket before TLS takes ownership; the kernel's view of the TCP
+		// connection is the same either side of the encryption.
+		let socket_stats = crate::tcp::adopt(&stream)?;
 
 		let mut config = (*self.config).clone();
 		config.alpn_protocols = prefixed.iter().map(|s| s.as_bytes().to_vec()).collect();
@@ -91,7 +97,7 @@ impl Client {
 		tracing::debug!(?prefixed, "TLS connecting");
 
 		let connector = TlsConnector::from(Arc::new(config));
-		let tls_stream = connector.connect(server_name, stream).await?;
+		let tls_stream = crate::config::within(deadline, connector.connect(server_name, stream)).await??;
 
 		let negotiated = tls_stream.get_ref().1.alpn_protocol();
 		let negotiated_str = negotiated.and_then(|a| std::str::from_utf8(a).ok());
@@ -106,7 +112,7 @@ impl Client {
 			return Err(Error::InvalidProtocol(negotiated_str.unwrap_or("<none>").to_string()));
 		}
 
-		let session_config = self.session.clone().with_negotiated(version, protocol);
+		let session_config = self.session.clone().with_negotiated(version, protocol).until(deadline);
 		let handshake = Handshake::new(tls_stream.get_ref().1.peer_certificates(), None);
 		let mut transport = Stream::new(tls_stream);
 		if let Some(stats) = socket_stats {
@@ -150,8 +156,8 @@ impl Server {
 	/// Accept a TLS connection over an established TCP stream, disabling Nagle on it.
 	///
 	/// This awaits both the TLS handshake and the QMux handshake (the peer's
-	/// transport parameters, bounded by the session's
-	/// [`handshake_timeout`](crate::Config::handshake_timeout)). Run each accept
+	/// transport parameters), which share the session's
+	/// [`handshake_timeout`](crate::Config::handshake_timeout). Run each accept
 	/// on its own task so a slow or non-cooperative peer can't stall your
 	/// `listener.accept()` loop.
 	///
@@ -162,10 +168,11 @@ impl Server {
 		&self,
 		stream: TcpStream,
 	) -> Result<(Session, Driver<Stream<tokio_rustls::server::TlsStream<TcpStream>>>), Error> {
+		let deadline = self.session.handshake_deadline();
 		let socket_stats = crate::tcp::adopt(&stream)?;
 		let acceptor = TlsAcceptor::from(self.config.clone());
-		let tls_stream = acceptor.accept(stream).await?;
-		self.accept_established(tls_stream, socket_stats).await
+		let tls_stream = crate::config::within(deadline, acceptor.accept(stream)).await??;
+		self.establish(tls_stream, socket_stats, deadline).await
 	}
 
 	/// Accept a session over a TLS stream whose handshake the caller already ran,
@@ -184,13 +191,28 @@ impl Server {
 	where
 		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 	{
+		self.establish(stream, socket_stats, self.session.handshake_deadline())
+			.await
+	}
+
+	/// Start a session over a finished TLS handshake, waiting for the peer's parameters until
+	/// `deadline`.
+	async fn establish<T>(
+		&self,
+		stream: tokio_rustls::server::TlsStream<T>,
+		socket_stats: Option<crate::SharedSocketStats>,
+		deadline: Option<kio::clock::Instant>,
+	) -> Result<(Session, Driver<Stream<tokio_rustls::server::TlsStream<T>>>), Error>
+	where
+		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+	{
 		let conn = stream.get_ref().1;
 		let negotiated = conn.alpn_protocol().and_then(|a| std::str::from_utf8(a).ok());
 		tracing::debug!(?negotiated, "TLS accepted, negotiated ALPN");
 		let (version, protocol) = alpn::parse(negotiated)?;
 		tracing::debug!(?version, ?protocol, "parsed ALPN");
 
-		let session_config = self.session.clone().with_negotiated(version, protocol);
+		let session_config = self.session.clone().with_negotiated(version, protocol).until(deadline);
 		let handshake = Handshake::new(conn.peer_certificates(), conn.server_name());
 		let mut transport = Stream::new(stream);
 		if let Some(stats) = socket_stats {
@@ -239,5 +261,42 @@ impl Session {
 	/// client sent none, on a [`Client`] session, or off TLS.
 	pub fn server_name(&self) -> Option<&str> {
 		self.tls.as_ref()?.server_name.as_deref()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A TLS client that connects but never says hello fails the accept at the session's
+	/// handshake deadline, rather than holding it open.
+	#[tokio::test(start_paused = true)]
+	async fn a_silent_tls_client_times_out_the_handshake() {
+		use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+		let signing_key = rind_rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&signing_key).unwrap();
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+		let config = rustls::ServerConfig::builder_with_provider(moq_crypto::provider::provider())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_no_client_auth()
+			.with_single_cert(vec![CertificateDer::from(cert.der().to_vec())], key)
+			.unwrap();
+		let server = Server::new(Arc::new(config));
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let _client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+		let (socket, _) = listener.accept().await.unwrap();
+		let start = kio::clock::now();
+		let accepted = server.accept(socket).await;
+		assert!(
+			matches!(accepted, Err(Error::HandshakeTimeout)),
+			"{:?}",
+			accepted.map(|_| ())
+		);
+		assert_eq!(kio::clock::now() - start, Config::default().handshake_timeout.unwrap());
 	}
 }

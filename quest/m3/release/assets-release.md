@@ -16,3 +16,7 @@ the newest releases (`@moq/watch` 0.6.6, `@moq/publish` 0.5.3) still lack it;
 adoption of the hosted files lives in moq.pro's package adoption, not here. Check with
 `npm view @moq/watch version` and `npm view @moq/publish version` for a newer
 version, then confirm its `exports` lists `./assets/*`.
+
+## Required
+
+- [Release cut](/quest/m3/release/cut.md) - `@moq/watch` and `@moq/publish` publish `assets()` with the cut

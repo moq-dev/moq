@@ -8,7 +8,7 @@
 //! - [`server`] serves HLS playlists, DASH manifests, and CMAF segments over
 //!   HTTP for MoQ broadcasts (an HTTP *server*). It subscribes only to each
 //!   broadcast's catalog and numbers segments on its `sync.interval` grid; media
-//!   bytes are FETCHed from the relay one group at a time, only when a segment
+//!   bytes are fetched from the relay in one bounded subscription, only when a segment
 //!   is actually requested. Until the catalog declares `sync.interval`, a
 //!   non-lazy server also holds its video and audio tracks subscribed, so an
 //!   on-demand publisher produces the media its interval is measured from.

@@ -117,7 +117,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<E>>>> {
 		let next = match &mut self.inner {
-			State::Hang(consumer) => consumer.poll_next(waiter),
+			State::Hang(consumer) => consumer.poll_next(waiter).map_ok(|next| next.map(|timed| timed.value)),
 			State::Msf(consumer) => consumer.poll_next(waiter),
 			State::Closed(_) => return Poll::Ready(Ok(None)),
 		};

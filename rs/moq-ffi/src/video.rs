@@ -352,12 +352,14 @@ fn panic_error() -> MoqError {
 
 /// Producer for a raw-video track.
 ///
-/// Constructed from a broadcast's media catalog. Each
-/// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
-/// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
+/// Constructed from a broadcast's media catalog. Each [`write`](Self::write) accepts a
+/// [`MoqVideoFrame`] whose `data` is in the pixel format declared by the [`MoqVideoEncoderInput`]
+/// passed at publish time.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
@@ -394,7 +396,7 @@ impl MoqVideoProducer {
 	}
 }
 
-// Dropped or closed before its finish, the track ends the way a publisher leaving does.
+// Closed with its broadcast before its finish, the track ends with the close's cause.
 impl crate::producer::Child for MoqVideoProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::runtime().enter();
@@ -411,7 +413,13 @@ impl crate::producer::Child for MoqVideoProducer {
 
 impl Drop for MoqVideoProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Dropped);
+		let _guard = crate::ffi::runtime().enter();
+		drop(
+			self.inner
+				.get_mut()
+				.unwrap_or_else(std::sync::PoisonError::into_inner)
+				.take(),
+		);
 	}
 }
 
@@ -498,26 +506,6 @@ impl MoqVideoProducer {
 		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?.reservation())))
 	}
 
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::runtime().enter();
-		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		let producer = guard.take().ok_or(MoqError::Closed)?;
-		if let Err(producer) = producer.abort_unwanted(moq_net::Error::App(error_code)) {
-			*guard = Some(producer);
-			return Ok(false);
-		}
-		Ok(true)
-	}
-
 	/// Flush any frames the codec is still holding and finalize the track.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
@@ -555,6 +543,35 @@ impl MoqVideoProducer {
 		catalog: &crate::media::MoqMediaCatalogProducer,
 		options: MoqVideoProducerOptions,
 	) -> Result<Arc<MoqVideoProducer>, MoqError> {
+		Self::open(catalog, None, options)
+	}
+
+	/// Open a video track on the track a subscriber's `request` asks for, as [`new`](Self::new)
+	/// does on a track of its own.
+	///
+	/// This is how an on-demand publisher serves a track asked for again after its producer was
+	/// released while read: serve it with the options it was first published with. Options that
+	/// change the track info its readers hold end the track with `MalformedTrack` and fail here;
+	/// nothing checks the codec settings, which its readers decode with, so keep those too. The
+	/// request names the track, so [`MoqVideoProducerOptions::track`] must be `None`, and it
+	/// must belong to the catalog's broadcast. A config this machine can't encode rejects the
+	/// request with `NotFound`.
+	#[uniffi::constructor]
+	pub fn requested(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Arc<crate::producer::MoqTrackRequest>,
+		options: MoqVideoProducerOptions,
+	) -> Result<Arc<MoqVideoProducer>, MoqError> {
+		Self::open(catalog, Some(request), options)
+	}
+}
+
+impl MoqVideoProducer {
+	fn open(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Option<Arc<crate::producer::MoqTrackRequest>>,
+		options: MoqVideoProducerOptions,
+	) -> Result<Arc<MoqVideoProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let broadcast = catalog.broadcast()?;
 
@@ -585,7 +602,14 @@ impl MoqVideoProducer {
 		// long as the codec takes to start.
 		let (target, catalog, children) = broadcast
 			.with_state(|state| Ok((state.broadcast.clone(), state.catalog.clone(), state.children.clone())))?;
-		let producer = block_on(moq_video::encode::Producer::new(&target, catalog, options))?;
+		let producer = match request {
+			None => block_on(moq_video::encode::Producer::new(&target, catalog, options))?,
+			Some(request) => request.answer_in(&children, |request| {
+				Ok(block_on(moq_video::encode::Producer::requested(
+					request, catalog, options,
+				))?)
+			})?,
+		};
 		children.adopt(Arc::new(MoqVideoProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 			format: input.format.0,
@@ -852,10 +876,11 @@ impl MoqVideoConsumer {
 	/// Subscribe to a video track and decode it inside the bindings.
 	///
 	/// `catalog_video` comes from the catalog (see
-	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. A codec or description this build cannot decode, or a stream every decoder's device
-	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
-	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
+	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec
+	/// is read from it. A codec or description this build cannot decode, or a stream every
+	/// decoder's device refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts.
+	/// Also fails with [`MoqError::Unsupported`] when [`surface`](MoqVideoDecoderOutput::surface)
+	/// is set on a platform with no surface to expose.
 	///
 	/// A [disabled](crate::media::MoqVideo::enabled) rendition returns [`MoqError::NotFound`]: no
 	/// frames are coming.
@@ -873,13 +898,10 @@ impl MoqVideoConsumer {
 		// Reject the codec and output before resolving: resolving reaches the origin, which can
 		// invoke a dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_video.broadcast.clone();
-		let instance = catalog_video.instance.clone();
 		let cfg = video_config(catalog_video)?;
 		let mut options = moq_video::decode::Options::default();
 		options.decoder.output = decoder_output(output.surface, HAS_SURFACE)?;
-		let resolved = broadcast
-			.resolve_inner(reference.as_deref(), instance.as_deref())
-			.await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.delay = output.delay.map(Into::into).unwrap_or_default();
@@ -937,7 +959,6 @@ mod decode_tests {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			instance: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,

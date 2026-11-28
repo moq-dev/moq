@@ -21,8 +21,8 @@ pub(super) struct Send {
 	///
 	/// A new frame is only queued once the peer has raised the limit.
 	pub(super) data_blocked_limit: Option<u64>,
-	/// The reason the peer wants us to stop, if `STOP_SENDING` was received
-	pub(super) stop_reason: Option<VarInt>,
+	/// Who stopped the stream's writer, if anyone, which its writes and finish then fail with
+	pub(super) stopped: Option<Stop>,
 	/// The lowest offset a [`Stream::acked`] call is waiting for
 	pub(super) notify: Option<u64>,
 	/// The application gave up the stream's ID with [`Stream::release`], so its end is not kept
@@ -41,7 +41,7 @@ impl Send {
 			priority: 0,
 			slot: Slot::default(),
 			data_blocked_limit: None,
-			stop_reason: None,
+			stopped: None,
 			notify: None,
 			released: false,
 			truncated_acked: 0,
@@ -53,8 +53,13 @@ impl Send {
 		matches!(self.state, SendState::ResetSent { .. })
 	}
 
+	/// Whether the peer sent STOP_SENDING, so it reads none of what is still owed
+	pub(super) fn peer_stopped(&self) -> bool {
+		matches!(self.stopped, Some(Stop::Peer(_)))
+	}
+
 	pub(super) fn finish(&mut self) -> Result<(), Error> {
-		if self.stop_reason.is_some() {
+		if self.stopped.is_some() {
 			Err(Error::Stopped)
 		} else if self.state == SendState::Ready {
 			self.state = SendState::DataSent {
@@ -76,8 +81,12 @@ impl Send {
 		if !self.is_writable() {
 			return Err(Error::Closed);
 		}
-		if self.stop_reason.is_some() {
+		if self.stopped.is_some() {
 			return Err(Error::Stopped);
+		}
+		// Nothing to queue, so neither flow control nor an empty STREAM frame is involved
+		if !data.has_remaining() {
+			return Ok(Some(0));
 		}
 		let budget = self.max_data - self.pending.offset();
 		if budget == 0 || limit == 0 {
@@ -98,10 +107,11 @@ impl Send {
 		Ok(Some(written))
 	}
 
-	/// How the stream ended, if it has: a peer's stop wins over the end it interrupted.
+	/// How the stream ended, if it has: a peer's stop, or a quiesce's, wins over the end it
+	/// interrupted.
 	pub(super) fn end(&self) -> Option<End> {
-		if let Some(code) = self.stop_reason {
-			return Some(End::Stopped(code));
+		if let Some(stop) = self.stopped {
+			return Some(End::Stopped(stop.code()));
 		}
 		match self.state {
 			SendState::ResetSent { error_code, .. } => Some(End::Reset(error_code)),
@@ -113,10 +123,10 @@ impl Send {
 	/// Update stream state due to a reset sent by the local application
 	///
 	/// Data below `reliable_size` is still delivered; everything after it is abandoned. Returns
-	/// the Reliable Size of the reset to send now, or `None` while a peer without RESET_STREAM_AT
-	/// (`!at`) still has data below `reliable_size` to acknowledge, after which
+	/// the Reliable Size of the reset to send now, or `None` while a reset that may not go ahead
+	/// of its data (`!ahead`) still has data below `reliable_size` to acknowledge, after which
 	/// [`take_held_reset`](Self::take_held_reset) releases it.
-	pub(super) fn reset(&mut self, error_code: VarInt, reliable_size: u64, at: bool) -> Option<u64> {
+	pub(super) fn reset(&mut self, error_code: VarInt, reliable_size: u64, ahead: bool) -> Option<u64> {
 		use SendState::*;
 		let (DataSent { .. } | Ready) = self.state else {
 			return None;
@@ -124,15 +134,20 @@ impl Send {
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
 		self.truncate(reliable_size);
-		let send = at || self.pending.is_fully_acked();
+		let held = match self.stopped {
+			// A quiesce sends its streams' resets together, once everything written to them arrived.
+			Some(Stop::Quiesce(_)) => Held::UntilQuiesced,
+			_ if ahead || self.pending.is_fully_acked() => Held::Sent,
+			_ => Held::UntilAcked,
+		};
 		self.state = ResetSent {
 			final_size,
 			reliable_size,
 			error_code,
-			held: !send,
+			held,
 			acked: None,
 		};
-		send.then_some(reliable_size)
+		(held == Held::Sent).then_some(reliable_size)
 	}
 
 	/// Release a held RESET_STREAM once all the data it holds for has been acknowledged, returning
@@ -144,10 +159,25 @@ impl Send {
 		else {
 			return None;
 		};
-		if !*held || !self.pending.is_fully_acked() {
+		if *held != Held::UntilAcked || !self.pending.is_fully_acked() {
 			return None;
 		}
-		*held = false;
+		*held = Held::Sent;
+		Some(*reliable_size)
+	}
+
+	/// Release a reset held while the stream was quiesced, returning its Reliable Size
+	pub(super) fn take_quiesced_reset(&mut self) -> Option<u64> {
+		let SendState::ResetSent {
+			held, reliable_size, ..
+		} = &mut self.state
+		else {
+			return None;
+		};
+		if *held != Held::UntilQuiesced {
+			return None;
+		}
+		*held = Held::Sent;
 		Some(*reliable_size)
 	}
 
@@ -175,7 +205,7 @@ impl Send {
 			return None;
 		}
 		*reliable_size = 0;
-		*held = false;
+		*held = Held::Sent;
 		self.truncate(0);
 		Some(0)
 	}
@@ -227,15 +257,14 @@ impl Send {
 
 	/// Handle STOP_SENDING
 	///
-	/// Returns true if the stream was stopped due to this frame, and false
-	/// if it had been stopped before
+	/// Returns true if the stream was stopped due to this frame, and false if the peer had
+	/// stopped it before. The peer's stop replaces a quiesce's: the peer reads nothing more.
 	pub(super) fn try_stop(&mut self, error_code: VarInt) -> bool {
-		if self.stop_reason.is_none() {
-			self.stop_reason = Some(error_code);
-			true
-		} else {
-			false
+		if self.peer_stopped() {
+			return false;
 		}
+		self.stopped = Some(Stop::Peer(error_code));
+		true
 	}
 
 	/// Returns whether the stream has been finished or reset, and all data it still owes the peer
@@ -260,12 +289,17 @@ impl Send {
 
 	/// Whether the peer acknowledged everything before `offset`, noting to report it if not
 	pub(super) fn acked(&mut self, offset: u64) -> Result<bool, Error> {
-		// An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
-		if self.stop_reason.is_some() || offset > self.pending.offset() {
+		// An acknowledgment no longer means the peer reads the data
+		if self.peer_stopped() {
 			return Err(Error::Closed);
 		}
-		if offset <= self.pending.acked() {
+		// Includes data acknowledged before a reset truncated it
+		if offset <= self.acked_len() {
 			return Ok(true);
+		}
+		// A reset dropped the rest
+		if offset > self.pending.offset() {
+			return Err(Error::Closed);
 		}
 		self.notify = Some(self.notify.map_or(offset, |notify| notify.min(offset)));
 		Ok(false)
@@ -341,10 +375,39 @@ pub(super) enum SendState {
 		final_size: u64,
 		reliable_size: u64,
 		error_code: VarInt,
-		held: bool,
+		held: Held,
 		/// The smallest Reliable Size an acknowledged reset frame carried
 		acked: Option<u64>,
 	},
+}
+
+/// Whether a reset frame waits to be sent
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(super) enum Held {
+	/// It went out
+	Sent,
+	/// Until the peer, which lacks RESET_STREAM_AT, acknowledged the data below the Reliable Size
+	UntilAcked,
+	/// Until the quiesce that stopped the stream sends every reset together
+	UntilQuiesced,
+}
+
+/// Who stopped a stream's writer, with the code it sees the stream stopped with
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(super) enum Stop {
+	/// The peer sent STOP_SENDING, so it reads none of what a reset would still deliver
+	Peer(VarInt),
+	/// A quiesce, so the peer still reads what was written
+	Quiesce(VarInt),
+}
+
+impl Stop {
+	/// The code the writer sees the stream stopped with
+	pub(super) fn code(self) -> VarInt {
+		match self {
+			Self::Peer(code) | Self::Quiesce(code) => code,
+		}
+	}
 }
 
 /// An outgoing stream, from [`Connection::send_stream`](crate::connection::Connection::send_stream)
@@ -445,6 +508,9 @@ impl<'a> Stream<'a> {
 			}
 			return Ok(None);
 		};
+		if written == 0 {
+			return Ok(Some(0));
+		}
 		self.state.data_sent += written as u64;
 		self.state.buffered_data += written as u64;
 		trace!(stream = %self.id, "wrote {} bytes", written);
@@ -638,7 +704,8 @@ impl<'a> Stream<'a> {
 	/// Abandon the stream, but still deliver the bytes before `offset`
 	///
 	/// Nothing past `offset` is sent or retransmitted. A peer that accepts RESET_STREAM_AT gets
-	/// it at once, and reads the data before the error. Otherwise the data keeps being
+	/// it at once, or on QMux once the data before `offset` went out ahead of it, and reads the
+	/// data before the error. Otherwise the data keeps being
 	/// retransmitted, and a plain RESET_STREAM follows once the peer has acknowledged all of it, a
 	/// round trip later. An acknowledgment only means the peer's QUIC stack holds the data:
 	/// RFC 9000 lets it discard data its application has not read yet on RESET_STREAM, so this
@@ -664,7 +731,7 @@ impl<'a> Stream<'a> {
 	}
 
 	fn reset_to(&mut self, offset: u64, error_code: VarInt) -> Result<(), Error> {
-		let at = self.state.peer_reset_stream_at;
+		let ahead = self.state.reset_ahead();
 		let max_data = self.state.max_send_data(self.id);
 		let stream = StreamsState::send_mut(&mut self.state.send, self.id, max_data)?;
 		if stream.is_reset() {
@@ -673,9 +740,12 @@ impl<'a> Stream<'a> {
 		}
 		// An offset is minted from what was written, which only grows until a reset.
 		debug_assert!(offset <= stream.offset(), "reset past the data written");
-		// The peer that sent STOP_SENDING will not read the prefix
-		let reliable_size = match stream.stop_reason {
-			Some(_) => 0,
+		let reliable_size = match stream.stopped {
+			// The peer that sent STOP_SENDING will not read the prefix
+			Some(Stop::Peer(_)) => 0,
+			// A quiesce stopped the writer so what it wrote reaches the peer, whatever the
+			// writer's own reset asks.
+			Some(Stop::Quiesce(_)) => stream.offset(),
 			None => offset,
 		};
 
@@ -683,9 +753,12 @@ impl<'a> Stream<'a> {
 		// send. We leave flow control alone because the peer's responsible for issuing additional
 		// credit based on the final offset communicated in the RESET_STREAM frame we send.
 		let buffered = stream.pending.buffered();
-		let send = stream.reset(error_code, reliable_size, at);
+		let send = stream.reset(error_code, reliable_size, ahead);
 		self.state.connection_blocked.swap_remove(&self.id);
 		self.state.buffered_data -= buffered - stream.pending.buffered();
+		// The reset may drop the last of what the peer had yet to acknowledge, which a quiesce
+		// waits for, as a peer's earlier STOP_SENDING has it.
+		let drained = stream.pending.is_fully_acked();
 		let waiting = stream.take_waiting();
 		// Only data below the Reliable Size is left to send
 		if !stream.is_pending() {
@@ -697,6 +770,9 @@ impl<'a> Stream<'a> {
 		}
 		if waiting {
 			self.state.waits.wake(self.id, Wait::Acked);
+		}
+		if drained {
+			self.state.waits.wake_ended();
 		}
 		// The stream ended, and a writer waiting on it learns it is closed.
 		self.state.waits.wake(self.id, Wait::End);
