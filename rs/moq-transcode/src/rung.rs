@@ -171,19 +171,22 @@ impl Drop for Serving {
 }
 
 /// An incomplete group is cancelled even when its async writer is abandoned.
+///
+/// `None` is a live group not claimed yet: it is created with its first encoded frame, so
+/// until then there is nothing to end.
 struct Writing(Option<moq_net::group::Producer>);
 
 impl Writing {
 	fn finish(mut self) -> moq_net::Result<()> {
-		self.0.take().expect("owned group").finish().map(drop)
+		self.0.take().map_or(Ok(()), |group| group.finish().map(drop))
 	}
 
 	fn finish_at(mut self, end: u64) -> moq_net::Result<()> {
-		self.0.take().expect("owned group").finish_at(end).map(drop)
+		self.0.take().map_or(Ok(()), |group| group.finish_at(end).map(drop))
 	}
 
 	fn abort(mut self, err: moq_net::Error) -> moq_net::Result<()> {
-		self.0.take().expect("owned group").abort(err)
+		self.0.take().map_or(Ok(()), |group| group.abort(err))
 	}
 }
 
@@ -511,14 +514,15 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					if !want.now(edge) {
 						break 'session;
 					}
-					// Mirror the source group so fetches and rendition
-					// switches map 1:1.
-					let info = moq_net::group::Info { start };
-					// `None`: a fetch task is already serving this group (a
-					// consumer fetched a group at the live edge before the live
-					// loop reached it). The fetch is authoritative and its group
-					// reaches every subscriber through the shared track cache, so
-					// skip it here. Residual: if that fetch then fails and aborts
+					// Mirror the source group so fetches and rendition switches map
+					// 1:1: its first encoded frame, the IDR at the source's frame 0,
+					// claims the same start.
+					//
+					// A fetch task already serving this group (a consumer fetched a
+					// group at the live edge before the live loop reached it) is
+					// authoritative and its group reaches every subscriber through
+					// the shared track cache, so skip it here before spending the
+					// encoder on it. Residual: if that fetch then fails and aborts
 					// the group, this rung skips one GOP until the next keyframe.
 					//
 					// The two paths stay separate writers on purpose. This one
@@ -530,32 +534,34 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// or give up the shared decode, and the track cache already
 					// settles who writes a group: the first `claim_group` or
 					// `accept` wins, and the other gets `None`.
-					current = producer.claim_group(info)?.map(|output| Writing(Some(output)));
+					current = (!producer.has_group(start)).then_some(Writing(None));
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
 					// recovering from a lost group. Wait for the next boundary, unless
 					// nobody is left to serve it.
-					let Some(output) = &mut current else {
+					if current.is_none() {
 						if leaving {
 							break 'session;
 						}
 						continue;
-					};
+					}
 
 					// The feed decodes at the source's native size; the encoder sizes
 					// this rung's copy on its own thread. Supported GPU paths feed the
 					// encoder without touching the CPU. The resize carries the source's
 					// color space across, which is what the encoder signals.
 					encoder.encode(rung, frame).await?;
-					drain(output, &active, &mut encoder)?;
+					claim_drain(&mut current, &producer, &active, &mut encoder)?;
 				}
 				Some(Item::End(end)) => {
-					if let Some(mut output) = current.take() {
+					if current.is_some() {
 						// The source group is complete, so this one has to be too: a
 						// hardware encoder is still holding its last frames.
 						encoder.flush().await?;
-						drain(&mut output, &active, &mut encoder)?;
+						claim_drain(&mut current, &producer, &active, &mut encoder)?;
+					}
+					if let Some(output) = current.take() {
 						match end {
 							Some(end) => output.finish_at(end)?,
 							None => output.finish()?,
@@ -1111,6 +1117,39 @@ fn drain(
 	Ok(())
 }
 
+/// [`drain`] into the live group, claiming it with the first frame. Another writer that claimed
+/// the start first, a fetch, wins: this rung's copy is dropped, and `current` with it.
+fn claim_drain(
+	current: &mut Option<Writing>,
+	producer: &moq_net::track::Producer,
+	active: &crate::active::Guard,
+	encoder: &mut Encoder,
+) -> Result<(), Error> {
+	while let Some(encoded) = encoder.receive()? {
+		let Some(output) = current else { continue };
+		if output.0.is_some() {
+			write(output, active, encoded)?;
+			continue;
+		}
+		let size = encoded.payload.len() as u64;
+		let timestamp = encoded.timestamp;
+		let mut buf = bytes::BytesMut::with_capacity(8 + encoded.payload.len());
+		hang::container::Frame {
+			timestamp,
+			payload: encoded.payload,
+		}
+		.encode(&mut buf)?;
+		match producer.claim_group(timestamp, buf.freeze())? {
+			Some(group) => {
+				output.0 = Some(group);
+				active.produced(1, size);
+			}
+			None => *current = None,
+		}
+	}
+	Ok(())
+}
+
 /// Append one encoded frame to the output group in the legacy hang framing,
 /// metering it once it reached the track.
 ///
@@ -1377,9 +1416,7 @@ mod tests {
 		};
 		let mut reader = track.subscribe(ascending(7));
 		track.start_at(10).unwrap();
-		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
-		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
-			.unwrap();
+		let mut live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
@@ -1852,9 +1889,7 @@ mod tests {
 				.with_order(moq_net::track::Order::Ascending),
 		);
 		track.start_at(10).unwrap();
-		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
-		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
-			.unwrap();
+		let mut live = track.create_group(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..]).unwrap();
 		live.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
@@ -1866,10 +1901,7 @@ mod tests {
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 
 		// The live path delivers group 7, and the reader never reads again to pick it up.
-		let mut seven = track.create_group(moq_net::group::Info { start: 7 }).unwrap();
-		seven
-			.write_frame(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..])
-			.unwrap();
+		let mut seven = track.create_group(moq_net::Timestamp::from_millis(7).unwrap(), &b"x"[..]).unwrap();
 		seven.finish().unwrap();
 
 		let (finished, mut finishing) = tokio::sync::watch::channel(false);

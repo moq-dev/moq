@@ -434,8 +434,7 @@ mod tests {
 
 			self.updates += 1;
 			let at = Self::stamp(self.updates);
-			let mut group = self.catalog.append_group(at).unwrap();
-			group.write_frame(at, catalog.to_json().unwrap()).unwrap();
+			let mut group = self.catalog.append_group(at, catalog.to_json().unwrap()).unwrap();
 			group.finish().unwrap();
 		}
 
