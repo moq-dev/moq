@@ -9570,7 +9570,10 @@ mod group_priority_test {
 		edge.finish().unwrap();
 
 		assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
-		assert_eq!(log.resets(), vec![crate::ietf::error::to_stream_code(&crate::StreamError::Old)]);
+		assert_eq!(
+			log.resets(),
+			vec![crate::ietf::error::to_stream_code(&crate::StreamError::Old)]
+		);
 	}
 
 	/// A stream parked on its FIN acknowledgement still follows each priority update.
@@ -10449,7 +10452,10 @@ mod serve_tests {
 			.await
 			.expect("the stale group releases PUBLISH_DONE")
 			.unwrap();
-		assert_eq!(h.log.resets(), vec![crate::ietf::error::to_stream_code(&crate::StreamError::Old)]);
+		assert_eq!(
+			h.log.resets(),
+			vec![crate::ietf::error::to_stream_code(&crate::StreamError::Old)]
+		);
 		let wire = Wire::read(&h.log, version);
 		let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
 		assert_eq!(status, ietf::PublishDoneStatus::TrackEnded.code());
