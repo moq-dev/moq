@@ -8944,7 +8944,7 @@ mod group_priority_test {
 					"test",
 					crate::track::Info::timed(),
 				);
-				let mut group = track.create_group(group::Info { start: 5 }).unwrap();
+				let mut group = track.create_empty(group::Info { start: 5 }).unwrap();
 				for i in 0..5u64 {
 					group
 						.write_frame(crate::Timestamp::from_millis(5 + i).unwrap(), b"x".as_slice())
@@ -9093,7 +9093,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
@@ -9233,7 +9233,7 @@ mod group_priority_test {
 		let mut appended = 0;
 		let produce = move || {
 			for _ in 0..BATCH.min(GROUPS - appended) {
-				let mut group = producer.create_group(group::Info { start: appended }).unwrap();
+				let mut group = producer.create_empty(group::Info { start: appended }).unwrap();
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
@@ -9277,7 +9277,7 @@ mod group_priority_test {
 			ServeRange::default(),
 		);
 		for key in 0..2 {
-			let mut group = track.create_group(group::Info { start: key }).unwrap();
+			let mut group = track.create_empty(group::Info { start: key }).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 				.unwrap();
@@ -9321,7 +9321,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let subscriber = track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 		for millis in 0..FRAMES as u64 {
 			group
 				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
@@ -9368,10 +9368,10 @@ mod group_priority_test {
 			ServeRange::default(),
 		);
 
-		let group = track.create_group(group::Info { start: 0 }).unwrap();
+		let group = track.create_empty(group::Info { start: 0 }).unwrap();
 		assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
 		// A later group is served meanwhile, its stream independent of the one waiting.
-		let mut later = track.create_group(group::Info { start: 1 }).unwrap();
+		let mut later = track.create_empty(group::Info { start: 1 }).unwrap();
 		later
 			.write_frame(crate::Timestamp::unscaled(later.start), b"later".as_slice())
 			.unwrap();
@@ -9593,7 +9593,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = track.append_empty(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
 		let consumer = subscriber
@@ -9705,7 +9705,7 @@ mod group_priority_test {
 			track::Info::default(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let _stalled = track.create_group(group::Info { start: 0 }).unwrap();
+		let _stalled = track.create_empty(group::Info { start: 0 }).unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("stalled group");
 
 		let mut serve = GroupServe::new(
@@ -9728,7 +9728,7 @@ mod group_priority_test {
 			"the relay state is unsettled"
 		);
 
-		let mut edge = track.create_group(group::Info { start: 1 }).unwrap();
+		let mut edge = track.create_empty(group::Info { start: 1 }).unwrap();
 		edge.write_frame(crate::Timestamp::unscaled(edge.start), b"edge".as_slice())
 			.unwrap();
 		edge.finish().unwrap();
@@ -9747,7 +9747,7 @@ mod group_priority_test {
 				crate::track::Info::timed(),
 			);
 			let mut subscriber = track.subscribe(None);
-			let mut producer = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut producer = track.create_empty(group::Info { start: 0 }).unwrap();
 			producer.start_at(1).unwrap();
 			producer
 				.write_frame(crate::Timestamp::ZERO, b"tail".as_slice())
@@ -9832,7 +9832,7 @@ mod group_priority_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"done".as_slice()).unwrap();
 		let consumer = group.consume();
 		group.finish().unwrap();
@@ -9951,7 +9951,7 @@ mod subscribe_cursor_test {
 			crate::track::Info::timed(),
 		);
 		for key in 0..4 {
-			let mut group = track.create_group(group::Info { start: key }).unwrap();
+			let mut group = track.create_empty(group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 			group.finish().unwrap();
 		}
@@ -10198,7 +10198,7 @@ mod serve_tests {
 				"{version}"
 			);
 			if !super::super::request_stream::fin_cancels(version) {
-				let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+				let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 				group.write_frame(group.key_time(), b"after FIN".as_slice()).unwrap();
 				group.finish().unwrap();
 				assert!(futures::poll!(run.as_mut()).is_pending());
@@ -10376,7 +10376,7 @@ mod serve_tests {
 		));
 
 		// An unfinished group keeps its stream open.
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"open".as_slice()).unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		let before = h.log.priorities();
@@ -10544,7 +10544,7 @@ mod serve_tests {
 	async fn publish_done_after_a_track_error_follows_every_stream_close() {
 		let version = Version::Draft22;
 		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"head".as_slice()).unwrap();
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -10605,7 +10605,7 @@ mod serve_tests {
 	async fn publish_done_at_the_track_end_counts_and_follows_every_stream() {
 		let version = Version::Draft22;
 		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"head".as_slice()).unwrap();
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -10762,7 +10762,7 @@ mod serve_tests {
 	/// inside it and the group stream waits for object 1.
 	async fn fail_update_mid_flight(version: Version) -> Wire {
 		let h = serve(version);
-		let group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		let mut frame = group
 			.create_frame(frame::Info {
 				timestamp: timestamp(),
@@ -10881,7 +10881,7 @@ mod serve_tests {
 						.count();
 					(ok, answers)
 				};
-				let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+				let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 				let mut paused = 0;
 				if !start_paused {
 					serve_until(serve.as_mut(), "SUBSCRIBE_OK", || answers().0).await;
@@ -10913,7 +10913,7 @@ mod serve_tests {
 		let broadcast = crate::broadcast::Producer::new(Default::default());
 		let track = broadcast.create_track("audio", track::Info::default()).unwrap();
 		let subscriber = track.subscribe(Subscription::default().with_start(0).with_end(1));
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), &b"bounded"[..])
 			.unwrap();
@@ -11004,7 +11004,7 @@ mod serve_tests {
 	async fn a_joining_fetch_after_a_resume_is_served() {
 		let version = Version::Draft18;
 		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"head".as_slice()).unwrap();
 		let mut request = ScriptedSession::new(Vec::new());
 		request.log = h.log.clone();
@@ -11105,7 +11105,7 @@ mod serve_tests {
 	/// Group 4 of `h`'s track: a 3 byte first frame and a 5 byte delta, over a refresh
 	/// ratio of 1.
 	fn refresh_group(h: &Serve) -> group::Producer {
-		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 		group.write_frame(group.key_time(), b"key".as_slice()).unwrap();
 		group.write_frame(group.key_time(), b"delta".as_slice()).unwrap();
 		group
@@ -12238,7 +12238,7 @@ mod serve_tests {
 		for version in ALL_VERSIONS {
 			for wanted in [true, false] {
 				let h = serve(version);
-				let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+				let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 				group.write_frame(group.key_time(), b"a".as_slice()).unwrap();
 				group.write_frame(group.key_time(), b"b".as_slice()).unwrap();
 				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
@@ -12288,7 +12288,7 @@ mod serve_tests {
 		let version = Version::Draft23;
 		for wanted in [true, false] {
 			let h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 			group.write_frame(group.key_time(), b"a".as_slice()).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(11).unwrap(), b"b".as_slice())
@@ -12531,7 +12531,7 @@ mod serve_tests {
 
 		for wanted in [true, false] {
 			let mut h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(stamp, b"stamped".as_slice()).unwrap();
 			group.finish().unwrap();
 
@@ -12550,7 +12550,7 @@ mod serve_tests {
 	async fn timestamp_object_ids_ignore_properties_wanted() {
 		for wanted in [true, false] {
 			let mut h = serve(Version::Draft23);
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"t0".as_slice())
 				.unwrap();
@@ -12851,11 +12851,11 @@ mod serve_tests {
 	async fn canonical_join_serves_the_head_on_a_fetch_stream() {
 		for filter in [Filter::NextObject, Filter::Unfiltered] {
 			let mut h = serve(Version::Draft22);
-			let mut earlier = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut earlier = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			earlier.write_frame(earlier.key_time(), b"earlier".as_slice()).unwrap();
 			earlier.finish().unwrap();
 
-			let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 1 }).unwrap();
 			for payload in [b"head-0", b"head-1", b"head-2"] {
 				group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 			}
@@ -12909,7 +12909,7 @@ mod serve_tests {
 		for (start, end, wanted) in narrowed {
 			let version = Version::Draft22;
 			let h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 1 }).unwrap();
 			group
 				.write_frame(group.key_time(), b"before-update".as_slice())
 				.unwrap();
@@ -12948,7 +12948,7 @@ mod serve_tests {
 			.await;
 			group.write_frame(group.key_time(), b"after-update".as_slice()).unwrap();
 			group.finish().unwrap();
-			let mut later = h.track.create_group(group::Info { start: 4 }).unwrap();
+			let mut later = h.track.create_empty(group::Info { start: 4 }).unwrap();
 			later.write_frame(later.key_time(), b"wanted".as_slice()).unwrap();
 			later.finish().unwrap();
 			h.track.finish_shared().unwrap();
@@ -12991,10 +12991,10 @@ mod serve_tests {
 		for (filter, narrowing) in cases {
 			let version = Version::Draft22;
 			let h = serve(version);
-			let mut history = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut history = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			history.write_frame(history.key_time(), b"history".as_slice()).unwrap();
 			history.finish().unwrap();
-			let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 1 }).unwrap();
 			group
 				.write_frame(group.key_time(), b"before-update".as_slice())
 				.unwrap();
@@ -13143,7 +13143,7 @@ mod serve_tests {
 		let credit = kio::Producer::new(false);
 		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_open_uni_gate(credit.consume());
 		let h = serve_session(version, crate::track::Info::timed(), session);
-		let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 1 }).unwrap();
 		group.write_frame(group.key_time(), b"head".as_slice()).unwrap();
 		kio::clock::sim::yield_now().await;
 		let mut request = ScriptedSession::new(Vec::new());
@@ -13215,10 +13215,10 @@ mod serve_tests {
 	async fn a_fill_only_update_keeps_the_live_join_floor() {
 		let version = Version::Draft22;
 		let h = serve(version);
-		let mut history = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut history = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		history.write_frame(history.key_time(), b"history".as_slice()).unwrap();
 		history.finish().unwrap();
-		let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 1 }).unwrap();
 		group.write_frame(group.key_time(), b"live".as_slice()).unwrap();
 		kio::clock::sim::yield_now().await;
 		let mut request = ScriptedSession::new(Vec::new());
@@ -13273,7 +13273,7 @@ mod serve_tests {
 		for end in [None, Some(EndLocation { group: 0, object: None })] {
 			let version = Version::Draft22;
 			let h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 1 }).unwrap();
 			group.write_frame(group.key_time(), b"history".as_slice()).unwrap();
 			kio::clock::sim::yield_now().await;
 			let mut request = ScriptedSession::new(Vec::new());
@@ -13328,7 +13328,7 @@ mod serve_tests {
 				.unwrap();
 			group.finish().unwrap();
 			for (key, payload) in [(2, b"excluded".as_slice()), (4, b"wanted".as_slice())] {
-				let mut group = h.track.create_group(group::Info { start: key }).unwrap();
+				let mut group = h.track.create_empty(group::Info { start: key }).unwrap();
 				group.write_frame(group.key_time(), payload).unwrap();
 				group.finish().unwrap();
 			}
@@ -13351,7 +13351,7 @@ mod serve_tests {
 	async fn relative_one_replays_the_current_group() {
 		let mut h = serve(Version::Draft22);
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		for payload in [b"head-0", b"head-1", b"head-2"] {
 			group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 		}
@@ -13371,7 +13371,7 @@ mod serve_tests {
 	async fn next_object_does_not_replay_the_head() {
 		let mut h = serve(Version::Draft22);
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		for payload in [b"head-0", b"head-1", b"head-2"] {
 			group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 		}
@@ -13401,7 +13401,7 @@ mod serve_tests {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
 				let mut h = serve(version);
 				for (key, payload) in [(0, b"history"), (1, b"latest!")] {
-					let mut group = h.track.create_group(group::Info { start: key }).unwrap();
+					let mut group = h.track.create_empty(group::Info { start: key }).unwrap();
 					group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 					group.finish().unwrap();
 				}
@@ -13436,7 +13436,7 @@ mod serve_tests {
 					.create_track("video", crate::track::Info::timed().with_max_age(None))
 					.unwrap();
 				for (key, payload) in [(0, b"history"), (1, b"latest!")] {
-					let mut group = track.create_group(group::Info { start: key }).unwrap();
+					let mut group = track.create_empty(group::Info { start: key }).unwrap();
 					group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 					group.finish().unwrap();
 				}
@@ -13506,7 +13506,7 @@ mod serve_tests {
 		let mut h = serve(Version::Draft22);
 
 		for key in 0..2 {
-			let mut group = h.track.create_group(group::Info { start: key }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 			group.finish().unwrap();
 		}
@@ -13549,7 +13549,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_fill_ranks_as_the_group_it_fills() {
 		let h = serve(Version::Draft22);
-		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 		group.write_frame(group.key_time(), b"fill".as_slice()).unwrap();
 
 		let queue = h.publisher.priority.clone();
@@ -13612,7 +13612,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_fill_outranks_the_rest_of_its_group() {
 		let h = serve(Version::Draft22);
-		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 		group.write_frame(group.key_time(), b"head".as_slice()).unwrap();
 
 		let ranking = Ranking {
@@ -13730,7 +13730,7 @@ mod serve_tests {
 	/// and a `{0, 0}` End Location would be below the subscriber's own Start.
 	fn publish_groups(h: &mut Serve, latest: u64) {
 		for key in 0..=latest {
-			let mut group = h.track.create_group(group::Info { start: key }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 			group.finish().unwrap();
 		}
@@ -13815,7 +13815,7 @@ mod serve_tests {
 					}
 				})
 				.await;
-				let group = h.track.create_group(group::Info { start: 3 }).unwrap();
+				let group = h.track.create_empty(group::Info { start: 3 }).unwrap();
 				group
 					.set_wire(group::Wire {
 						sparse: true,
@@ -13911,7 +13911,7 @@ mod serve_tests {
 		for version in JOINING_DRAFTS {
 			let mut h = serve(version);
 			publish_groups(&mut h, LATEST - 1);
-			let mut group = h.track.create_group(group::Info { start: LATEST }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: LATEST }).unwrap();
 			let payloads: &[&[u8]] = &[b"first-object", b"", b"third-object"];
 			for (i, payload) in payloads.iter().enumerate() {
 				group
@@ -14139,7 +14139,7 @@ mod serve_tests {
 	async fn a_joining_fetch_refuses_a_missing_prefix_before_fetch_ok() {
 		let version = Version::Draft18;
 		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 5 }).unwrap();
 		group.start_at(1).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
@@ -14176,7 +14176,7 @@ mod serve_tests {
 	async fn a_joining_fetch_ending_at_the_end_of_group_status_is_answered() {
 		for version in JOINING_DRAFTS {
 			let h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 5 }).unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -14226,7 +14226,7 @@ mod serve_tests {
 	async fn a_joining_fetch_refuses_a_prefix_group_it_lost() {
 		let version = Version::Draft18;
 		let h = serve(version);
-		let mut prefix = h.track.create_group(group::Info { start: 5 }).unwrap();
+		let mut prefix = h.track.create_empty(group::Info { start: 5 }).unwrap();
 		prefix.write_frame(prefix.key_time(), b"frame".as_slice()).unwrap();
 		settle().await;
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -14347,7 +14347,7 @@ mod serve_tests {
 		for version in JOINING_DRAFTS {
 			let mut h = serve(version);
 			publish_groups(&mut h, 4);
-			let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 5 }).unwrap();
 			group.write_frame(group.key_time(), b"the-head".as_slice()).unwrap();
 			group.finish().unwrap();
 			settle().await;
@@ -14444,7 +14444,7 @@ mod serve_tests {
 				.broadcast()
 				.create_track("video", crate::track::Info::timed())
 				.unwrap();
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			settle().await;
@@ -14667,7 +14667,7 @@ mod serve_tests {
 				serve_until(serving.as_mut(), "SUBSCRIBE_OK was sent", || !h.log.trail().is_empty()).await;
 
 				// A group left open, so its stream is still serving when the grant ends.
-				let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+				let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 				group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 				serve_until(serving.as_mut(), "the group stream opened", || {
 					!data_streams(&h.log).is_empty()
@@ -14814,7 +14814,7 @@ mod serve_tests {
 	/// Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`.
 	fn publish_pairs(h: &mut Serve, count: u64, hole: Option<u64>) {
 		for key in (0..count).filter(|key| Some(*key) != hole) {
-			let mut group = h.track.create_group(group::Info { start: key }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: key }).unwrap();
 			for object in 0..2 {
 				group
 					.write_frame(group.key_time(), format!("{key}-{object}").into_bytes())
@@ -14837,7 +14837,7 @@ mod serve_tests {
 	async fn a_cached_standalone_fetch_yields_while_writing() {
 		for version in FETCH_DRAFTS {
 			let h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			for _ in 0..256 {
 				group.write_frame(group.key_time(), vec![7; 1024]).unwrap();
 			}
@@ -15301,7 +15301,7 @@ mod serve_tests {
 			for wanted in [Some(true), opt_out].into_iter().flatten() {
 				let h = serve(version);
 				let track = h._broadcast.broadcast().create_track("timed", info.clone()).unwrap();
-				let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+				let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 				group.write_frame(stamp, b"stamped".as_slice()).unwrap();
 				group.finish().unwrap();
 				settle().await;
@@ -15394,7 +15394,7 @@ mod serve_tests {
 				..track::Info::timed()
 			},
 		);
-		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 		group.write_frame(group.key_time(), b"fill".as_slice()).unwrap();
 		group.finish().unwrap();
 
@@ -15427,7 +15427,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_fill_through_the_terminal_object_is_served_whole() {
 		let h = serve(Version::Draft22);
-		let group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 		let key_time = group.key_time();
 		group
 			.set_wire(group::Wire {
@@ -15500,7 +15500,7 @@ mod serve_tests {
 		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_uni_fins(1);
 		let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
 		// Frozen timestamps, so only the wall clock since group 5 arrived convicts group 4.
-		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 		group.write_frame(group.key_time(), b"fill".as_slice()).unwrap();
 		group.finish().unwrap();
 
@@ -15534,7 +15534,7 @@ mod serve_tests {
 		.await
 		.expect("the fill went out whole");
 
-		let mut next = h.track.create_group(group::Info { start: 5 }).unwrap();
+		let mut next = h.track.create_empty(group::Info { start: 5 }).unwrap();
 		next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
 		next.finish().unwrap();
 		kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
@@ -15569,7 +15569,7 @@ mod serve_tests {
 		};
 		let answer = |session: ScriptedSession| {
 			let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"fetch".as_slice()).unwrap();
 			group.finish().unwrap();
 			h
@@ -15629,7 +15629,7 @@ mod serve_tests {
 		})
 		.await;
 
-		let mut next = h.track.create_group(group::Info { start: 1 }).unwrap();
+		let mut next = h.track.create_empty(group::Info { start: 1 }).unwrap();
 		next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
 		next.finish().unwrap();
 		kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
@@ -15658,7 +15658,7 @@ mod serve_tests {
 			let session = ScriptedSession::per_stream(vec![Vec::new()]).with_uni_send_window(1);
 			let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
 			// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"fetch".as_slice()).unwrap();
 			group.finish().unwrap();
 
@@ -15689,7 +15689,7 @@ mod serve_tests {
 			})
 			.await;
 
-			let mut next = h.track.create_group(group::Info { start: 1 }).unwrap();
+			let mut next = h.track.create_empty(group::Info { start: 1 }).unwrap();
 			next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
 			next.finish().unwrap();
 			kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
@@ -15753,7 +15753,7 @@ mod serve_tests {
 			);
 
 			let h = serve_track(version, info.clone());
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"a".as_slice()).unwrap();
 			group.finish().unwrap();
 			settle().await;
@@ -16020,7 +16020,7 @@ mod serve_tests {
 				h.track.finish_shared().unwrap();
 				None
 			}
-			Largest::Live => Some(h.track.create_group(group::Info { start: 5 }).unwrap()),
+			Largest::Live => Some(h.track.create_empty(group::Info { start: 5 }).unwrap()),
 			Largest::Idle => {
 				h.track.set_idle();
 				None
@@ -16036,7 +16036,7 @@ mod serve_tests {
 				None
 			}
 			Largest::Aborted => {
-				let mut newer = h.track.create_group(group::Info { start: 5 }).unwrap();
+				let mut newer = h.track.create_empty(group::Info { start: 5 }).unwrap();
 				newer.write_frame(newer.key_time(), b"5-0".to_vec()).unwrap();
 				newer.abort(Error::Cancel).unwrap();
 				None
@@ -16100,7 +16100,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		let mut h = serve(version);
 		publish_pairs(&mut h, 5, None);
-		let empty = h.track.create_group(group::Info { start: 5 }).unwrap();
+		let empty = h.track.create_empty(group::Info { start: 5 }).unwrap();
 		empty.finish().unwrap();
 		settle().await;
 
@@ -16349,7 +16349,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 4, None);
-			let mut live = h.track.create_group(group::Info { start: 4 }).unwrap();
+			let mut live = h.track.create_empty(group::Info { start: 4 }).unwrap();
 			for object in 0..2 {
 				live.write_frame(live.key_time(), format!("4-{object}").into_bytes())
 					.unwrap();
@@ -16392,9 +16392,9 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 4, None);
-			let mut older = h.track.create_group(group::Info { start: 4 }).unwrap();
+			let mut older = h.track.create_empty(group::Info { start: 4 }).unwrap();
 			older.write_frame(older.key_time(), b"4-0".to_vec()).unwrap();
-			let mut newer = h.track.create_group(group::Info { start: 5 }).unwrap();
+			let mut newer = h.track.create_empty(group::Info { start: 5 }).unwrap();
 			newer.write_frame(newer.key_time(), b"5-0".to_vec()).unwrap();
 			settle().await;
 
@@ -16442,7 +16442,7 @@ mod serve_tests {
 		let version = Version::Draft23;
 		for (group_id, expected) in [(0, NOT_SUPPORTED), (1, DOES_NOT_EXIST)] {
 			let h = serve(version);
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group.start_at(1).unwrap();
 			// Offsets 5, 10, 10: Object IDs 5, 10, 11, estimated as 10 without frame 0.
 			for ms in [5, 10, 10] {
@@ -16538,7 +16538,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			// The group is still being written, so the fetch waits on it when the grant narrows.
 			let h = serve(version);
-			let _group = h.track.clone().create_group(group::Info { start: 0 }).unwrap();
+			let _group = h.track.clone().create_empty(group::Info { start: 0 }).unwrap();
 			settle().await;
 			let auth = crate::auth::Link::new(false);
 			let mut h = h;
@@ -16577,7 +16577,7 @@ mod serve_tests {
 				.broadcast()
 				.create_track("video", crate::track::Info::timed())
 				.unwrap();
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"0-0".to_vec()).unwrap();
 			group.finish().unwrap();
 			settle().await;
@@ -16676,7 +16676,7 @@ mod serve_tests {
 					.broadcast()
 					.create_track("video", crate::track::Info::timed())
 					.unwrap();
-				let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+				let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 				group.write_frame(group.key_time(), PAYLOAD.to_vec()).unwrap();
 				settle().await;
 
@@ -16810,7 +16810,7 @@ mod serve_tests {
 				.broadcast()
 				.create_track("video", crate::track::Info::timed())
 				.unwrap();
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), PAYLOAD.to_vec()).unwrap();
 			settle().await;
 
@@ -16986,7 +16986,7 @@ mod serve_tests {
 		let h = serve_on(VERSION, auth, session);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), ANSWERED_HEAD.to_vec()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -17153,7 +17153,7 @@ mod serve_tests {
 				match parked {
 					// One published group, so the subscription parks at the live edge.
 					Parked::Acking => {
-						let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+						let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 						group.write_frame(group.key_time(), b"frame".to_vec()).unwrap();
 						group.finish().unwrap();
 					}
@@ -17722,7 +17722,7 @@ mod serve_tests {
 		for version in JOINING_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 4, None);
-			let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 4 }).unwrap();
 			group.write_frame(group.key_time(), b"4-0".as_slice()).unwrap();
 			settle().await;
 
@@ -17853,7 +17853,7 @@ mod serve_tests {
 		let mut h = serve(version);
 
 		// A live edge in the middle of group 5: objects 0 through 3.
-		let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 5 }).unwrap();
 		for payload in [b"5-0", b"5-1", b"5-2", b"5-3"] {
 			group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 		}
@@ -17946,7 +17946,7 @@ mod serve_tests {
 				"test",
 				crate::track::Info::default(),
 			);
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			for payload in [b"aa", b"bb", b"cc", b"dd"] {
 				group
 					.write_frame(crate::Timestamp::unscaled(0), payload.as_slice())
@@ -18089,11 +18089,11 @@ mod serve_tests {
 			group.finish().unwrap();
 		};
 		// The track's first group, appended, so keys 0 and 1 never exist.
-		write(track.append_group(crate::Timestamp::unscaled(2)).unwrap());
+		write(track.append_empty(crate::Timestamp::unscaled(2)).unwrap());
 		// Appending says the producer will not go back, so keys 3 and 4 never exist.
-		write(track.append_group(crate::Timestamp::unscaled(5)).unwrap());
+		write(track.append_empty(crate::Timestamp::unscaled(5)).unwrap());
 		// A gap between created groups says nothing.
-		write(track.create_group(group::Info { start: 7 }).unwrap());
+		write(track.create_empty(group::Info { start: 7 }).unwrap());
 		let _track = track.finish().unwrap();
 
 		let mut serve = TrackServe::new(
@@ -18305,7 +18305,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION, true).await);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18504,7 +18504,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, script);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18579,7 +18579,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, script);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18634,7 +18634,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, script);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18681,7 +18681,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, script);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18728,7 +18728,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, script);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18799,7 +18799,7 @@ mod serve_tests {
 			let h = serve_with_auth(version, auth, script);
 			let rt = h.publisher.runtime.clone();
 
-			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 			group.finish().unwrap();
 			settle().await;
@@ -18868,7 +18868,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, script);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18925,7 +18925,7 @@ mod serve_tests {
 		cancel: impl FnOnce(),
 		label: &str,
 	) {
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -18998,7 +18998,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION, true).await);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -19072,7 +19072,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, subscribe_update_with_token(VERSION, true).await);
 		let rt = h.publisher.runtime.clone();
 
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -19177,7 +19177,7 @@ mod serve_tests {
 		auth.handle().authorize(&crate::auth::Grant::default());
 
 		let h = serve_with_auth(VERSION, auth, Vec::new());
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -19231,7 +19231,7 @@ mod serve_tests {
 			auth.handle().authorize(limit);
 		}
 		let h = serve_with_auth(VERSION, auth.clone(), Vec::new());
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 		settle().await;
@@ -19435,7 +19435,7 @@ mod serve_tests {
 
 		let unlimited = crate::auth::Link::new(false);
 		let h = serve_with_auth(VERSION, unlimited, Vec::new());
-		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = h.track.create_empty(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
 		settle().await;
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -22808,8 +22808,8 @@ mod range_tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		track.create_group(group::Info { start: 7 }).unwrap().finish().unwrap();
-		track.create_group(group::Info { start: 8 }).unwrap().finish().unwrap();
+		track.create_empty(group::Info { start: 7 }).unwrap().finish().unwrap();
+		track.create_empty(group::Info { start: 8 }).unwrap().finish().unwrap();
 
 		// Next Group against a live edge of 8 asks for 9, which does not exist yet.
 		let mut subscriber = track.subscribe(None);
@@ -22820,7 +22820,7 @@ mod range_tests {
 		);
 
 		// The group it asked for is what it gets once published.
-		track.create_group(group::Info { start: 9 }).unwrap().finish().unwrap();
+		track.create_empty(group::Info { start: 9 }).unwrap().finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("group 9");
 		assert_eq!(group.start, 9);
 	}
@@ -22971,13 +22971,13 @@ mod range_tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut first = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut first = track.create_empty(group::Info { start: 0 }).unwrap();
 		for _ in 0..3 {
 			first
 				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
 				.unwrap();
 		}
-		let _open = track.create_group(group::Info { start: 1 }).unwrap();
+		let _open = track.create_empty(group::Info { start: 1 }).unwrap();
 
 		let edge = live_edge(&track.consume());
 		assert_eq!(edge.latest, Some(1));
@@ -23002,7 +23002,7 @@ mod range_tests {
 			"catalog",
 			crate::track::Info::timed(),
 		);
-		let group = track.create_group(group::Info { start: 7 }).unwrap();
+		let group = track.create_empty(group::Info { start: 7 }).unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -23046,7 +23046,7 @@ mod range_tests {
 		}
 
 		// Without the terminal object the same cap lost an object.
-		let mut bare = track.create_group(group::Info { start: 8 }).unwrap();
+		let mut bare = track.create_empty(group::Info { start: 8 }).unwrap();
 		bare.write_frame(bare.key_time(), &b"x"[..]).unwrap();
 		let bare = bare.finish().unwrap();
 		let mut write = FetchGroupWrite::new(
@@ -23079,7 +23079,7 @@ mod range_tests {
 			if reported_first {
 				track.report_object(3, 4);
 			}
-			let mut newer = track.create_group(group::Info { start: key }).unwrap();
+			let mut newer = track.create_empty(group::Info { start: key }).unwrap();
 			for _ in 0..frames {
 				newer
 					.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
@@ -23114,7 +23114,7 @@ mod range_tests {
 			});
 			let staged = request.stage(crate::track::Info::timed());
 			for key in 0..3 {
-				let mut group = staged.create_group(group::Info { start: key }).unwrap();
+				let mut group = staged.create_empty(group::Info { start: key }).unwrap();
 				for _ in 0..2 {
 					group
 						.write_frame(crate::Timestamp::from_millis(key).unwrap(), b"frame".as_slice())
@@ -23136,13 +23136,13 @@ mod range_tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut first = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut first = track.create_empty(group::Info { start: 0 }).unwrap();
 		first
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
 			.unwrap();
 		first.finish().unwrap();
 		// Key 1 never exists; the newest group is empty.
-		let _open = track.create_group(group::Info { start: 2 }).unwrap();
+		let _open = track.create_empty(group::Info { start: 2 }).unwrap();
 
 		let edge = live_edge(&track.consume());
 		assert_eq!(edge.latest, Some(2));
@@ -23160,14 +23160,14 @@ mod range_tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut first = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut first = track.create_empty(group::Info { start: 0 }).unwrap();
 		for _ in 0..2 {
 			first
 				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
 				.unwrap();
 		}
 		first.finish().unwrap();
-		let mut newest = track.create_group(group::Info { start: 1 }).unwrap();
+		let mut newest = track.create_empty(group::Info { start: 1 }).unwrap();
 		newest.write_frame(newest.key_time(), b"frame".as_slice()).unwrap();
 		newest.abort(Error::Cancel).unwrap();
 
@@ -23523,7 +23523,7 @@ mod compression_tests {
 			"video",
 			track::Info::timed().with_timescale(Timescale::MILLI),
 		);
-		let group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let group = track.append_empty(Timestamp::from_millis(1000).unwrap()).unwrap();
 		let consumer = group.consume();
 		// Frame 0 (ordinal 0) has timestamp 1033ms -> wire Object ID 33.
 		let mut frame = group
@@ -23594,7 +23594,7 @@ mod compression_tests {
 				"video",
 				track::Info::timed().with_timescale(Timescale::MILLI),
 			);
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			if headless {
 				group.start_at(1).unwrap();
 			}
@@ -23622,7 +23622,7 @@ mod compression_tests {
 				..track::Info::timed().with_timescale(Timescale::MILLI)
 			},
 		);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 		for at in [5, 40, 20] {
 			group.write_frame(ms(at), b"x".as_slice()).unwrap();
 		}
@@ -23657,7 +23657,7 @@ mod compression_tests {
 		}));
 		for declared in [true, false] {
 			let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
-			let mut group = track.create_group(group::Info { start: 1000 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 1000 }).unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -23712,7 +23712,7 @@ mod compression_tests {
 			values: Vec::new(),
 		}));
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -23767,7 +23767,7 @@ mod compression_tests {
 		}));
 		for first_object in [true, false] {
 			let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
-			let group = track.create_group(group::Info { start: 0 }).unwrap();
+			let group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -23797,7 +23797,7 @@ mod compression_tests {
 				track::Info::timed().with_timescale(Timescale::MILLI),
 			);
 			let subscriber = track.subscribe(None);
-			let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+			let mut group = track.append_empty(Timestamp::from_millis(1000).unwrap()).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(1000).unwrap(), b"a".as_slice())
 				.unwrap();
@@ -23840,7 +23840,7 @@ mod compression_tests {
 			"video",
 			track::Info::timed().with_timescale(Timescale::MILLI),
 		);
-		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let mut group = track.append_empty(Timestamp::from_millis(1000).unwrap()).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(1000).unwrap(), b"a".as_slice())
 			.unwrap();
@@ -23890,7 +23890,7 @@ mod compression_tests {
 			..track::Info::timed()
 		};
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
-		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let mut group = track.append_empty(Timestamp::from_millis(1000).unwrap()).unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -23964,7 +23964,7 @@ mod compression_tests {
 			..track::Info::timed()
 		};
 		let track22 = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info22);
-		let mut group22 = track22.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let mut group22 = track22.append_empty(Timestamp::from_millis(1000).unwrap()).unwrap();
 		group22
 			.set_wire(group::Wire {
 				sparse: false,
@@ -24052,7 +24052,7 @@ mod compression_tests {
 		// Upstream reported sparse Largest Object (1000, 33).
 		track.report_object(1000, 33);
 
-		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let mut group = track.append_empty(Timestamp::from_millis(1000).unwrap()).unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -24144,7 +24144,7 @@ mod compression_tests {
 		// 3. Relayed suffix (`first_object: false`) refuses cross-mode translation.
 		let suffix_track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
 		let mut suffix_group = suffix_track
-			.append_group(Timestamp::from_millis(2000).unwrap())
+			.append_empty(Timestamp::from_millis(2000).unwrap())
 			.unwrap();
 		suffix_group
 			.set_wire(group::Wire {
@@ -24202,7 +24202,7 @@ mod compression_tests {
 			"video",
 			track::Info::timed().with_timescale(Timescale::MILLI),
 		);
-		let empty_group = empty_track.append_group(Timestamp::from_millis(3000).unwrap()).unwrap();
+		let empty_group = empty_track.append_empty(Timestamp::from_millis(3000).unwrap()).unwrap();
 		empty_group.finish().unwrap();
 		empty_track
 			.finish_at(track::Position { group: 3000, frame: 3 })
@@ -24224,7 +24224,7 @@ mod compression_tests {
 			"video",
 			track::Info::timed().with_timescale(Timescale::MILLI),
 		);
-		let mut cap_group = cap_track.append_group(Timestamp::from_millis(4000).unwrap()).unwrap();
+		let mut cap_group = cap_track.append_empty(Timestamp::from_millis(4000).unwrap()).unwrap();
 		cap_group
 			.write_frame(Timestamp::from_millis(4000).unwrap(), b"a".as_slice())
 			.unwrap();

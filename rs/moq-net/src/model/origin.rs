@@ -9632,7 +9632,7 @@ mod tests {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let broadcast = Arc::new(broadcast::Info::default());
 			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
-			let mut group = source.create_group(7u64.into()).unwrap();
+			let mut group = source.create_empty(7u64.into()).unwrap();
 			group.write_frame(group.key_time(), b"snapshot".as_ref()).unwrap();
 			group.finish().unwrap();
 			let source = source.finish().unwrap();
@@ -10501,7 +10501,7 @@ mod tests {
 
 		let mut subscriber = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let bill = subscriber.bill();
-		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut group = track.append_empty(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"dropped".as_ref()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"sent".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -10554,7 +10554,7 @@ mod tests {
 				.sum()
 		};
 
-		let mut live = track.create_group(crate::group::Info { start: 1 }).unwrap();
+		let mut live = track.create_empty(crate::group::Info { start: 1 }).unwrap();
 		live.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 			.unwrap();
 		live.finish().unwrap();
@@ -12980,7 +12980,7 @@ mod tests {
 			.expect("the front asked the source")
 			.expect("request");
 		let source = request.request_start(None).accept(crate::track::Info::timed());
-		let mut group = source.create_group(0u64.into()).unwrap();
+		let mut group = source.create_empty(0u64.into()).unwrap();
 		group.write_frame(group.key_time(), b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
 		let source = source.finish().unwrap();
@@ -13355,7 +13355,7 @@ mod tests {
 			.await
 			.unwrap()
 			.accept(crate::track::Info::timed());
-		let mut group = source.create_group(0u64.into()).unwrap();
+		let mut group = source.create_empty(0u64.into()).unwrap();
 		group.write_frame(group.key_time(), b"a".as_ref()).unwrap();
 		group.write_frame(group.key_time(), b"b".as_ref()).unwrap();
 		let mut subscription = subscribing.await.unwrap().unwrap();
@@ -13414,7 +13414,7 @@ mod tests {
 		});
 		let mut next = request.request_start(None).accept(crate::track::Info::timed());
 		next.start_at(0).unwrap();
-		let mut next_group = next.create_group(0u64.into()).unwrap();
+		let mut next_group = next.create_empty(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();
 		next_group.write_frame(next_group.key_time(), b"c".as_ref()).unwrap();
 		assert_eq!(read(&mut reading).await, b"c", "dies_first={dies_first}");
@@ -13533,7 +13533,7 @@ mod tests {
 
 		// A fresh source copy numbers groups past what the cache already delivered.
 		let source = request.accept(crate::track::Info::timed());
-		let mut group = source.create_group(1u64.into()).unwrap();
+		let mut group = source.create_empty(1u64.into()).unwrap();
 		group.write_frame(group.key_time(), b"late".as_ref()).unwrap();
 		group.finish().unwrap();
 		let _source = source.finish().unwrap();
@@ -16665,7 +16665,7 @@ mod tests {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 		let mut group = rig
 			.incumbent_track
-			.create_group(crate::group::Info { start: 5 })
+			.create_empty(crate::group::Info { start: 5 })
 			.unwrap();
 		group.write_frame(group.key_time(), b"five".as_ref()).unwrap();
 		group.finish().unwrap();

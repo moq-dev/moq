@@ -2137,7 +2137,7 @@ impl Producer {
 	/// way. Where the group begins is part of its shape, so this must come before the
 	/// first frame; afterwards it returns [`Error::Closed`]. A second call may raise the
 	/// start but not lower it, since the frame log's first index never moves back.
-	pub fn start_at(&mut self, index: u64) -> Result<()> {
+	pub(crate) fn start_at(&mut self, index: u64) -> Result<()> {
 		let index = usize::try_from(index).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		if index == usize::MAX {
 			return Err(Error::BoundsExceeded(crate::coding::BoundsExceeded));
@@ -6844,7 +6844,7 @@ mod test {
 			track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let groups: Vec<_> = (0..3)
 			.map(|key| {
-				let mut group = track.create_group(Info { start: key }).unwrap();
+				let mut group = track.create_empty(Info { start: key }).unwrap();
 				group.write_frame(group.key_time(), b"f".as_ref()).unwrap();
 				group.finish().unwrap()
 			})
@@ -7841,7 +7841,7 @@ mod test {
 			.create_track("test", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		let live = track.create_group(Info { start: 0 }).unwrap();
+		let live = track.create_empty(Info { start: 0 }).unwrap();
 
 		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		assert_eq!(alone.consume().arrived(), start);

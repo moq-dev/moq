@@ -224,7 +224,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_next().ok()?;
-			let clock = lite::Clock::new(version, producer.start);
+			let clock = lite::Clock::new(version, producer.start, frame_start);
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
@@ -242,7 +242,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
-			let producer = track.create_group(group::Info { start: header.group_id }).ok()?;
+			let producer = track.create_empty(group::Info { start: header.group_id }).ok()?;
 			producer
 				.set_wire(group::Wire {
 					sparse: false,

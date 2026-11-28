@@ -865,7 +865,7 @@ mod hop_tests {
 			info.properties = track_properties.clone();
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_empty(group::Info { start: 0 }).unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -1117,7 +1117,7 @@ mod hop_tests {
 			.broadcast()
 			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
 			.unwrap();
-		let mut first = track.create_group(0u64.into()).unwrap();
+		let mut first = track.create_empty(0u64.into()).unwrap();
 		first.write_frame(ts(5), b"key".to_vec()).unwrap();
 		first.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		first.finish().unwrap();
@@ -1155,7 +1155,7 @@ mod hop_tests {
 				..track::Info::timed()
 			};
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
-			let mut head = track.create_group(0u64.into()).unwrap();
+			let mut head = track.create_empty(0u64.into()).unwrap();
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
@@ -1198,7 +1198,7 @@ mod hop_tests {
 					.await
 					.unwrap()
 					.unwrap();
-			let mut group = track.create_group(1u64.into()).unwrap();
+			let mut group = track.create_empty(1u64.into()).unwrap();
 			group.write_frame(ts(150), b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
@@ -1208,7 +1208,7 @@ mod hop_tests {
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
 			// Provenance exempts nothing from the rewind check.
-			let mut rewound = track.create_group(2u64.into()).unwrap();
+			let mut rewound = track.create_empty(2u64.into()).unwrap();
 			assert!(matches!(
 				rewound.write_frame(ts(50), b"frame".to_vec()),
 				Err(crate::Error::TimestampMismatch)

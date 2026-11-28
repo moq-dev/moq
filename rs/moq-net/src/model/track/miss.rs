@@ -2344,7 +2344,7 @@ mod tests {
 			track.received();
 			for key in [0, 2] {
 				track
-					.create_group(crate::group::Info { start: key })
+					.create_empty(crate::group::Info { start: key })
 					.unwrap()
 					.finish()
 					.unwrap();
@@ -2405,7 +2405,7 @@ mod tests {
 		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in [4, 0] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2461,7 +2461,7 @@ mod tests {
 		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in [4, 0] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2515,7 +2515,7 @@ mod tests {
 		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in [4, 0] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2578,7 +2578,7 @@ mod tests {
 		// may answer.
 		for key in [4, 0] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2626,7 +2626,7 @@ mod tests {
 		// An arrival and cut happen while the cursor is idle. The drop suppresses asking
 		// again, and reclaiming the cut removes the cached incarnation before the probe.
 		track
-			.create_group(crate::group::Info { start: 2 })
+			.create_empty(crate::group::Info { start: 2 })
 			.unwrap()
 			.abort(Error::Cancel)
 			.unwrap();
@@ -2651,7 +2651,7 @@ mod tests {
 		let revision = state.arrivals.changes().revision();
 		drop(state);
 		track
-			.create_group(crate::group::Info { start: 2 })
+			.create_empty(crate::group::Info { start: 2 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -2721,7 +2721,7 @@ mod tests {
 		// may answer.
 		for key in [4, 0] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2766,7 +2766,7 @@ mod tests {
 		// The live feed accounts for group 2 but aborts it without a cut, so its slot is
 		// still a hole: the refusal stands and the hole is given up, not asked again.
 		track
-			.create_group(crate::group::Info { start: 2 })
+			.create_empty(crate::group::Info { start: 2 })
 			.unwrap()
 			.abort(Error::Cancel)
 			.unwrap();
@@ -2807,7 +2807,7 @@ mod tests {
 		// may answer.
 		for key in [4, 0] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2846,7 +2846,7 @@ mod tests {
 
 		// Group 2 arrives whole and the pool evicts it before this reader judges again.
 		track
-			.create_group(crate::group::Info { start: 2 })
+			.create_empty(crate::group::Info { start: 2 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -2907,7 +2907,7 @@ mod tests {
 		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in [0, 2, 4] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -2958,7 +2958,7 @@ mod tests {
 		);
 		drop(state);
 		track
-			.create_group(crate::group::Info { start: 1 })
+			.create_empty(crate::group::Info { start: 1 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -3019,7 +3019,7 @@ mod tests {
 		let _reader = track.subscribe(Subscription::default().with_max(budget));
 		for key in 0..3 {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -3077,7 +3077,7 @@ mod tests {
 		drop(state);
 
 		track
-			.create_group(crate::group::Info { start: 4 })
+			.create_empty(crate::group::Info { start: 4 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -3218,7 +3218,7 @@ mod tests {
 				let key = next(KEYS);
 				match next(6) {
 					0..=2 => {
-						if let Ok(mut group) = track.create_group(crate::group::Info { start: key }) {
+						if let Ok(mut group) = track.create_empty(crate::group::Info { start: key }) {
 							if next(4) > 0 {
 								group
 									.write_frame(at(key * 20), bytes::Bytes::from_static(b"x"))
@@ -3308,7 +3308,7 @@ mod tests {
 			let keys: Vec<_> = (0..KEYS).filter(|_| next(3) > 0).collect();
 			for &key in keys.iter().rev() {
 				track
-					.create_group(crate::group::Info { start: key })
+					.create_empty(crate::group::Info { start: key })
 					.unwrap()
 					.finish()
 					.unwrap();
@@ -3413,7 +3413,7 @@ mod tests {
 		// Every range starts at a group held, so each knows where it starts without a lookup.
 		for key in [0, 3, 6, 9, 12] {
 			track
-				.create_group(crate::group::Info { start: key })
+				.create_empty(crate::group::Info { start: key })
 				.unwrap()
 				.finish()
 				.unwrap();
@@ -3490,7 +3490,7 @@ mod tests {
 		let requests = track.requests();
 		track.start_at(8).unwrap();
 		track
-			.create_group(crate::group::Info { start: 8 })
+			.create_empty(crate::group::Info { start: 8 })
 			.unwrap()
 			.finish()
 			.unwrap();
