@@ -1017,6 +1017,7 @@ max_streams = 64
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
+		refuse("[stats]\nenabled = true\nprefix = \".stats*\"\n", "invalid stats.prefix");
 		refuse("[stats]\nroots = true\n", "--stats-roots requires --stats-enabled");
 		resolve("[stats]\nenabled = true\nroots = true\n");
 

@@ -134,6 +134,8 @@ impl Config {
 			anyhow::ensure!(!self.roots, "--stats-roots requires --stats-enabled");
 			return Ok(());
 		}
+		// Stats exclude their own reads by prefix, and a prefix refuses `*`.
+		self.prefix.parse::<moq_net::Prefix>().context("invalid stats.prefix")?;
 		// A malformed node was set, so it gets its own error rather than the missing-flag one.
 		let node = self
 			.node

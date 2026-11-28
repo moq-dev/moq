@@ -33,7 +33,7 @@ pub struct Config {
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
 	/// `node` is unset), announced under a fresh [`Identity`](moq_net::Identity) each time. Also the
 	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
-	/// more stats.
+	/// more stats; [`Producer::new`] panics if it holds a `*`, which a prefix refuses.
 	pub prefix: Path,
 	/// Node suffix that disambiguates broadcasts from different relays sharing a
 	/// cluster origin. Set this on every node in multi-relay deployments. May be
