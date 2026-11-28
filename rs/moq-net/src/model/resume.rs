@@ -3628,7 +3628,7 @@ impl Reader {
 		if floor >= key {
 			return Vec::new();
 		}
-		sub.reaching_drops_for(key, floor, bound, record)
+		sub.reaching_drops_for(key, floor, bound, record, true)
 	}
 
 	/// Forget `run` as queued, received or not.

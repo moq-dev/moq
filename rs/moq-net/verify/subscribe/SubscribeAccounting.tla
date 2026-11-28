@@ -263,13 +263,14 @@ PubOutcomes ==
           /\ ndrop' = Named(ndrop, {g})
     /\ UNCHANGED <<cur, late, ends, folded, nskip, streams, subVars>>
 
-\* The pool hands the reader debt and its record folds the start into its floor: one the
-\* cursor reached a verdict on, once no failed stream of it is still to name. Every
-\* report is final, so the fold forgets which.
+\* The pool hands the reader debt and its record folds the start into its floor: for a
+\* wire/drop reader (`Fold::Debt if reader.drops`), only handed-out or reported keys fold;
+\* unreported cursor verdicts are forgotten without settling so a later lowered start or
+\* wider budget still reports or asks for them.
 PubFold(g) ==
     /\ Pressure
     /\ g \notin folded
-    /\ cur[g] # "pending"
+    /\ (g \in served \/ cur[g] = "handed")
     /\ \A i \in 1..Len(outq) : outq[i][1] # g
     /\ folded' = folded \cup {g}
     /\ UNCHANGED <<cur, late, ends, served, outq, names, streams, resp, subVars>>

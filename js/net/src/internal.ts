@@ -1368,6 +1368,7 @@ export const hooks: {
 		floor: bigint,
 		bound: number | undefined,
 		untold?: (start: bigint, end: bigint) => Run[],
+		allow?: (drop: DropRun) => boolean,
 	) => DropRun[];
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the

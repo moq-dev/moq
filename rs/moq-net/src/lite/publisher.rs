@@ -6748,6 +6748,9 @@ impl TrackRun {
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "shedding a group ranked below one waiting for credit");
 						self.mark_served(key..key + 1);
 						self.shed(&group);
+						if matches!(self.start, Start::Resolved(start) if key < start) {
+							self.name_reaching(key, writer)?;
+						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					match &mut self.start {
@@ -12281,12 +12284,17 @@ mod serve_group_test {
 		let start = run.start.resolved().expect("resolved");
 
 		// Shrink the pool and write more groups/gaps above `start` so the reader pays debt and
-		// runs `Record::fold` while `Misses` holds adopted drops below `start`.
+		// runs `Record::fold` while `Misses` holds adopted drops below `start`. Sustained debt
+		// must not trigger fill churn for unowed keys below `start`.
 		pool.resize(1);
 		for key in (1000..1120).step_by(20) {
 			write_group(&mut track, key, key);
 			track.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert!(
+				dynamic.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
+				"sustained debt must not re-ask fills below start"
+			);
 		}
 
 		// Lower the start over the history below `start`. Even if pool pressure also shed
@@ -12381,6 +12389,49 @@ mod serve_group_test {
 		widened.sort();
 		let reaching: Vec<_> = (served..start).step_by(20).map(|key| (key - 19, key - 1)).collect();
 		assert_eq!(widened, reaching, "reaching drops survive logical record debt fold");
+	}
+
+	/// On a front, a budget widening serving a cached group below `start` must not emit a
+	/// retryable route failure (such as UNROUTABLE) as a final reaching drop, and must stop the
+	/// contiguous walk there.
+	#[kio::test]
+	async fn a_widened_budget_stops_reaching_drops_at_retryable_route_error() {
+		let version = Version::Lite06;
+		let mut front = track::Routed::new("test", crate::track::Info::timed());
+		for key in (0..1000).step_by(20) {
+			write_group(&mut front.copy, key, key);
+			front.copy.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+		}
+		// Mark the gap directly below group 860 as UNROUTABLE (with a NotFound run below it).
+		front.copy.drop_groups(850..860, crate::StreamError::Unroutable);
+		let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+		let subscriber = front
+			.logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.expect("an accepted logical track answers at once")
+			.unwrap();
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let start = run.start.resolved().expect("resolved");
+		assert_eq!(start, 880);
+
+		let named = drops(&mut writer, &log, version).await.len();
+		run.replace(lite::SubscribeUpdate {
+			wanted_group: None,
+			order: crate::track::Order::Descending,
+			priority: 1,
+			max_delay: Some(Duration::from_millis(120)),
+			ranges: vec![lite::Range::span(None, 0, None, None)],
+		});
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let widened = drops(&mut writer, &log, version).await.split_off(named);
+		assert_eq!(
+			widened,
+			Vec::<(u64, u64)>::new(),
+			"retryable UNROUTABLE below 860 is not forwarded and stops the contiguous walk"
+		);
 	}
 
 	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,

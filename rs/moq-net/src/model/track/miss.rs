@@ -125,6 +125,13 @@ pub(super) struct Misses {
 	unknown_at: Option<(u64, Budget, super::Coverage)>,
 	/// The [`Forgotten`] revision this reader judged again up to.
 	forgotten: u64,
+	/// Bounding span of untold verdicts forgotten under cache debt, held in O(1) memory without
+	/// clearing `judged` or `at`, and invalidated only when a lowered start, wider owed-drop
+	/// set, or wider budget makes those keys relevant again.
+	forgotten_debt: Option<ops::Range<u64>>,
+	/// The reader's budget when [`Self::forgotten_debt`] was recorded, so only a widening past
+	/// it re-judges those keys.
+	forgotten_budget: Option<Budget>,
 }
 
 /// A stale verdict a reader holds: the budget it was judged under, and whose judgement it is.
@@ -1816,6 +1823,12 @@ impl Misses {
 		for (run, gone) in state.drops.overlapping(&hole) {
 			let run = run.start.max(hole.start)..run.end.min(hole.end);
 			if !run.is_empty() && drift.settles(run.start, gone) {
+				if *gone == Hole::Skip {
+					self.given_up.insert(run.clone());
+					self.skipped.insert(run.clone());
+					self.stale.remove(run);
+					continue;
+				}
 				let stale = gone.stale_budget().map(|budget| Stale {
 					budget,
 					adopted: Some(gone.stale_cap()),
@@ -1846,6 +1859,17 @@ impl Misses {
 	/// rests on, such as the cap the upstream judged it within.
 	pub fn retake(&mut self, drift: &Drift) -> RangeSet<u64> {
 		let mut taken = self.widen(&drift.budget);
+		if let Some(debt) = self.forgotten_debt.as_ref()
+			&& self.forgotten_budget.as_ref().is_none_or(|prev| {
+				prev.runs(debt.clone())
+					.into_iter()
+					.any(|(run, old)| drift.budget.runs(run).into_iter().any(|(_, now)| now > old))
+			}) {
+			let debt = self.forgotten_debt.take().expect("checked above");
+			self.forgotten_budget = None;
+			self.judged.remove(debt);
+			self.at = None;
+		}
 		if self
 			.adopted_under
 			.as_ref()
@@ -1980,6 +2004,33 @@ impl Misses {
 		self.judged.remove(run);
 		// The next probe judges under new terms, which looks at every key it has not judged.
 		self.at = None;
+	}
+
+	/// Invalidate any debt-forgotten verdicts overlapping `span` so the next probe re-judges
+	/// them once a lowered start or newly owed range makes them relevant again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn reopen_forgotten(&mut self, span: ops::Range<u64>) {
+		let Some(debt) = self.forgotten_debt.clone() else {
+			return;
+		};
+		let hit = debt.start.max(span.start)..debt.end.min(span.end);
+		if hit.is_empty() {
+			return;
+		}
+		self.judged.remove(hit.clone());
+		self.at = None;
+		self.forgotten_debt = if hit.start <= debt.start && hit.end >= debt.end {
+			None
+		} else if hit.start <= debt.start {
+			Some(hit.end..debt.end)
+		} else if hit.end >= debt.end {
+			Some(debt.start..hit.start)
+		} else {
+			Some(debt)
+		};
+		if self.forgotten_debt.is_none() {
+			self.forgotten_budget = None;
+		}
 	}
 }
 
@@ -2382,25 +2433,54 @@ impl super::super::record::Beside for Misses {
 		}
 	}
 
-	fn reopen(&mut self, untold: ops::Range<u64>) -> bool {
-		if untold.is_empty() {
-			return false;
+	fn forget_untold(
+		&mut self,
+		floor: u64,
+		reported: &RangeMap<u64, super::super::record::Report>,
+		pending: &RangeMap<u64, super::super::record::Pending>,
+	) {
+		if self.given_up.is_empty() {
+			return;
 		}
-		let runs: Vec<_> = (self.given_up.overlapping(&untold))
-			.map(|run| run.start.max(untold.start)..run.end.min(untold.end))
-			.collect();
-		if runs.is_empty() {
-			return false;
+		let mut cleared = Vec::new();
+		for run in self.given_up.overlapping(&(floor..u64::MAX)) {
+			let run = run.start.max(floor)..run.end;
+			if run.is_empty() {
+				continue;
+			}
+			let mut untold = RangeSet::new();
+			untold.insert(run.clone());
+			for kept in reported
+				.overlapping(&run)
+				.map(|(kept, _)| kept)
+				.chain(pending.overlapping(&run).map(|(kept, _)| kept))
+			{
+				let part = kept.start.max(run.start)..kept.end.min(run.end);
+				if !part.is_empty() {
+					untold.remove(part);
+				}
+			}
+			cleared.extend(untold);
 		}
-		for run in runs {
+		if cleared.is_empty() {
+			return;
+		}
+		for run in cleared {
 			self.given_up.remove(run.clone());
 			self.skipped.remove(run.clone());
 			self.stale.remove(run.clone());
-			self.judged.remove(run);
+			self.forgotten_debt = Some(match self.forgotten_debt.take() {
+				Some(prev) => prev.start.min(run.start)..prev.end.max(run.end),
+				None => run,
+			});
 		}
 		self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
-		self.at = None;
-		true
+		if !self.stale.iter().any(|(_, verdict)| verdict.adopted.is_some()) {
+			self.adopted_under = None;
+		}
+		if self.forgotten_budget.is_none() {
+			self.forgotten_budget = self.budget.clone();
+		}
 	}
 }
 

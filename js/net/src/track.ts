@@ -5525,8 +5525,8 @@ export class Subscriber {
 			subscriber.#resume?.untell(start, end);
 		};
 		hooks.setDropOwed = (subscriber, owed) => subscriber.#setDropOwed(owed);
-		hooks.reachingDrops = (subscriber, key, floor, bound, untold) =>
-			subscriber.#reachingDrops(key, floor, bound, untold);
+		hooks.reachingDrops = (subscriber, key, floor, bound, untold, allow) =>
+			subscriber.#reachingDrops(key, floor, bound, untold, allow);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
@@ -6271,6 +6271,13 @@ export class Subscriber {
 
 	#setDropOwed(owed: Run[]): void {
 		if (this.#resume) {
+			this.#pending = this.#pending.flatMap((run) =>
+				owed.flatMap((allowed) => {
+					const start = max(run.start, allowed.start);
+					const end = min(run.end, allowed.end);
+					return start < end ? [{ ...run, start, end }] : [];
+				}),
+			);
 			this.#resume.setDropOwed(owed);
 			return;
 		}
@@ -6284,11 +6291,15 @@ export class Subscriber {
 		this.#dropOwedRev++;
 	}
 
+	// Contiguous final drops immediately below `key` that `untold` says have not gone out yet.
+	// JS checks `drops` and `refused` directly (unlike Rust, JS has no separate per-reader miss
+	// ledger or cut-slot verdicts).
 	#reachingDrops(
 		key: bigint,
 		floor: bigint,
 		bound: number | undefined,
 		untold?: (start: bigint, end: bigint) => Run[],
+		allow?: (drop: DropRun) => boolean,
 	): DropRun[] {
 		const checkUntold =
 			untold ??
@@ -6305,6 +6316,7 @@ export class Subscriber {
 			if (checkUntold(prev, reach).length === 0 || !this.#window.contains(prev)) break;
 			const drop = drops.at(prev) ?? refusedRuns.find((run) => prev >= run.start && prev < run.end);
 			if (!drop) break;
+			if (allow && !allow(drop)) break;
 			if (drop.stale !== undefined && (bound === undefined || drop.stale < bound)) break;
 			let start = max(drop.start, minKey);
 			const open = checkUntold(start, reach);

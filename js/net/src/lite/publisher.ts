@@ -2687,7 +2687,10 @@ export class Publisher {
 					// Group Start is the latest group, and this key becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
-					if (!(await resolveStart(startKey, largest))) return false;
+					if (!(await resolveStart(startKey, largest))) {
+						group.close();
+						return false;
+					}
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
 				streaming.add(group.start);
@@ -2696,8 +2699,18 @@ export class Publisher {
 				// `TrackRun::name_reaching`.
 				if (startKey !== undefined && group.start < startKey) {
 					const bound = hasRanges(this.version) ? (serving.maxAge ?? Number.POSITIVE_INFINITY) : undefined;
-					for (const run of hooks.reachingDrops(track, group.start, floor, bound)) {
-						if (!(await forward(run.start, run.end, run))) return false;
+					try {
+						for (const run of hooks.reachingDrops(track, group.start, floor, bound)) {
+							if (!(await forward(run.start, run.end, run))) {
+								streaming.delete(group.start);
+								group.close();
+								return false;
+							}
+						}
+					} catch (err) {
+						streaming.delete(group.start);
+						group.close();
+						throw err;
 					}
 				}
 

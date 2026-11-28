@@ -11077,7 +11077,8 @@ impl Cursor {
 	}
 
 	/// The contiguous final drops below `key`, at or above `floor`, that `record` has not
-	/// reported yet, in ascending key order.
+	/// reported yet, in ascending key order. When `skip_retryable` is set (on a front), the
+	/// walk stops at any retryable route failure because another route may still deliver it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn reaching_drops(
 		&self,
@@ -11085,6 +11086,7 @@ impl Cursor {
 		floor: u64,
 		bound: Option<Duration>,
 		record: &Record,
+		skip_retryable: bool,
 	) -> Vec<(ops::Range<u64>, Hole)> {
 		let floor = floor.max(self.floor());
 		let state = self.state.read();
@@ -11114,6 +11116,9 @@ impl Cursor {
 			let Some((mut run, hole)) = next else {
 				break;
 			};
+			if skip_retryable && Error::Stream(hole.error()).retryable() {
+				break;
+			}
 			let Some(untold) = record.untold(run.clone()).iter().next_back().cloned() else {
 				break;
 			};
@@ -11144,13 +11149,16 @@ impl Cursor {
 		let walks = (self.filter.revision, self.fill_view());
 		self.sync();
 		if self.drops.is_none() {
-			self.drops = Some(Box::new(DropCursor::new(&self.state.read())));
+			let state = self.state.read();
+			self.drops = Some(Box::new(DropCursor::new(&state)));
 			// Seed pending before probing: an ordered read may already have advanced `next_key`
 			// past misses it gave up before drops were first polled, and `probe` clips `misses`
-			// below `next_key`.
+			// below `next_key`. Check stale verdicts against the current clamped budget so a
+			// widening before the first drop poll does not emit an obsolete stale verdict.
 			if let Some(misses) = &self.misses {
+				let budget = self.filter.window.budget().clamped(state.max_age_bound());
 				for part in DropCursor::owed_spans(&(0..u64::MAX), self.drop_owed.as_deref()) {
-					misses.fold_given_up(&part, None, |run, hole| {
+					misses.fold_given_up(&part, Some(&budget), |run, hole| {
 						DropCursor::give_up(&mut self.record, run, hole);
 					});
 				}
@@ -13738,6 +13746,15 @@ impl Subscriber {
 				if cursor.drop_owed.as_deref() == Some(&*owed) {
 					return;
 				}
+				if let Some(misses) = cursor.misses.as_deref_mut()
+					&& let Some(prev) = cursor.drop_owed.as_deref()
+				{
+					for run in owed.iter() {
+						for gain in prev.gaps(run) {
+							misses.reopen_forgotten(gain);
+						}
+					}
+				}
 				cursor.drop_owed = Some(owed);
 				cursor.drop_owed_rev = cursor.drop_owed_rev.wrapping_add(1);
 			}
@@ -13755,7 +13772,7 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reaching_drops(&self, key: u64, floor: u64, bound: Option<Duration>) -> Vec<(ops::Range<u64>, Hole)> {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.reaching_drops(key, floor, bound, &cursor.record),
+			Inner::Plain(cursor) => cursor.reaching_drops(key, floor, bound, &cursor.record, false),
 			Inner::Resume(resume, logical) => resume.reaching_drops(key, floor, bound, &logical.record),
 		}
 	}
@@ -13768,9 +13785,10 @@ impl Subscriber {
 		floor: u64,
 		bound: Option<Duration>,
 		record: &Record,
+		skip_retryable: bool,
 	) -> Vec<(ops::Range<u64>, Hole)> {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.reaching_drops(key, floor, bound, record),
+			Inner::Plain(cursor) => cursor.reaching_drops(key, floor, bound, record, skip_retryable),
 			Inner::Resume(resume, _) => resume.reaching_drops(key, floor, bound, record),
 		}
 	}
@@ -14519,6 +14537,11 @@ impl Subscriber {
 		let (start, end) = super::subscription::key_bounds(groups);
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
+				if start < cursor.min_key
+					&& let Some(misses) = cursor.misses.as_deref_mut()
+				{
+					misses.reopen_forgotten(start..cursor.min_key);
+				}
 				cursor.min_key = start;
 				cursor.end_key = end;
 				cursor.update_servable();
@@ -37119,6 +37142,62 @@ mod test {
 			};
 			assert_eq!((fill.start().group, fill.end()), (0, 3));
 		}
+	}
+
+	/// An adopted upstream `Hole::Skip` shed from `state.drops` before `DropCursor` reports it
+	/// is reconstructed as `Hole::Skip` rather than downgraded to `NotFound`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_shed_adopted_skip_is_reconstructed_as_skip() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.start_at(0).unwrap();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		producer.skip_received(2..4);
+		write_group(&producer, 4);
+		let mut subscriber = producer.subscribe(replay());
+		let waiter = kio::Waiter::noop();
+		// Probe so `misses.adopt_drops` adopts `2..4` as `Hole::Skip`.
+		assert_eq!(drain_groups(&mut subscriber), [4, 0]);
+		// First `poll_drop` reports `1..2` and leaves `2..4` queued in `record.pending`.
+		assert_eq!(
+			subscriber.poll_drop(&waiter),
+			Poll::Ready((1..2, Hole::drop(StreamError::NotFound)))
+		);
+		// Shed `2..4` from `state.drops` before the next `poll_drop`.
+		producer.state.write().ok().expect("open").forget_drops(2..4);
+		assert_eq!(
+			subscriber.poll_drop(&waiter),
+			Poll::Ready((2..4, Hole::Skip)),
+			"adopted skip survives drop-set shedding"
+		);
+	}
+
+	/// Widening a cursor's budget before its first `poll_drop` must not seed an obsolete stale
+	/// verdict judged under the narrower budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widening_before_first_drop_poll_does_not_seed_narrow_stale() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let narrow = within(Duration::from_millis(100), None);
+		let mut subscriber = producer.subscribe(narrow.clone());
+		producer.start_at(2).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_next_group(&waiter).is_pending());
+		let Poll::Ready(Ok(_fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		elapse(&producer, Duration::from_millis(200));
+		assert!(matches!(subscriber.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
+		// Widen before calling `poll_drop` for the first time.
+		subscriber.update(narrow.with_max(Duration::from_secs(60))).unwrap();
+		assert!(
+			subscriber.poll_drop(&waiter).is_pending(),
+			"the obsolete 100 ms stale verdict must not be seeded under the 60 s budget"
+		);
 	}
 
 	/// A fill's OLD answer under the publisher's max age binds every reader, so the track holds

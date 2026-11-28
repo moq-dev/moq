@@ -191,13 +191,11 @@ pub(super) trait Beside {
 	fn next_held(&self, key: u64) -> Option<u64>;
 	/// Forget every run within `folded`, which the record folded as settled or forgot.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
-	/// Reopen every given-up run within `untold`, which debt forgot without settling because
-	/// the wire was never told of it, so a later read judges it afresh. Returns whether any
-	/// run was reopened.
-	fn reopen(&mut self, untold: std::ops::Range<u64>) -> bool {
-		self.forget(untold);
-		false
-	}
+	/// Forget every given-up run above `floor` not covered by `reported` or `pending`, paying
+	/// cache debt without settling untold keys or forcing an immediate re-probe. The reader
+	/// remembers only a bounded span to re-judge once a lowered start or wider budget makes
+	/// those keys relevant again.
+	fn forget_untold(&mut self, _floor: u64, _reported: &RangeMap<u64, Report>, _pending: &RangeMap<u64, Pending>) {}
 }
 
 impl Beside for () {
@@ -298,19 +296,11 @@ impl Record {
 			return;
 		}
 		let mut folded = Vec::new();
-		let mut reopened = Vec::new();
 		if moved {
 			folded.extend(self.retire(&reader, &*beside));
 		}
 		if owed {
-			let (settled, untold) = self.fold(&reader, &*beside);
-			folded.extend(settled);
-			reopened.extend(untold);
-		}
-		for untold in reopened {
-			if beside.reopen(untold) {
-				self.rescan = true;
-			}
+			folded.extend(self.fold(&reader, beside));
 		}
 		for folded in folded {
 			beside.forget(folded);
@@ -399,8 +389,9 @@ impl Record {
 	/// and the keys nothing settled.
 	///
 	/// On a drop-tracking reader (`reader.drops`), only handed-out groups and [`Self::reported`]
-	/// were told to the consumer: unreported skips and `beside` verdicts are reopened instead of
-	/// settled, so debt never marks an untold key as reported.
+	/// were told to the consumer: unreported skips and `beside` verdicts are forgotten under
+	/// debt without settling them into [`Self::floor`], and without forcing an immediate
+	/// re-probe, so debt never marks an untold key as reported or churns fills below the start.
 	///
 	/// A reader that started above its floor, as at a sparse-key track's live edge or its
 	/// oldest group, never settles the keys below its start, so each final stretch from its
@@ -408,15 +399,9 @@ impl Record {
 	/// or the lowest key it settled when they name none or less. The keys below stay owed,
 	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
 	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
-	/// ask allowance bounds in turn. Returns the runs it folded, and the unreported spans for
-	/// `beside` to reopen.
-	fn fold(
-		&mut self,
-		reader: &Standing,
-		beside: &dyn Beside,
-	) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
+	/// ask allowance bounds in turn. Returns the runs it folded.
+	fn fold(&mut self, reader: &Standing, beside: &mut dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
-		let mut reopened = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -433,26 +418,19 @@ impl Record {
 		}
 		// On a drop-tracking reader, debt forgets unreported skips and miss verdicts instead of
 		// settling them into `floor` or `reported`: their wire was never told, so a later
-		// lowered start still scans the track or asks upstream for them.
+		// lowered start or wider budget still scans the track or asks upstream for them.
+		// Walks only the non-empty skip/miss sets rather than `reported` or `pending`, so
+		// sustained debt costs O(1) once they are clear.
 		if reader.drops {
-			let mut kept = RangeSet::new();
-			for (run, _) in self.reported.iter() {
-				if run.end > self.floor {
-					kept.insert(run.start.max(self.floor)..run.end);
-				}
+			if !self.skipped.is_empty() {
+				self.skipped.forget(self.floor..u64::MAX);
 			}
-			for (run, _) in self.pending.iter() {
-				if run.end > self.floor {
-					kept.insert(run.start.max(self.floor)..run.end);
-				}
+			if !self.written_off.is_empty() {
+				self.written_off.clear();
 			}
-			for gap in kept.gaps(&(self.floor..u64::MAX)) {
-				self.skipped.forget(gap.clone());
-				self.written_off.remove(gap.clone());
-				reopened.push(gap);
-			}
+			beside.forget_untold(self.floor, &self.reported, &self.pending);
 		}
-		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
+		let floor = self.final_end(self.floor, reader, &*beside, Fold::Debt).end;
 		if floor > self.floor {
 			self.raise(floor);
 			folded.push(0..floor);
@@ -460,14 +438,14 @@ impl Record {
 		let mut from = Some(reader.from.max(self.lowest_settled().unwrap_or(0))).filter(|from| *from > self.floor);
 		while let Some(start) = from {
 			// Folded, a stretch costs two runs: only one spanning more is worth it.
-			let stretch = self.final_end(start, reader, beside, Fold::Debt);
+			let stretch = self.final_end(start, reader, &*beside, Fold::Debt);
 			if stretch.runs > 2 {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
 			from = self.next_told(stretch.end.max(start + 1));
 		}
-		(folded, reopened)
+		folded
 	}
 
 	/// Settle everything below `floor` for good.
@@ -681,20 +659,33 @@ mod test {
 			fn forget(&mut self, folded: Range<u64>) {
 				self.runs.remove(folded);
 			}
-			fn reopen(&mut self, untold: Range<u64>) -> bool {
-				let found: Vec<_> = self
-					.runs
-					.overlapping(&untold)
-					.map(|run| run.start.max(untold.start)..run.end.min(untold.end))
-					.collect();
-				if found.is_empty() {
-					return false;
+			fn forget_untold(
+				&mut self,
+				floor: u64,
+				reported: &RangeMap<u64, Report>,
+				pending: &RangeMap<u64, Pending>,
+			) {
+				let mut cleared = Vec::new();
+				for run in self.runs.overlapping(&(floor..u64::MAX)) {
+					let run = run.start.max(floor)..run.end;
+					let mut untold = RangeSet::new();
+					untold.insert(run.clone());
+					for kept in reported
+						.overlapping(&run)
+						.map(|(kept, _)| kept)
+						.chain(pending.overlapping(&run).map(|(kept, _)| kept))
+					{
+						let part = kept.start.max(run.start)..kept.end.min(run.end);
+						if !part.is_empty() {
+							untold.remove(part);
+						}
+					}
+					cleared.extend(untold);
 				}
-				for run in &found {
+				for run in &cleared {
 					self.runs.remove(run.clone());
 				}
-				self.reopened.extend(found);
-				true
+				self.reopened.extend(cleared);
 			}
 		}
 		let (pool, track) = account();
@@ -717,9 +708,12 @@ mod test {
 		record.settle(|| track.clone(), &mut beside, standing.clone());
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut beside, standing);
-		assert_eq!(beside.runs.len(), 0, "unreported miss verdicts were reopened");
+		assert_eq!(beside.runs.len(), 0, "unreported miss verdicts were forgotten");
 		assert_eq!(beside.reopened, vec![1..5]);
-		assert!(record.rescan, "reopening a miss verdict asks for a rescan");
+		assert!(
+			!record.rescan,
+			"forgetting untold verdicts without pending received drops triggers no rescan"
+		);
 		assert!(
 			!record.told(0) && !record.told(1) && !record.told(4),
 			"untold prefix stays untold"

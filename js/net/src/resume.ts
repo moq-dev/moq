@@ -2334,7 +2334,7 @@ class Reader implements ResumeSource {
 			if (start < key && end > minKey) minKey = max(minKey, min(end, key));
 		}
 		if (minKey >= key) return [];
-		return hooks.reachingDrops(serving.sub, key, minKey, bound, untold);
+		return hooks.reachingDrops(serving.sub, key, minKey, bound, untold, (drop) => !routeFailed(drop.error));
 	}
 
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
