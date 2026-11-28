@@ -1,11 +1,12 @@
 import { race } from "@moq/signals";
-import { FrameTooLarge, StreamCode, StreamError } from "../error.ts";
+import { error, FrameTooLarge, StreamCode, StreamError } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
 import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
+import { isDecodeError } from "../util/decode_error.ts";
 import { RESERVED } from "../util/key.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
@@ -73,8 +74,8 @@ export class Group {
  * A malformed FRAME on a Group Stream, which ends only that stream while the session and its other
  * streams go on (lite-07). Mirrors the Rust `UniState::Group`, which aborts only the stream.
  */
-function malformed(message: string): StreamError {
-	return new StreamError(StreamCode.MalformedTrack, { message });
+function malformed(message: string, cause?: unknown): StreamError {
+	return new StreamError(StreamCode.MalformedTrack, { message, cause });
 }
 
 /** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `varint::unzigzag`). */
@@ -183,6 +184,17 @@ export async function readFrames(
 	producer: netGroup.Producer,
 	format: FrameFormat,
 ): Promise<bigint | undefined> {
+	try {
+		return await readEach(stream, producer, format);
+	} catch (err: unknown) {
+		// A frame this hop cannot decode is a malformed track to everyone it forwards the group
+		// to, as the Rust `StreamError::from(Decode)` says, rather than a bare internal error.
+		if (isDecodeError(err) && !(err instanceof StreamError)) throw malformed(error(err).message, err);
+		throw err;
+	}
+}
+
+async function readEach(stream: Reader, producer: netGroup.Producer, format: FrameFormat): Promise<bigint | undefined> {
 	const decode = frameDecoder({ ...format, start: producer.start, meta: hooks.groupMeta(producer) });
 
 	for (;;) {
