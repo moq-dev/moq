@@ -246,8 +246,9 @@ mod tests {
 
 	/// A running relay with a publisher attached, and the flags that reach it.
 	struct NetworkFixture {
-		/// `--connect` and the TLS pin for the relay's generated certificate.
-		connect: [String; 4],
+		/// `--connect`, the TLS pin for the relay's generated certificate, and moq-lite-07,
+		/// since a moq-lite-05/06 copy refuses a group asked by key.
+		connect: [String; 6],
 		/// The relay's HTTP listener, for comparing against `/fetch`.
 		http: std::net::SocketAddr,
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
@@ -284,6 +285,8 @@ mod tests {
 				fixture.url.to_string(),
 				"--connect-tls-fingerprint".to_string(),
 				fixture.fingerprint.clone(),
+				"--connect-version".to_string(),
+				"moq-lite-07-wip".to_string(),
 			];
 
 			let publisher = Fixture::new().await;

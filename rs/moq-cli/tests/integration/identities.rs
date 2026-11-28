@@ -313,7 +313,6 @@ macro_rules! versions {
 
 versions! {
 	lite07: "moq-lite-07-wip",
-	lite06: "moq-lite-06",
 	ietf22: "moq-transport-22",
 }
 

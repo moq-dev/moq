@@ -215,53 +215,173 @@ struct TrackEntry {
 /// Lite-05/06 numbers a subscription's groups by sequence, and the copy keys each by its frame
 /// 0's timestamp as it arrives. The subscription's tail still counts sequence numbers, which is
 /// what the publisher's drops, start, and end name.
+///
+/// Keys rise with sequence numbers, so numbers with nothing left between them prove the keys
+/// between their groups empty: consecutive numbers never produced any, and numbers whose groups
+/// between were all dropped lost them. Groups arrive in either order, so the keyed numbers are
+/// held as runs with nothing unknown inside, merged as the gaps between them close.
 #[derive(Default)]
 struct Rekey {
-	/// The highest sequence number keyed so far, and its key.
-	last: Option<(u64, u64)>,
+	/// Each run's first sequence number, mapped to its last and the keys of both.
+	runs: BTreeMap<u64, Run>,
+	/// The numbers a DROP named outside every run, with its error, until a run reaches them.
+	dropped: rangemap::RangeMap<u64, crate::StreamError>,
 	/// Lite-06: the exclusive sequence number SUBSCRIBE_END named, until the group before it
 	/// arrives to key it.
 	end: Option<u64>,
-	/// The empty spans found before the copy was accepted, which it skips on accept.
-	skips: Vec<std::ops::Range<u64>>,
+	/// The keys found to hold no group before the copy was accepted, which it applies on accept.
+	holes: Vec<(std::ops::Range<u64>, Gone)>,
+}
+
+/// Keyed groups numbered `first..=last` (by its map entry) with nothing unknown between them.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+	last: u64,
+	/// The keys of the first and last groups.
+	keys: (u64, u64),
+}
+
+/// The most runs a copy holds. A peer numbering its groups sparsely leaves one per gap, so past
+/// this the oldest is forgotten: its gap then proves nothing, which costs a reader a wait there.
+const RUNS: usize = 64;
+
+/// Why keys hold no group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Gone {
+	/// Between consecutively numbered groups: never produced.
+	Skipped,
+	/// Between groups whose numbers in between were dropped with this error.
+	Dropped(crate::StreamError),
+}
+
+impl Gone {
+	/// Record `keys` on the copy `producer`.
+	fn apply(self, producer: &track::Producer, keys: std::ops::Range<u64>) {
+		match self {
+			Self::Skipped => producer.skip_groups(keys),
+			Self::Dropped(err) => producer.drop_groups(keys, err),
+		}
+	}
 }
 
 /// What keying one group says of the copy.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Keyed {
-	/// The keys between the group and the one numbered just before it, which hold no group.
-	skipped: Option<std::ops::Range<u64>>,
+	/// The keys on either side of the group that hold no group.
+	holes: Vec<(std::ops::Range<u64>, Gone)>,
 	/// The track's exclusive end, once the group SUBSCRIBE_END named last arrives.
 	end: Option<u64>,
 }
 
 impl Rekey {
-	/// Key the group numbered `seq` at `key`. Keys must rise with sequence numbers, so a group
-	/// out of order with the one numbered highest is refused, and consecutive groups prove the
-	/// keys between them empty.
+	/// Key the group numbered `seq` at `key`, refusing one out of order with the groups keyed
+	/// around it, and returning the keys it proves empty.
 	fn insert(&mut self, seq: u64, key: u64) -> Result<Keyed, Error> {
+		let below = self.runs.range(..=seq).next_back().map(|(first, run)| (*first, *run));
+		let above = self.runs.range(seq + 1..).next().map(|(first, run)| (*first, *run));
 		let mut keyed = Keyed::default();
-		match self.last {
-			None => self.last = Some((seq, key)),
-			Some((last, at)) if seq == last && key != at => return Err(Error::TimestampMismatch),
-			Some((last, _)) if seq == last => {}
-			Some((last, at)) if seq > last => {
-				if key <= at {
+		match below {
+			// Keyed already: the same key again, or nothing known inside a run to check it by.
+			Some((first, run)) if seq <= run.last => {
+				let known = match seq {
+					_ if seq == first => Some(run.keys.0),
+					_ if seq == run.last => Some(run.keys.1),
+					_ => None,
+				};
+				match known {
+					Some(known) if known != key => return Err(Error::TimestampMismatch),
+					Some(_) => {}
+					None if key <= run.keys.0 || key >= run.keys.1 => return Err(Error::TimestampMismatch),
+					None => {}
+				}
+			}
+			_ => {
+				if below.is_some_and(|(_, run)| key <= run.keys.1) || above.is_some_and(|(_, run)| key >= run.keys.0) {
 					return Err(Error::TimestampMismatch);
 				}
-				if seq == last + 1 {
-					keyed.skipped = Some(at + 1..key).filter(|span| !span.is_empty());
+				self.runs.insert(
+					seq,
+					Run {
+						last: seq,
+						keys: (key, key),
+					},
+				);
+				if let Some((first, _)) = below {
+					keyed.holes.extend(self.close(first));
 				}
-				self.last = Some((seq, key));
+				// The run holding the group now, merged with the one below or not.
+				if above.is_some()
+					&& let Some((first, _)) = self.runs.range(..=seq).next_back()
+				{
+					keyed.holes.extend(self.close(*first));
+				}
+				self.bound();
 			}
-			Some((_, at)) if key >= at => return Err(Error::TimestampMismatch),
-			Some(_) => {}
 		}
 		if self.end.is_some_and(|end| end.checked_sub(1) == Some(seq)) {
 			self.end = None;
 			keyed.end = Some(key.saturating_add(1));
 		}
 		Ok(keyed)
+	}
+
+	/// A DROP of the groups numbered `seqs` with `err`, returning the keys of the gaps it closes.
+	fn drop(&mut self, seqs: std::ops::Range<u64>, err: crate::StreamError) -> Vec<(std::ops::Range<u64>, Gone)> {
+		if seqs.is_empty() {
+			return Vec::new();
+		}
+		self.dropped.insert(seqs.clone(), err);
+		let firsts: Vec<u64> = match self.runs.range(..seqs.start).next_back() {
+			Some((first, _)) => std::iter::once(*first)
+				.chain(self.runs.range(seqs.start..seqs.end).map(|(first, _)| *first))
+				.collect(),
+			None => self.runs.range(seqs.start..seqs.end).map(|(first, _)| *first).collect(),
+		};
+		let holes = firsts.into_iter().filter_map(|first| self.close(first)).collect();
+		self.bound();
+		holes
+	}
+
+	/// Merge the run starting at `first` with the next one if nothing unknown lies between them,
+	/// returning the keys between them, which hold no group.
+	fn close(&mut self, first: u64) -> Option<(std::ops::Range<u64>, Gone)> {
+		let run = *self.runs.get(&first)?;
+		let (next, after) = self
+			.runs
+			.range(run.last + 1..)
+			.next()
+			.map(|(next, after)| (*next, *after))?;
+		let between = run.last + 1..next;
+		let gone = match between.is_empty() {
+			true => Gone::Skipped,
+			false => {
+				if self.dropped.gaps(&between).next().is_some() {
+					return None;
+				}
+				let err = self.dropped.get(&between.start).expect("covered").clone();
+				self.dropped.remove(between);
+				Gone::Dropped(err)
+			}
+		};
+		self.runs.remove(&next);
+		let merged = self.runs.get_mut(&first).expect("held above");
+		merged.last = after.last;
+		merged.keys.1 = after.keys.1;
+		Some((run.keys.1 + 1..after.keys.0, gone)).filter(|(keys, _)| !keys.is_empty())
+	}
+
+	/// Forget the oldest runs and drops past [`RUNS`] each.
+	fn bound(&mut self) {
+		while self.runs.len() > RUNS {
+			self.runs.pop_first();
+		}
+		while self.dropped.len() > RUNS {
+			let oldest = self.dropped.first_range_value().map(|(range, _)| range.clone());
+			match oldest {
+				Some(oldest) => self.dropped.remove(oldest),
+				None => break,
+			}
+		}
 	}
 
 	/// The track's exclusive end for SUBSCRIBE_END's exclusive sequence number `end`, once the
@@ -275,9 +395,18 @@ impl Rekey {
 		let Some(last) = end.checked_sub(1) else {
 			return Some(0);
 		};
-		match self.last {
-			Some((seq, key)) if seq == last => Some(key.saturating_add(1)),
-			_ => {
+		let keyed = self
+			.runs
+			.range(..=last)
+			.next_back()
+			.and_then(|(first, run)| match last {
+				_ if last == *first => Some(run.keys.0),
+				_ if last == run.last => Some(run.keys.1),
+				_ => None,
+			});
+		match keyed {
+			Some(key) => Some(key.saturating_add(1)),
+			None => {
 				self.end = Some(end);
 				None
 			}
@@ -493,8 +622,8 @@ impl TrackEntry {
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
-		for skipped in std::mem::take(&mut self.rekey.skips) {
-			copy.producer.skip_groups(skipped);
+		for (keys, gone) in std::mem::take(&mut self.rekey.holes) {
+			gone.apply(&copy.producer, keys);
 		}
 		self.target = TrackTarget::Copy(copy);
 		let Some(parked) = self.parked.clone() else {
@@ -601,20 +730,24 @@ impl TrackEntry {
 		let key = u64::try_from(crate::coding::varint::unzigzag(lead)).map_err(|_| Error::TimestampMismatch)?;
 		let keyed = self.rekey.insert(wire.key, key)?;
 		wire.key = key;
-		match &mut self.target {
-			TrackTarget::Copy(Accepted { producer, .. }) => {
-				if let Some(skipped) = keyed.skipped {
-					producer.skip_groups(skipped);
-				}
-				if let Some(end) = keyed.end
-					&& let Err(err) = producer.end_at(Position::group(end), None)
-				{
-					tracing::warn!(group = end, %err, "subscribe end below a received group");
-				}
-			}
-			_ => self.rekey.skips.extend(keyed.skipped),
+		for (keys, gone) in keyed.holes {
+			self.hole(keys, gone);
+		}
+		if let TrackTarget::Copy(Accepted { producer, .. }) = &mut self.target
+			&& let Some(end) = keyed.end
+			&& let Err(err) = producer.end_at(Position::group(end), None)
+		{
+			tracing::warn!(group = end, %err, "subscribe end below a received group");
 		}
 		Ok(Some(wire))
+	}
+
+	/// Lite-05/06: record `keys` as holding no group, on the copy or once it is accepted.
+	fn hole(&mut self, keys: std::ops::Range<u64>, gone: Gone) {
+		match &self.target {
+			TrackTarget::Copy(Accepted { producer, .. }) => gone.apply(producer, keys),
+			_ => self.rekey.holes.push((keys, gone)),
+		}
 	}
 
 	/// Open the group for a parked stream whose [`Reading`] was already opened on arrival.
@@ -1675,8 +1808,10 @@ impl GroupRecv {
 		// SETUP, and reading it first lets us account for `hdr.key` in the subscription's tail
 		// before parking, so a reset or eviction while parked never drops the group unaccounted.
 		let received: lite::Group = wait!(Header => self.reader.poll_decode::<lite::Group>(waiter))?;
-		// Lite05/06 key a group by its frame 0's timestamp, which leads the stream.
+		// Lite05/06 key a group by its frame 0's timestamp, which leads the stream. A stream of no
+		// subscription is refused first rather than waiting on its frame.
 		let lead: Option<u64> = wait!(Lead => match self.subscriber.version.rekeys() && received.frame_start == 0 {
+			true if !self.subscriber.subscribes.lock().contains_key(&received.subscribe) => Poll::Ready(Err(Error::Cancel)),
 			true => self.reader.poll_varint_peek_maybe(waiter),
 			false => Poll::Ready(Ok(None)),
 		})?;
@@ -5553,37 +5688,35 @@ mod tests {
 	#[test]
 	fn rekey_follows_the_sequence() {
 		let mut rekey = Rekey::default();
+		let skipped = |keys: std::ops::Range<u64>| Keyed {
+			holes: vec![(keys, Gone::Skipped)],
+			end: None,
+		};
 		assert_eq!(rekey.insert(4, 100).unwrap(), Keyed::default());
+		assert_eq!(rekey.insert(5, 133).unwrap(), skipped(101..133));
+		// A hole in the sequence proves nothing until it closes.
+		assert_eq!(rekey.insert(7, 200).unwrap(), Keyed::default());
+		// A late group closing it on both sides, and a copy of one keyed already.
 		assert_eq!(
-			rekey.insert(5, 133).unwrap(),
+			rekey.insert(6, 166).unwrap(),
 			Keyed {
-				skipped: Some(101..133),
+				holes: vec![(134..166, Gone::Skipped), (167..200, Gone::Skipped)],
 				end: None
 			}
 		);
-		// A hole in the sequence proves nothing.
 		assert_eq!(rekey.insert(7, 200).unwrap(), Keyed::default());
-		// A late group within the hole, and a copy of one keyed already.
-		assert_eq!(rekey.insert(6, 166).unwrap(), Keyed::default());
-		assert_eq!(rekey.insert(7, 200).unwrap(), Keyed::default());
-		// Out of order with the newest, or a sequence number keyed elsewhere.
+		// Out of order with the groups around it, or a sequence number keyed elsewhere.
 		assert!(matches!(rekey.insert(8, 200), Err(Error::TimestampMismatch)));
 		assert!(matches!(rekey.insert(3, 300), Err(Error::TimestampMismatch)));
 		assert!(matches!(rekey.insert(7, 201), Err(Error::TimestampMismatch)));
 
 		// The end waits for the group before it, then lands one past its key.
 		assert_eq!(rekey.end(Version::Lite06, 10), None);
-		assert_eq!(
-			rekey.insert(8, 233).unwrap(),
-			Keyed {
-				skipped: Some(201..233),
-				end: None
-			}
-		);
+		assert_eq!(rekey.insert(8, 233).unwrap(), skipped(201..233));
 		assert_eq!(
 			rekey.insert(9, 266).unwrap(),
 			Keyed {
-				skipped: Some(234..266),
+				holes: vec![(234..266, Gone::Skipped)],
 				end: Some(267)
 			}
 		);
@@ -5591,6 +5724,40 @@ mod tests {
 		assert_eq!(Rekey::default().end(Version::Lite06, 0), Some(0));
 		// Lite-05's end may be inclusive, so its FIN ends the copy instead.
 		assert_eq!(rekey.end(Version::Lite05, 10), None);
+	}
+
+	/// A DROP of the numbers between two groups, before or after either arrives and in either
+	/// order, proves their keys lost; one covering only part of a gap proves nothing.
+	#[test]
+	fn rekey_maps_drops_between_groups() {
+		let err = crate::StreamError::Old;
+		let dropped = |keys: std::ops::Range<u64>| Keyed {
+			holes: vec![(keys, Gone::Dropped(crate::StreamError::Old))],
+			end: None,
+		};
+		let mut rekey = Rekey::default();
+		assert_eq!(rekey.drop(1..20, err.clone()), [], "nothing keyed to map it by");
+		// Newest first, as a descending subscription delivers.
+		assert_eq!(rekey.insert(20, 500).unwrap(), Keyed::default());
+		assert_eq!(rekey.insert(0, 0).unwrap(), dropped(1..500));
+		// A drop after both groups.
+		assert_eq!(rekey.insert(30, 900).unwrap(), Keyed::default());
+		assert_eq!(
+			rekey.drop(21..30, err.clone()),
+			[(501..900, Gone::Dropped(err.clone()))]
+		);
+		assert_eq!(rekey.drop(21..30, err.clone()), [], "mapped once");
+		// Partly, then whole.
+		assert_eq!(rekey.insert(40, 1000).unwrap(), Keyed::default());
+		assert_eq!(rekey.drop(31..35, err.clone()), []);
+		assert_eq!(
+			rekey.drop(35..40, err.clone()),
+			[(901..1000, Gone::Dropped(err.clone()))]
+		);
+		// A drop reaching past the next group holds on for the one after.
+		assert_eq!(rekey.drop(41..50, err.clone()), []);
+		assert_eq!(rekey.insert(42, 1100).unwrap(), dropped(1001..1100));
+		assert_eq!(rekey.insert(50, 1200).unwrap(), dropped(1101..1200));
 	}
 
 	/// Serve one Group Stream for `key` on subscription 7, accepted into `track`. Before
@@ -15843,8 +16010,13 @@ impl ServeLoop {
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
-				// Lite05/06 name sequence numbers, which key nothing in the copy.
+				// Lite05/06 name sequence numbers, which key the copy only between groups that arrived.
 				if serve.subscriber.version.rekeys() {
+					if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
+						for (keys, gone) in entry.rekey.drop(groups, error) {
+							entry.hole(keys, gone);
+						}
+					}
 					return Ok(());
 				}
 				if serve.subscriber.version.has_skip() && error == crate::StreamError::Skip {

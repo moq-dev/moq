@@ -560,8 +560,6 @@ macro_rules! retired_fetch_tests {
 }
 
 retired_fetch_tests! {
-	retired_fetch_lite05: "moq-lite-05",
-	retired_fetch_lite06: "moq-lite-06",
 	retired_fetch_lite07: "moq-lite-07-wip",
 	retired_fetch_ietf18: "moq-transport-18",
 	retired_fetch_ietf22: "moq-transport-22",

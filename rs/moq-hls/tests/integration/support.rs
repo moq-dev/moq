@@ -25,10 +25,9 @@ pub struct Pair {
 }
 
 impl Pair {
-	/// Connect on the default moq-lite version.
+	/// Connect on moq-lite-07: HLS reads segments by time, which a moq-lite-05/06 copy refuses.
 	pub async fn connect() -> Self {
-		let version = *moq_net::Versions::default().iter().next().expect("a default version");
-		Self::new(version, Default::default()).await
+		Self::new("moq-lite-07-wip".parse().unwrap(), Default::default()).await
 	}
 
 	/// Connect on `version`, with the publisher's origin built from `config`.

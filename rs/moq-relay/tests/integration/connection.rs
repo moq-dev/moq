@@ -64,6 +64,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				true => moq_net::Timestamp::unscaled(sequence),
 				false => moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap(),
 			};
+			let key = timestamp.value();
 			let group = track.create_group(timestamp, b"ladder".as_ref()).unwrap();
 			group.finish().unwrap();
 			let mut got = kio::clock::timeout(TIMEOUT, sub.recv_group())
@@ -71,12 +72,12 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				.unwrap_or_else(|_| panic!("{alpn} sequence={sequence} hung"))
 				.unwrap()
 				.unwrap();
-			assert_eq!(got.start, sequence, "{alpn}");
+			assert_eq!(got.start, key, "{alpn}");
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
 			// Lite-02 carries no timestamps, so its frames arrive scale-less at their group key.
 			let expected = match alpn {
-				"moq-lite-02" => moq_net::Timestamp::unscaled(sequence),
+				"moq-lite-02" => moq_net::Timestamp::unscaled(key),
 				_ => timestamp,
 			};
 			assert_eq!(frame.timestamp, expected, "{alpn}");

@@ -2724,11 +2724,6 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn a_live_fmp4_import_serves_segments_over_lite06() {
-		live_fmp4_segments(Some("moq-lite-06"), false).await;
-	}
-
-	#[tokio::test(start_paused = true)]
 	async fn a_live_fmp4_import_serves_segments_over_lite07() {
 		live_fmp4_segments(Some("moq-lite-07-wip"), false).await;
 	}

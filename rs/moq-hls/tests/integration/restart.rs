@@ -132,11 +132,6 @@ async fn takeover(version: &str, case: Case) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn unanswered_lite06() {
-	takeover("moq-lite-06", Case::Unanswered).await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn unanswered_lite07() {
 	takeover("moq-lite-07-wip", Case::Unanswered).await;
 }
@@ -159,60 +154,6 @@ async fn finished_first() {
 #[tokio::test(start_paused = true)]
 async fn finished_settled() {
 	takeover("moq-lite-07-wip", Case::FinishedSettled).await;
-}
-
-/// Over a wire that carries no identity, the server's session mints one. A publisher naming an
-/// identity with the same text is another stream, so it gets URLs of its own while the minted
-/// one keeps serving its own bytes.
-#[tokio::test(start_paused = true)]
-async fn a_named_identity_never_shares_urls_with_a_minted_one_of_its_text() {
-	let pair = Pair::new("moq-lite-06".parse().unwrap(), Default::default()).await;
-	let mut old = Publisher::new(&pair.publisher, "live", Default::default());
-	let server = pair.server();
-	let app = server.router();
-	old.write(0, 13, OLD);
-	let old_media = media_uri(&app, "live").await;
-	let playlist = listed(&app, &old_media, ".2.m4s").await;
-	let old_segment = segment_uri(&old_media, &playlist, 0);
-	assert_old(&app, &old_segment).await;
-
-	let minted = kio::clock::timeout(TIMEOUT, pair.subscriber.consume().request("live", None))
-		.await
-		.expect("resolve timed out")
-		.expect("resolved")
-		.info()
-		.identity
-		.clone()
-		.expect("an identity");
-	assert!(minted.is_minted(), "moq-lite-06 carries no identity");
-	let named: moq_net::Identity = minted.as_str().parse().unwrap();
-	// Published beside the server, where the identity is the text the session minted.
-	let mut new = Publisher::new(
-		&pair.subscriber,
-		"live",
-		moq_net::origin::RouteOptions::default().with_identity(named, 0),
-	);
-	new.write(0, 13, NEW);
-
-	let deadline = kio::clock::now().saturating_add(TIMEOUT);
-	let new_media = loop {
-		let media = media_uri(&app, "live").await;
-		if media != old_media {
-			break media;
-		}
-		assert!(
-			kio::clock::now() < deadline,
-			"the named identity shared the minted one's URLs"
-		);
-		kio::clock::sleep(Duration::from_millis(50)).await;
-	};
-	let playlist = listed(&app, &new_media, ".2.m4s").await;
-	let response = get(&app, &segment_uri(&new_media, &playlist, 0)).await;
-	assert_eq!(response.status(), StatusCode::OK);
-	assert!(contains(response.body(), &[NEW; 8]) && !contains(response.body(), &[OLD; 8]));
-	// The minted identity is still open, so its URLs still serve its own bytes.
-	assert_old(&app, &old_segment).await;
-	drop((old, new));
 }
 
 /// Read `cursor` until it ends, asserting each segment carries only the old run's media.

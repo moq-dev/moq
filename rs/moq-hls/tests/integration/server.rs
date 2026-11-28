@@ -48,7 +48,6 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		("moq-lite-02", HOLELESS),
 		("moq-lite-03", HOLELESS),
 		("moq-lite-04", HOLELESS),
-		("moq-lite-05", TIMEOUT),
 	] {
 		let pair = Pair::new(version.parse().unwrap(), Default::default()).await;
 		let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());

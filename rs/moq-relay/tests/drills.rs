@@ -328,6 +328,14 @@ fn client_over(url: &url::Url, quic: moq_tokio::quic::Config) -> moq_tokio::Clie
 	config.init(quic).expect("client init")
 }
 
+/// [`client_over`], speaking only `version`.
+fn client_on(url: &url::Url, quic: moq_tokio::quic::Config, version: moq_net::Version) -> moq_tokio::Client {
+	let mut config = dial();
+	config.url = Some(url.clone());
+	config.version = vec![version];
+	config.init(quic).expect("client init")
+}
+
 /// How a drill's clients, and a relay dialing a peer, connect: trusting the
 /// generated certificate, over QUIC only, from an ephemeral loopback port.
 fn dial() -> moq_tokio::connect::Config {
@@ -976,7 +984,7 @@ lanes!(bursts_cross_a_transport_peer);
 /// How the cross-relay drill's peer link behaves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerLink {
-	/// Up throughout, on the version the relays negotiate by default.
+	/// Up throughout, on moq-lite-07.
 	Steady,
 	/// Cut mid-recovery, then restored.
 	Flapping,
@@ -1021,8 +1029,13 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 		Lane::Loopback => quic(),
 		Lane::Impaired => credit(lane, relay_config().quic),
 	};
+	// The gap FETCHes need history, which a moq-lite-05/06 copy never serves, so every
+	// session runs moq-lite-07 except a moq-transport peer link.
+	let lite07: moq_net::Version = "moq-lite-07-wip".parse().expect("parse version");
+	let transport: moq_net::Version = "moq-transport-22".parse().expect("parse version");
 	let mut config = relay_config();
 	config.quic = relay_quic();
+	config.listen.version = vec![lite07, transport];
 	let relay_idle = config
 		.quic
 		.resolve()
@@ -1048,9 +1061,11 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// slow impaired handshake short mid-flap adds a redial wait the drill's budget
 	// does not cover. A stall still fails the drill.
 	config.connect.backoff.timeout = Some((Duration::from_secs(10)).into());
-	if link == PeerLink::Transport {
-		config.connect.version = vec!["moq-transport-22".parse().expect("parse version")];
-	}
+	config.connect.version = match link {
+		PeerLink::Transport => vec![transport],
+		PeerLink::Steady | PeerLink::Flapping => vec![lite07],
+	};
+	config.listen.version = vec![lite07];
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;
 
@@ -1068,7 +1083,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let url = publish_path.url.clone();
 	let publish_session = kio::clock::timeout(
 		TIMEOUT,
-		client_over(&url, credit(lane, quic()))
+		client_on(&url, credit(lane, quic()), lite07)
 			.with_publisher(&publisher)
 			.with_reconnect(false)
 			.connect(url)
@@ -1084,7 +1099,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let url = subscribe_path.url.clone();
 	let subscribe_session = kio::clock::timeout(
 		TIMEOUT,
-		client_over(&url, credit(lane, quic()))
+		client_on(&url, credit(lane, quic()), lite07)
 			.with_subscriber(subscriber)
 			.with_reconnect(false)
 			.connect(url)
