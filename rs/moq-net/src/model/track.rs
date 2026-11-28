@@ -11727,8 +11727,8 @@ impl Cursor {
 
 	/// The first group in `run`, ascending or not, this arrival read holds unread that `wants`
 	/// takes: owed and cached when `owed` (the cache serves the window), answered by a fill,
-	/// or a head answered. Newest first, the first one `wants` passes over ends the search: a
-	/// range that gave up a group gave up every one older.
+	/// or a head answered. Costs the groups it passes, which a backlog `wants` passes over
+	/// bounds, as the cache does.
 	#[cfg(feature = "async")]
 	fn first_unread(
 		&self,
@@ -11782,12 +11782,10 @@ impl Cursor {
 		};
 		let heads = heads.map(|key| (key, Taken::Head));
 		// Each source's first that `wants` takes, then the first of those in the run's order.
-		let first = |source: Box<dyn Iterator<Item = (u64, Taken)> + '_>| -> Option<(u64, Taken)> {
-			let mut source = source;
-			match ascending {
-				true => source.find(|(key, _)| wants(*key)),
-				false => source.next().filter(|(key, _)| wants(*key)),
-			}
+		// Newest first too, one stale is no proof the older are: groups arriving out of order age
+		// by their own successors.
+		let first = |mut source: Box<dyn Iterator<Item = (u64, Taken)> + '_>| -> Option<(u64, Taken)> {
+			source.find(|(key, _)| wants(*key))
 		};
 		[
 			first(Box::new(owed_keys)),
@@ -35911,13 +35909,16 @@ mod test {
 			.collect()
 	}
 
-	/// A newest-first ranked read gets past a group gone stale by its own successor to an older
-	/// one still fresh by its: groups arriving out of order age out of key order.
+	/// A newest-first range's ranked pick looks past a group stale for it to an older one still
+	/// fresh, even where another range still wants the stale one: otherwise that range's lower
+	/// rank stands for the group the urgent range would send.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_ranked_read_passes_a_stale_group_to_an_older_fresh_one() {
+	async fn a_ranked_range_looks_past_its_stale_group_another_range_holds() {
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(1)));
+		let live = Range::from(Start::within(Duration::from_secs(1))).with_priority(9);
+		let history = Range::ALL.with_priority(1);
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([live, history]));
 		let waiter = kio::Waiter::noop();
 		write_group(&producer, 3);
 		write_group(&producer, 4);
@@ -35926,14 +35927,14 @@ mod test {
 		};
 		assert_eq!(group.start, 4);
 
-		// Group 3 went stale behind group 4, while group 2 lands right behind group 1 now.
+		// Group 3 went stale behind group 4 for the live join, while group 2 lands right behind
+		// group 1 now. A history group 5 waits for credit.
 		kio::clock::sim::advance(Duration::from_secs(2)).await;
 		write_group(&producer, 1);
 		write_group(&producer, 2);
-		// The ranked pick stops at group 3, which the read writes off, as group 2, before ranking
-		// again: group 1 still goes out ranked, above a waiting group's rank.
-		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group_above(Some((i8::MIN, i64::MIN)), &waiter) else {
-			panic!("group 1 outranks the floor");
+		let waiting = (1, crate::priority::in_group(5, 0, Order::Descending));
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group_above(Some(waiting), &waiter) else {
+			panic!("group 1 still ranks by the live join");
 		};
 		assert_eq!(group.start, 1);
 	}

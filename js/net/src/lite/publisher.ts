@@ -837,9 +837,16 @@ function asked(range: WireRange): Asked {
  *   no other's. The groups given up meanwhile are named once delivery resolves.
  * - `withheld`: lite-07, delivery starts at `from`, but no range is answered yet, as one following an
  *   edge this hop does not know leaves it: the drops given up since go out after the first START,
- *   each built then, so an unjudged drop names the max age its subscription asks at that time.
+ *   an unjudged one naming no wider a max age than the narrowest asked while they were held.
  * - `answered`: lite-07, a range is answered, so drops go out as they are given up.
  */
+/** The narrower of two max ages in milliseconds, undefined being no limit. */
+function narrower(a: number | undefined, b: number | undefined): number | undefined {
+	if (a === undefined) return b;
+	if (b === undefined) return a;
+	return Math.min(a, b);
+}
+
 type StartAnswer =
 	| { kind: "legacy" }
 	| {
@@ -849,7 +856,7 @@ type StartAnswer =
 	  }
 	| { kind: "started"; from: bigint }
 	| { kind: "unresolved"; served?: bigint; skipped: Runs<DropRun> }
-	| { kind: "withheld"; from: bigint; held: [bigint, bigint, Hole][] }
+	| { kind: "withheld"; from: bigint; held: [bigint, bigint, Hole][]; narrowest: number | undefined }
 	| { kind: "answered"; from: bigint };
 
 /** What `version` has said of where delivery starts before anything resolved it. */
@@ -2073,10 +2080,10 @@ export class Publisher {
 		const sendStart = async (start: SubscribeStart): Promise<boolean> => {
 			if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))) return false;
 			if (answer.kind !== "withheld") return true;
-			const { from, held } = answer;
+			const { from, held, narrowest } = answer;
 			answer = { kind: "answered", from };
 			for (const [low, high, hole] of held) {
-				const msg = holeMessage(low, high, hole);
+				const msg = holeMessage(low, high, hole, narrowest);
 				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
@@ -2086,8 +2093,11 @@ export class Publisher {
 		// stream failed, is named once it does.
 		const sendHole = (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (answer.kind === "unresolved") answer.skipped.set(start, end, { ...hole, start, end });
-			else if (answer.kind === "withheld") answer.held.push([start, end, hole]);
-			else return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
+			else if (answer.kind === "withheld") {
+				answer.narrowest = narrower(answer.narrowest, requested.narrowest());
+				answer.held.push([start, end, hole]);
+			} else
+				return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
 			return Promise.resolve(true);
 		};
 		// Lite-07: whether the track is a relay's copy that places each range only where its upstream
@@ -2112,7 +2122,7 @@ export class Publisher {
 			}
 			if (answer.kind !== "unresolved") throw new Error(`delivery resolves once, not when ${answer.kind}`);
 			const { skipped } = answer;
-			answer = { kind: "withheld", from, held: [] };
+			answer = { kind: "withheld", from, held: [], narrowest: undefined };
 			const largest = edge(position);
 			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, ids);
@@ -2319,8 +2329,10 @@ export class Publisher {
 		// produced with `SKIP`, and earlier versions drop it as not found.
 		// The message naming `[start, end)` given up as `hole`; an OLD drop with no verdict of its own
 		// names the narrowest max age the live ranges ask, so only a reader no wider settles on it.
-		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse => ({
-			drop: SubscribeDrop.hole(start, end, hole, requested.narrowest(), this.version),
+		// An unjudged OLD names no wider a max age than `held`, the narrowest asked while it was held,
+		// since a widening since never judged it. Mirrors the Rust `TrackRun::hole_within`.
+		const holeMessage = (start: bigint, end: bigint, hole: Hole, held?: number): SubscribeResponse => ({
+			drop: SubscribeDrop.hole(start, end, hole, narrower(requested.narrowest(), held), this.version),
 		});
 
 		// What the wire is told when `hole` goes out. Every report is final. Mirrors the Rust

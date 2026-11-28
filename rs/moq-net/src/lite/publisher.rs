@@ -6109,8 +6109,14 @@ enum Delivery {
 		skipped: RangeMap<u64, Hole>,
 	},
 	/// Delivery starts at `from`, but no range is answered yet, as one following an edge this
-	/// hop does not know leaves it: the drops given up since, sent after the first START.
-	Withheld { from: u64, held: RangeMap<u64, Hole> },
+	/// hop does not know leaves it: the drops given up since, sent after the first START, and
+	/// the narrowest max age the subscription asked as they were held, which caps what an
+	/// unjudged `OLD` among them names.
+	Withheld {
+		from: u64,
+		held: RangeMap<u64, Hole>,
+		narrowest: Duration,
+	},
 	/// A range is answered, so drops go out as they are given up.
 	Answered { from: u64 },
 }
@@ -6300,6 +6306,9 @@ struct TrackRun {
 	/// withholds credit. One that cannot make room gives way to a group that outranks it
 	/// (see [`Self::stuck`]).
 	opening: Option<GroupServe>,
+	/// The group waiting for credit moved where it ranks, which the track side ranks against the
+	/// cache before it may take credit.
+	rerank: bool,
 	/// A group that waited for credit gave way since the cursor last had nothing left to hand
 	/// out, so the place refills by rank rather than in the subscription's order: see
 	/// [`Self::give_way`].
@@ -6457,6 +6466,7 @@ impl TrackRun {
 			answer,
 			end_sent: false,
 			opening: None,
+			rerank: false,
 			gave_way: false,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -6945,16 +6955,18 @@ impl TrackRun {
 		let _ = self.children.poll(waiter);
 		// The group waiting for stream credit joins the others once it has one, or fails
 		// without one, and the cursor fills its place.
-		let polled = self.opening.as_mut().map(|opening| {
-			let ranked = opening.rank();
-			let polled = opening.poll_open(&mut self.ctx.session, self.ctx.group.as_ref(), waiter);
-			(polled, opening.rank() != ranked)
-		});
-		// One that moved where it ranks, aging out of a range, is ranked anew against the cache.
-		if let Some((Poll::Pending, true)) = polled {
+		// One that moved where it ranks, aging out of a range, is ranked anew against the cache
+		// before it may take credit.
+		if self.opening.as_mut().is_some_and(|opening| opening.poll_rank(waiter)) {
+			self.rerank = true;
 			Idle::disarm(&mut self.idle);
 		}
-		if let Some((Poll::Ready(res), _)) = polled {
+		let polled = match self.rerank {
+			true => None,
+			false => (self.opening.as_mut())
+				.map(|opening| opening.poll_open(&mut self.ctx.session, self.ctx.group.as_ref(), waiter)),
+		};
+		if let Some(Poll::Ready(res)) = polled {
 			// The track side takes groups again.
 			Idle::disarm(&mut self.idle);
 			let mut opening = self.opening.take().expect("polled above");
@@ -7024,6 +7036,10 @@ impl TrackRun {
 		let mut idle = Idle::start(&mut self.idle, waiter);
 		let polled = self.poll_track(writer, idle.waiter());
 		idle.finish(&mut self.idle, (), polled.is_pending());
+		// Ranked anew, the group still waiting may take credit once the track side had its look.
+		if std::mem::take(&mut self.rerank) && polled.is_pending() {
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
 		polled
 	}
 
@@ -7391,7 +7407,13 @@ impl TrackRun {
 	/// with no verdict of its own the narrowest its live ranges ask, so only a reader no wider
 	/// settles on it.
 	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
-		let unjudged = crate::track::max_of(self.track.subscription().narrowest());
+		self.hole_within(groups, hole, Duration::MAX)
+	}
+
+	/// [`Self::hole`], an unjudged `OLD` naming no more than `narrowest` either: the narrowest
+	/// asked while it was held, since a widening since never judged it.
+	fn hole_within(&self, groups: std::ops::Range<u64>, hole: &Hole, narrowest: Duration) -> lite::SubscribeResponse {
+		let unjudged = crate::track::max_of(self.track.subscription().narrowest().min(narrowest));
 		lite::SubscribeResponse::Drop(lite::SubscribeDrop::given_up(groups, hole, unjudged, self.ctx.version))
 	}
 
@@ -7410,9 +7432,12 @@ impl TrackRun {
 				..
 			}) => skipped.insert(groups, hole),
 			Answer::Ranges(Ranges {
-				delivery: Delivery::Withheld { held, .. },
+				delivery: Delivery::Withheld { held, narrowest, .. },
 				..
-			}) => held.insert(groups, hole),
+			}) => {
+				*narrowest = (*narrowest).min(self.track.subscription().narrowest());
+				held.insert(groups, hole);
+			}
 			_ => writer.buffer(&self.hole(groups, &hole))?,
 		}
 		Ok(())
@@ -7429,16 +7454,16 @@ impl TrackRun {
 			return Ok(());
 		};
 		ranges.answer(start.id);
-		let held = match &mut ranges.delivery {
-			Delivery::Withheld { from, held } => {
-				let held = std::mem::take(held);
+		let (held, narrowest) = match &mut ranges.delivery {
+			Delivery::Withheld { from, held, narrowest } => {
+				let held = (std::mem::take(held), *narrowest);
 				ranges.delivery = Delivery::Answered { from: *from };
 				held
 			}
 			_ => return Ok(()),
 		};
 		for (groups, hole) in held {
-			writer.buffer(&self.hole(groups, &hole))?;
+			writer.buffer(&self.hole_within(groups, &hole, narrowest))?;
 		}
 		Ok(())
 	}
@@ -7749,6 +7774,7 @@ impl TrackRun {
 				let held = Delivery::Withheld {
 					from: start,
 					held: RangeMap::new(),
+					narrowest: Duration::MAX,
 				};
 				match std::mem::replace(&mut ranges.delivery, held) {
 					Delivery::Unresolved { skipped, .. } => skipped,
@@ -8481,6 +8507,21 @@ impl GroupServe {
 		}
 	}
 
+	/// Take in the policy the group goes out at now, as a retune or its aging moves it,
+	/// returning whether that moved where it ranks.
+	fn poll_rank(&mut self, waiter: &kio::Waiter) -> bool {
+		let ranked = self.rank();
+		Self::poll_steer(&mut self.ctx, &mut self.covers, self.key, waiter);
+		let policy = poll_policy(&self.ctx.steer_seen, &self.covers, &mut self.aged, &self.group, waiter);
+		if let Rank::Queue(handle) = &mut self.rank
+			&& policy != self.policy
+		{
+			handle.steer(policy.priority, policy.order);
+		}
+		self.policy = policy;
+		self.rank() != ranked
+	}
+
 	/// Wait for stream credit, then write the group header, leaving the machine serving.
 	/// Gives up once the group can no longer be sent, so a parked group never spends the
 	/// credit it was waiting for on a reset.
@@ -8499,8 +8540,8 @@ impl GroupServe {
 			return Poll::Ready(Err(err));
 		}
 		// A retune while it waits moves where it ranks, which may let it preempt a stream.
-		Self::poll_steer(&mut self.ctx, &mut self.covers, self.key, waiter);
-		let policy = poll_policy(&self.ctx.steer_seen, &self.covers, &mut self.aged, &self.group, waiter);
+		self.poll_rank(waiter);
+		let policy = self.policy;
 		// A lite-07 stream opens in the send group of its own priority.
 		let joined = match (&self.rank, &self.ctx.groups) {
 			(Rank::Group, Some(groups)) => groups.at(policy.priority),
@@ -8511,17 +8552,11 @@ impl GroupServe {
 				group: joined.as_ref().or(group),
 				priority: crate::priority::in_group(self.key, self.frame_start, policy.order),
 			},
-			Rank::Queue(handle) => {
-				if policy != self.policy {
-					handle.steer(policy.priority, policy.order);
-				}
-				SendOptions {
-					group: None,
-					priority: handle.send_order().into(),
-				}
-			}
+			Rank::Queue(handle) => SendOptions {
+				group: None,
+				priority: handle.send_order().into(),
+			},
 		};
-		self.policy = policy;
 		// A higher-priority open waiting for credit can reset this stream: the reader fell too
 		// far behind the publisher's streams. Like any reset, it accounts for the group or the
 		// control stream drops it (see `accounts`).
@@ -11905,6 +11940,53 @@ mod serve_group_test {
 		);
 	}
 
+	/// An unjudged OLD drop withheld for the first SUBSCRIBE_START names no wider a max age than
+	/// the narrowest the subscription asked while it was held: a widening since never judged it.
+	#[kio::test]
+	async fn lite07_a_withheld_unjudged_drop_keeps_the_narrowest_max_age() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.await_edge();
+		track.request_start(Some(0)).unwrap();
+		let live = |max: u64| lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Some(Duration::ZERO),
+				max: Some(Duration::from_millis(max)),
+			}),
+			..lite::Range::OPEN
+		};
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[live(100)]);
+		write_group(&mut track, 0, 0);
+		track.drop_groups(1..2, StreamError::Old);
+		track.start_resolved(0).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [], "the edge is unknown");
+
+		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: None,
+			ranges: lite::Applied::Edit {
+				retired: Vec::new(),
+				added: Vec::new(),
+				retuned: vec![(0, live(1000))],
+			},
+			order: Order::Descending,
+		});
+		track.finish_at(track::Position::group(2)).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let answered = responses(&mut writer, &log).await;
+		let drop = answered.iter().find_map(|msg| match msg {
+			lite::SubscribeResponse::Drop(drop) if drop.groups == (1..2) => Some(drop.max_age),
+			_ => None,
+		});
+		assert_eq!(drop, Some(Some(Duration::from_millis(100))), "{answered:?}");
+	}
+
 	/// A track that ends before its first group answers every range with its SUBSCRIBE_END at
 	/// group 0, so none is left waiting on a start no group will resolve.
 	#[kio::test]
@@ -12263,54 +12345,68 @@ mod serve_group_test {
 	}
 
 	/// A group waiting for credit that ages out of its live join into a lower history rank is
-	/// ranked anew against the groups waiting in the cache, so one that now outranks it takes its
-	/// place without a track event first.
+	/// ranked anew against the groups waiting in the cache before it may take credit, so one that
+	/// now outranks it takes its place without a track event first, credit freeing as it ages or
+	/// not.
 	#[kio::test]
 	async fn lite07_a_waiting_group_aging_down_lets_a_cached_one_take_its_place() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		let gate = kio::Producer::new(false);
-		let session = SinkSession::gated_open_uni(gate.consume());
-		let live = lite::Range {
-			start: Some(lite::Anchor::Live {
-				min: None,
-				max: Some(Duration::from_secs(1)),
-			}),
-			end: Some(lite::Anchor::Absolute(track::Position::group(6))),
-			priority: 9,
-			order: Order::Descending,
-		};
-		let (mut run, mut writer, _) = lite07_policy_run(session, &track, &[live, from_group(0, 1, Order::Ascending)]);
-		let waiter = kio::Waiter::noop();
+		for credit in [false, true] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let gate = kio::Producer::new(false);
+			let session = SinkSession::gated_open_uni(gate.consume()).with_groups();
+			let log = session.log.clone();
+			let live = lite::Range {
+				start: Some(lite::Anchor::Live {
+					min: None,
+					max: Some(Duration::from_secs(1)),
+				}),
+				end: Some(lite::Anchor::Absolute(track::Position::group(6))),
+				priority: 9,
+				order: Order::Descending,
+			};
+			let ranges = [live, from_group(0, 1, Order::Ascending)];
+			let (mut run, mut writer, _) = lite07_policy_run(session, &track, &ranges);
+			let waiter = kio::Waiter::noop();
 
-		let mut open = vec![write_open(&mut track, 5)];
-		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(5));
-		// Only the history range wants group 1, below the live group waiting.
-		open.push(write_open(&mut track, 1));
-		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(
-			run.opening.as_ref().map(|serve| serve.key),
-			Some(5),
-			"group 1 ranks below"
-		);
+			let mut open = vec![write_open(&mut track, 5)];
+			while run.poll_step(&mut writer, &waiter).is_ready() {}
+			assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(5));
+			// Only the history range wants group 1, below the live group waiting.
+			open.push(write_open(&mut track, 1));
+			while run.poll_step(&mut writer, &waiter).is_ready() {}
+			assert_eq!(
+				run.opening.as_ref().map(|serve| serve.key),
+				Some(5),
+				"group 1 ranks below"
+			);
 
-		// Group 6, past the live join's end, supersedes group 5, which ages past the join's max
-		// into the history range, where the older group 1 goes first.
-		open.push(write_open(&mut track, 6));
-		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(
-			run.opening.as_ref().map(|serve| serve.key),
-			Some(5),
-			"group 6 ranks below"
-		);
-		kio::clock::sim::advance(Duration::from_secs(2)).await;
-		while run.poll_step(&mut writer, &waiter).is_ready() {}
-		assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(1), "group 5 gave way");
-		drop(open);
+			// Group 6, past the live join's end, supersedes group 5, which ages past the join's
+			// max into the history range, where the older group 1 goes first.
+			open.push(write_open(&mut track, 6));
+			while run.poll_step(&mut writer, &waiter).is_ready() {}
+			assert_eq!(
+				run.opening.as_ref().map(|serve| serve.key),
+				Some(5),
+				"group 6 ranks below"
+			);
+			kio::clock::sim::advance(Duration::from_secs(2)).await;
+			*gate.write().ok().unwrap() = credit;
+			while run.poll_step(&mut writer, &waiter).is_ready() {}
+			let first = log.orders().first().map(|(_, order)| *order);
+			match credit {
+				true => assert_eq!(
+					first,
+					Some(crate::priority::in_group(1, 0, Order::Ascending)),
+					"group 1 opened first"
+				),
+				false => assert_eq!(run.opening.as_ref().map(|serve| serve.key), Some(1), "group 5 gave way"),
+			}
+			drop(open);
+		}
 	}
 
 	/// Under congestion, history ranked below the group waiting for credit never holds back a
