@@ -1373,14 +1373,6 @@ export class Consumer {
 		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
-		hooks.onGroupStarted = (group, fn) => {
-			const frames = group.#state.total.changed(fn);
-			const closed = group.#state.closed.changed(fn);
-			return () => {
-				frames();
-				closed();
-			};
-		};
 		hooks.groupFate = (group) => {
 			const state = group.#state;
 			return () => {

@@ -22,6 +22,10 @@ Seen three times, each in a full `just test interop --all`, and never in a targe
   `finish cpp -> *` cell failed, the same `error: no health group` from `js-native-node` and
   `error: missing session health payload` from `python`, so the C++ publisher's row hits it
   too. A targeted rerun of the C++ row against every reader passed.
+- On [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794) (2026-11-28): every
+  `finish cpp -> *` cell failed again, with `error: missing health group` from the `cpp`
+  reader, while the other readers logged `finish clean frames=10`. An immediate full rerun
+  passed.
 
 Each is a whole publisher row with a reader seeing an empty track. Since the C++ row hits it
 too, the cause is more likely the relay's copy of a finished publisher's tracks (or the

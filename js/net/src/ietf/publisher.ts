@@ -1290,20 +1290,6 @@ export class Publisher {
 			// A REQUEST_UPDATE re-ranks the subscription, so a group already on the wire follows it.
 			ranking.add(stream, group.start, slice.skip);
 
-			// A timed slice past Object 0 starts at frame 0 only when frame 0's ID reaches it, so its
-			// header waits for frame 0 or the group's end, as the Rust `describe` waits for a write.
-			if (timescale !== undefined && slice.skip > 0) {
-				while (!hooks.groupStarted(group)) {
-					const { promise, resolve } = Promise.withResolvers<"changed">();
-					const dispose = hooks.onGroupStarted(group, () => resolve("changed"));
-					try {
-						if ((await race([promise, unsubscribed, excluded.promise])) !== "changed") break;
-					} finally {
-						dispose();
-					}
-				}
-			}
-
 			// Object 0 names the keys just below this group the track declared skipped, a
 			// best-effort drop signal; a stream starting past object 0 carries no object 0.
 			const groupGap = slice.skip === 0 ? hooks.skippedBelow(track, group.start) : 0n;
@@ -1322,12 +1308,9 @@ export class Publisher {
 					hasEnd: false,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
-					// a trimmed head starts partway through. A timed slice past Object 0 still
-					// starts at frame 0 when frame 0's ID reaches it, as in Rust.
-					firstObject:
-						slice.skip === 0 ||
-						(timescale !== undefined &&
-							(hooks.groupTimedId(group, 0, timescale) ?? -1n) >= BigInt(slice.skip)),
+					// a trimmed head starts partway through. A timed slice past Object 0 may still
+					// start at frame 0, which its first read below settles.
+					firstObject: slice.skip === 0,
 				},
 			});
 
@@ -1359,9 +1342,32 @@ export class Publisher {
 			};
 
 			try {
+				const ids = timescale && new TimedIds(group.start, timescale);
+				// Reading from the filter's start drops the objects below it: they are outside the
+				// requested range, so skipping them is not a gap. A moq-timestamp ID follows the
+				// one before it, so a timed read walks from frame 0.
+				const readNext = () =>
+					race([hooks.readGroupFrame(group, false, ids ? 0 : slice.skip), closed, stopped]);
+				// A timed slice past Object 0 starts at frame 0 only when frame 0's ID reaches it, so its
+				// header waits on the first read, which the loop below then sends, as the Rust
+				// `describe` waits for a write. A slice that selects nothing needs no frame.
+				let held: { read: Awaited<ReturnType<typeof readNext>> } | undefined;
+				if (
+					timescale !== undefined &&
+					slice.skip > 0 &&
+					(slice.until === undefined || slice.until > slice.skip)
+				) {
+					const read = await readNext();
+					// Frame 0's ID counts from the group's start alone.
+					if (read && read.index === 0) {
+						const dts = BigInt(floorAt(read.frame.timestamp, timescale));
+						header.flags.firstObject =
+							timestampObjectId(group.start, undefined, dts).id >= BigInt(slice.skip);
+					}
+					held = { read };
+				}
 				await send(() => header.encode(stream, this.#session.version));
 				let priorObject: bigint | undefined;
-				const ids = timescale && new TimedIds(group.start, timescale);
 				let next = slice.skip;
 				// Whether the group finished, rather than the range or a stop ending the read.
 				let ended = false;
@@ -1371,14 +1377,8 @@ export class Publisher {
 					// outside the requested range, so stop without waiting for the group's end.
 					if (slice.until !== undefined && next >= slice.until) break;
 
-					// Reading from the filter's start drops the objects below it: they are outside the
-					// requested range, so skipping them is not a gap. A moq-timestamp ID follows the
-					// one before it, so a timed read walks from frame 0.
-					const read = await race([
-						hooks.readGroupFrame(group, false, ids ? 0 : slice.skip),
-						closed,
-						stopped,
-					]);
+					const read = held ? held.read : await readNext();
+					held = undefined;
 					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (read === undefined) ended = true;
