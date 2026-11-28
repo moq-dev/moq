@@ -23,9 +23,12 @@ lite-06 has no drop. 72 other lite-06 cells on hosted runners and every schedule
 Confirm it is the lost reset first: with the run directory that step now uploads, add the
 group stream's reset code to the relay's debug log for a failing cell, or reproduce on a
 loaded host with `--version moq-lite-06 --engine chromium`. Then bound it in the lite-06 JS
-subscriber: a group still open after its subscription settled (its end declared and the
-tail's grace passed) ends with an error the reader can tell from a clean end, so the reader
-may fetch it. Lite-06 is a published wire, so the fix stays on the subscriber.
+subscriber. `Tail.settle` (`js/net/src/tail.ts`) returns only once no stream is being read,
+even after its grace expires, so the stuck group must be found while the tail settles, not
+after: once the end is declared and the grace has passed, a group stream that has delivered
+nothing for that grace ends with an error the reader can tell from a clean end, so the reader
+may fetch it. Test that a slow stream still delivering frames in that window finishes whole.
+Lite-06 is a published wire, so the fix stays on the subscriber.
 
 ## Related
 
