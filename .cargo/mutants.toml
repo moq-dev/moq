@@ -85,6 +85,9 @@ exclude_re = [
     ':\d+:17: replace < with <= in Reader::backfill_gaps$',
     # `may_take` already confines a drained key to the copy's ranges, which end at its cap.
     ':\d+:40: replace < with <= in Copy::may_drain$',
+    # The ordered bound also checking the candidate itself: a copy offers that group in this
+    # hand-out, so a re-arm there asks at most a walk whose gap the hand-out fills.
+    ':\d+:55: replace < with <= in Reader::rescan_drains$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',
