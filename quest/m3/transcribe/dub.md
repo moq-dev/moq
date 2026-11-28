@@ -43,7 +43,7 @@ Guidance:
   delta to Aura-2's streaming HTTP endpoint
   (`POST https://api.deepgram.com/v1/speak` with the configured Aura-2 voice
   model such as `aura-2-thalia-en` or `aura-2-elara-de`, `encoding=linear16`,
-  and `mip_opt_out=true`) using bounded in-flight concurrency and strictly
+  `container=none`, and `mip_opt_out=true`) using bounded in-flight concurrency and strictly
   ordered output, encoding incoming `linear16` PCM chunks to 48 kHz Opus
   through `moq-audio` as soon as they arrive. Using streaming HTTP per
   committed clause avoids Aura-2 WebSocket's 20 flushes per 60 seconds limit
