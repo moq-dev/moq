@@ -113,8 +113,4 @@ exclude_re = [
     # Walking again before anything the read parked on fires returns the same
     # `Pending`, so the idle shortcut only saves work.
     'replace Subscriber::parked -> bool with false$',
-    # Race-only, as `Fetching::poll_moved` above: it matters only when a group lands on a fill
-    # after its read parked and that landing's wake has yet to reach the read, a window between
-    # another thread releasing the track lock and waking its waiters.
-    'replace Subscriber::disarm_all with \(\)$',
 ]

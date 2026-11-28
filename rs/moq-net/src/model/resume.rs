@@ -1377,17 +1377,6 @@ impl Subscriber {
 		Idle::disarm(&mut self.idle);
 	}
 
-	/// [`Self::disarm`], and the parked reads of every copy it holds, so the next read walks
-	/// each copy whatever its wakes have reached so far.
-	pub(super) fn disarm_all(&mut self) {
-		self.disarm();
-		for copy in &mut self.reader().copies {
-			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.disarm();
-			}
-		}
-	}
-
 	/// The parts of `groups` this reader knows were skipped, by any copy it holds. A skip is
 	/// final for the whole track, so an outer front reading this one as a copy counts what a
 	/// route this front still holds declared, and asks for the rest as it would of any route.
@@ -3007,7 +2996,7 @@ impl Reader {
 	}
 
 	/// Whether a fill in `waiting`, each one whose read waits on its route this pass with the
-	/// count of groups its track had cached before that read, still owes a group from `floor` below
+	/// count of groups its track had cached before that read (see `track::Subscriber::cached`), still owes a group from `floor` below
 	/// the candidate `first` that the reader lacks, the local bounds admit, and the reader or a
 	/// copy has not recorded skipped, as its own ordered read waits for it: one a fill of its
 	/// route has yet to answer, one whose head it asked for, or one its received route's live
@@ -3052,12 +3041,11 @@ impl Reader {
 			// or fetched, is no longer owed, but it counts as cached in the same step: checked
 			// after, one cached at any point shows. Its wake may not have reached the fill's read
 			// yet, so that read walks past its gate. Each retry takes a group cached in a gap below
-			// the candidate.
-			let copy = &mut self.copies[index];
-			if copy.track.cached_in(cached, &open) {
-				if let Sub::Ready(sub) = &mut copy.sub {
-					sub.disarm();
-				}
+			// the candidate that the fill's read hands out.
+			if let Sub::Ready(sub) = &mut self.copies[index].sub
+				&& sub.cached_in(cached, &open)
+			{
+				sub.disarm();
 				return Below::Landed;
 			}
 		}
@@ -3178,14 +3166,14 @@ impl Reader {
 			}
 			let mut late = ran_out;
 			let mut arrivals = copy.track.arrived();
-			// What it had cached before its read, for [`Self::fill_owes_below`].
-			let mut cached = copy.track.cached();
 			loop {
 				let copy = &mut self.copies[index];
+				let fills = ordered && copy.fills;
 				let sub = match copy.poll_ready(groups, waiter) {
 					Poll::Pending => {
-						if copy.fills {
-							waiting.push((index, cached));
+						// Unanswered, it owes what it was asked: nothing it cached is read.
+						if fills {
+							waiting.push((index, 0));
 						}
 						break;
 					}
@@ -3198,14 +3186,17 @@ impl Reader {
 				if ordered {
 					sub.skip_ordered(floor);
 				}
+				// What a fill's ordered read had cached before it looked, for
+				// [`Self::fill_owes_below`].
+				let seen = fills.then(|| sub.cached());
 				// The copy's own record bills to its track as a direct reader's does, including
 				// what a peek skipped before it parked.
 				let res = sub.poll_peek_group(ordered, waiter);
 				sub.settle_record(None);
 				match res {
 					Poll::Pending => {
-						if self.copies[index].fills {
-							waiting.push((index, cached));
+						if let Some(seen) = seen {
+							waiting.push((index, seen));
 						}
 						break;
 					}
@@ -3243,7 +3234,6 @@ impl Reader {
 								let copy = &self.copies[index];
 								if copy.track.poll_arrived(arrivals, waiter).is_ready() {
 									arrivals = copy.track.arrived();
-									cached = copy.track.cached();
 									continue;
 								}
 								break;
@@ -3282,7 +3272,6 @@ impl Reader {
 							copy.done = None;
 							late = true;
 							arrivals = copy.track.arrived();
-							cached = copy.track.cached();
 							continue;
 						}
 						break;

@@ -8358,24 +8358,6 @@ impl Consumer {
 		self.with_state(|state| state.map_or(0, |state| state.read().next_arrival))
 	}
 
-	/// How many groups were cached here so far, fetched ones included; see [`Self::cached_in`].
-	pub(super) fn cached(&self) -> u64 {
-		self.with_state(|state| state.map_or(0, |state| state.read().cached))
-	}
-
-	/// Whether a group in `groups` cached here after the first `seen`, as [`Self::cached`]
-	/// counts them, is cached still.
-	pub(super) fn cached_in(&self, seen: u64, groups: &RangeSet<u64>) -> bool {
-		self.with_state(|state| {
-			state.is_some_and(|state| {
-				let state = state.read();
-				// Nothing cached since leaves no slot to look up.
-				state.cached > seen
-					&& (groups.iter()).any(|run| state.lookup.range(run.clone()).any(|(_, slot)| slot.cached > seen))
-			})
-		})
-	}
-
 	/// Ready once more than `seen` groups arrived here. A received copy still takes the groups
 	/// in flight below an end its readers stopped waiting at. Pending for good once the track closes.
 	pub(super) fn poll_arrived(&self, seen: usize, waiter: &kio::Waiter) -> Poll<()> {
@@ -13474,12 +13456,36 @@ impl Subscriber {
 			&& fin.checked_sub(1).is_none_or(|last| self.next_in_range(last).is_some())
 	}
 
-	/// Forget every parked group read here, a front's copies' included: a group landed that
-	/// the caller saw before its wake reached them.
+	/// How many groups this read's track cached so far, fetched ones included; see
+	/// [`Self::cached_in`]. A front's logical track caches none of its own.
+	pub(super) fn cached(&self) -> u64 {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().cached,
+			Inner::Resume(..) => 0,
+		}
+	}
+
+	/// Whether a group in `groups` that a read in key order here hands out was cached after
+	/// the first `seen`, as [`Self::cached`] counts them: the check `Cursor::poll_owed` makes.
+	pub(super) fn cached_in(&self, seen: u64, groups: &RangeSet<u64>) -> bool {
+		let Inner::Plain(cursor) = &self.inner else {
+			return false;
+		};
+		let state = cursor.state.read();
+		// Nothing cached since leaves no slot to look up.
+		state.cached > seen
+			&& groups.iter().any(|run| {
+				(state.walk(run.start, cursor.end_key, &cursor.filter.window))
+					.take_while(|slot| slot.group.start < run.end)
+					.any(|slot| slot.cached > seen)
+			})
+	}
+
+	/// Forget the parked group read: a group was cached that the caller saw before its wake
+	/// reached the read.
 	pub(super) fn disarm(&mut self) {
-		match &mut self.inner {
-			Inner::Plain(cursor) => idle::Idle::disarm(&mut cursor.idle),
-			Inner::Resume(resume, _) => resume.disarm_all(),
+		if let Inner::Plain(cursor) = &mut self.inner {
+			idle::Idle::disarm(&mut cursor.idle);
 		}
 	}
 
