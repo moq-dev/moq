@@ -8358,13 +8358,20 @@ impl Consumer {
 		self.with_state(|state| state.map_or(0, |state| state.read().next_arrival))
 	}
 
-	/// Whether a group in `groups` arrived here after the first `seen`. One evicted since may
-	/// be forgotten, which leaves nothing to read.
-	pub(super) fn arrived_in(&self, seen: usize, groups: &RangeSet<u64>) -> bool {
+	/// How many groups were cached here so far, fetched ones included; see [`Self::cached_in`].
+	pub(super) fn cached(&self) -> u64 {
+		self.with_state(|state| state.map_or(0, |state| state.read().cached))
+	}
+
+	/// Whether a group in `groups` cached here after the first `seen`, as [`Self::cached`]
+	/// counts them, is cached still.
+	pub(super) fn cached_in(&self, seen: u64, groups: &RangeSet<u64>) -> bool {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.arrivals_from(seen).any(|entry| groups.contains(&entry.key))
+				// Nothing cached since leaves no slot to look up.
+				state.cached > seen
+					&& (groups.iter()).any(|run| state.lookup.range(run.clone()).any(|(_, slot)| slot.cached > seen))
 			})
 		})
 	}

@@ -3007,7 +3007,7 @@ impl Reader {
 	}
 
 	/// Whether a fill in `waiting`, each one whose read waits on its route this pass with the
-	/// groups its track had seen arrive before that read, still owes a group from `floor` below
+	/// count of groups its track had cached before that read, still owes a group from `floor` below
 	/// the candidate `first` that the reader lacks, the local bounds admit, and the reader or a
 	/// copy has not recorded skipped, as its own ordered read waits for it: one a fill of its
 	/// route has yet to answer, one whose head it asked for, or one its received route's live
@@ -3017,14 +3017,14 @@ impl Reader {
 	/// the answer, the group landing, or its drop wakes the fill's own read.
 	fn fill_owes_below(
 		&mut self,
-		waiting: &[(usize, usize)],
+		waiting: &[(usize, u64)],
 		first: &Candidate,
 		floor: u64,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Below {
 		let (start, cap) = self.groups;
-		for &(index, arrivals) in waiting {
+		for &(index, cached) in waiting {
 			let copy = &self.copies[index];
 			if Arc::ptr_eq(&copy.lease, &first.lease) {
 				continue;
@@ -3048,12 +3048,13 @@ impl Reader {
 			if open.iter().any(owes) {
 				return Below::Owed;
 			}
-			// A group landing in one of those gaps on another thread after the read parked is no
-			// longer owed, but it counts as arrived in the same step: checked after, a landing at
-			// any point shows. Its wake may not have reached the fill's read yet, so that read
-			// walks past its gate. Each retry takes a landing in a gap below the candidate.
+			// A group cached in one of those gaps on another thread after the read parked, landed
+			// or fetched, is no longer owed, but it counts as cached in the same step: checked
+			// after, one cached at any point shows. Its wake may not have reached the fill's read
+			// yet, so that read walks past its gate. Each retry takes a group cached in a gap below
+			// the candidate.
 			let copy = &mut self.copies[index];
-			if copy.track.arrived_in(arrivals, &open) {
+			if copy.track.cached_in(cached, &open) {
 				if let Sub::Ready(sub) = &mut copy.sub {
 					sub.disarm();
 				}
@@ -3177,12 +3178,14 @@ impl Reader {
 			}
 			let mut late = ran_out;
 			let mut arrivals = copy.track.arrived();
+			// What it had cached before its read, for [`Self::fill_owes_below`].
+			let mut cached = copy.track.cached();
 			loop {
 				let copy = &mut self.copies[index];
 				let sub = match copy.poll_ready(groups, waiter) {
 					Poll::Pending => {
 						if copy.fills {
-							waiting.push((index, arrivals));
+							waiting.push((index, cached));
 						}
 						break;
 					}
@@ -3202,7 +3205,7 @@ impl Reader {
 				match res {
 					Poll::Pending => {
 						if self.copies[index].fills {
-							waiting.push((index, arrivals));
+							waiting.push((index, cached));
 						}
 						break;
 					}
@@ -3240,6 +3243,7 @@ impl Reader {
 								let copy = &self.copies[index];
 								if copy.track.poll_arrived(arrivals, waiter).is_ready() {
 									arrivals = copy.track.arrived();
+									cached = copy.track.cached();
 									continue;
 								}
 								break;
@@ -3278,6 +3282,7 @@ impl Reader {
 							copy.done = None;
 							late = true;
 							arrivals = copy.track.arrived();
+							cached = copy.track.cached();
 							continue;
 						}
 						break;
