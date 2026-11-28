@@ -251,7 +251,7 @@ PR).
 
 Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
 subscribe/fetch audit): ✅ the cut waits on
-[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md)
+the lite-07 subscribe and fetch redesign (finished with [moq-dev/moq#9719](https://github.com/moq-dev/moq/pull/9719))
 (rejected: bugfixes only without wire changes; drop). That epic freezes
 `Previous Delta` on `GROUP` headers, requires `RESET_STREAM_AT` for opened
 Group Streams (superseding the 2026-11-14 `SUBSCRIBE_DROP` note for publisher
@@ -295,7 +295,6 @@ before 0.22 (rejected: folding it into #9794; dropping it).
 
 ## Required
 
-- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 - [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
 
 ## Related
