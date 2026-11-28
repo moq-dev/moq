@@ -23,6 +23,16 @@ tracks-limit, ts-unpadded-audio-buffer, and vr-demo-try from m1;
 js-listing-synced-order and release-attest-backport from m0; and
 hls-group-end-timing from m2.
 
+Amended 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit):
+[owed-group-pass-over](/quest/m0/owed-group-pass-over.md),
+[go-module-proxy](/quest/m0/go-module-proxy.md), and
+[kt-ffi-maven-0428](/quest/m0/kt-ffi-maven-0428.md) moved back to `m0`;
+[front-drop-with-next-group](/quest/m2/front-drop-with-next-group.md) and
+[hls-group-end-timing](/quest/m2/hls-group-end-timing.md) moved back to `m2`;
+`js-listing-synced-order` was deleted (already fixed on `main`); and
+[time-placement-predecessor](/quest/m3/time-placement-predecessor.md) moved up
+from `m4` for `moq-transcode` rungs.
+
 Decided 2026-11-05 (maintainer, milestone re-cut): the old m2 ("later work")
 split in half by priority into m3 and m4. A quest joined m3 when a named
 consumer or user-facing need waits on it, when it is release execution or a

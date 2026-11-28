@@ -293,9 +293,13 @@ which creates published groups eagerly from frame 0, omits the first `FRAME`
 delta at `Frame Start = 0`, removes zigzag from lite-07, and drops `seek(start)`
 before 0.22 (rejected: folding it into #9794; dropping it).
 
+Decided 2026-11-28 (maintainer, `/quest-plan` of the pre-0.22 design-gate audit): ✅ the cut also waits for [routing every lite-07 SUBSCRIBE through TrackRun](/quest/m2/lite07-single-subscribe-engine.md) (deleting `OneShotFetch` / `#serveOneShotFetch` to eliminate `#9687`'s `FIN` timing race and Rust/JS `Largest` divergence) and [lite-07 timestamp mismatch egress and proven ledger bounds](/quest/m2/lite07-timestamp-mismatch-and-ledger.md) (fixing `#9794`'s `MALFORMED_TRACK`/`INTERNAL_ERROR` egress codes and `#9686`'s proven-ledger gap folding and draft clarity).
+
 ## Required
 
 - [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
+- [Route every lite-07 SUBSCRIBE through TrackRun and check expiry while restaging](/quest/m2/lite07-single-subscribe-engine.md) - eliminates the `OneShotFetch` vs `TrackRun` `FIN` timing race and Rust/JS `Largest` divergence before lite-07 freezes
+- [Lite-07 timestamp mismatch egress, proven ledger bounds, and finish_at binding parity](/quest/m2/lite07-timestamp-mismatch-and-ledger.md) - sends terminal `TIMESTAMP_MISMATCH` (`0x39`) in Rust and JS, stops proven ledgers from forging gap proof, and closes draft/binding parity
 
 ## Related
 
