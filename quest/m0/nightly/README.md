@@ -314,7 +314,7 @@ Darwin `swift-format` at it or at nixpkgs-unstable's head
 ([moq-dev/moq#9857](https://github.com/moq-dev/moq/pull/9857)); Interop's open-GOP fixture,
 from [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)
 ([moq-dev/moq#9858](https://github.com/moq-dev/moq/pull/9858)); and the three easy surviving
-`resume.rs` mutants (MUTANTS_PR). New child, in m3 by decision:
+`resume.rs` mutants ([moq-dev/moq#9861](https://github.com/moq-dev/moq/pull/9861)). New child, in m3 by decision:
 [resume.rs's back-cut mutants](/quest/m3/resume-cut-mutants.md), the other 16. Owned by open
 PRs or quests: Windows' CRLF crate names
 ([moq-dev/moq#9545](https://github.com/moq-dev/moq/pull/9545), a draft since 11-24),

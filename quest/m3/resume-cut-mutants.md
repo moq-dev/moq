@@ -13,8 +13,8 @@ reason.
 Found by the triage of Nightly
 [46038678705](https://github.com/moq-dev/moq/actions/runs/46038678705)
 (`f7a41c3ea5`): 19 mutants survived on `main` (rerun at `f7684041f5` with
-`just rs mutants --re ...`). The three easy ones are killed by this triage's
-test PR; this quest owns the rest. Lines are at `f7684041f5`.
+`just rs mutants --re ...`). The three easy ones are killed by
+[moq-dev/moq#9861](https://github.com/moq-dev/moq/pull/9861); this quest owns the other 16. Lines are at `f7684041f5`.
 
 Decided 2026-11-28 (maintainer, /quest-plan): ✅ kill the easy mutants
 inline and plan the rest in m3 (rejected: one m0 quest for all 19; easy
