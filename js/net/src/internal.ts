@@ -1573,6 +1573,8 @@ export const hooks: {
 	groupTimedId: (group: GroupConsumer, index: number, timescale: Timescale) => bigint | undefined;
 	groupSettledFrames: (group: GroupConsumer) => number | undefined;
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** Call `fn` whenever what {@link groupStarted} reads may have changed. */
+	onGroupStarted: (group: GroupConsumer, fn: () => void) => Dispose;
 	/** The first frame this copy begins at: past 0 for one missing its head. */
 	groupFirstFrame: (group: GroupConsumer) => number;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
@@ -2150,6 +2152,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
+	onGroupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFirstFrame: () => {

@@ -1290,6 +1290,20 @@ export class Publisher {
 			// A REQUEST_UPDATE re-ranks the subscription, so a group already on the wire follows it.
 			ranking.add(stream, group.start, slice.skip);
 
+			// A timed slice past Object 0 starts at frame 0 only when frame 0's ID reaches it, so its
+			// header waits for frame 0 or the group's end, as the Rust `describe` waits for a write.
+			if (timescale !== undefined && slice.skip > 0) {
+				while (!hooks.groupStarted(group)) {
+					const { promise, resolve } = Promise.withResolvers<"changed">();
+					const dispose = hooks.onGroupStarted(group, () => resolve("changed"));
+					try {
+						if ((await race([promise, unsubscribed, excluded.promise])) !== "changed") break;
+					} finally {
+						dispose();
+					}
+				}
+			}
+
 			// Object 0 names the keys just below this group the track declared skipped, a
 			// best-effort drop signal; a stream starting past object 0 carries no object 0.
 			const groupGap = slice.skip === 0 ? hooks.skippedBelow(track, group.start) : 0n;

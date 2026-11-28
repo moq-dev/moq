@@ -277,10 +277,12 @@ async fn serve_group<S: ObjectStore>(
 	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
 		let index = index.lock().unwrap();
-		// From the group's first object even for a tail: a group whose stored timestamps
-		// decrease anywhere is refused, which only the whole stored prefix shows.
-		let (holding, after) = index.holding(sequence, 0);
-		(holding, after, index.timed(), index.timescale)
+		// A timed group is read from its first object even for a tail: one whose stored
+		// timestamps decrease anywhere is refused, which only the whole stored prefix shows.
+		// An untimed one's frames all share its key, so a tail needs only what holds it.
+		let timed = index.timed();
+		let (holding, after) = index.holding(sequence, if timed { 0 } else { frame });
+		(holding, after, timed, index.timescale)
 	};
 	let next = after.map_or(u64::MAX, |start| start.0);
 

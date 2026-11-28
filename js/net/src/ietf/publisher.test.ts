@@ -5396,37 +5396,48 @@ test("draft-23: a group without its first frame is not served", async () => {
 	}
 });
 
-/** A timed stream starting past Object 0 still starts at frame 0 when frame 0's ID reaches the start. */
-test("draft-23: a timed filter past Object 0 that reaches frame 0 sets FIRST_OBJECT", async () => {
-	const version = Version.DRAFT_23;
-	const fx = fixture(version);
-	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	const group = track.createGroup(1000n);
-	// Frame 0 presents 30 ms past its group's start: Object ID 30.
-	group.writeFrame({ payload: new TextEncoder().encode("f0"), timestamp: Timestamp.fromMillis(1030) });
-	group.finish();
-	const { client } = await runSubscribe(
-		fx,
-		new Subscribe({
-			requestId: 7n,
-			trackNamespace: Path.from("test"),
-			trackName: "video",
-			subscriberPriority: 0,
-			groupOrder: "ascending",
-			filter: { kind: "absolute", startGroup: 1000n, startObject: 10n, endGroup: 1001n, endObject: 0n },
-		}),
-	);
-	try {
-		const reader = new Reader(await nextUni(fx.uni), undefined, version);
-		const header = await GroupMessage.decode(reader, version);
-		expect(header.groupId).toBe(1000n);
-		expect(header.flags.firstObject).toBe(true);
-		expect(await reader.u53()).toBe(30);
-	} finally {
-		fx.close();
-		client.close();
-	}
-});
+/**
+ * A timed stream starting past Object 0 still starts at frame 0 when frame 0's ID reaches the start,
+ * whether frame 0 is written before the stream opens or after.
+ */
+test.each([false, true])(
+	"draft-23: a timed filter past Object 0 that reaches frame 0 sets FIRST_OBJECT (late %p)",
+	async (late) => {
+		const version = Version.DRAFT_23;
+		const fx = fixture(version);
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const group = track.createGroup(1000n);
+		// Frame 0 presents 30 ms past its group's start: Object ID 30.
+		const write = () => {
+			group.writeFrame({ payload: new TextEncoder().encode("f0"), timestamp: Timestamp.fromMillis(1030) });
+			group.finish();
+		};
+		if (!late) write();
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				groupOrder: "ascending",
+				filter: { kind: "absolute", startGroup: 1000n, startObject: 10n, endGroup: 1001n, endObject: 0n },
+			}),
+		);
+		try {
+			const stream = nextUni(fx.uni);
+			if (late) write();
+			const reader = new Reader(await stream, undefined, version);
+			const header = await GroupMessage.decode(reader, version);
+			expect(header.groupId).toBe(1000n);
+			expect(header.flags.firstObject).toBe(true);
+			expect(await reader.u53()).toBe(30);
+		} finally {
+			fx.close();
+			client.close();
+		}
+	},
+);
 
 test("draft-23: standalone END_OF_TRACK translates final frame ordinal to sparse wire Object ID", async () => {
 	const version = Version.DRAFT_23;
