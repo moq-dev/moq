@@ -32,12 +32,15 @@ Facts:
   more than 131 KiB, but at load 15, so it does not yet separate the socket
   from the host.
 
-Start by profiling the relay during the ramp of a lossy round
-(`just bench-profile cpu chat` with the default shared runtime, and the
-scheduler's view of the endpoint task: how often it runs and for how long
-against its 50 µs receive budget, `RECV_TIME_BOUND` in
-`rs/moq-tokio/src/quic/driver/mod.rs`), against `release`'s `noq` endpoint
-on the same host. Then rerun shards at the shared runtime's load. The scratch
+Start by profiling the relay through the ramp of a lossy round, on the
+default shared runtime that `just bench-relay` runs. `just bench-profile`
+defaults to `tokio-workers` and captures from second 5, after the 2 s ramp
+(`bench/relay.sh`), so either start its capture with the relay or record
+`perf` on the relay's PID from its start. Look at CPU stacks and the
+scheduler's view of the endpoint task: how often it runs, and for how long
+against its 50 µs receive budget (`RECV_TIME_BOUND` in
+`rs/moq-tokio/src/quic/driver/mod.rs`). Compare with `release`'s `noq`
+endpoint on the same host. Then rerun shards at the shared runtime's load. The scratch
 probe that timed each group across the hops is in the description of
 [moq-dev/moq#9825](https://github.com/moq-dev/moq/pull/9825); reapply it to
 confirm a fix.

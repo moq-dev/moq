@@ -1,5 +1,5 @@
 use kio::clock::Wall;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet, btree_map};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -492,6 +492,7 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 			}
 		}
 	}
+	gaps.finish();
 	Ok(())
 }
 
@@ -536,8 +537,9 @@ async fn read_group(
 /// than that is skipped rather than handed out. The span therefore ends at `cap`, the newest
 /// group received whose start is more than `budget` behind the newest start seen: any gap
 /// below it can never be filled. Groups above `cap` wait in `pending`, so one that arrives
-/// late but within the budget, overtaken by newer groups, is delivered and not lost. A zero
-/// budget settles everything behind the newest group.
+/// late but within the budget, overtaken by newer groups, is delivered and not lost, while one
+/// that arrives already past the budget is lost as the player would skip it. A zero budget
+/// settles everything behind the newest group, and a track's end settles everything.
 ///
 /// The span's floor is pinned at the first group the subscription receives. A
 /// completed group older than that, such as cached history a relay fills in after
@@ -545,7 +547,7 @@ async fn read_group(
 /// join that over-fetches history does not read as loss.
 ///
 /// A group that explicitly fails is known lost immediately wherever it falls,
-/// even below the floor or above the cap. Each observation feeds the shared [`Stats`]
+/// even below the floor or above the cap, and settles like a completed one. Each observation feeds the shared [`Stats`]
 /// incrementally so the reporter sees losses live and many subscriptions sum
 /// correctly: `groups_expected - groups_present` is the gaps still outstanding.
 ///
@@ -560,14 +562,15 @@ struct GapTracker<'a> {
 	floor: Option<u64>,
 	/// The newest group settled: every sequence from `floor` through it is decided.
 	cap: Option<u64>,
-	/// Completed groups above `cap`, by sequence, with their starts: still within the budget.
-	pending: BTreeMap<u64, u64>,
+	/// Groups above `cap`, by sequence, with their starts and whether they were delivered:
+	/// still within the budget.
+	pending: BTreeMap<u64, (u64, bool)>,
 	/// The newest start seen.
 	newest: u64,
 	/// Completed groups from `floor` through `cap`.
 	settled: u64,
-	/// Failed groups above `cap`: already lost, so not counted again once `cap` passes them.
-	failed: BTreeSet<u64>,
+	/// Lost groups in `pending`: already counted, so not counted again once `cap` passes them.
+	failed: u64,
 	/// Failed groups below the floor: outside the span, but still lost.
 	failed_history: u64,
 	/// This subscription's current contributions, remembered so each update pushes
@@ -586,7 +589,7 @@ impl<'a> GapTracker<'a> {
 			pending: BTreeMap::new(),
 			newest: 0,
 			settled: 0,
-			failed: BTreeSet::new(),
+			failed: 0,
 			failed_history: 0,
 			expected: 0,
 			present: 0,
@@ -621,29 +624,42 @@ impl<'a> GapTracker<'a> {
 		} else if self.cap.is_some_and(|cap| sequence <= cap) {
 			// Already settled as a gap, so it stays lost; a completed one is present all the same.
 			self.settled += u64::from(complete);
-		} else if complete {
-			self.pending.insert(sequence, start);
-		} else {
-			self.failed.insert(sequence);
+		} else if let btree_map::Entry::Vacant(entry) = self.pending.entry(sequence) {
+			// One already past the budget is lost however it ended: a live player skips it.
+			let delivered = complete && start.saturating_add(self.budget) >= self.newest;
+			entry.insert((start, delivered));
+			self.failed += u64::from(!delivered);
 		}
 		self.newest = self.newest.max(start);
+		self.settle(false);
+	}
 
-		// Settle every pending group the budget has left behind, oldest first: the gaps below
-		// it can no longer be filled.
-		while let Some((&sequence, &start)) = self.pending.first_key_value()
-			&& start.saturating_add(self.budget) < self.newest
+	/// The track ended: no group can still arrive, so settle every gap between known groups.
+	fn finish(&mut self) {
+		self.settle(true);
+	}
+
+	/// Settle the pending groups the budget has left behind, or all of them once `all`, oldest
+	/// first: the gaps below them can no longer be filled.
+	fn settle(&mut self, all: bool) {
+		let Some(floor) = self.floor else {
+			return;
+		};
+
+		while let Some((&sequence, &(start, delivered))) = self.pending.first_key_value()
+			&& (all || start.saturating_add(self.budget) < self.newest)
 		{
 			self.pending.pop_first();
-			self.settled += 1;
 			self.cap = Some(sequence);
-		}
-		if let Some(cap) = self.cap {
-			// Failed groups the cap passed now sit inside the span.
-			self.failed = self.failed.split_off(&(cap + 1));
+			// A lost group the cap passes moves from `failed` into the span, still lost.
+			match delivered {
+				true => self.settled += 1,
+				false => self.failed -= 1,
+			}
 		}
 
 		let span = self.cap.map_or(0, |cap| cap - floor + 1);
-		let expected = span + self.failed.len() as u64 + self.failed_history;
+		let expected = span + self.failed + self.failed_history;
 		let present = self.settled;
 		let grown = (expected - present).saturating_sub(self.expected - self.present);
 		// Grow the denominator first and release the counters bounded by it, so a
@@ -1170,12 +1186,12 @@ mod tests {
 		assert_eq!(lost(&stats), 1, "the failed group counts as a gap");
 	}
 
-	/// Drain a group that a newer one overtook, then report the groups lost.
+	/// Drain a group that a newer one overtook, then report the groups lost and expected.
 	///
 	/// The drain is parked in group 0 while groups 1 and 2 are written, so when it
 	/// asks for the next group, group 1 already trails group 2 by 500ms of media
 	/// time. Timestamps are explicit, so no wall clock is involved.
-	async fn lost_to_an_overtaken_group(max_delay: Duration) -> u64 {
+	async fn lost_to_an_overtaken_group(max_delay: Duration) -> (u64, u64) {
 		// Group `n` starts at its first frame, which carries the header numbering it.
 		fn write_group(track: &mut track::Producer, n: u64, millis: &[u64]) {
 			let mut group = track
@@ -1211,13 +1227,13 @@ mod tests {
 		first.finish().unwrap();
 		wait_for(&stats.groups_recv, 2).await;
 
-		// A last group moves the live frontier past group 2, so 1 and 2 are accounted.
+		// A last group, then the track's end settles every group.
 		write_group(&mut track, 3, &[2_000]);
 		let _track = track.finish().unwrap();
 		broadcast.close();
 
 		task.await.unwrap().unwrap();
-		lost(&stats)
+		(lost(&stats), stats.groups_expected.load(Ordering::Relaxed))
 	}
 
 	/// A player waits out a late group within its budget. A zero budget skips group 1
@@ -1225,8 +1241,8 @@ mod tests {
 	/// player would see.
 	#[tokio::test]
 	async fn drain_waits_for_a_late_group_within_max_delay() {
-		assert_eq!(lost_to_an_overtaken_group(Duration::from_secs(2)).await, 0);
-		assert_eq!(lost_to_an_overtaken_group(Duration::ZERO).await, 1);
+		assert_eq!(lost_to_an_overtaken_group(Duration::from_secs(2)).await, (0, 4));
+		assert_eq!(lost_to_an_overtaken_group(Duration::ZERO).await, (1, 4));
 	}
 
 	/// Subscription targets must be picked at random from the announced stream.
@@ -1303,44 +1319,67 @@ mod tests {
 	fn gap_tracker_waits_out_the_budget() {
 		let stats = Stats::default();
 		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
-		// Group n starts at n * 100 ms; 2 is overtaken by 3, 4, and 5.
-		for seq in [0, 1, 3, 4, 5] {
+		// Group n starts at n * 100 ms; 2 is overtaken by 3 and 4.
+		for seq in [0, 1, 3, 4] {
 			gaps.complete(seq * 100, Some(seq));
 		}
-		assert_eq!(
-			(lost(&stats), outstanding(&stats)),
-			(0, 0),
-			"2 is still within the budget"
-		);
 		gaps.complete(200, Some(2));
-		// 7 never arrives; 8 is within the budget of 10, so it is not settled yet.
-		for seq in [6, 8, 9, 10] {
+		for seq in [5, 6, 8, 9, 10] {
 			gaps.complete(seq * 100, Some(seq));
 		}
 		assert_eq!(
 			(lost(&stats), outstanding(&stats)),
 			(0, 0),
-			"7 is still within the budget"
+			"2 arrived within the budget"
 		);
+		// 7 lands 300 ms behind 10, past the budget, so a player would skip it.
+		gaps.complete(700, Some(7));
+		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1), "7 arrived past the budget");
 		gaps.complete(1_100, Some(11));
-		assert_eq!(
-			(lost(&stats), outstanding(&stats)),
-			(1, 1),
-			"8 settled, leaving 7 behind"
-		);
+		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1), "settling 7 counts it once");
 		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 9);
 	}
 
-	/// Out-of-order arrivals that fill the whole span count as zero loss.
+	/// Failed groups settle as media time advances, so a viewer losing every group holds only
+	/// the budget's worth of them.
+	#[test]
+	fn gap_tracker_settles_failed_groups() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
+		for seq in 0..100 {
+			gaps.fail(seq * 100, Some(seq));
+		}
+		assert_eq!(lost(&stats), 100);
+		assert!(gaps.pending.len() <= 3, "{} pending", gaps.pending.len());
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 100);
+	}
+
+	/// A track's end settles the gaps no newer group will ever confirm.
+	#[test]
+	fn gap_tracker_settles_at_the_end() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats, Duration::from_secs(2));
+		for seq in [0, 2] {
+			gaps.complete(seq * 100, Some(seq));
+		}
+		assert_eq!(lost(&stats), 0);
+		gaps.finish();
+		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 3);
+	}
+
+	/// Out-of-order arrivals within the budget that fill the whole span count as zero loss.
 	#[test]
 	fn gap_tracker_handles_out_of_order() {
 		let stats = Stats::default();
-		let mut gaps = GapTracker::new(&stats, Duration::ZERO);
+		let mut gaps = GapTracker::new(&stats, Duration::from_millis(250));
 		for seq in [0, 3, 1, 2, 4] {
-			gaps.complete(seq, Some(seq));
+			gaps.complete(seq * 100, Some(seq));
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
+		gaps.finish();
 		assert_eq!((lost(&stats), outstanding(&stats)), (0, 0));
+		assert_eq!(stats.groups_expected.load(Ordering::Relaxed), 5);
 	}
 
 	/// Groups older than the first one received are history a relay filled in after

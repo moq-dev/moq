@@ -70,7 +70,8 @@ loss (which the transport already repairs). A gap is blamed only once the player
 can no longer receive it: a group overtaken by newer ones still arrives within the
 `--max-delay` budget, so the count stops at the newest group whose start is more
 than that budget behind the newest start seen, below which the subscriber's live
-read skips any missing group as stale. The span
+read skips any missing group as stale; a group arriving already past the budget is
+lost too, and a track's end settles every gap. The span
 starts at the first group a subscription receives: an older group that arrives
 later is history, counted in `history_groups` rather than widening the span, so
 a join that over-fetches history never reads as loss. A group the

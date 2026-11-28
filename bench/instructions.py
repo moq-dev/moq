@@ -281,7 +281,11 @@ def report(directory, load):
 
 
 def lost(rows, start, end):
-    """Groups the generator confirmed lost between the reports bracketing the window."""
+    """Groups the generator confirmed lost between the reports bracketing the window.
+
+    The generator confirms a gap only once newer groups are its --max-delay past it, so the
+    count trails the window by that budget.
+    """
     before = [row for row in rows if row["timestamp_ms"] <= start]
     after = [row for row in rows if row["timestamp_ms"] >= end]
     if not before or not after:
