@@ -3,17 +3,37 @@
 ## Goal
 
 Every change that would need a semver-breaking release if it landed right
-after the next cut of `main` into `release`. The
+after the next cut of `main` into `release`, and the non-breaking work the
+cut or [lite-07 finalization](/quest/m2/lite07-finalize.md) requires. A quest
+stays here only for a reason of its own: the cut waiting on m2 is not one. The
 [release cut](/quest/m3/release/cut.md) and its pre-cut reviews wait on this
 milestone (plus `cut.md`'s m0 blockers, not m1); complete it before cutting
 main into release.
 
 ## Plan
 
+Decided 2026-11-28 (maintainer, /quest-run): ✅ until the `0.22.0` cut, m0
+to m2 hold only what the cut or lite-07 finalization needs, plus
+semver-breaking API or wire changes; every other quest moved to m3 and ships
+later in a patch version (rejected: moving only m1; keeping all of m0 as an
+ops bucket). The [questline](/quest/README.md) states the rule.
+
+Here, [hls-group-end-timing](/quest/m3/hls-group-end-timing.md) moved: it
+rechecks HLS timing after lite-07 is finalized and changes no API. The
+typed superseded group end (additive) stays only while its PR claims it.
+
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
+- ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
+  to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
+  [timestamp-ids](/quest/m2/timestamp-ids.md) (rejected: folding into
+  [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).
+  Creates groups eagerly from frame 0 across Rust, JS, `moq-ffi`, `libmoq`, and
+  bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits
+  lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag from
+  lite-07, and keeps `GROUP_END` as the last frame's exclusive end.
 - ✅ Added [delete `moq-pattern` and `@moq/pattern`](/quest/m2/delete-moq-pattern.md)
-  and [remove `identity` from `hang::catalog`](/quest/m2/remove-catalog-identity.md)
+  and removing `identity` from `hang::catalog` (landed)
   to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
   keep `moq-pattern` or catalog `identity`). Wildcards never transit the wire,
   grants already moved to `Prefixes`, and wire announcements already carry
@@ -22,7 +42,7 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
 
 Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 
-- ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
+- ✅ Added pre-cut Rust API fences (`#[non_exhaustive]`
   on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
   `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
   `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its
@@ -31,7 +51,8 @@ Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
   API cut).
 - ✅ Moved three non-breaking quests out of m2 so they stop stalling m2 and the
   five pre-cut release reviews: [TS export audio rate](/quest/m1/ts-export-audio-rate.md)
-  and [TS unpadded audio buffer](/quest/m1/ts-unpadded-audio-buffer.md) to m1,
+  and [TS unpadded audio buffer](/quest/m3/ts-unpadded-audio-buffer.md) to m1 (moved on to m3
+  2026-11-28),
   and kio's crates.io publish (since dropped: kio moved back into `rs/kio`) to m0 as a direct
   `Required` gate on [cut.md](/quest/m3/release/cut.md) (rejected: keeping them
   in m2).

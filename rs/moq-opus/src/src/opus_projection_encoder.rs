@@ -494,7 +494,6 @@ pub unsafe fn opus_projection_encoder_ctl_impl(st: *mut OpusProjectionEncoder, r
 		_ => return ret,
 	};
 }
-#[macro_export]
 macro_rules! opus_projection_encoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_projection_encoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -506,3 +505,4 @@ macro_rules! opus_projection_encoder_ctl {
         opus_projection_encoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_projection_encoder_ctl;

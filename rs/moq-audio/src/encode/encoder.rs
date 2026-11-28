@@ -701,9 +701,8 @@ mod tests {
 			assert_eq!(enc.frame_size(), samples);
 
 			let packet = crate::single(enc.encode_all(&vec![0.0f32; samples]).unwrap());
-			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
-			let coded = unsafe { moq_opus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
-			assert_eq!(coded as usize, samples, "{millis} ms packet");
+			let coded = moq_opus::packet::samples_per_frame(&packet.payload, 48_000);
+			assert_eq!(coded, Some(samples), "{millis} ms packet");
 		}
 	}
 

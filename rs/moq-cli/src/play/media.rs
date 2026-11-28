@@ -821,7 +821,7 @@ where
 	// Each candidate's broadcast request, issued up front so every one is asked at once.
 	let mut bound = Vec::new();
 	for (name, config, reference) in candidates {
-		match source.bind(config.broadcast(), config.identity()) {
+		match source.bind(config.broadcast()) {
 			Ok(binding) => bound.push((name, config, reference, binding, Attempt::Waiting)),
 			Err(err) => reject(&name, &err),
 		}
@@ -1340,7 +1340,7 @@ async fn play_audio<O: Output>(
 			let ended = matches!(event, Ok(None));
 			let delay = consumer.delay();
 			let crossing = match &event {
-				Ok(Some(moq_audio::decode::Read::End { end })) => {
+				Ok(Some(moq_audio::decode::Read::End { end, .. })) => {
 					ends.push_back(Duration::try_from(*end)?);
 					None
 				}
@@ -1475,6 +1475,8 @@ async fn play_audio<O: Output>(
 				}
 				// Never queued: receive folds it into the next frame's crossing.
 				Ok(Some(moq_audio::decode::Read::Gap { .. })) => continue,
+				// A read this player predates has nothing to play.
+				Ok(Some(_)) => continue,
 				Ok(None) => break,
 				// One bad packet is that packet's problem: the decoder stays usable, so
 				// skip it rather than ending playback and taking the video window down

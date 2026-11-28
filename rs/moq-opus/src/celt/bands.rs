@@ -410,9 +410,7 @@ unsafe fn stereo_merge(X: *mut celt_norm, Y: *mut celt_norm, mid: opus_val16, N:
 		memcpy(
 			Y as *mut core::ffi::c_void,
 			X as *const core::ffi::c_void,
-			(N as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-				.wrapping_add((0 * Y.offset_from(X) as i64) as u64),
+			(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 		);
 		return;
 	}
@@ -577,9 +575,7 @@ unsafe fn deinterleave_hadamard(X: *mut celt_norm, N0: i32, stride: i32, hadamar
 	memcpy(
 		X as *mut core::ffi::c_void,
 		tmp.as_mut_ptr() as *const core::ffi::c_void,
-		(N as u64)
-			.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-			.wrapping_add((0 * X.offset_from(tmp.as_mut_ptr()) as i64) as u64),
+		(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 	);
 }
 unsafe fn interleave_hadamard(X: *mut celt_norm, N0: i32, stride: i32, hadamard: i32) {
@@ -615,9 +611,7 @@ unsafe fn interleave_hadamard(X: *mut celt_norm, N0: i32, stride: i32, hadamard:
 	memcpy(
 		X as *mut core::ffi::c_void,
 		tmp.as_mut_ptr() as *const core::ffi::c_void,
-		(N as u64)
-			.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-			.wrapping_add((0 * X.offset_from(tmp.as_mut_ptr()) as i64) as u64),
+		(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 	);
 }
 pub unsafe fn haar1(X: *mut celt_norm, mut N0: i32, stride: i32) {
@@ -1112,9 +1106,7 @@ unsafe fn quant_band(
 		memcpy(
 			lowband_scratch as *mut core::ffi::c_void,
 			lowband as *const core::ffi::c_void,
-			(N as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-				.wrapping_add((0 * lowband_scratch.offset_from(lowband) as i64) as u64),
+			(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 		);
 		lowband = lowband_scratch;
 	}
@@ -1405,23 +1397,13 @@ unsafe fn special_hybrid_folding(
 	memcpy(
 		&mut *norm.offset(n1 as isize) as *mut celt_norm as *mut core::ffi::c_void,
 		&mut *norm.offset((2 * n1 - n2) as isize) as *mut celt_norm as *const core::ffi::c_void,
-		((n2 - n1) as u64)
-			.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-			.wrapping_add(
-				(0 * (&mut *norm.offset(n1 as isize) as *mut celt_norm)
-					.offset_from(&mut *norm.offset((2 * n1 - n2) as isize)) as i64) as u64,
-			),
+		((n2 - n1) as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 	);
 	if dual_stereo != 0 {
 		memcpy(
 			&mut *norm2.offset(n1 as isize) as *mut celt_norm as *mut core::ffi::c_void,
 			&mut *norm2.offset((2 * n1 - n2) as isize) as *mut celt_norm as *const core::ffi::c_void,
-			((n2 - n1) as u64)
-				.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-				.wrapping_add(
-					(0 * (&mut *norm2.offset(n1 as isize) as *mut celt_norm)
-						.offset_from(&mut *norm2.offset((2 * n1 - n2) as isize)) as i64) as u64,
-				),
+			((n2 - n1) as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 		);
 	}
 }
@@ -1768,16 +1750,12 @@ pub unsafe fn quant_all_bands(
 					memcpy(
 						X_save.as_mut_ptr() as *mut core::ffi::c_void,
 						X as *const core::ffi::c_void,
-						(N as u64)
-							.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-							.wrapping_add((0 * X_save.as_mut_ptr().offset_from(X) as i64) as u64),
+						(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 					);
 					memcpy(
 						Y_save.as_mut_ptr() as *mut core::ffi::c_void,
 						Y as *const core::ffi::c_void,
-						(N as u64)
-							.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-							.wrapping_add((0 * Y_save.as_mut_ptr().offset_from(Y) as i64) as u64),
+						(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 					);
 					ctx.theta_round = -1;
 					x_cm = quant_band_stereo(
@@ -1810,30 +1788,19 @@ pub unsafe fn quant_all_bands(
 					memcpy(
 						X_save2.as_mut_ptr() as *mut core::ffi::c_void,
 						X as *const core::ffi::c_void,
-						(N as u64)
-							.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-							.wrapping_add((0 * X_save2.as_mut_ptr().offset_from(X) as i64) as u64),
+						(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 					);
 					memcpy(
 						Y_save2.as_mut_ptr() as *mut core::ffi::c_void,
 						Y as *const core::ffi::c_void,
-						(N as u64)
-							.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-							.wrapping_add((0 * Y_save2.as_mut_ptr().offset_from(Y) as i64) as u64),
+						(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 					);
 					if last == 0 {
 						memcpy(
 							norm_save2.as_mut_ptr() as *mut core::ffi::c_void,
 							norm.offset((M * *eBands.offset(i as isize) as i32) as isize)
 								.offset(-(norm_offset as isize)) as *const core::ffi::c_void,
-							(N as u64)
-								.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-								.wrapping_add(
-									(0 * norm_save2.as_mut_ptr().offset_from(
-										norm.offset((M * *eBands.offset(i as isize) as i32) as isize)
-											.offset(-(norm_offset as isize)),
-									) as i64) as u64,
-								),
+							(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 						);
 					}
 					nstart_bytes = ec_save.offs as i32;
@@ -1843,25 +1810,19 @@ pub unsafe fn quant_all_bands(
 					memcpy(
 						bytes_save.as_mut_ptr() as *mut core::ffi::c_void,
 						bytes_buf as *const core::ffi::c_void,
-						(save_bytes as u64)
-							.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-							.wrapping_add((0 * bytes_save.as_mut_ptr().offset_from(bytes_buf) as i64) as u64),
+						(save_bytes as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 					);
 					(*ec).restore(ec_save);
 					ctx = ctx_save;
 					memcpy(
 						X as *mut core::ffi::c_void,
 						X_save.as_mut_ptr() as *const core::ffi::c_void,
-						(N as u64)
-							.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-							.wrapping_add((0 * X.offset_from(X_save.as_mut_ptr()) as i64) as u64),
+						(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 					);
 					memcpy(
 						Y as *mut core::ffi::c_void,
 						Y_save.as_mut_ptr() as *const core::ffi::c_void,
-						(N as u64)
-							.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-							.wrapping_add((0 * Y.offset_from(Y_save.as_mut_ptr()) as i64) as u64),
+						(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 					);
 					if i == start + 1 {
 						special_hybrid_folding(m, norm, norm2, start, M, dual_stereo);
@@ -1898,38 +1859,25 @@ pub unsafe fn quant_all_bands(
 						memcpy(
 							X as *mut core::ffi::c_void,
 							X_save2.as_mut_ptr() as *const core::ffi::c_void,
-							(N as u64)
-								.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-								.wrapping_add((0 * X.offset_from(X_save2.as_mut_ptr()) as i64) as u64),
+							(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 						);
 						memcpy(
 							Y as *mut core::ffi::c_void,
 							Y_save2.as_mut_ptr() as *const core::ffi::c_void,
-							(N as u64)
-								.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-								.wrapping_add((0 * Y.offset_from(Y_save2.as_mut_ptr()) as i64) as u64),
+							(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 						);
 						if last == 0 {
 							memcpy(
 								norm.offset((M * *eBands.offset(i as isize) as i32) as isize)
 									.offset(-(norm_offset as isize)) as *mut core::ffi::c_void,
 								norm_save2.as_mut_ptr() as *const core::ffi::c_void,
-								(N as u64)
-									.wrapping_mul(::core::mem::size_of::<celt_norm>() as u64)
-									.wrapping_add(
-										(0 * norm
-											.offset((M * *eBands.offset(i as isize) as i32) as isize)
-											.offset(-(norm_offset as isize))
-											.offset_from(norm_save2.as_mut_ptr()) as i64) as u64,
-									),
+								(N as u64).wrapping_mul(::core::mem::size_of::<celt_norm>() as u64),
 							);
 						}
 						memcpy(
 							bytes_buf as *mut core::ffi::c_void,
 							bytes_save.as_mut_ptr() as *const core::ffi::c_void,
-							(save_bytes as u64)
-								.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-								.wrapping_add((0 * bytes_buf.offset_from(bytes_save.as_mut_ptr()) as i64) as u64),
+							(save_bytes as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 						);
 					}
 				} else {

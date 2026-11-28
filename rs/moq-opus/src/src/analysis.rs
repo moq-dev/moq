@@ -554,9 +554,7 @@ unsafe fn downmix_and_resample(
 		memcpy(
 			y as *mut core::ffi::c_void,
 			tmp.as_mut_ptr() as *const core::ffi::c_void,
-			(subframe as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64)
-				.wrapping_add((0 * y.offset_from(tmp.as_mut_ptr()) as i64) as u64),
+			(subframe as u64).wrapping_mul(::core::mem::size_of::<opus_val32>() as u64),
 		);
 	} else if Fs == 16000 {
 		let vla_0 = (3 * subframe) as usize;
@@ -632,11 +630,7 @@ pub unsafe fn tonality_get_info(tonal: *mut TonalityAnalysisState, info_out: *mu
 	memcpy(
 		info_out as *mut core::ffi::c_void,
 		&mut *((*tonal).info).as_mut_ptr().offset(pos as isize) as *mut AnalysisInfo as *const core::ffi::c_void,
-		1_u64
-			.wrapping_mul(::core::mem::size_of::<AnalysisInfo>() as u64)
-			.wrapping_add(
-				(0 * info_out.offset_from(&mut *((*tonal).info).as_mut_ptr().offset(pos as isize)) as i64) as u64,
-			),
+		1_u64.wrapping_mul(::core::mem::size_of::<AnalysisInfo>() as u64),
 	);
 	if (*info_out).valid == 0 {
 		return;
@@ -942,16 +936,7 @@ unsafe fn tonality_analysis(
 			.as_mut_ptr()
 			.offset(720 as isize)
 			.offset(-(240 as isize)) as *const core::ffi::c_void,
-		240_u64
-			.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64)
-			.wrapping_add(
-				(0 * ((*tonal).inmem).as_mut_ptr().offset_from(
-					((*tonal).inmem)
-						.as_mut_ptr()
-						.offset(720 as isize)
-						.offset(-(240 as isize)),
-				) as i64) as u64,
-			),
+		240_u64.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64),
 	);
 	remaining = len - (ANALYSIS_BUF_SIZE - (*tonal).mem_fill);
 	(*tonal).hp_ener_accum = downmix_and_resample(
@@ -976,11 +961,7 @@ unsafe fn tonality_analysis(
 			info as *mut core::ffi::c_void,
 			&mut *((*tonal).info).as_mut_ptr().offset(prev_pos as isize) as *mut AnalysisInfo
 				as *const core::ffi::c_void,
-			1_u64
-				.wrapping_mul(::core::mem::size_of::<AnalysisInfo>() as u64)
-				.wrapping_add(
-					(0 * info.offset_from(&mut *((*tonal).info).as_mut_ptr().offset(prev_pos as isize)) as i64) as u64,
-				),
+			1_u64.wrapping_mul(::core::mem::size_of::<AnalysisInfo>() as u64),
 		);
 		return;
 	}

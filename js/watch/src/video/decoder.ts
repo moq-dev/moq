@@ -282,7 +282,7 @@ export class Decoder {
 		// tell whether a failure's source is still selected.
 		const active: Moq.Broadcast.Consumer | undefined =
 			broadcast && track && playback && (enabled || selection.kind === "failed")
-				? broadcast.relativeBroadcast(effect, playback.broadcast, playback.identity)
+				? broadcast.relativeBroadcast(effect, playback.broadcast)
 				: undefined;
 		const key = playback && JSON.stringify(playback);
 

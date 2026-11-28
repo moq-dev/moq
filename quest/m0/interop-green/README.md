@@ -1,4 +1,4 @@
-# Interop and Video pass on main
+# [XS] Interop and Video pass on main
 
 ## Goal
 
@@ -130,6 +130,20 @@ earlier rejoin or reattach step. Remeasured on `main` in
 so the child that owned them was deleted (decided 2026-11-26, maintainer). Its trace showed a
 lite-06 cold join replays about 2 s of retained audio that the player skips through; that waits
 for lite-07, whose joins state their lag (rejected: fixing it for lite-06).
+
+The 2026-11-27 Nightly triage then found `Media (firefox player)` failing 6 of 15 runs at a
+different lifecycle step almost every time (`rejoin reaches live`, `reattach reaches live`, and the
+tone after a resume, rejoin, or reattach). Every one of those runs was at a commit before
+[moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561), which grew the JS publisher's audio
+groups from 20 ms to 100 ms. Measured on the Nightly's ARM runner class with the whole `media`
+lane in [moq-dev/moq#9809](https://github.com/moq-dev/moq/pull/9809): `main` passed 64 of 64
+runs, the last failing Nightly commit (`7297210187`) failed 3 of 24, and `main` with the fixture's
+audio groups set back to 20 ms failed 10 of 56 (7 of 32 beside `main`'s 32 of 32 in one batch), at
+the same steps. The `reaches live` failures found the 4-vCPU host saturated (idle near 0%, the
+debug-built relay near a whole core) while a resubscription replayed retained audio as a stream
+per 20 ms group. The child quest was deleted, since its failures no longer
+occur (decided 2026-11-28, AFK recommendation; rejected: profiling the player's per-group cost
+against a 20 ms publisher, and building the media lane's relay in release).
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

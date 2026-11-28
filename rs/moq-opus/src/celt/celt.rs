@@ -110,9 +110,7 @@ pub unsafe fn comb_filter(
 			memmove(
 				y as *mut core::ffi::c_void,
 				x as *const core::ffi::c_void,
-				(N as u64)
-					.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64)
-					.wrapping_add((0 * y.offset_from(x) as i64) as u64),
+				(N as u64).wrapping_mul(::core::mem::size_of::<opus_val32>() as u64),
 			);
 		}
 		return;
@@ -156,11 +154,7 @@ pub unsafe fn comb_filter(
 			memmove(
 				y.offset(overlap as isize) as *mut core::ffi::c_void,
 				x.offset(overlap as isize) as *const core::ffi::c_void,
-				((N - overlap) as u64)
-					.wrapping_mul(::core::mem::size_of::<opus_val32>() as u64)
-					.wrapping_add(
-						(0 * y.offset(overlap as isize).offset_from(x.offset(overlap as isize)) as i64) as u64,
-					),
+				((N - overlap) as u64).wrapping_mul(::core::mem::size_of::<opus_val32>() as u64),
 			);
 		}
 		return;

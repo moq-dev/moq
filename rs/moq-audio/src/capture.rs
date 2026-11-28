@@ -513,6 +513,7 @@ impl Microphone {
 
 /// An audio input reported by [`devices`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Device {
 	/// Opaque identifier: pass to [`Source::Microphone`].
 	///

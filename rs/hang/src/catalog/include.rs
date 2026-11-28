@@ -21,13 +21,6 @@ pub struct Include {
 	/// Resolve it with [`Path::try_resolve`](moq_net::Path::try_resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	pub broadcast: moq_net::path::Relative,
-
-	/// The stream the reference names, with a rendition `identity`'s meaning: a route of another
-	/// identity refuses it, and against one a relay minted it is best effort. A composer leaves it
-	/// out until the include resolves.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
-	pub identity: Option<moq_net::Identity>,
 }
 
 impl crate::catalog::Entry for Include {}
@@ -37,7 +30,6 @@ impl Include {
 	pub fn new(broadcast: impl Into<moq_net::path::Relative>) -> Self {
 		Self {
 			broadcast: broadcast.into(),
-			identity: None,
 		}
 	}
 }
