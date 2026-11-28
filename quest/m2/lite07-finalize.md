@@ -280,10 +280,18 @@ for [unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md), so lite-07's
 `FRAME` timestamp deltas freeze unsigned, so the timestamps they produce never
 decrease (rejected: the next wip version after the cut).
 
+Decided 2026-11-27 (maintainer, `/quest-plan` following the frame-0 design pass
+on [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ the cut
+also waits for [keying groups by frame 0](/quest/m2/group-frame-timestamps.md),
+which creates published groups eagerly from frame 0, omits the first `FRAME`
+delta at `Frame Start = 0`, removes zigzag from lite-07, and drops `seek(start)`
+before 0.22 (rejected: folding it into #9794; dropping it).
+
 ## Required
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 - [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
+- [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
 
 ## Related
 
