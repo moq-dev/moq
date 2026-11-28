@@ -255,11 +255,12 @@ impl Grouping {
 		Some(end.and(full))
 	}
 
-	/// Whether a voiced packet at `pts` resumes speech after a DTX silence long enough that the open
-	/// group of DTX packets can't take it, so the caller closes that group before writing it: a live
-	/// join that skips the stale group would otherwise skip the resumed audio with it.
-	fn resumes(&mut self, pause: bool, pts: Option<moq_net::Timestamp>) -> bool {
-		let resumes = !pause && !self.speaking && pts.is_some_and(|pts| self.join.opens(pts));
+	/// Whether a voiced packet at `pts` resumes speech a whole span past the start of the open group
+	/// of DTX packets, so the caller closes that group before writing it: a live join that skips the
+	/// stale group would otherwise skip the resumed audio with it. A packet reordered before the
+	/// group's start is left to the producer to place.
+	fn resumes(&mut self, pause: bool, pts: moq_net::Timestamp) -> bool {
+		let resumes = !pause && !self.speaking && self.join.gaps(pts);
 		if resumes {
 			self.reset();
 		}
@@ -432,10 +433,12 @@ impl Track {
 			}
 			TrackKind::Opus(ref mut import) => {
 				let pause = frame.as_ref().len() <= 2;
+				// Resolved once, so a packet stamped from the clock is checked where it is written.
+				let pts = import.timestamp(pts)?;
 				if self.audio.resumes(pause, pts) {
 					import.close(None)?;
 				}
-				let written = import.write(frame.into_bytes(), pts)?;
+				let written = import.write(frame.into_bytes(), Some(pts))?;
 				if let Some(end) = self.audio.fill(written, pause) {
 					import.close(end)?;
 				}
@@ -1281,6 +1284,56 @@ mod tests {
 
 		// Speech resuming after the silence closes the open DTX group rather than joining it.
 		assert_eq!(collect_groups(subscriber).await, vec![5, 1, 4, 2]);
+	}
+
+	/// Speech the broadcast clock stamps still starts a group of its own after a DTX silence.
+	#[tokio::test(start_paused = true)]
+	async fn clock_stamped_speech_after_dtx_starts_its_own_group() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+
+		let write = async |import: &mut Track, packet: &[u8]| {
+			import.decode(packet, None).unwrap();
+			kio::clock::sleep(Duration::from_millis(20)).await;
+		};
+		for _ in 0..5 {
+			write(&mut import, OPUS_20MS).await;
+		}
+		for _ in 0..3 {
+			write(&mut import, b"a").await;
+		}
+		kio::clock::sleep(Duration::from_secs(2)).await;
+		for _ in 0..2 {
+			write(&mut import, OPUS_20MS).await;
+		}
+		let _finished = import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![5, 1, 2, 2]);
+	}
+
+	/// A voiced packet reordered behind DTX packets joins their open group as it did before, rather
+	/// than closing it and then being refused as a rewind.
+	#[tokio::test(start_paused = true)]
+	async fn reordered_speech_joins_the_open_dtx_group() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+
+		for index in 0..5 {
+			import
+				.decode(OPUS_20MS, Some(Timestamp::from_micros(index * 20_000).unwrap()))
+				.unwrap();
+		}
+		for ts in [100_000, 140_000] {
+			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+		}
+		import
+			.decode(OPUS_20MS, Some(Timestamp::from_micros(120_000).unwrap()))
+			.unwrap();
+		let _finished = import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![5, 1, 2]);
 	}
 
 	/// A group closed on a frame of unknown length declares no end, so the producer doesn't

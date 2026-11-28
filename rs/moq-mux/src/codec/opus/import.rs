@@ -106,6 +106,11 @@ impl Import {
 		self.write(frame.into_bytes(), pts).map(|_| ())
 	}
 
+	/// The timestamp a packet at `pts` is written at: `pts`, or the broadcast clock's reading.
+	pub(crate) fn timestamp(&self, pts: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
+		self.track.timestamp(pts)
+	}
+
 	/// [`decode`](Self::decode), returning the packet's timestamp and how long it plays, if known.
 	pub(crate) fn write(&mut self, payload: bytes::Bytes, pts: Option<moq_net::Timestamp>) -> crate::Result<Written> {
 		let timestamp = self.track.timestamp(pts)?;
