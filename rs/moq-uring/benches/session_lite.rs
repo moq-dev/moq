@@ -5,7 +5,7 @@
 //! the two matrices are directly comparable: the difference is the moq-net
 //! machine and container framing on top of the same wire path.
 //!
-//! Run it with `just rs bench-session` on a Linux 6.12+ kernel.
+//! Time it with `just bench -- -p moq-uring --bench session_lite` on a Linux 6.12+ kernel.
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
 #[path = "../tests/integration/support.rs"]

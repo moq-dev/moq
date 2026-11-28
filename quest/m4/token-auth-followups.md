@@ -2,8 +2,8 @@
 
 ## Goal
 
-The remaining multi-token gap in
-`cargo bench -p moq-net --bench auth -- auth/request_tokens` is profiled,
+The remaining multi-token gap in `request_tokens`
+(`just bench -- -p moq-net --features fuzz --bench auth`) is profiled,
 and its cause either fixed or recorded in this quest's PR with numbers.
 
 ## Plan

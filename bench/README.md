@@ -68,8 +68,8 @@ and stats over the in-memory transport:
 nix develop --command just bench -- -p moq-relay --features test-support --bench session
 ```
 
-The relay and model targets share shapes and complete-payload assertions. The
-`relay_` prefix distinguishes results; the model-only idle case needs its server
+The relay and model targets share shapes and complete-payload assertions, and
+their file names tell their results apart; the model-only idle case needs its server
 session handle and is not registered by the relay target. Relay fixtures enable
 stats and admit all benchmark paths using embedded auth. The dash viewer gets a
 peer grant to discover hidden stats routes on protocols without hidden opt-in. The announcement limit
@@ -90,19 +90,15 @@ size, and cadence (datagrams per track between reads):
 
 ```bash
 nix develop --command just bench -- -p moq-net --features fuzz --bench session
-nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --features fuzz --bench session
 ```
 
 Throughput counts delivered datagrams. Every one must arrive with its sequence
 and payload; the memory transport loses none at these cadences, so a drop fails
-instead of looking cheaper. `SESSION_ALLOCS=1` prints the group consumer size,
-allocations, allocated bytes and, where Linux perf counters are readable, user instructions per
-delivered datagram or viewer-group. The counts exclude the cache tick. Bytes sum
-requested allocation and reallocation sizes, including growth in place; they
-measure neither live memory nor bytes copied. A multiplexed instruction counter
-fails the run instead of reporting an undercount. Every task runs on the bench's
-one thread. Pin it to one CPU to compare repeated instruction counts. The relay target runs the same shapes as
-`relay_session_delivery_datagram`.
+instead of looking cheaper. swole reports each case's allocations and allocated
+bytes per call and per delivered item, beside its time or instruction count;
+the cache tick runs between calls, outside them. Every task runs on the bench's
+one thread. The relay target runs the same shapes as its
+`session_delivery_datagram`.
 
 Real QUIC adds congestion control and the sender's datagram queue. This sends
 datagrams below and above a bufferbloated bottleneck to a loopback viewer and a
@@ -121,14 +117,12 @@ including QUIC opens, writes, receive leases and FINs, on long-lived loopback co
 
 ```bash
 nix develop --command just bench -- -p moq-tokio --bench fanout
-nix develop --command env NATIVE_ALLOCS=1 cargo bench --locked -p moq-tokio --bench fanout
 ```
 
-The allocation mode warms each shape, then counts allocations and requested allocation/reallocation
-bytes over 64 batches, per delivered stream. Setup and destruction are outside the counters;
-all QUIC tasks run on the benchmark's current-thread runtime. Payload size and streams per batch
-vary independently. Every delivered payload is compared byte for byte. The ordinary timing
-series runs nightly with `fanout`.
+swole counts each call's allocations and allocated bytes beside its time; setup
+and teardown stay outside them. All QUIC tasks run on the benchmark's
+current-thread runtime. Payload size and streams per batch vary independently.
+Every delivered payload is compared byte for byte. It runs nightly.
 
 The io\_uring `web_headers` target varies stalled partial headers independently of ready uni/bi
 streams. It then completes every fragmented header and checks its payload and FIN, so a busy
@@ -218,14 +212,10 @@ nix develop --command just bench -- --manifest-path "$PWD/rs/qmux/Cargo.toml" --
 sessions, and 1/8 streams per session. Both endpoints run on one thread over
 bounded in-memory byte pipes; this isolates framing and receive ownership from
 TLS, kernel sockets, and congestion. Each stream holds an unread 512 KiB lease,
-so eight together fill the connection window. The untimed output reports live
-requested heap bytes, including both endpoints, their tasks, the pipes, stream
-tables and receive backings, per session. The shared source payload and runtime
-are excluded. This measures retained allocations, not RSS; allocator counters
-also run during timing. Every timed round reads and checks all payload bytes,
-returns lease credit, and fills each stream again. Throughput counts delivered
-payload once. Nightly's supplemental Rust benchmark leg records the series and
-keeps the memory output with its raw results. The broader MoQ session transport
+so eight together fill the connection window. Every call reads and checks all
+payload bytes, returns lease credit, and fills each stream again. Throughput
+counts delivered payload once. Nightly's supplemental Rust benchmark leg records
+the series. The broader MoQ session transport
 and version sweep remains in [its quest](/quest/m5/bench-transport-sweep.md).
 
 Compare one multi-threaded Tokio runtime with the same number of independent
@@ -805,18 +795,14 @@ sweeps the set size (1, 16, 256) against a first, last or missing `kid`; `refuse
 covers expired, forged, unknown-`kid`, `kid`-less and malformed tokens. `clients`
 runs 1, 16 or 64 concurrent requests on a four-worker runtime against one key, a
 16-key directory or a 16-key set, plus a refusal burst and a key replaced and
-removed by atomic rename during the requests; each prints its per-request
-p50/p95/p99 after the run. `sessions` times a `connect` and `end` while the
+removed by atomic rename during the requests. `sessions` times a `connect` and `end` while the
 server's session limits count 0, 1024 or 16384 other live sessions. `http` is one
 HS256 or ES256 `connect` as a relay sends it, a `POST /` over loopback TCP, which
 puts the verification in scale.
 
 Validity checks read a manual clock, so every run decides alike. Set
-`VERIFY_FIXTURE` to a directory to reuse its keys and tokens across runs, and
-`VERIFY_CASE` with `VERIFY_ITERATIONS=n` to run one case exactly `n` times instead
-of the harness, printing its allocations per iteration. Under `perf stat`, the
-instruction difference between `n` and 0 iterations, divided by `n`, is that case's
-deterministic cost on a loaded host. It runs nightly in the `rust-extra` group.
+`VERIFY_FIXTURE` to a directory to reuse its keys and tokens across runs. It runs
+nightly in the `rust-extra` group.
 
 ## Nightly trends
 
@@ -957,22 +943,18 @@ next run; delete the directory, then `git worktree prune`, to reclaim them.
 The Instructions workflow counts each deterministic bench's instructions every
 night on `main`, under stock Valgrind on a hosted runner, through
 [swole](https://github.com/kixel-ai/swole). Each
-benchmark runs alone in its own Valgrind process, so a change of a few percent
-shows without the paired comparison's rounds. Some counts still move
+benchmark runs alone in its own Valgrind process and counts once, so a change of
+a few percent shows without pairing. Some counts still move
 between runs of the same code: some benches read the wall clock and follow the
 host's load, by up to 32%, and some shift with the checkout's path
 ([quest](/quest/m0/repeatable-instruction-counts.md)). CI counts one benchmark
 at a time (`--jobs 1`), so a bisect step counts under the nightly's load. Beside
 each count, swole writes its estimated cycles, which weigh Callgrind's simulated
-cache misses and branch mispredicts. It does not see syscalls, I/O, or
-contention, and CodSpeed's Criterion, which counts them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
-single-threaded targets without I/O, and Nightly keeps measuring every bench.
-Workspace benches import `criterion`, which `rs/bench-harness` resolves to
-Criterion, or to CodSpeed's instrumented Criterion under `cfg(codspeed)`, which
-swole sets. swole cannot see a CodSpeed bench's threads, so it counts each
-five times and records the median, with the least and most beside it; once the
-benches move to swole's own harness ([quest](/quest/m5/bench-harness.md)), one
-that runs alone counts once. Nothing gates on it.
+cache misses and branch mispredicts. A count sees no syscall's kernel work, and
+holds whatever another thread ran beside the call, which swole counts five
+times to take the median, so `sh/rs/instructions.sh` selects only
+single-threaded targets without I/O, and Nightly keeps timing every bench.
+Nothing gates on it.
 
 Each count's measure names the environment it ran in, such as `instructions
 (x86_64-9d154cd7ab99)` and `estimated cycles (x86_64-9d154cd7ab99)`: Valgrind's
