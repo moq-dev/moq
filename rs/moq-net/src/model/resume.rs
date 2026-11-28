@@ -42,7 +42,9 @@
 //!
 //! A reader polled for drops reports what the serving copy gave up, other than a route
 //! failure, once no copy it replaced may still deliver it. A route change discards what the
-//! former serving copy gave up and the reader had yet to report.
+//! former serving copy gave up and the reader had yet to report. A skip is the content's own,
+//! which every copy of the identity shares: the reader reports the skips of every copy it lets
+//! go of, and answers about the cache with every copy's, so a switch carries them over.
 
 use rangemap::{RangeMap, RangeSet};
 
@@ -605,6 +607,10 @@ impl Consumer {
 				drops: RangeMap::new(),
 				received: RangeSet::new(),
 				received_checked: None,
+				carried: RangeSet::new(),
+				unreported: RangeSet::new(),
+				carried_for: (revision, (0, None)),
+				carrying: kio::WaiterList::new(),
 				declared: None,
 				declared_error: None,
 			})
@@ -1561,21 +1567,14 @@ impl Subscriber {
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
 		let mut reader = self.reader();
 		reader.window();
-		// The serving route's copy holds what its publisher skipped or gave up.
-		let serving = reader.copies.last().map(|copy| copy.track.clone());
-		track::first_open(reader.window.runs(from), |key| {
-			serving.as_ref().and_then(|track| track.hole_end(key, true))
-		})
+		track::first_open(reader.window.runs(from), |key| reader.hole_end(key, true))
 	}
 
-	/// Whether the serving route's copy holds every group of `run` declared skipped; see
+	/// Whether every group of `run` was declared skipped, by any copy of the track; see
 	/// [`track::Subscriber::is_skipped`].
 	pub(super) fn is_skipped(&self, run: impl Iterator<Item = std::ops::RangeInclusive<u64>>) -> bool {
-		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
-		let Some(serving) = serving else {
-			return false;
-		};
-		track::first_open(run, |key| serving.hole_end(key, false)).is_none()
+		let reader = self.reader();
+		!reader.copies.is_empty() && track::first_open(run, |key| reader.hole_end(key, false)).is_none()
 	}
 
 	/// Where a run of starts up to `end` ends with the span the serving copy knows it reaches
@@ -1689,12 +1688,15 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn skipped_below(&self, key: u64) -> u64 {
 		let reader = self.reader();
-		reader
-			.copies
-			.iter()
+		let carried = key
+			.checked_sub(1)
+			.and_then(|below| reader.carried.get(&below))
+			.map_or(0, |run| key - run.start);
+		(reader.copies.iter())
 			.map(|copy| copy.track.skipped_below(key))
 			.max()
 			.unwrap_or(0)
+			.max(carried)
 	}
 
 	/// Whether `position` is the serving copy's largest and its group ended there.
@@ -2192,6 +2194,20 @@ struct Reader {
 	/// The part of [`Self::drops`] that is a received stale run the serving copy held, which
 	/// a new upstream subscription can supersede. Kept apart so a poll costs these runs, not every queued one.
 	received: RangeSet<u64>,
+	/// What a copy let go of declared skipped within the reader's groups: its publisher never
+	/// produced those groups. Every copy is of one identity, so one content, and no route
+	/// will deliver them; unlike a drop, this outlives the copy and any route change. Kept
+	/// above what the reader settled for good, so a rescan reports a run the wire was told
+	/// nothing of.
+	carried: RangeSet<u64>,
+	/// The part of [`Self::carried`] not yet reported.
+	unreported: RangeSet<u64>,
+	/// The ranges' revision and local bounds [`Self::unreported`] was last clipped to: a run
+	/// they left out is reported once they grow over it.
+	carried_for: (u64, (u64, Option<u64>)),
+	/// Drop polls parked while nothing was left to report, which a copy let go of with skips
+	/// to carry wakes.
+	carrying: kio::WaiterList,
 	/// The serving copy's [`track::Subscriber::stale_revision`] when [`Self::received`] was
 	/// last checked against it, so a poll rechecks those runs only after one may be gone.
 	/// `None` until the serving copy is first checked.
@@ -2752,6 +2768,7 @@ impl Reader {
 			waiter,
 		};
 		let mut waits = false;
+		let mut gone = Vec::new();
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
 		for (index, mut copy) in std::mem::take(&mut self.copies).into_iter().enumerate() {
 			let mut retains = copy.replaced.then(|| copy.retains(&reader));
@@ -2765,10 +2782,65 @@ impl Reader {
 					waits = true;
 					self.copies.push(copy);
 				}
-				Some(Retains::No) => {}
+				Some(Retains::No) => gone.push(copy),
 			}
 		}
+		for copy in gone {
+			self.carry_skips(&copy, delivered);
+		}
 		waits
+	}
+
+	/// Keep what `copy`, let go of now, declared skipped within the reader's groups and not
+	/// handed out, for [`Self::poll_drop`] to report: once the copy is gone, nothing else knows.
+	fn carry_skips(&mut self, copy: &Copy, delivered: &Delivered) {
+		let (start, end) = self.groups;
+		let skipped = copy.skipped_in(start..end.unwrap_or(u64::MAX), &kio::Waiter::noop());
+		let mut carried = false;
+		for run in skipped.iter() {
+			for gap in delivered.gaps(run.clone()) {
+				for new in self.carried.gaps(&gap).collect::<Vec<_>>() {
+					self.unreported.insert(new);
+					carried = true;
+				}
+				self.carried.insert(gap);
+			}
+		}
+		if carried {
+			self.carrying.wake();
+		}
+	}
+
+	/// The exclusive end of the run at `key` no group will fill, for answering about the
+	/// track's cache: the serving copy's, and with `dropped` its drops for good too, or a skip
+	/// any other copy declared, held or let go of. Every copy is of one identity, so one
+	/// content: a group one declared skipped no route will produce. A replaced copy's drops
+	/// are that route's own verdict.
+	fn hole_end(&self, key: u64, dropped: bool) -> Option<u64> {
+		let serving = (self.copies.last()).and_then(|copy| copy.track.hole_end(key, dropped));
+		let replaced = (self.copies.iter().rev().skip(1)).filter_map(|copy| copy.track.hole_end(key, false));
+		let carried = self.carried.get(&key).map(|run| run.end);
+		serving.into_iter().chain(replaced).chain(carried).max()
+	}
+
+	/// The parts of `run` the reader would report: within its local bounds and its ranges.
+	fn reportable(&self, run: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
+		let (start, end) = self.groups;
+		let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
+		let mut parts = Vec::new();
+		if run.is_empty() {
+			return parts;
+		}
+		for range in self.window.runs(run.start) {
+			if *range.start() >= run.end {
+				break;
+			}
+			let part = run.start.max(*range.start())..run.end.min(range.end().saturating_add(1));
+			if !part.is_empty() {
+				parts.push(part);
+			}
+		}
+		parts
 	}
 
 	/// The parts of `groups` recorded skipped or a copy held now declared skipped. Parks
@@ -2780,6 +2852,9 @@ impl Reader {
 		for copy in &self.copies {
 			skipped.extend(copy.skipped_in(groups.clone(), waiter).iter().cloned());
 		}
+		skipped.extend(
+			(self.carried.overlapping(&groups)).map(|run| run.start.max(groups.start)..run.end.min(groups.end)),
+		);
 		skipped
 	}
 
@@ -3491,12 +3566,40 @@ impl Reader {
 		// The common case: nothing to report on one route, and the serving copy's own poll
 		// above wakes this for the next run it gives up. A replaced copy is still judged:
 		// dropping the last group handed out from it wakes nothing else that lets it go.
-		if self.drops.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
+		// Ranges or bounds that moved may now take in a run clipped away before.
+		let view = (self.revision, self.groups);
+		if self.carried_for != view {
+			self.carried_for = view;
+			for run in self.carried.iter() {
+				self.unreported.insert(run.clone());
+			}
+		}
+		if self.drops.is_empty() && self.unreported.is_empty() && !self.copies.iter().any(|copy| copy.replaced) {
+			self.carrying.register(waiter);
 			return Poll::Pending;
 		}
 		// Judged as the group path judges it, so a copy kept only for a group still read
 		// holds nothing back, and letting one go wakes this too.
 		self.let_go(delivered, waiter);
+		// A skip a copy let go of declared goes out at once, within the reader's bounds and
+		// ranges: no copy of the identity will deliver it, so none it replaced holds it back.
+		// Below what the reader settled for good, nothing is reported again.
+		let settled = delivered.floor();
+		if settled > 0 {
+			self.carried.remove(0..settled);
+			self.unreported.remove(0..settled);
+		}
+		while let Some(run) = self.unreported.iter().next().cloned() {
+			self.unreported.remove(run.clone());
+			let mut open = (self.reportable(run).into_iter()).flat_map(|part| delivered.gaps(part).collect::<Vec<_>>());
+			if let Some(first) = open.next() {
+				for rest in open {
+					self.unreported.insert(rest);
+				}
+				return Poll::Ready((first, track::Hole::Skip));
+			}
+		}
+		self.carrying.register(waiter);
 		let serving = self.generation;
 		let (start, end) = self.groups;
 		let mut feeding = RangeSet::new();
@@ -3548,6 +3651,11 @@ impl Reader {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn rescan_drops(&mut self) {
+		// Reported again where the wire was told nothing of them: delivery widened below an
+		// earlier start.
+		for run in self.carried.iter() {
+			self.unreported.insert(run.clone());
+		}
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
 				sub.rescan_drops();
@@ -7521,11 +7629,11 @@ mod test {
 		assert!(consumer.serving().is_some_and(|copy| copy.same_channel(&b.consume())));
 	}
 
-	/// A reader asked about the track's cache answers for the serving copy, which a replaced
-	/// copy's groups and skips do not change; the run of skips just below a group counts
-	/// from any copy.
+	/// A reader asked about the track's cache answers with what every copy of the identity
+	/// knows was skipped, a replaced copy's too, since a switch carries the cache over; the
+	/// largest group is still the serving copy's.
 	#[test]
-	fn a_reader_answers_cache_queries_for_the_serving_copy() {
+	fn a_reader_answers_cache_queries_from_every_copy() {
 		let routes = Producer::new();
 		let a = copy();
 		write(&a, 1);
@@ -7544,9 +7652,10 @@ mod test {
 		assert_eq!(sub.skipped_below(5), 2, "the replaced copy knows 3 and 4 were skipped");
 		assert!(sub.is_skipped(std::iter::once(6..=7)));
 		assert!(
-			!sub.is_skipped(std::iter::once(3..=4)),
-			"only the replaced copy skipped 3 and 4"
+			sub.is_skipped(std::iter::once(3..=3)),
+			"the replaced copy's skip of 3 carries over"
 		);
+		assert!(!sub.is_skipped(std::iter::once(2..=3)), "group 2 exists");
 		assert!(sub.largest_finished(Position::group(5)));
 		assert!(!sub.largest_finished(Position::group(4)));
 		let consumer = routes.consume();
@@ -8751,6 +8860,125 @@ mod test {
 				assert_eq!(read(&mut ordered), ["group 4"]);
 			}
 		}
+	}
+
+	/// A replaced copy's skips reach a reader only within its bounds: the copy's track holds
+	/// skips other readers asked about, which this one never did.
+	#[test]
+	fn a_carried_skip_stays_within_the_readers_bounds() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(Subscription::default().with_max(None))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.with_range(2..);
+		a.skip_groups(0..3);
+		write(&a, 3);
+		let mut b = received_copy();
+		b.anchored();
+		write(&b, 3);
+		write(&b, 4);
+		routes.serve(b.consume());
+		b.finish_at(Position::group(5)).unwrap();
+		while let Poll::Ready(Ok(Some(_))) = sub.poll_recv_group(&kio::Waiter::noop()) {}
+		let mut skips = Vec::new();
+		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+			assert!(matches!(hole, track::Hole::Skip), "{run:?} {hole:?}");
+			skips.push((run.start, run.end));
+		}
+		assert_eq!(skips, vec![(2, 3)], "nothing below the reader's floor");
+	}
+
+	/// A carried skip outside the reader's ranges is reported once the ranges grow over it.
+	#[test]
+	fn a_carried_skip_is_reported_once_the_ranges_take_it_in() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let from = |start| {
+			Subscription::default().with_max(None).with_ranges([track::Range {
+				start: crate::track::Start::Time(start),
+				end: None,
+			}])
+		};
+		let mut sub = logical.consume().subscribe(from(3)).now_or_never().unwrap().unwrap();
+		a.skip_groups(0..3);
+		write(&a, 3);
+		let mut b = received_copy();
+		b.anchored();
+		write(&b, 3);
+		write(&b, 4);
+		routes.serve(b.consume());
+		b.finish_at(Position::group(5)).unwrap();
+		let skips = |sub: &mut track::Subscriber| {
+			while let Poll::Ready(Ok(Some(_))) = sub.poll_recv_group(&kio::Waiter::noop()) {}
+			let mut skips = Vec::new();
+			while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+				if matches!(hole, track::Hole::Skip) {
+					skips.push((run.start, run.end));
+				}
+			}
+			skips
+		};
+		assert_eq!(
+			skips(&mut sub),
+			Vec::<(u64, u64)>::new(),
+			"the ranges start past the skip"
+		);
+		sub.update(from(0)).unwrap();
+		assert!(skips(&mut sub).contains(&(0, 3)), "the widened ranges take the skip in");
+	}
+
+	/// A reader that read a copy's groups around a skip that copy's publisher declared is told
+	/// of that skip after the front switched routes, as a reader of the copy alone is: a relay
+	/// serving it otherwise names those starts NOT_FOUND once the track ends.
+	#[test]
+	fn a_skip_on_a_replaced_copy_reaches_its_reader() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(Subscription::default().with_max(None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&a, 0);
+		a.skip_groups(1..3);
+		write(&a, 3);
+		let mut b = received_copy();
+		b.anchored();
+		write(&b, 3);
+		b.skip_groups(4..6);
+		write(&b, 6);
+		routes.serve(b.consume());
+		b.finish_at(Position::group(7)).unwrap();
+		let mut groups = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&kio::Waiter::noop()) {
+			groups.push(group.start);
+		}
+		assert_eq!(groups, [6, 3, 0]);
+		let mut skips = Vec::new();
+		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+			assert!(matches!(hole, track::Hole::Skip), "{run:?} {hole:?}");
+			skips.push(run);
+		}
+		skips.sort_by_key(|run| run.start);
+		assert_eq!(
+			skips,
+			[1..3, 4..6],
+			"the replaced copy's skip of 1 and 2 reaches the reader"
+		);
 	}
 
 	/// A front's held group with no end of its own is bounded by the next key its copies hold,

@@ -6749,6 +6749,11 @@ impl TrackRun {
 					if !self.children.is_empty() || self.opening.is_some() {
 						return Poll::Pending;
 					}
+					// A verdict the read reached on its way to the end, such as a skip a copy it let
+					// go of declared, goes out before the end names every run left not found.
+					if self.poll_forward_drop(false, writer, waiter)? {
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
 					// Lite-07 sends no FIN to say nothing was served, so a track that ended
 					// before any group resolved the start still says where delivery starts,
 					// and the drops below then account for every group.
