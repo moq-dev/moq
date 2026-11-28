@@ -98,13 +98,17 @@ type Pending =
 	| { kind: "remove"; finished: boolean }
 	| { kind: "readd"; finished: boolean; listed: Listed };
 
+/**
+ * Where one reader's SYNCED stands: the listing has not synced, SYNCED went out, or the keys of the
+ * changes queued when it synced. Those lead the queue, so SYNCED goes out once they were read, and
+ * a change queued later never postpones it.
+ */
+type Sync = "waiting" | "sent" | Set<string>;
+
 /** One reader's pending changes, keyed by kind and name in the order they happened. */
 class Queue {
 	pending = new Map<string, Pending>();
-	/** Events left to send before SYNCED, once the listing has synced. */
-	bound?: number;
-	/** SYNCED was sent. */
-	synced = false;
+	sync: Sync = "waiting";
 	/** `null` once the listing ended, or the error that ended it. */
 	end?: Error | null;
 	/** The reader left the listing, or a newer reader of its owner replaced it. */
@@ -118,46 +122,34 @@ class Queue {
 	add(key: string, listed: Listed) {
 		// A track is listed once at a time, so only its removal can be pending.
 		const pending = this.pending.get(key);
-		if (pending?.kind === "remove") {
-			this.pending.set(key, { kind: "readd", finished: pending.finished, listed });
-			// The readd's extra event must not use up the count owed to changes queued behind it.
-			if (!this.synced && this.bound !== undefined) this.bound += 1;
-		} else {
-			this.pending.set(key, { kind: "add", listed });
-		}
+		if (pending?.kind === "remove") this.pending.set(key, { kind: "readd", finished: pending.finished, listed });
+		else this.pending.set(key, { kind: "add", listed });
 		this.wake();
 	}
 
 	remove(key: string, finished: boolean) {
-		const pending = this.pending.get(key);
-		// Never read: the two cancel.
-		if (pending?.kind === "add") {
-			this.pending.delete(key);
-		} else {
-			// Read, then re-added unread: the reader sees only the last removal, one event fewer.
-			if (pending?.kind === "readd" && !this.synced && this.bound) this.bound -= 1;
-			this.pending.set(key, { kind: "remove", finished });
-		}
+		// Never read: the two cancel. Otherwise the removal replaces a pending re-add in place.
+		if (this.pending.get(key)?.kind === "add") this.dequeue(key);
+		else this.pending.set(key, { kind: "remove", finished });
 		this.wake();
 	}
 
-	/** The events the pending changes take to read. */
-	events(): number {
-		let events = 0;
-		for (const pending of this.pending.values()) events += pending.kind === "readd" ? 2 : 1;
-		return events;
+	/** Drop the change queued under `key`, so SYNCED no longer waits on it. */
+	dequeue(key: string) {
+		this.pending.delete(key);
+		if (this.sync instanceof Set) this.sync.delete(key);
 	}
 
-	/** The listing synced: SYNCED goes out once what is queued now was read, or earlier if the queue drains first. */
-	sync() {
-		if (this.synced || this.bound !== undefined) return;
-		this.bound = this.events();
+	/** The listing synced: SYNCED goes out once what is queued now was read. */
+	synced() {
+		if (this.sync !== "waiting") return;
+		this.sync = new Set(this.pending.keys());
 		this.wake();
 	}
 
 	/** The listing's answer restarted before this reader was told it synced. */
 	unsync() {
-		if (!this.synced) this.bound = undefined;
+		if (this.sync instanceof Set) this.sync = "waiting";
 	}
 
 	finish(end: Error | null) {
@@ -167,7 +159,7 @@ class Queue {
 	}
 
 	ready(): boolean {
-		return this.end !== undefined || this.pending.size > 0 || (!this.synced && this.bound !== undefined);
+		return this.end !== undefined || this.pending.size > 0 || this.sync instanceof Set;
 	}
 
 	next(): TracksEvent | undefined {
@@ -181,23 +173,23 @@ class Queue {
 			}
 			return undefined;
 		}
-		if (!this.synced && this.bound !== undefined && (this.bound === 0 || this.pending.size === 0)) {
-			this.synced = true;
+		if (this.sync instanceof Set && this.sync.size === 0) {
+			this.sync = "sent";
 			return { kind: "synced" };
 		}
 		const first = this.pending.entries().next();
 		if (first.done) throw new Error("a ready queue has a pending change");
 		const [key, pending] = first.value;
-		if (!this.synced && this.bound !== undefined) this.bound -= 1;
 		switch (pending.kind) {
 			case "add":
-				this.pending.delete(key);
+				this.dequeue(key);
 				return { kind: "added", name: key.slice(1), ...pending.listed };
 			case "remove":
-				this.pending.delete(key);
+				this.dequeue(key);
 				return removal(key, pending.finished);
 			case "readd":
-				// Setting an existing key keeps its place, so the add is read next.
+				// Setting an existing key keeps its place, so the add is read next, and SYNCED
+				// still waits on it if it did.
 				this.pending.set(key, { kind: "add", listed: pending.listed });
 				return removal(key, pending.finished);
 		}
@@ -248,7 +240,7 @@ export class Listing {
 	/** Re-evaluate whether the listing has synced, telling readers when it changed. */
 	#resync(was: boolean) {
 		const now = this.#synced();
-		if (!was && now) for (const queue of this.#readers) queue.sync();
+		if (!was && now) for (const queue of this.#readers) queue.synced();
 		if (was && !now) for (const queue of this.#readers) queue.unsync();
 	}
 
@@ -273,7 +265,7 @@ export class Listing {
 		}
 		const queue = new Queue();
 		for (const [key, entry] of this.#live) queue.pending.set(key, { kind: "add", listed: entry.listed });
-		if (this.#synced()) queue.bound = queue.pending.size;
+		if (this.#synced()) queue.sync = new Set(queue.pending.keys());
 		this.#readers.add(queue);
 		if (owner) {
 			const older = this.#owners.get(owner);
