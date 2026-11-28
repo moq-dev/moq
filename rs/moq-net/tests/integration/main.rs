@@ -20,6 +20,7 @@ mod claim_continues;
 mod claim_reach;
 mod compress;
 mod control_stats;
+mod created_first_group;
 mod datagram;
 mod dial_split_horizon;
 mod drained_claim;
