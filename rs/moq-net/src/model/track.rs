@@ -4574,7 +4574,19 @@ impl TrackState {
 	/// the end or a start was declared, or a group last arrived, so a feed still delivering toward an
 	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group
 	/// counts as delivered, and the check costs the same however much is cached.
+	///
+	/// While the copy is idle no feed delivers, so nothing it misses is late yet: it is never
+	/// given up until the next feed goes live, whose grace starts then.
 	fn tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
+		let deadline = self.fed_tail_deadline(fin)?;
+		match self.feed {
+			Feed::Idle { .. } => Some(None),
+			Feed::Live { .. } | Feed::Answered { .. } => Some(deadline),
+		}
+	}
+
+	/// [`Self::tail_deadline`] for a copy a feed delivers to.
+	fn fed_tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
 		let active = self.outcome.end()?.tail.pending()?;
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
@@ -4741,9 +4753,21 @@ impl TrackState {
 			.filter(|(_, slot)| slot.visible && !slot.is_aborted() && !slot.copies().any(group::Handle::is_finished))
 			.map(|(&key, _)| key)
 			.collect();
+		// Nor does it count as delivered, or an end, declared already or by the next feed, would
+		// read the cache as the whole track without it: the tail waits for it again, a grace
+		// from now, as for any group still to come below the end.
+		let now = self.cache.pool().now_wall();
+		if !open.is_empty()
+			&& let Outcome::Ending(end) = &mut self.outcome
+			&& end.tail.is_received()
+		{
+			end.tail = TailState::Pending(now);
+		}
 		for key in open {
 			self.displace(key);
+			self.arrivals.forget(key, now);
 		}
+		self.bill_arrivals();
 		// Largest names an object, so an empty group holds nothing to judge.
 		let held = self
 			.lookup
@@ -4862,6 +4886,10 @@ impl TrackState {
 		if !matches!(self.feed, Feed::Idle { .. }) {
 			return;
 		}
+		// What the tail still misses is waited for from now: no feed delivered while idle.
+		let now = self.cache.pool().now_wall();
+		self.arrivals.demand(0..u64::MAX, now);
+		self.refresh_tail(now);
 		// An answer past the newest group still cached leaves a gap after it.
 		let cached = self.idle_cached();
 		// A feed asked from the cache's head resends what follows it, newest first on a
@@ -5987,10 +6015,15 @@ impl Producer {
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
 		let end = Position::group(state.next_key());
+		// An idle copy's session has no feed: a group it dropped going idle never came, so its
+		// tail stays waiting for the next feed.
+		let idle = matches!(state.feed, Feed::Idle { .. });
 		if let Outcome::Ending(declared) = &mut state.outcome
 			&& declared.tail.is_received()
 		{
-			declared.tail = TailState::Settled;
+			if !(idle && declared.tail.pending().is_some()) {
+				declared.tail = TailState::Settled;
+			}
 			let fin = declared.at.final_key();
 			state.latch_settled();
 			if let Some(fin) = fin {
@@ -18097,6 +18130,76 @@ mod test {
 
 		let _producer = producer.finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![3]);
+	}
+
+	/// A copy that goes idle with a group still open drops that group, which the next feed
+	/// sends again, so a returning reader waits for it whatever end was declared and in
+	/// whichever order: an end the ended feed declared, pending or settled, or one the next
+	/// feed declares before the group arrives, however long after the last reader left the
+	/// next one returns. One that never comes leaves an abort, not a clean end without it.
+	#[test]
+	fn an_idle_copy_waits_for_a_group_it_dropped() {
+		#[derive(Clone, Copy, Debug, PartialEq)]
+		enum Case {
+			EndedPending,
+			EndedSettled,
+			EndedLater,
+			Aborted,
+		}
+		let cases = [Case::EndedPending, Case::EndedSettled, Case::EndedLater, Case::Aborted];
+		// A copy from before lite-07 gives a missing group up a grace after it is late.
+		for (case, proven) in cases.into_iter().flat_map(|case| [(case, true), (case, false)]) {
+			let mut producer = track_producer("test", Info::default());
+			producer.received();
+			if proven {
+				producer.proven();
+			}
+			elapse(&producer, Duration::ZERO);
+			let open = framed(&producer, 0, 1);
+			if case != Case::EndedLater {
+				producer.finish_at(Position::group(1)).unwrap();
+			}
+			if case == Case::EndedSettled {
+				producer.finish_shared().unwrap();
+			}
+			// The last reader left before the group's stream finished.
+			producer.set_idle();
+			drop(open);
+			// The next reader returns long after any grace.
+			elapse(&producer, Duration::from_secs(60));
+
+			let mut reader = producer.subscribe(Subscription::default());
+			let noop = kio::Waiter::noop();
+			if case == Case::Aborted {
+				producer.abort(Error::Cancel).unwrap();
+				assert!(
+					matches!(reader.poll_recv_group(&noop), Poll::Ready(Err(_))),
+					"{case:?} proven={proven}: the copy never held the whole track"
+				);
+				continue;
+			}
+			let (woken, waiter) = Flag::waiter();
+			assert!(reader.poll_recv_group(&waiter).is_pending(), "{case:?} proven={proven}");
+
+			// The next feed answers and may repeat the end before the group lands again.
+			producer
+				.set_live(Some(Position::group(0)), Some(true), Some(0))
+				.unwrap();
+			producer.finish_at(Position::group(1)).unwrap();
+			assert!(reader.poll_recv_group(&waiter).is_pending(), "{case:?}: the end alone");
+			framed(&producer, 0, 1).finish().unwrap();
+			producer.finish_shared().unwrap();
+			assert!(woken.take(), "{case:?}: the group wakes the reader");
+			let Poll::Ready(Ok(Some(mut group))) = reader.poll_recv_group(&noop) else {
+				panic!("{case:?}: group 0 arrives");
+			};
+			assert_eq!(group.start, 0, "{case:?}");
+			assert!(matches!(group.poll_read_frame(&noop), Poll::Ready(Ok(Some(_)))));
+			assert!(
+				matches!(reader.poll_recv_group(&noop), Poll::Ready(Ok(None))),
+				"{case:?}: then the track ends"
+			);
+		}
 	}
 
 	/// A live join's answer places a reader's live join where it says the feed is, even once
