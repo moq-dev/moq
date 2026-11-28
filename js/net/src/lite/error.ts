@@ -18,7 +18,7 @@ export function closeViolation(quic: WebTransport, cause: unknown): ProtocolViol
  * session's, which leaves this one open: a reset saying SESSION_CLOSED would send a viewer waiting
  * on a route change, so it reads as a malformed track instead.
  */
-export function servedError(err: Error): Error {
+export function servedError<E>(err: E): E | StreamError {
 	if (!(err instanceof ProtocolViolation)) return err;
 	return new StreamError(StreamCode.MalformedTrack, { message: err.message, cause: err });
 }

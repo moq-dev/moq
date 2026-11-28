@@ -1268,7 +1268,7 @@ export class Publisher {
 		try {
 			front = await this.#resolve(msg, left.signal);
 		} catch (err: unknown) {
-			stream.writer.reset(error(err));
+			stream.writer.reset(servedError(error(err)));
 			return;
 		}
 		// Revoked while the broadcast resolved: the watch already reset the stream.
@@ -1823,7 +1823,7 @@ export class Publisher {
 			try {
 				front = await this.#resolve(msg, holding);
 			} catch (err: unknown) {
-				stream.writer.reset(error(err));
+				stream.writer.reset(servedError(error(err)));
 				return;
 			}
 			if (!front) {
@@ -2215,7 +2215,7 @@ export class Publisher {
 			endSent = true;
 			if (!emitRange) return true;
 			const endError = hooks.subscriberEndError(track);
-			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
+			const code = endError && hasEndError(this.version) ? toStreamCode(servedError(endError)) : undefined;
 			return controls.response(
 				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
 			);
@@ -2796,7 +2796,7 @@ export class Publisher {
 		} catch (err) {
 			hold.abort();
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
-			stream.writer.reset(error(err));
+			stream.writer.reset(servedError(error(err)));
 		} finally {
 			watch.dispose();
 		}
@@ -2854,7 +2854,7 @@ export class Publisher {
 		} catch (err) {
 			const e = cancel.signal.aborted ? error(cancel.signal.reason) : error(err);
 			console.debug(`tracks end: broadcast=${msg.broadcast} error=${reason(e)}`);
-			stream.writer.reset(e);
+			stream.writer.reset(servedError(e));
 		} finally {
 			tracks?.close();
 			watch.dispose();
