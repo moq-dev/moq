@@ -323,9 +323,10 @@ Take(r, b) ==
               !.dup = @ \/ b.g \in r.dlv,
               !.dlv = @ \cup {b.g}]
 
-\* What the reader's copies declared skipped, which `Reader::let_go` takes once,
+\* What the reader's copies declared skipped under their own bounds
+\* (`Copy::skipped_in` clips to `Copy::end`), which `Reader::let_go` takes once,
 \* from every copy it holds, as `Retain::skipped`.
-Known(r) == UNION {trk[r.copies[i].t].skp : i \in 1 .. Len(r.copies)}
+Known(r) == UNION {{g \in trk[r.copies[i].t].skp : g < End(r.copies[i])} : i \in 1 .. Len(r.copies)}
 
 \* `Copy::retains` for a replaced copy: "wait" while it may still deliver a
 \* group the reader lacks under its cap, "keep" while it backs a group being
@@ -589,10 +590,10 @@ CleanEndIsDeclared == rd.ended = "ok" => \E t \in Tracks : trk[t].fin
 FailsOnlyUnroutable == rd.ended = "err" => front.end = "err"
 
 \* Once the serving route's copy is complete and the reader holds every group
-\* the publisher did not skip, a poll ends the read rather than parking on
-\* another route, whichever copies learned of the skip.
+\* bar those a copy it holds declared skipped under its bound, a poll ends the
+\* read rather than parking on another route.
 QuietIsSettled ==
-    (rd.ended = "no" /\ trk[front.cur].whole /\ rd.dlv \cup AllSkips = Groups) => Poll(rd).r # rd
+    (rd.ended = "no" /\ trk[front.cur].whole /\ rd.dlv \cup Known(rd) = Groups) => Poll(rd).r # rd
 
 \* Flapping between routes keeps at most a route's own copy and one backfill
 \* of it still subscribed, however many times it flaps. A drained copy waits

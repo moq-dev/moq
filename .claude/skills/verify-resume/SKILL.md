@@ -34,13 +34,14 @@ quest gate just rs tla moq-net/verify/resume/ResumeReader.tla
 quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/ThreeRoutes.cfg
 quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/Evict.cfg
 quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/Skip.cfg
+quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/SkipThree.cfg -simulate num=200000 -depth 100
 ```
 
 ```sh
 quest gate just rs tla moq-net/verify/recover/StaleRecover.tla
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 20.1M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.4M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. The fourth, `Skip.cfg`, lets the publisher skip a group that one route learns of while another may still wait for it (`Skip`, `MaxSkips`): about 573k states, in seconds. `Retains` waits on no copy for a group any copy the reader holds declared skipped (`Known`); dropping that union fails `QuietIsSettled`. All three pass at the sync commit. StaleRecover checks two budgets the copy retunes between and three readers in under a second; with `Rule = "stand"` it fails `AnswersAsUpstream`, with `Rule = "ask"` `AsksOnlyWhenWider`, and with `Recorded = "current"` `AnswersAsUpstream`. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 20.1M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.4M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. The fourth, `Skip.cfg`, lets the publisher skip a group that one route learns of while another may still wait for it (`Skip`, `MaxSkips`), over two routes and two switches: about 2.5M states, in about half a minute. `Retains` waits on no copy for a group any copy the reader holds declared skipped under its own bound (`Known`, as `Copy::skipped_in` clips to `Copy::end`); dropping that union fails `QuietIsSettled`. The fifth, `SkipThree.cfg`, adds a third route, so a copy replaced twice holds evidence above its cap; it is too large to exhaust (past 180M distinct states unfinished), so its `Simulate:` line samples 200k behaviors in about three minutes. A mutant that ignores the cap passes both, so the clip is checked by reading, not by TLC. All three pass at the sync commit. StaleRecover checks two budgets the copy retunes between and three readers in under a second; with `Rule = "stand"` it fails `AnswersAsUpstream`, with `Rule = "ask"` `AsksOnlyWhenWider`, and with `Recorded = "current"` `AnswersAsUpstream`. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
 ## Open findings
 
@@ -65,6 +66,8 @@ Sync commit: `c53243d095730a38dd51110d66920a70f09a9a43`, plus the re-armed backf
 | `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, `Producer::end`, `Phase::Finished` | `Serve`, `FrontFinish`, `FrontFail` |
 | `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `max_key`, `Consumer::latest_key`, `Consumer::poll_arrived`, `track::Subscriber::has_unread_group`, `Producer::finish_shared` | `Seal`, `Held`, `MayLand`, `Latest`, `Landed`, `HasUnread`, `Settle` |
 | `rs/moq-net/src/model/track.rs` `TrackState::evict_group` | `Evict`, `Arrived` |
+| `rs/moq-net/src/model/resume.rs` `Reader::skipped_in`, `Copy::skipped_in` | `Known` |
+| `rs/moq-net/src/model/track.rs` `TrackState::skip_groups` | `Skip` |
 | `rs/moq-net/src/model/resume.rs` `Recover::undelivered`, `outgrows_judging`, `poll_serving` (StaleRecover) | `Recover` |
 | `rs/moq-net/src/model/track.rs` `Producer::judge_under`, `Consumer::judged_under`, `settles` (StaleRecover) | `Retune`, `Reset`, `Recover` |
 | `rs/moq-net/src/lite/subscriber.rs` `SubStream::stale_budget` (StaleRecover) | `Reset` (`Recorded`) |
