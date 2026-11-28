@@ -541,3 +541,10 @@ def test_shutdown_never_waits_on_a_full_command_queue() -> None:
         assert task.cancelled()
 
     asyncio.run(scenario())
+
+
+def test_a_driver_is_one_segment_beneath_the_prefix_escapes_included() -> None:
+    assert publish._driver("viewer/carla/t", "viewer/carla/t/abc") == "abc"
+    assert publish._driver("viewer/carla/t", "viewer/carla/t/a\\/b") == "a\\/b"
+    for path in ["viewer/carla/t", "viewer/carla/t/a/b", "viewer/carla/u/abc", "viewer/carla/t/"]:
+        assert publish._driver("viewer/carla/t", path) is None

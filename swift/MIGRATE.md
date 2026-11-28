@@ -313,7 +313,7 @@ A panic in a background task throws `MoqError.Task` with the panic message as `r
 A restart means another publisher instance now serves the prefix: request the path again.
 
 ```swift
-for try await event in try session.consume.announced(prefix: "live/") {
+for try await event in try session.consume.announced(prefix: "live") {
     switch event {
     case .start(let announce), .restart(let announce): subscribe(announce.prefix)
     default: continue

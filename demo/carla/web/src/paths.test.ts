@@ -4,6 +4,8 @@ import { parseCamera } from "./paths.ts";
 describe("parseCamera", () => {
 	test("accepts exactly carla/<truck>/<camera>.hang", () => {
 		expect(parseCamera("carla/truck1/front.hang")).toEqual({ truck: "truck1", id: "truck1/front" });
+		// An escaped slash stays inside its segment.
+		expect(parseCamera("carla/truck1/a\\/b.hang")).toEqual({ truck: "truck1", id: "truck1/a\\/b" });
 	});
 
 	test("ignores other broadcasts that share the relay", () => {

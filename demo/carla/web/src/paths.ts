@@ -22,7 +22,8 @@ export interface Camera {
 
 /** Parse a camera broadcast path, or `undefined` for anything else. */
 export function parseCamera(path: string): Camera | undefined {
-	const [root, truck, file, ...rest] = path.split("/");
+	// Split only at an unescaped `/`, keeping each segment escaped as written.
+	const [root, truck, file, ...rest] = Moq.Path.parts(path as Moq.Path.Valid);
 	if (root !== CAMERAS || !truck || rest.length > 0 || !file?.endsWith(".hang")) return undefined;
 	return { truck, id: `${truck}/${file.slice(0, -".hang".length)}` };
 }

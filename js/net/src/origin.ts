@@ -1502,7 +1502,9 @@ export class Producer implements Table {
 					for (const [prefix, count] of wants) for (let i = 0; i < count; i++) listener(prefix, false);
 				});
 			},
-			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
+			// A peer's route holding a `*` is skipped: `receive` would refuse it (see `nameable`),
+			// and that throw would end discovery for the whole session.
+			accepts: (prefix) => !prefix.includes("*") && this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			snapshot: (prefix) =>
 				this.#borrowed?.closed ? () => {} : this.#hold(this.#state.addSnapshot(this.#scope.prefix(prefix))),

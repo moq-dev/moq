@@ -1166,6 +1166,16 @@ test("closing an announce consumer during upstream teardown does not append retr
 	}
 });
 
+test("announced refuses a starred prefix up front, before any session exists", () => {
+	const connection = new Connection({ enabled: false });
+	try {
+		expect(() => connection.announced(Path.from("room/*"))).toThrow();
+		expect(() => connection.routes(Path.from(Array(33).fill("a").join("/")))).toThrow();
+	} finally {
+		connection.close();
+	}
+});
+
 /**
  * A watcher on the consume origin syncs only once the session has delivered the
  * server's initial set, exactly on versions that count it (lite-05+, MoQ Active Count), and

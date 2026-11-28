@@ -313,10 +313,19 @@ _runs = itertools.count(1)
 
 
 def _driver(prefix: str, path: str) -> str | None:
-    """The driver id `path` names: its one segment beneath `prefix`, else None."""
+    """The driver id `path` names: its one segment beneath `prefix`, still escaped
+    as written, else None. A `\\/` escapes a slash within a segment."""
     rest = path.removeprefix(f"{prefix}/")
-    if rest == path or not rest or "/" in rest:
+    if rest == path or not rest:
         return None
+    escaped = False
+    for char in rest:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "/":
+            return None
     return rest
 
 

@@ -3796,6 +3796,8 @@ test("a `*` is refused everywhere a path is named", async () => {
 			expect(() => origin.route(path, { hidden: true }).broadcast).toThrow("`*`");
 			expect(() => origin.claim(path)).toThrow("`*`");
 			expect(() => wireOf(origin).receive(path, WireRoute.default)).toThrow("`*`");
+			// So a peer's announcement of one is skipped before `receive`, not thrown from it.
+			expect(wireOf(origin).accepts(path)).toBe(false);
 			expect(() => origin.consume().follow(path)).toThrow("`*`");
 		}
 		// A peer's request for one never reaches a claim covering it.

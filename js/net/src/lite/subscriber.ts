@@ -585,6 +585,8 @@ export class Subscriber {
 	 * with `options.claims`.
 	 */
 	routes(prefix: Path.Valid = Path.empty(), options?: announce.RouteOptions): announce.Routes {
+		// Refuse a prefix no request can carry before any reader registers for it.
+		Path.Prefix.parse(prefix);
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
 		const consumer = announced.consume();
