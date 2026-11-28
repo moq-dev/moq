@@ -28,7 +28,7 @@ openh264 = ["moq-video/openh264"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
-boytacean = { version = "0.13", features = ["gen-mock"] }
+boytacean = { version = "0.14", features = ["gen-mock"] }
 bytes = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
