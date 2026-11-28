@@ -2017,8 +2017,10 @@ class Reader implements ResumeSource {
 		this.#rescanDrains(this.#delivered);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
 		// A copy that stopped draining a group, or was let go with one, owes the serving route a
-		// backfill first, which the next read asks.
+		// backfill first: asked here, since a caller awaiting only the close may never read, and
+		// the end then waits for it as for any copy that may still deliver.
 		if (this.#resumed && !resumed && this.#window().floor() !== undefined) {
+			this.#backfillGaps(this.#delivered);
 			this.wake();
 			return false;
 		}
