@@ -492,14 +492,14 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 				}
 				stats.groups_recv.fetch_add(1, Ordering::Relaxed);
 				if let Some(number) = number {
-					sequence.reached(number, true);
+					sequence.reached(number, true)?;
 				}
 			}
 			// The relay failed this one group: `Error::Lagged` once we fall behind. One that
 			// failed before its header named it is counted by the next group's gap instead.
 			Err(err) => {
 				if let Some(number) = number {
-					sequence.reached(number, false);
+					sequence.reached(number, false)?;
 				}
 				tracing::debug!(start = group.start, ?number, %err, "group ended early");
 			}
@@ -558,7 +558,10 @@ impl<'a> Sequence<'a> {
 	}
 
 	/// The ordered read reached group `number`, which was `delivered` end to end or failed.
-	fn reached(&mut self, number: u64, delivered: bool) {
+	///
+	/// Fails when a peer's numbers jump far enough to overflow the shared count, rather
+	/// than wrap it and report less loss.
+	fn reached(&mut self, number: u64, delivered: bool) -> anyhow::Result<()> {
 		let skipped = match self.last {
 			Some(last) if number > last => number - last - 1,
 			_ => 0,
@@ -566,13 +569,20 @@ impl<'a> Sequence<'a> {
 		if skipped > 0 {
 			tracing::debug!(last = ?self.last, number, "groups skipped");
 		}
-		self.last = Some(number);
 		// Grow the denominator first, so a snapshot that acquires `groups_lost` before
-		// reading `groups_expected` never sees more lost than expected.
-		self.stats.groups_expected.fetch_add(skipped + 1, Ordering::Relaxed);
+		// reading `groups_expected` never sees more lost than expected. Lost never exceeds
+		// expected, so only expected can overflow.
+		self.stats
+			.groups_expected
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |expected| {
+				skipped.checked_add(1).and_then(|grown| expected.checked_add(grown))
+			})
+			.map_err(|_| anyhow::anyhow!("group number {number} overflows the expected count"))?;
+		self.last = Some(number);
 		self.stats
 			.groups_lost
 			.fetch_add(skipped + u64::from(!delivered), Ordering::Release);
+		Ok(())
 	}
 }
 
@@ -1183,7 +1193,7 @@ mod tests {
 		let stats = Stats::default();
 		let mut sequence = Sequence::new(&stats);
 		for number in [10, 11, 14, 15] {
-			sequence.reached(number, true);
+			sequence.reached(number, true).unwrap();
 		}
 		assert_eq!((lost(&stats), expected(&stats)), (2, 6));
 	}
@@ -1193,11 +1203,11 @@ mod tests {
 	fn sequence_counts_a_failed_group_once() {
 		let stats = Stats::default();
 		let mut sequence = Sequence::new(&stats);
-		sequence.reached(0, false);
+		sequence.reached(0, false).unwrap();
 		assert_eq!((lost(&stats), expected(&stats)), (1, 1));
-		sequence.reached(1, true);
-		sequence.reached(2, false);
-		sequence.reached(4, true);
+		sequence.reached(1, true).unwrap();
+		sequence.reached(2, false).unwrap();
+		sequence.reached(4, true).unwrap();
 		assert_eq!((lost(&stats), expected(&stats)), (3, 5));
 	}
 
@@ -1207,8 +1217,18 @@ mod tests {
 		let stats = Stats::default();
 		let mut sequence = Sequence::new(&stats);
 		for number in [7, 8, 0, 1, 3] {
-			sequence.reached(number, true);
+			sequence.reached(number, true).unwrap();
 		}
 		assert_eq!((lost(&stats), expected(&stats)), (1, 6));
+	}
+
+	/// A jump that would overflow the shared count fails and counts nothing, instead of wrapping.
+	#[test]
+	fn sequence_refuses_an_overflowing_jump() {
+		let stats = Stats::default();
+		let mut sequence = Sequence::new(&stats);
+		sequence.reached(0, true).unwrap();
+		assert!(sequence.reached(u64::MAX, true).is_err());
+		assert_eq!((lost(&stats), expected(&stats)), (0, 1));
 	}
 }

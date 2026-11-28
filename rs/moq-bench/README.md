@@ -47,7 +47,8 @@ and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 
 - `recv_groups`: cumulative groups read end to end across all subscriptions.
 - `lost_groups`: cumulative groups after a subscription's first that its
-  ordered read skipped past, or that the relay gave up on part-way.
+  ordered read skipped past, or that the relay gave up on part-way. Groups given
+  up before a subscription's first are not counted, since nothing numbers them.
 - `loss`: `lost_groups` as a percentage.
 - `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
   cumulative one-way delivery latency from each group's keyframe timestamp.
@@ -149,8 +150,10 @@ established work ending.
 This changes the previous numeric JSONL fields into objects. Migrate reads of
 `connections` to `connections.established`, `broadcasts` to `broadcasts.active`,
 and `subscriptions` to `subscriptions.active`; those gauges retain their meanings.
-Frame, byte, group and latency fields are unchanged. The human-readable stats log
-also keeps its existing numeric fields.
+Frame, byte and latency fields are unchanged. Of the group fields, JSONL keeps
+`groups_expected` and `groups_lost` with the meanings below and drops
+`groups_present` and `groups_history`; the human-readable stats log drops
+`history_groups`.
 
 A mesh publishing run refuses a subscription range larger than the smallest
 possible peer broadcast count: `(max(connections.min, 1) - 1) * broadcasts.min`,

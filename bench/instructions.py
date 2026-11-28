@@ -283,8 +283,8 @@ def report(directory, load):
 def lost(rows, start, end):
     """Groups the generator confirmed lost between the reports bracketing the window.
 
-    An ordered read waits up to --max-delay for a missing group before it skips past it, so
-    the count trails the window by up to that budget.
+    A skipped group is counted once the next group it reaches finishes or fails, so the
+    count can trail the window by that group's read as well as by the --max-delay wait.
     """
     before = [row for row in rows if row["timestamp_ms"] <= start]
     after = [row for row in rows if row["timestamp_ms"] >= end]
