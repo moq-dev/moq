@@ -20620,6 +20620,10 @@ rec {
             name = "num-traits";
             packageId = "num-traits";
           }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.21";
+          }
         ];
         devDependencies = [
           {

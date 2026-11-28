@@ -4747,6 +4747,7 @@ dependencies = [
  "hex",
  "num-complex",
  "num-traits",
+ "thiserror 2.0.21",
  "workspace-hack",
 ]
 

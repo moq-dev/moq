@@ -287,6 +287,16 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Ranges** | Which groups to ask for, through the group containing an end time or onward with the live edge. A range starts at the oldest group or at the group containing a time, which asks for history, or as a live join (the default joins at the live edge). Each group arrives whole, from its first frame. |
 | **Max** (live joins) | How long a non-latest group a live join reaches stays worth delivering before it is skipped. Zero means "live edge only", the default. Unset leaves the publisher's max age alone to bound it. History has none: its groups arrive in full, bounded only by the publisher's max age. |
 
+A **metadata subscription** (`broadcast.meta(name)` in Rust and TypeScript) takes
+the same knobs and delivers a track's groups with each frame's timestamp and
+declared size, without the payload, to watch a track's progress cheaply. It is a
+subscription of its own beside any payload subscription, and never switches mode.
+On moq-lite 07 each relay hop forwards it as a metadata subscription, so no
+payload crosses a hop for it. Over an older version or moq-transport it rides the
+track's one payload subscription and drops the payload, so a track is never
+downloaded twice. A reader that wants the payload after all subscribes to the
+track from the group it reached and skips the frames it already saw.
+
 A live join is a range starting a lag behind the live edge: the playout buffer
 the subscriber holds. It starts at the group containing the live edge minus the
 lag, so the buffer arrives full instead of filling in real time, and no fuller;

@@ -74,14 +74,15 @@
         "nixpkgs": "nixpkgs",
         "nixpkgs-bun": "nixpkgs-bun",
         "quest-pinned": "quest-pinned",
-        "token-max": "token-max"
+        "token-max": "token-max",
+        "treefmt-nix": "treefmt-nix"
       },
       "locked": {
-        "lastModified": 1795795696,
-        "narHash": "sha256-9BpU49VDqbxuCb962ksBOIhZ9QFHJ5QF0Ib4KyFWTwU=",
+        "lastModified": 1795819093,
+        "narHash": "sha256-l2m2VA3EV6T8ccvXVqLcorhaZvYWgGsfRLDk2DOze6w=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "9690cecf6603c775cb2ee37e791dde5e92345c5b",
+        "rev": "2422aac04f06c6098989b89f2af0802b7aead492",
         "type": "github"
       },
       "original": {
@@ -255,6 +256,27 @@
       "original": {
         "owner": "kixel-ai",
         "repo": "token-max",
+        "type": "github"
+      }
+    },
+    "treefmt-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "quest",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795615686,
+        "narHash": "sha256-/C0FK2Fwq0aWE/GADYyYbAIdQeGfYBbWMin3tfks1NA=",
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "rev": "b7b56d3c8833016c650ca542b1230e6130299741",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "treefmt-nix",
         "type": "github"
       }
     }

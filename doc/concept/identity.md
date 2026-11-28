@@ -111,8 +111,6 @@ identity names the announcement, not the publisher's stream, so:
 - Continuity does not survive such a hop: a reconnect of the same publisher
   through it reads as another stream. Do not rely on seamless failover through
   an older hop.
-- A catalog reference naming an identity cannot be checked against a minted
-  one, so there it is best effort.
 - To pin a request to a minted identity, pass back the identity the route
   reported. Its text parses to a different, named identity, which never
   resolves to that route.
@@ -169,16 +167,13 @@ they resolve. See [renditions in another broadcast](/concept/hang#catalog).
 | Expectation | Over moq-lite 07 | Over an older wire |
 | --- | --- | --- |
 | Request pinned to an identity (`request(path, Some(identity))`, `request(path, { identity })`) | Only that identity, over any of its routes; another is refused as unroutable | Only the identity this session minted |
-| Catalog reference with an `identity` | Only that identity; another ends the rendition | Best effort: reads whatever resolved |
 | No expectation | Whichever identity wins | Whichever announcement wins |
 
 The identity also travels on requests: on moq-lite 07, TRACK, TRACKS,
 SUBSCRIBE and FETCH name the identity their route announced, and a publisher
 or relay now serving another refuses them rather than answer with the wrong
-stream. A catalog's `identity` is weaker. It never proves a subscription may
-resume across routes, and against a minted identity it cannot be checked at
-all. Set it only when you know the stream; omit it for a broadcast produced on
-demand, whose identity changes each time its job restarts.
+stream. A catalog names no identity: its references follow or pin whichever
+stream the announcements resolve.
 
 ## Work on demand
 

@@ -28,26 +28,3 @@ export const RelativeBroadcastSchema: z.ZodMiniType<RelativeBroadcast, string> =
  * out here so the catalog schemas' inferred types stay nameable from this package.
  */
 export type RelativeBroadcast = string & { __brand: "Relative" };
-
-const utf8 = new TextEncoder();
-
-/**
- * Zod schema for the stream a catalog reference names: an entry's `identity` beside its
- * `broadcast`. Any non-empty text of at most 256 UTF-8 bytes, the same text MoQ routes carry,
- * naming the publisher's stream; an empty, longer, or ill-formed one (a lone surrogate) refuses
- * the catalog.
- */
-export const IdentitySchema: z.ZodMiniType<ReferenceIdentity, string> = z.pipe(
-	z.string().check(
-		z.minLength(1, "expected a non-empty identity"),
-		z.refine((text) => text.isWellFormed(), "expected well-formed identity text"),
-		z.refine((text) => utf8.encode(text).byteLength <= 256, "expected an identity of at most 256 UTF-8 bytes"),
-	),
-	z.transform((text) => text as ReferenceIdentity),
-);
-
-/**
- * A validated reference identity: the same brand as `Identity.Valid` from `@moq/net`, spelled
- * out here so the catalog schemas' inferred types stay nameable from this package.
- */
-export type ReferenceIdentity = string & { readonly _brand: "identity" };

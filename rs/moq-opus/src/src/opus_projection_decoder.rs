@@ -281,7 +281,6 @@ pub unsafe fn opus_projection_decoder_ctl_impl(st: *mut OpusProjectionDecoder, r
 	ret = opus_multistream_decoder_ctl_va_list(get_multistream_decoder(st), request, args);
 	return ret;
 }
-#[macro_export]
 macro_rules! opus_projection_decoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_projection_decoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -293,6 +292,7 @@ macro_rules! opus_projection_decoder_ctl {
         opus_projection_decoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_projection_decoder_ctl;
 pub unsafe fn opus_projection_decoder_destroy(st: *mut OpusProjectionDecoder) {
 	free(st as *mut core::ffi::c_void);
 }

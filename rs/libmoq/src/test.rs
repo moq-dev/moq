@@ -765,8 +765,6 @@ fn publish_media_labels_config_without_naming_track() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -842,8 +840,6 @@ fn publish_catalog_config_invalid_broadcast() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -869,8 +865,6 @@ fn publish_catalog_config_invalid_broadcast() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -914,8 +908,6 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -971,8 +963,6 @@ fn publish_video_config_replaces_its_own_rendition() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1022,8 +1012,6 @@ fn manual_video_identity_change_is_refused() {
 		preference: 0,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1066,8 +1054,6 @@ fn manual_audio_identity_change_is_refused() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1236,7 +1222,6 @@ fn publish_catalog_roundtrip() {
 	let height: u32 = 1080;
 	let description: &[u8] = &[0x01, 0x02, 0x03];
 	let reference = "./source";
-	let identity = fresh_identity();
 	let track = "video-track";
 	let video = moq_video_config {
 		preference: 0,
@@ -1253,8 +1238,6 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 		broadcast: reference.as_ptr().cast(),
 		broadcast_len: reference.len(),
-		identity: identity.as_ptr().cast(),
-		identity_len: identity.len(),
 		track: track.as_ptr().cast(),
 		track_len: track.len(),
 	};
@@ -1275,8 +1258,6 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1325,8 +1306,6 @@ fn publish_catalog_roundtrip() {
 		has_warmup: true,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1354,8 +1333,6 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1378,10 +1355,6 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(
 		borrowed_string(video_cfg.broadcast, video_cfg.broadcast_len).as_deref(),
 		Some("source")
-	);
-	assert_eq!(
-		borrowed_string(video_cfg.identity, video_cfg.identity_len),
-		Some(identity.clone())
 	);
 	assert_eq!(
 		borrowed_string(video_cfg.track, video_cfg.track_len).as_deref(),
@@ -1446,8 +1419,6 @@ fn publish_catalog_roundtrip() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1460,7 +1431,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(audio_cfg.channel_count, 2);
 	assert_eq!((audio_cfg.jitter_us, audio_cfg.has_jitter), (20_000, true));
 	assert_eq!((audio_cfg.warmup_us, audio_cfg.has_warmup), (40_000, true));
-	assert!(audio_cfg.broadcast.is_null() && audio_cfg.identity.is_null() && audio_cfg.track.is_null());
+	assert!(audio_cfg.broadcast.is_null() && audio_cfg.track.is_null());
 
 	// Removing the video rendition republishes a catalog without it.
 	assert_eq!(
@@ -1510,8 +1481,6 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1537,8 +1506,6 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1609,8 +1576,6 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		},
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1637,8 +1602,6 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1724,8 +1687,6 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1754,8 +1715,6 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -1799,8 +1758,6 @@ fn unpublishable_catalog_containers_are_rejected() {
 		container,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -2743,6 +2700,62 @@ fn raw_track_ends_on_an_aborted_group() {
 	assert!(frame_cb.recv() < 0, "the abort ends the track");
 
 	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// What [header_callback] forwards: a header's group, frame, size, and timestamp, or the terminal code.
+type HeaderEvent = Result<(u64, u64, u64, u64), i32>;
+
+extern "C" fn header_callback(user_data: *mut c_void, header: *const moq_header, code: i32) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<HeaderEvent>) }.clone();
+	let event = match unsafe { header.as_ref() } {
+		Some(h) => Ok((h.group, h.frame, h.size, h.timestamp.value)),
+		None => Err(code),
+	};
+	let _ = tx.send(event);
+}
+
+/// A metadata subscription delivers each frame's position, declared size, and timestamp, an
+/// empty frame as size 0, then ends cleanly with the track on a NULL header.
+#[test]
+fn meta_reads_headers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"meta-reads-headers");
+	let name = b"video";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let consume = consume_local(broadcast);
+	let (tx, rx) = mpsc::channel::<HeaderEvent>();
+	let tx = Box::into_raw(Box::new(tx));
+	let meta = id(unsafe {
+		moq_consume_meta(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			std::ptr::null(),
+			Some(header_callback),
+			tx as *mut c_void,
+		)
+	});
+
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	for (payload, at) in [(&b"key"[..], 0), (b"", 1)] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), &micros(at)) },
+			0
+		);
+	}
+	assert_eq!(moq_publish_group_finish(group), 0);
+
+	let headers: Vec<_> = (0..2).map(|_| rx.recv().expect("header")).collect();
+	assert_eq!(headers, [Ok((0, 0, 3, 0)), Ok((0, 1, 0, 1))]);
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(rx.recv().expect("terminal"), Err(0), "the track finished");
+	assert!(moq_consume_meta_cancel(meta) < 0, "the task already ended");
+	drop(unsafe { Box::from_raw(tx) });
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -3879,8 +3892,6 @@ fn media_consumers_cancel_while_subscribing() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -3904,8 +3915,6 @@ fn media_consumers_cancel_while_subscribing() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5816,8 +5825,6 @@ fn local_publish_consume() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5849,8 +5856,6 @@ fn local_publish_consume() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5947,8 +5952,6 @@ fn follow_local() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -5966,9 +5969,8 @@ fn follow_local() {
 }
 
 /// Publish an Opus rendition on `a/source` (served under `source_identity`) and describe it
-/// in `a/pub`'s catalog as a sibling reference naming `rendition_identity`, returning
-/// (source, media, broadcast).
-fn publish_sibling_audio(origin: u32, source_identity: &str, rendition_identity: Option<&str>) -> (u32, u32, u32) {
+/// in `a/pub`'s catalog as a sibling reference, returning (source, media, broadcast).
+fn publish_sibling_audio(origin: u32, source_identity: &str) -> (u32, u32, u32) {
 	// Only the sibling serves the track; the catalog broadcast just describes it.
 	let source = create_route(origin, b"a/source", Some(&route_options(0, source_identity, false))).1;
 	let init = opus_head();
@@ -5996,9 +5998,6 @@ fn publish_sibling_audio(origin: u32, source_identity: &str, rendition_identity:
 	let broadcast = publish_broadcast(origin, b"a/pub");
 	let codec = "opus";
 	let sibling = "./source";
-	let (identity, identity_len) = rendition_identity.map_or((std::ptr::null(), 0), |identity| {
-		(identity.as_ptr() as *const c_char, identity.len())
-	});
 	let config = moq_audio_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
@@ -6017,8 +6016,6 @@ fn publish_sibling_audio(origin: u32, source_identity: &str, rendition_identity:
 		has_warmup: false,
 		broadcast: sibling.as_ptr() as *const c_char,
 		broadcast_len: sibling.len(),
-		identity,
-		identity_len,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -6029,12 +6026,10 @@ fn publish_sibling_audio(origin: u32, source_identity: &str, rendition_identity:
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
 /// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
 /// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
-/// The rendition's identity, when it matches the sibling's, does not get in the way.
 #[test]
 fn consume_audio_follows_a_sibling_broadcast_reference() {
 	let origin = id(moq_origin_create());
-	let identity = fresh_identity();
-	let (source, media, broadcast) = publish_sibling_audio(origin, &identity, Some(&identity));
+	let (source, media, broadcast) = publish_sibling_audio(origin, &fresh_identity());
 
 	let consume = request_broadcast(origin, b"a/pub");
 	let catalog_cb = Callback::new();
@@ -6067,39 +6062,6 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
-	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_publish_close(source), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// A rendition naming an identity refuses a sibling proven to serve another stream, rather
-/// than delivering that stream's frames.
-#[test]
-fn consume_audio_refuses_a_sibling_of_another_identity() {
-	let origin = id(moq_origin_create());
-	let (wanted, served) = (fresh_identity(), fresh_identity());
-	let (source, media, broadcast) = publish_sibling_audio(origin, &served, Some(&wanted));
-
-	let consume = request_broadcast(origin, b"a/pub");
-	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, 0, Some(channel_callback), catalog_cb.ptr) });
-	let catalog_id = id(catalog_cb.recv());
-
-	let frame_cb = Callback::new();
-	let _track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
-	let payload = b"another stream";
-	assert_eq!(
-		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(1_000_000)) },
-		0
-	);
-	let code = frame_cb.recv();
-	assert!(code < 0, "a sibling of another identity is refused, got {code}");
-
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
@@ -6176,7 +6138,7 @@ fn decoders_cancel_while_resolving_a_sibling() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A decoded consumer follows a rendition's sibling reference and identity too, decoding the
+/// A decoded consumer follows a rendition's sibling reference too, decoding the
 /// sibling's track rather than looking for it on the catalog's own broadcast.
 #[test]
 fn decode_audio_follows_a_sibling_broadcast_reference() {
@@ -6217,7 +6179,6 @@ fn decode_audio_follows_a_sibling_broadcast_reference() {
 			(name.clone(), config.clone())
 		};
 		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-		config.identity = Some(identity.parse().unwrap());
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
 		catalog
 			.modify(catalog.next_timestamp())
@@ -6608,8 +6569,6 @@ fn video_publish_consume() {
 		container: moq_container::default(),
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -6652,8 +6611,6 @@ fn video_publish_consume() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
@@ -7783,8 +7740,6 @@ fn catalog_update_on_new_track() {
 		has_warmup: false,
 		broadcast: std::ptr::null(),
 		broadcast_len: 0,
-		identity: std::ptr::null(),
-		identity_len: 0,
 		track: std::ptr::null(),
 		track_len: 0,
 	};

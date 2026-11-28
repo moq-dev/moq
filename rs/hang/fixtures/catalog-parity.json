@@ -3084,40 +3084,6 @@
 		"refused": true
 	},
 	{
-		"name": "video empty identity",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"ok": {
-						"codec": "avc1.64001f"
-					},
-					"probe": {
-						"codec": "avc1.64001f",
-						"identity": ""
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
-		"name": "video identity over 256 bytes",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"ok": {
-						"codec": "avc1.64001f"
-					},
-					"probe": {
-						"codec": "avc1.64001f",
-						"identity": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééa"
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
 		"name": "video projection fov out of range",
 		"catalog": {
 			"video": {
@@ -4550,20 +4516,6 @@
 		"refused": true
 	},
 	{
-		"name": "null video identity",
-		"catalog": {
-			"video": {
-				"renditions": {
-					"probe": {
-						"codec": "avc1.64001f",
-						"identity": null
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
 		"name": "null video track",
 		"catalog": {
 			"video": {
@@ -4860,22 +4812,6 @@
 		"refused": true
 	},
 	{
-		"name": "null audio identity",
-		"catalog": {
-			"audio": {
-				"renditions": {
-					"probe": {
-						"codec": "opus",
-						"sampleRate": 48000,
-						"numberOfChannels": 2,
-						"identity": null
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
 		"name": "null audio track",
 		"catalog": {
 			"audio": {
@@ -5050,20 +4986,6 @@
 		"refused": true
 	},
 	{
-		"name": "null text identity",
-		"catalog": {
-			"text": {
-				"renditions": {
-					"probe": {
-						"format": "vtt",
-						"identity": null
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
 		"name": "null text track",
 		"catalog": {
 			"text": {
@@ -5176,20 +5098,6 @@
 		"refused": true
 	},
 	{
-		"name": "null json identity",
-		"catalog": {
-			"json": {
-				"tracks": {
-					"probe": {
-						"mode": "snapshot",
-						"identity": null
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
 		"name": "null json track",
 		"catalog": {
 			"json": {
@@ -5267,20 +5175,6 @@
 					"probe": {
 						"mode": "stream",
 						"broadcast": null
-					}
-				}
-			}
-		},
-		"refused": true
-	},
-	{
-		"name": "null binary identity",
-		"catalog": {
-			"binary": {
-				"tracks": {
-					"probe": {
-						"mode": "stream",
-						"identity": null
 					}
 				}
 			}
@@ -5496,18 +5390,6 @@
 			"video": {
 				"renditions": {},
 				"flip": null
-			}
-		},
-		"refused": true
-	},
-	{
-		"name": "null include identity",
-		"catalog": {
-			"include": {
-				"probe": {
-					"broadcast": "./a.hang",
-					"identity": null
-				}
 			}
 		},
 		"refused": true
@@ -6216,7 +6098,6 @@
 					"probe": {
 						"codec": "avc1.64001f",
 						"broadcast": "./source",
-						"identity": "abc",
 						"track": "hd",
 						"version": 4
 					}
@@ -6235,14 +6116,6 @@
 		"catalog": {
 			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
 			"include": { "a": { "broadcast": "/a" } }
-		},
-		"refused": true
-	},
-	{
-		"name": "include empty identity",
-		"catalog": {
-			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
-			"include": { "a": { "broadcast": "./a", "identity": "" } }
 		},
 		"refused": true
 	},
@@ -6304,7 +6177,6 @@
 						"mode": "stream",
 						"schema": "https://example.com/s.json",
 						"broadcast": "./x",
-						"identity": "i",
 						"track": "t",
 						"bitrate": 1,
 						"jitter": 2,

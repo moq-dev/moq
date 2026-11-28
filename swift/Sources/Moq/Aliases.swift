@@ -13,6 +13,9 @@ public typealias Timestamp = MoqFFI.MoqTimestamp
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
+/// A frame's header without its payload, as a metadata subscription reads it: the declared
+/// payload `size` in bytes (0 for an empty frame) and its timestamp.
+public typealias FrameHeader = MoqFFI.MoqFrameHeader
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
 public typealias AudioFrame = MoqFFI.MoqAudioFrame

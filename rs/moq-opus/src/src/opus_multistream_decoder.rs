@@ -38,10 +38,7 @@ use crate::src::opus_multistream::{
 };
 use crate::src::opus_private::align;
 use crate::varargs::VarArgs;
-use crate::{
-	opus_decoder_ctl, opus_decoder_get_size, opus_decoder_init, opus_multistream_decoder_ctl,
-	opus_packet_get_nb_samples, OpusDecoder,
-};
+use crate::{opus_decoder_ctl, opus_decoder_get_size, opus_decoder_init, opus_packet_get_nb_samples, OpusDecoder};
 
 pub const OPUS_MULTISTREAM_GET_DECODER_STATE_REQUEST: i32 = 5122;
 
@@ -589,7 +586,6 @@ pub unsafe fn opus_multistream_decoder_ctl_impl(st: *mut OpusMSDecoder, request:
 	ret = opus_multistream_decoder_ctl_va_list(st, request, args);
 	return ret;
 }
-#[macro_export]
 macro_rules! opus_multistream_decoder_ctl {
     ($st:expr, $request:expr, $($arg:expr),*) => {
         $crate::opus_multistream_decoder_ctl_impl($st, $request, $crate::varargs!($($arg),*))
@@ -601,6 +597,7 @@ macro_rules! opus_multistream_decoder_ctl {
         opus_multistream_decoder_ctl!($st, $request, $($arg),*)
     };
 }
+pub(crate) use opus_multistream_decoder_ctl;
 pub unsafe fn opus_multistream_decoder_destroy(st: *mut OpusMSDecoder) {
 	free(st as *mut core::ffi::c_void);
 }

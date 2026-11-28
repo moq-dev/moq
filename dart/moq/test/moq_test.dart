@@ -135,6 +135,52 @@ void main() {
     broadcast.close();
   });
 
+  test('a metadata subscription reads frame headers', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'video',
+      info: TrackInfo(maxAge: Duration.zero, timescale: 1000000),
+    );
+    final MetaConsumer meta = await broadcast
+        .consume()
+        .subscribeMeta(name: 'video', subscription: null)
+        .timeout(timeout);
+    expect(meta.info().timescale, 1000000);
+
+    final group = track.appendGroup(start: Timestamp(value: 0, scale: 1000000));
+    group.writeFrame(
+      frame: Frame(
+        payload: utf8.encode('key'),
+        timestamp: Timestamp(value: 0, scale: 1000000),
+      ),
+    );
+    group.writeFrame(
+      frame: Frame(
+        payload: Uint8List(0),
+        timestamp: Timestamp(value: 1, scale: 1000000),
+      ),
+    );
+    group.finish();
+    track.finish();
+
+    final MetaGroup read = (await meta.recvGroup().timeout(timeout))!;
+    expect(read.start(), 0);
+    final headers = <(int, int, int?)>[];
+    while (true) {
+      final FrameHeader? header = await read.nextHeader().timeout(timeout);
+      if (header == null) break;
+      headers.add((
+        header.size,
+        header.timestamp.value,
+        header.timestamp.scale,
+      ));
+    }
+    expect(headers, [(3, 0, 1000000), (0, 1, 1000000)]);
+    expect(await meta.recvGroup().timeout(timeout), isNull);
+    meta.cancel();
+    broadcast.close();
+  });
+
   test('releasing a producer ends an on-demand track', () async {
     final broadcast = BroadcastProducer();
     final requests = broadcast.requests();

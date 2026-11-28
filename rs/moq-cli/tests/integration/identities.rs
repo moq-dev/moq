@@ -95,7 +95,6 @@ fn publish(origin: &origin::Producer, identity: &Identity, tag: &str) -> Publish
 			|catalog| {
 				let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 				audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-				audio.identity = Some(identity.clone());
 				catalog.audio.renditions.insert("audio".into(), audio);
 			},
 			catalog.next_timestamp(),
@@ -186,10 +185,7 @@ async fn replacement(version: &str) {
 	let mut catalog = old.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await.unwrap();
 	let snapshot = catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
-	let pinned = old
-		.resolve(reference.broadcast.as_ref(), reference.identity.as_ref())
-		.await
-		.unwrap();
+	let pinned = old.resolve(reference.broadcast.as_ref()).await.unwrap();
 	let cold = pinned.track("audio").unwrap();
 	let mut subscription = cold.subscribe(None).await.unwrap();
 	assert_eq!(read(&mut subscription).await, "A:0");
@@ -240,7 +236,7 @@ async fn replacement(version: &str) {
 	let later = catalog.next().await.unwrap().unwrap();
 	assert_eq!(later.audio.renditions["audio"].bitrate, Some(64_000));
 	assert!(
-		old.resolve(reference.broadcast.as_ref(), None)
+		old.resolve(reference.broadcast.as_ref())
 			.await
 			.unwrap()
 			.is_clone(&pinned)
@@ -279,11 +275,14 @@ async fn replacement(version: &str) {
 		.unwrap();
 	let snapshot = fresh_catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
-	assert_eq!(reference.identity.as_ref(), Some(&b));
-	let new = fresh
-		.resolve(reference.broadcast.as_ref(), reference.identity.as_ref())
-		.await
-		.unwrap();
+	let new = fresh.resolve(reference.broadcast.as_ref()).await.unwrap();
+	if version == LITE_07 {
+		assert_eq!(
+			new.info().identity.as_ref(),
+			Some(&b),
+			"only lite-07 carries the identity"
+		);
+	}
 	assert!(!new.is_clone(&pinned));
 	let mut new_subscription = new.track("audio").unwrap().subscribe(None).await.unwrap();
 	let new_frame = read(&mut new_subscription).await;
@@ -319,7 +318,7 @@ versions! {
 }
 
 /// A worker claiming `live`, answering each request with a job's exact route: the catalog,
-/// which names `./media` under the job's identity, and the media it references.
+/// which names `./media`, and the media it references.
 struct Worker {
 	claim: origin::Claim,
 	jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
@@ -342,8 +341,6 @@ impl Worker {
 			while let Some(request) = handler.requested().await {
 				let path = request.path().to_string();
 				let route = request.route(origin::RouteOptions::hidden()).unwrap();
-				// Hidden, the job reports the identity it will announce under: the claim's.
-				let identity = route.identity();
 				let (catalog, media) = match path.as_str() {
 					"live/catalog.hang" => {
 						let mut catalog =
@@ -355,7 +352,6 @@ impl Worker {
 									let mut audio =
 										hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 									audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-									audio.identity = Some(identity);
 									catalog.audio.renditions.insert("audio".into(), audio);
 								},
 								catalog.next_timestamp(),
@@ -433,15 +429,12 @@ async fn a_player_reads_through_a_claim_on_its_first_request() {
 		.unwrap();
 	let snapshot = catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
+	let pinned = source.resolve(reference.broadcast.as_ref()).await.unwrap();
 	assert_eq!(
-		reference.identity.as_ref(),
+		pinned.info().identity.as_ref(),
 		Some(&lent),
 		"the job serves the claim's identity"
 	);
-	let pinned = source
-		.resolve(reference.broadcast.as_ref(), reference.identity.as_ref())
-		.await
-		.unwrap();
 	let mut subscription = pinned.track("audio").unwrap().subscribe(None).await.unwrap();
 	assert_eq!(read(&mut subscription).await, "job:0");
 	assert_eq!(worker.answered(), ["live/catalog.hang", "live/media"]);

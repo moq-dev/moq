@@ -93,6 +93,7 @@ export namespace Broadcast {
 		get closed(): Signals.GetPromise<null>;
 		datagrams(name: string): Datagram.Consumer;
 		get identity(): Identity.Valid | undefined;
+		meta(name: string): Meta.Consumer;
 		get path(): Path.Valid;
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
@@ -488,6 +489,26 @@ export namespace Identity {
 	export function parse(text: string): Identity.Named;
 	export function random(): Identity.Named;
 	export function text(identity: Identity.Valid): string;
+}
+
+export namespace Meta {
+	export class Consumer {
+		readonly name: string;
+		subscribe(options?: Track.Subscription): Meta.Subscriber;
+	}
+	export class Group {
+		close(): void;
+		get index(): number;
+		nextHeader(): Promise<Frame.Info | undefined>;
+		readonly start: bigint;
+	}
+	export class Subscriber {
+		close(abort?: Error): void;
+		finished(): Promise<Track.Position>;
+		info(): Promise<Track.Info>;
+		recvGroup(): Promise<Meta.Group | undefined>;
+		update(options: Track.Subscription): void;
+	}
 }
 
 export namespace Origin {

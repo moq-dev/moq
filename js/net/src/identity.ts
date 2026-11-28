@@ -56,9 +56,8 @@ export function text(identity: Valid): string {
 /**
  * Whether a session minted this identity, for a route whose wire (an older moq-lite, or
  * moq-transport) carries none. It names the announcement rather than the publisher's stream,
- * so it can neither match nor contradict an identity the publisher named elsewhere, such as in
- * a catalog. Hops that forward it keep the flag, and only a session sets it: {@link parse}
- * never builds a minted identity.
+ * so it can neither match nor contradict an identity the publisher named. Hops that forward it
+ * keep the flag, and only a session sets it: {@link parse} never builds a minted identity.
  */
 export function isMinted(identity: Valid): identity is Minted {
 	return Minted.is(identity);

@@ -8816,6 +8816,15 @@ impl Consumer {
 		self.with_state(|state| state.map_or(0, |state| state.read().skipped_below(key)))
 	}
 
+	/// The freshness bound this track holds every reader to, `None` when unlimited.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		if let Some(serving) = self.serving() {
+			return serving.max_age_bound();
+		}
+		self.with_state(|state| state.and_then(|state| state.read().max_age_bound()))
+	}
+
 	/// Ready once [`Self::latest_key`] is `Some`: the track holds a group. Stays pending
 	/// on a track that closed without one.
 	pub(super) fn poll_grouped(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -13981,6 +13990,16 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().span_end(end),
 			Inner::Resume(resume, _) => resume.span_end(end),
+		}
+	}
+
+	/// The freshness bound the track holds this reader to, whatever budget it asks: `None`
+	/// when unlimited. A run stale under it stays stale under any wider budget.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age_bound(&self) -> Option<Duration> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().max_age_bound(),
+			Inner::Resume(resume, _) => resume.max_age_bound(),
 		}
 	}
 

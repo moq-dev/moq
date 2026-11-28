@@ -1076,6 +1076,64 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 }
 
+func TestSubscribeMetaReadsHeaders(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("video", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := consumer.SubscribeMeta(ctx, "video", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Cancel()
+
+	group, err := track.AppendGroup(ts(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, payload := range []string{"key", ""} {
+		if err := group.WriteFrame(moq.Frame{Payload: []byte(payload), Timestamp: ts(uint64(i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := group.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	var starts []uint64
+	var headers []moq.FrameHeader
+	for group, err := range meta.GroupsAsArrived(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		starts = append(starts, group.Start())
+		for header, err := range group.All(ctx) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			headers = append(headers, *header)
+		}
+	}
+	want := []moq.FrameHeader{{Size: 3, Timestamp: ts(0)}, {Size: 0, Timestamp: ts(1)}}
+	if !slices.Equal(starts, []uint64{0}) || !reflect.DeepEqual(headers, want) {
+		t.Fatalf("starts = %v, headers = %+v, want [0] and %+v", starts, headers, want)
+	}
+}
+
 func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

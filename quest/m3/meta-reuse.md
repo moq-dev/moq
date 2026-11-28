@@ -53,5 +53,4 @@ for this case, so the behavior is stated.
 
 ## Related
 
-- [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - the public API whose readers this serves
 - [Route health](/quest/m3/route-health/README.md) - the metadata standby that creates mixed demand

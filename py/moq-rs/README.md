@@ -240,6 +240,7 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
+  - `await .subscribe_meta(name, subscription=None) → MetaConsumer`. Each frame's header (declared size and timestamp) without its payload, as a subscription of its own.
 - **`TrackConsumer`**. Async iterator of raw groups, in start order.
   - `await .next_group() → GroupConsumer | None`. Start order; what the default iteration yields.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start order; groups already held come in the subscription's group order, newest first unless it asks ascending. Prefer it when latency matters more than order.
@@ -249,8 +250,14 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
+- **`MetaConsumer`**. Async iterator of metadata groups, in arrival order.
+  - `await .recv_group() → MetaGroup | None`. Arrival order, as `TrackConsumer.recv_group()`; what the iteration yields.
+  - `.info() → TrackInfo`
+  - `.update(subscription)`
+- **`MetaGroup`**. Async iterator of `FrameHeader`s.
+  - `await .next_header() → FrameHeader | None` returns a frame's `size` and `timestamp`; `None` ends the group.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `MetaConsumer`, `MetaGroup`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 

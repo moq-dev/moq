@@ -78,7 +78,6 @@ impl<'a> VarArgs<'a> {
 	}
 }
 
-#[macro_export]
 macro_rules! varargs {
     ($($arg:expr),*) => {
         $crate::varargs::VarArgs::new(
@@ -90,3 +89,4 @@ macro_rules! varargs {
         )
     };
 }
+pub(crate) use varargs;

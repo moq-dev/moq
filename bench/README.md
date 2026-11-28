@@ -441,8 +441,11 @@ run by default:
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no
-  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. A
-  revision whose session API predates this harness reports it unsupported.
+  QUIC: in-tree qmux, receive leases, and crypto only show in relay counts. It
+  builds against every revision since
+  [moq-dev/moq#9386](https://github.com/moq-dev/moq/pull/9386) made `proxy` an
+  `origin::Config` field, which its relay origin sets; an older revision reports it
+  unsupported.
 - `group`, on request: every subscriber drains one finished 512-frame group in
   object batches through the relay's private reader, as moq-net's
   `group_relay_objects/plain/512/*` bench does, so that bench's cost is counted
@@ -462,7 +465,7 @@ callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
 `python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
 instructions per group, and `python3 bench/fanout.py compare BASE CURRENT
 SUBSCRIBERS` ranks what moved between two revisions' `callgrind/` directories. `BENCH_FANOUT_VERSION` picks the session's protocol
-version (default `moq-lite-06`).
+version (default `moq-lite-06`; `moq-lite-07-wip` runs too).
 
 ### Heap
 

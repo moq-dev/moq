@@ -12,9 +12,17 @@ main into release.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
+- ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
+  to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
+  [timestamp-ids](/quest/m2/timestamp-ids.md) (rejected: folding into
+  [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).
+  Creates groups eagerly from frame 0 across Rust, JS, `moq-ffi`, `libmoq`, and
+  bindings, removes `seek(start)`, exposes `drop_groups` in Rust and JS, omits
+  lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag from
+  lite-07, and keeps `GROUP_END` as the last frame's exclusive end.
 - ✅ Added delete `moq-pattern` and `@moq/pattern`
   ([moq-dev/moq#9800](https://github.com/moq-dev/moq/pull/9800))
-  and [remove `identity` from `hang::catalog`](/quest/m2/remove-catalog-identity.md)
+  and removing `identity` from `hang::catalog` (landed)
   to `m2` before the `0.22.0` cut (rejected: defer either or both to `m3`;
   keep `moq-pattern` or catalog `identity`). Wildcards never transit the wire,
   grants already moved to `Prefixes`, and wire announcements already carry
@@ -23,7 +31,7 @@ Decided 2026-11-27 (maintainer, `/quest-plan`):
 
 Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit):
 
-- ✅ Added [pre-cut Rust API fences](/quest/m2/api-fences.md) (`#[non_exhaustive]`
+- ✅ Added pre-cut Rust API fences (`#[non_exhaustive]`
   on `moq_audio::playback::Device` for `moq-dev/studio` m0 and
   `moq_audio::decode::Read` for `audio-playout-library`, plus exempting
   `moq-opus` from the shared `0.22.0` minor while `opus-safe` replaces its
@@ -80,7 +88,7 @@ the Identity rename and 256-byte cap ([moq-dev/moq#9720](https://github.com/moq-
 256 UTF-8 bytes for public keys, and hashing it in `moq-hls` URLs; rejected:
 keeping `Instance`, 1024-byte cap, raw URLs, no wire cap) and on both
 metadata mode on the lite-07 wire, served ([moq-dev/moq#9758](https://github.com/moq-dev/moq/pull/9758)),
-and [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) (reversing the
+and its subscriber API ([moq-dev/moq#9793](https://github.com/moq-dev/moq/pull/9793)) (reversing the
 2026-11-25 deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD
 indexing is an immediate consumer and `moq_subscription` changes the C ABI;
 rejected: moving only the wire into `m2`, leaving both in `m3`).

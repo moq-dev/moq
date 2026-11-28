@@ -700,6 +700,31 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(end)
     }
 
+    func testMetadataSubscriptionReadsFrameHeaders() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
+        let meta = try await broadcast.consume().subscribeMeta(name: "video")
+        XCTAssertEqual(meta.info().timescale, 1_000_000)
+
+        let group = try track.appendGroup(start: micros(0))
+        try group.writeFrame(Data("key".utf8), timestamp: micros(0))
+        try group.writeFrame(Data(), timestamp: micros(1))
+        try group.finish()
+        try track.finish()
+
+        var starts: [UInt64] = []
+        var headers: [FrameHeader] = []
+        for try await group in meta {
+            starts.append(group.start)
+            for try await header in group {
+                headers.append(header)
+            }
+        }
+        XCTAssertEqual(starts, [0])
+        XCTAssertEqual(headers.map(\.size), [3, 0])
+        XCTAssertEqual(headers.map(\.timestamp), [micros(0), micros(1)])
+    }
+
     func testJsonSnapshotRoundTrip() async throws {
         struct Status: Codable, Equatable {
             let state: String

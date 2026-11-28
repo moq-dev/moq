@@ -606,6 +606,32 @@ async def test_publish_track_info_and_subscription():
     track.finish()
 
 
+async def test_subscribe_meta_reads_headers():
+    """A metadata subscription iterates groups and their headers, an empty frame as size 0."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("video", moq.TrackInfo(timescale=1_000_000))
+    meta = await broadcast.consume().subscribe_meta("video")
+    assert meta.info().timescale == 1_000_000
+
+    group = track.append_group(moq.Timestamp(0, 1_000_000))
+    group.write_frame(b"key", moq.Timestamp(0, 1_000_000))
+    group.write_frame(b"", moq.Timestamp(1, 1_000_000))
+    group.finish()
+    track.finish()
+
+    async with meta:
+        groups = [(group.start, [header async for header in group]) async for group in meta]
+    assert groups == [
+        (
+            0,
+            [
+                moq.FrameHeader(size=3, timestamp=moq.Timestamp(0, 1_000_000)),
+                moq.FrameHeader(size=0, timestamp=moq.Timestamp(1, 1_000_000)),
+            ],
+        )
+    ]
+
+
 def test_track_info_keeps_native_default_priority():
     """A partially configured TrackInfo keeps moq-ffi's default priority of 0."""
     native = moq_ffi.MoqTrackInfo(max_age=None).priority

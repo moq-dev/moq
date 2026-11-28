@@ -593,7 +593,7 @@ export class Decoder {
 		const phase = this.#phase.peek();
 		const active =
 			broadcast && track && playback && (running || phase.kind === "failed")
-				? broadcast.relativeBroadcast(effect, playback.broadcast, playback.identity)
+				? broadcast.relativeBroadcast(effect, playback.broadcast)
 				: undefined;
 		const key = playback && JSON.stringify(playback);
 

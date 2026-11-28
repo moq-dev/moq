@@ -22,6 +22,15 @@ public final class BroadcastConsumer: Sendable {
         return TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
+    /// Subscribe to a track's metadata by name: its groups and each frame's header, without
+    /// the payload. A subscription of its own beside any `subscribeTrack` of the same track; to
+    /// read the payload after all, subscribe to the track from the group reached.
+    /// `subscription` works as in `subscribeTrack`.
+    public func subscribeMeta(name: String, subscription: Subscription? = nil) async throws -> MetaConsumer {
+        try checkSubscription(subscription)
+        return MetaConsumer(try await ffi.subscribeMeta(name: name, subscription: subscription))
+    }
+
     /// Fetch one complete group by track name and group start without holding
     /// a live subscription. The group may still be receiving frames.
     public func fetchGroup(
@@ -35,10 +44,8 @@ public final class BroadcastConsumer: Sendable {
     /// Resolve a catalog rendition to the broadcast serving its track.
     ///
     /// The rendition's `broadcast` reference, `nil` or empty, names this broadcast; anything else
-    /// names a sibling relative to it (e.g. `./source`). Its `identity` is the stream the reference
-    /// names: a broadcast proven to serve another one throws instead of resolving, while a route
-    /// over a wire that carries no identity cannot prove one, so there it is best effort. Call it on a
-    /// rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which take a
+    /// names a sibling relative to it (e.g. `./source`). Call it on a rendition that carries a
+    /// reference before `subscribeTrack` or `fetchGroup`, which take a
     /// track name rather than a rendition: the rendition's `track`, or its ID when `nil`. The
     /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
     /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve it themselves.

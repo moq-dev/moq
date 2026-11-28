@@ -218,20 +218,6 @@ pub enum Error {
 	#[error("broadcast reference escapes the root: {0}")]
 	EscapingBroadcast(String),
 
-	/// A reference's `identity` names another stream than the one serving its broadcast.
-	///
-	/// The served identity is the one the source resolved first for that path, so a later
-	/// reference cannot move it; the reference fails instead of reading other content.
-	#[error("broadcast {path} serves identity {actual}, not the referenced {expected}")]
-	IdentityMismatch {
-		/// The broadcast's path, relative to the origin root.
-		path: String,
-		/// The identity the reference names.
-		expected: moq_net::Identity,
-		/// The identity the resolved broadcast serves.
-		actual: moq_net::Identity,
-	},
-
 	/// A rendition tried to lower jitter already advertised to subscribers.
 	#[error("catalog jitter cannot decrease for a published rendition")]
 	JitterDecreased,

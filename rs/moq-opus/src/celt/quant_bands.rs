@@ -301,9 +301,7 @@ pub unsafe fn quant_coarse_energy(
 	memcpy(
 		oldEBands_intra.as_mut_ptr() as *mut core::ffi::c_void,
 		oldEBands as *const core::ffi::c_void,
-		((C * (*m).nbEBands) as u64)
-			.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-			.wrapping_add((0 * oldEBands_intra.as_mut_ptr().offset_from(oldEBands) as i64) as u64),
+		((C * (*m).nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 	);
 	if two_pass != 0 || intra != 0 {
 		badness1 = quant_coarse_energy_impl(
@@ -346,9 +344,7 @@ pub unsafe fn quant_coarse_energy(
 		memcpy(
 			intra_bits.as_mut_ptr() as *mut core::ffi::c_void,
 			intra_buf as *const core::ffi::c_void,
-			(nintra_bytes.wrapping_sub(nstart_bytes) as u64)
-				.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-				.wrapping_add((0 * intra_bits.as_mut_ptr().offset_from(intra_buf) as i64) as u64),
+			(nintra_bytes.wrapping_sub(nstart_bytes) as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 		);
 		enc.restore(enc_start_state);
 		badness2 = quant_coarse_energy_impl(
@@ -375,23 +371,17 @@ pub unsafe fn quant_coarse_energy(
 			memcpy(
 				intra_buf as *mut core::ffi::c_void,
 				intra_bits.as_mut_ptr() as *const core::ffi::c_void,
-				(nintra_bytes.wrapping_sub(nstart_bytes) as u64)
-					.wrapping_mul(::core::mem::size_of::<u8>() as u64)
-					.wrapping_add((0 * intra_buf.offset_from(intra_bits.as_mut_ptr()) as i64) as u64),
+				(nintra_bytes.wrapping_sub(nstart_bytes) as u64).wrapping_mul(::core::mem::size_of::<u8>() as u64),
 			);
 			memcpy(
 				oldEBands as *mut core::ffi::c_void,
 				oldEBands_intra.as_mut_ptr() as *const core::ffi::c_void,
-				((C * (*m).nbEBands) as u64)
-					.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-					.wrapping_add((0 * oldEBands.offset_from(oldEBands_intra.as_mut_ptr()) as i64) as u64),
+				((C * (*m).nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 			);
 			memcpy(
 				error as *mut core::ffi::c_void,
 				error_intra.as_mut_ptr() as *const core::ffi::c_void,
-				((C * (*m).nbEBands) as u64)
-					.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-					.wrapping_add((0 * error.offset_from(error_intra.as_mut_ptr()) as i64) as u64),
+				((C * (*m).nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 			);
 			intra = 1;
 		}
@@ -399,16 +389,12 @@ pub unsafe fn quant_coarse_energy(
 		memcpy(
 			oldEBands as *mut core::ffi::c_void,
 			oldEBands_intra.as_mut_ptr() as *const core::ffi::c_void,
-			((C * (*m).nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * oldEBands.offset_from(oldEBands_intra.as_mut_ptr()) as i64) as u64),
+			((C * (*m).nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 		memcpy(
 			error as *mut core::ffi::c_void,
 			error_intra.as_mut_ptr() as *const core::ffi::c_void,
-			((C * (*m).nbEBands) as u64)
-				.wrapping_mul(::core::mem::size_of::<opus_val16>() as u64)
-				.wrapping_add((0 * error.offset_from(error_intra.as_mut_ptr()) as i64) as u64),
+			((C * (*m).nbEBands) as u64).wrapping_mul(::core::mem::size_of::<opus_val16>() as u64),
 		);
 	}
 	if intra != 0 {

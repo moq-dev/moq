@@ -124,7 +124,7 @@ pub(crate) struct StreamsState {
 	/// Streams the stuck pass has looked at, to prove it stays cheap
 	#[cfg(test)]
 	pub(super) scans: usize,
-	/// Which connection the send groups handed out here belong to
+	/// Which connection the send groups, offsets, and leases handed out here belong to
 	pub(super) tag: ConnectionTag,
 	/// Total quantity of outgoing data retained in send buffers, including acknowledged data
 	pub(super) buffered_data: u64,
@@ -5248,6 +5248,57 @@ mod tests {
 
 		recv(&mut client, &mut pending, old).restore(held);
 		assert_eq!(wait(&mut client, new, 1), Poll::Ready(Err(recv::Error::Evicted)));
+	}
+
+	/// A dropped lease holds eviction off like one still out, and stopping its stream returns
+	/// the credit it held, so the window recovers without evicting anything else.
+	#[test]
+	fn stop_recovers_a_dropped_lease() {
+		const WINDOW: u64 = 1000;
+		let (mut client, [old, new]) = stuck(WINDOW);
+		data(&mut client, old, 0, WINDOW as usize, false);
+		let mut pending = Retransmits::default();
+		let _ = recv(&mut client, &mut pending, old).lease(0).unwrap();
+		data(&mut client, new, 0, WINDOW as usize, false);
+		assert!(matches!(wait(&mut client, new, 2000), Poll::Pending));
+		assert_eq!(client.credit_stats().leased, 2 * WINDOW);
+
+		let max_data = client.local_max_data;
+		let pending = stop(&mut client, old, 0);
+		assert_eq!(
+			client.credit_stats().leased,
+			WINDOW,
+			"the dropped lease's credit returned"
+		);
+		assert_eq!(client.local_max_data, max_data + WINDOW, "and granted to the peer");
+		assert!(pending.max_data, "in a MAX_DATA frame");
+		assert!(matches!(wait(&mut client, new, 2000), Poll::Pending));
+		assert_eq!(client.credit_stats().evicted, 0);
+	}
+
+	/// A lease handed to another stream would land its bytes there and underflow its counts.
+	#[test]
+	#[should_panic(expected = "lease handed back to another stream")]
+	fn lease_on_another_stream_panics() {
+		let (mut client, [a, b]) = stuck(1000);
+		data(&mut client, a, 0, 100, false);
+		let mut pending = Retransmits::default();
+		let lease = recv(&mut client, &mut pending, a).lease(0).unwrap();
+		recv(&mut client, &mut pending, b).release(lease);
+	}
+
+	/// The same stream ID on another connection is another stream.
+	#[test]
+	#[should_panic(expected = "lease handed back to another stream")]
+	fn lease_on_another_connection_panics() {
+		let (mut client, [id, _]) = stuck(1000);
+		let (mut other, _) = stuck(1000);
+		data(&mut client, id, 0, 100, false);
+		data(&mut other, id, 0, 100, false);
+		let mut pending = Retransmits::default();
+		let lease = recv(&mut client, &mut pending, id).lease(0).unwrap();
+		let _ = recv(&mut other, &mut pending, id).lease(0).unwrap();
+		recv(&mut other, &mut pending, id).restore(lease);
 	}
 
 	/// A stream nobody has leased yet may have a reader about to run, so it holds eviction off

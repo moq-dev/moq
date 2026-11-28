@@ -529,8 +529,11 @@ plan_pass() {
         fi
     done
     [[ "$VERSION" == auto ]] || return 0
+    record "not run" case=meta publisher=rust subscriber=rust version=moq-lite-07-wip
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
+        record "not run" case=meta publisher=rust subscriber="$runtime" version=moq-lite-07-wip
+        record "not run" case=meta publisher="$runtime" subscriber=rust version=moq-lite-07-wip
         for version in "${COMPRESS_VERSIONS[@]}"; do
             record "not run" case=compress publisher=rust subscriber="$runtime" version="$version"
             record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
@@ -1998,6 +2001,9 @@ run_tail_pair() {
         want="track status answered"
     elif [[ "$kind" == compress ]]; then
         mode="compress"
+    elif [[ "$kind" == meta ]]; then
+        mode="meta"
+        want='tail meta clean end=4 groups=0,1,2,3 frames=4'
     fi
     local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     [[ -z "${4:-}" ]] || cell+=(version="$version")
@@ -2626,8 +2632,9 @@ run_tails() {
             fi
         fi
     done
-    # The compress, compressed catalog, and drop lanes pin their own versions.
+    # The compress, metadata, compressed catalog, and drop lanes pin their own versions.
     [[ "$VERSION" == auto ]] || return 0
+    run_tail_pair rust rust meta moq-lite-07-wip
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         run_replacement_case "$runtime" websocket
@@ -2636,6 +2643,8 @@ run_tails() {
             run_tail_pair rust "$runtime" compress "$version"
             run_tail_pair "$runtime" rust compress "$version"
         done
+        run_tail_pair rust "$runtime" meta moq-lite-07-wip
+        run_tail_pair "$runtime" rust meta moq-lite-07-wip
         run_catalog_fanout "$runtime"
         run_hls_grid "$runtime"
         if [[ "$COMPAT" -eq 0 ]]; then
