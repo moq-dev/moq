@@ -1183,7 +1183,6 @@ fn reconcile(
 			renditions: HashMap::new(),
 			readers: tokio::task::JoinSet::new(),
 			current: None,
-			resumable: HashMap::new(),
 			finished: Finished::default(),
 			started: 0,
 			starts: 0,
@@ -1253,11 +1252,8 @@ struct Follower {
 	path: moq_net::Path,
 	renditions: HashMap<Rendition, Entry>,
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
-	/// The identity last started.
+	/// The identity last started, which a return resumes.
 	current: Option<Current>,
-	/// The number and timeline of each identity a return would resume: the current one and each
-	/// a rendition pins, by identity.
-	resumable: HashMap<moq_net::Identity, (u64, Arc<Timeline>)>,
 	/// Shared with the readers.
 	finished: Finished,
 	/// How many identities started, numbering each.
@@ -1275,7 +1271,7 @@ struct Follower {
 struct Current {
 	/// Released at its end, so an offline sibling holds none of its state.
 	identity: Option<moq_net::broadcast::Consumer>,
-	/// Its route's identity, which [`Follower::resumable`] keeps it by.
+	/// Its route's identity, which a return is recognized by.
 	id: Option<moq_net::Identity>,
 	/// Shared by every rendition reading the identity, so their first frames fix one mapping for
 	/// all of them.
@@ -1505,8 +1501,13 @@ impl Follower {
 
 		// An identity served again keeps its timeline and the tracks it finished.
 		let id = identity.info().identity.clone();
-		let (serial, timeline) = match id.as_ref().and_then(|id| self.resumable.get(id)) {
-			Some((serial, timeline)) => (*serial, timeline.clone()),
+		let resumed = self
+			.current
+			.as_ref()
+			.filter(|current| id.is_some() && current.id == id)
+			.map(|current| (current.serial, current.timeline.clone()));
+		let (serial, timeline) = match resumed {
+			Some(resumed) => resumed,
 			None => {
 				self.started += 1;
 				// The first identity is the one the run started alongside. A later one's
@@ -1518,9 +1519,6 @@ impl Follower {
 				(self.started, timeline)
 			}
 		};
-		if let Some(id) = &id {
-			self.resumable.insert(id.clone(), (serial, timeline.clone()));
-		}
 		self.starts += 1;
 		self.current = Some(Current {
 			identity: Some(identity),
@@ -1534,20 +1532,13 @@ impl Follower {
 		self.play();
 	}
 
-	/// Drop the state no return can resume: an identity other than the current one, and the
-	/// records of a retired pad.
+	/// Drop the state no return can resume: the records of an identity other than the current
+	/// one, and of a retired pad.
 	fn forget(&mut self) {
-		let current = self.current.as_ref().and_then(|current| current.id.as_ref());
-		self.resumable.retain(|identity, _| Some(identity) == current);
-		let serials: HashSet<u64> = self
-			.resumable
-			.values()
-			.map(|(serial, _)| *serial)
-			.chain(self.current.as_ref().map(|current| current.serial))
-			.collect();
+		let current = self.current.as_ref().map(|current| current.serial);
 		let pads = &self.playback.session.pads;
 		self.finished
-			.retain(|rendition, serial| pads.is_listed(rendition) && serials.contains(&serial));
+			.retain(|rendition, serial| pads.is_listed(rendition) && Some(serial) == current);
 	}
 
 	/// The identity ended: release it and idle until the next one.
