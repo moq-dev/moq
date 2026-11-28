@@ -84,12 +84,15 @@ impl Encoder {
 	/// Encode one frame of interleaved `pcm` into `packet`, returning the packet's length.
 	///
 	/// The frame is `pcm.len()` divided by the channel count, and must be 2.5, 5,
-	/// 10, 20, 40, or 60 ms long. A packet never exceeds 1275 bytes per frame.
+	/// 10, 20, 40, 60, 80, 100, or 120 ms long. A packet never exceeds 1275 bytes per frame.
 	pub fn encode_float(&mut self, pcm: &[f32], packet: &mut [u8]) -> Result<usize, Error> {
-		if !pcm.len().is_multiple_of(self.channels) {
+		let frame_size = pcm.len() / self.channels;
+		// libopus's duration checks multiply the frame size in `i32`, so a frame
+		// past the longest it codes (120 ms at 48 kHz) must not reach them.
+		if !pcm.len().is_multiple_of(self.channels) || frame_size > 5760 {
 			return Err(Error::BadArg);
 		}
-		let frame_size = i32::try_from(pcm.len() / self.channels).map_err(|_| Error::BadArg)?;
+		let frame_size = frame_size as i32;
 		let max = i32::try_from(packet.len()).unwrap_or(i32::MAX);
 		// SAFETY: `inner` is live, and libopus reads `frame_size * channels` samples
 		// (all of `pcm`) and writes at most `max` bytes of `packet`.
@@ -229,5 +232,12 @@ mod tests {
 		assert_eq!(encoder.encode_float(&[0.0; 3], &mut packet), Err(Error::BadArg));
 		// Not an Opus frame duration.
 		assert_eq!(encoder.encode_float(&[0.0; 100 * 2], &mut packet), Err(Error::BadArg));
+		// 120 ms is the longest frame libopus codes.
+		assert!(encoder.encode_float(&[0.0; 5760 * 2], &mut packet).is_ok());
+		// Long enough to overflow libopus's i32 duration math.
+		assert_eq!(
+			encoder.encode_float(&vec![0.0; 5_368_710 * 2], &mut packet),
+			Err(Error::BadArg)
+		);
 	}
 }
