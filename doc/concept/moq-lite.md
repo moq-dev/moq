@@ -208,8 +208,8 @@ it instead, so a claim at `room` through a grant of `room/alice` is announced at
 crosses does the same with the grant it takes the claim under.
 
 A listing names the prefixes to watch, the same way a grant does, and a
-consumer narrows it to any subset locally. There is no wildcard: a `*` in a path
-is an ordinary byte.
+consumer narrows it to any subset locally. There is no wildcard, and no path
+may hold a `*`, so a pattern written where a prefix belongs fails loudly.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route

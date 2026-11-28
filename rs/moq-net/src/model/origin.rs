@@ -1692,8 +1692,19 @@ impl RouteEntry {
 // Published names are literal coordinates. Navigation belongs to Relative,
 // resolved before publication, so a name remains stable when carried by a URL.
 fn publish_path(path: &Path) -> Result<(), Error> {
+	nameable(path)?;
 	if path.parts().any(|segment| matches!(segment, "." | "..")) {
 		return Err(Error::NavigationSegment);
+	}
+	Ok(())
+}
+
+// A `*` stays out of every path while a prefix refuses one (so a pattern written where a
+// prefix belongs fails loudly): a broadcast no listing can root at, and that pre-0.22
+// subscribers read as a wildcard, is refused before it is published or watched.
+fn nameable(path: &Path) -> Result<(), Error> {
+	if path.as_str().contains('*') {
+		return Err(Error::InvalidPath);
 	}
 	Ok(())
 }
@@ -2610,8 +2621,8 @@ impl Producer {
 	/// producer may publish under (after [`scope`](Self::scope)) or beneath a
 	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
-	/// [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`], [`Error::NavigationSegment`] for a literal
-	/// `.` or `..`, or [`Error::Closed`] once the origin's
+	/// [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`], [`Error::InvalidPath`] if it holds a `*`,
+	/// [`Error::NavigationSegment`] for a literal `.` or `..`, or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn route(&self, path: impl TryInto<Path, Error: Into<Error>>, options: RouteOptions) -> Result<Route, Error> {
 		let full = self.root.join(&path::convert(path)?)?;
@@ -2987,7 +2998,8 @@ impl Producer {
 	/// `at` or `target` overlaps a mount point this producer already has, or `at`
 	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
 	/// so a target is always read as the origin holds it. Mounts may share a target.
-	/// and [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`].
+	/// [`Error::BoundsExceeded`] if either rooted path exceeds [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`],
+	/// and [`Error::InvalidPath`] if `at` holds a `*`.
 	pub fn mount(
 		&self,
 		at: impl TryInto<Path, Error: Into<Error>>,
@@ -2998,6 +3010,7 @@ impl Producer {
 		if at.depth() > Path::MAX_PARTS || target.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
+		nameable(&at)?;
 		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 		// An excluded subtree at, above, or beneath the target would be read under `at`.
 		if !self.scope.allowed.matches(target.as_str())
@@ -8349,6 +8362,11 @@ impl Consumer {
 
 		// On a consumer limited to `foo/specific`, no route can ever cover `foo`.
 		let root = self.root.join(&path)?;
+		nameable(&root)?;
+		// The join is bounded in bytes only, and the interest it registers must encode.
+		if root.depth() > Path::MAX_PARTS {
+			return Err(BoundsExceeded.into());
+		}
 		if !self.scope.permits(&root) {
 			return Err(Error::Unauthorized);
 		}
@@ -8419,7 +8437,8 @@ impl Consumer {
 	///
 	/// Pass an owned [`Identity`] to follow only that stream: another one taking over ends
 	/// it, and the identity is handed out again when it serves the path again. Fails with
-	/// [`Error::Unauthorized`] when this consumer's scope can never cover the path.
+	/// [`Error::Unauthorized`] when this consumer's scope can never cover the path, and with
+	/// [`Error::InvalidPath`] when it holds a `*`.
 	pub fn follow(
 		&self,
 		path: impl TryInto<Path, Error: Into<Error>>,
@@ -18303,18 +18322,27 @@ mod tests {
 		}
 	}
 
-	/// No path byte is reserved: a `*` names a broadcast like any other, which lists and
-	/// mounts as usual.
+	/// A `*` names no prefix, so no broadcast, claim, mount point, or lookup may hold one.
 	#[kio::test]
-	async fn a_star_is_an_ordinary_path_byte() {
+	async fn a_star_is_refused_everywhere_a_path_is_named() {
 		let producer = origin(1).produce();
-		let mut announced = producer.consume().routes();
-		let _star = producer.route("room/*", RouteOptions::default()).unwrap();
-		let _globstar = producer.announce("room/**", RouteInfo::new()).unwrap();
-		announced.expect_next_active("room/*").await;
-		announced.expect_next_active("room/**").await;
-		announced.assert_next_wait();
-		let _mounted = producer.mount("p1/*", "room").unwrap();
+		let consumer = producer.consume();
+		for path in ["room/*", "room/cam*1", "**"] {
+			assert!(matches!(producer.route(path, RouteOptions::default()), Err(Error::InvalidPath)));
+			assert!(matches!(producer.announce(path, RouteInfo::new()), Err(Error::InvalidPath)));
+			assert!(matches!(producer.mount(path, "room"), Err(Error::InvalidPath)));
+			assert!(matches!(consumer.follow(path, None), Err(Error::InvalidPath)));
+		}
+	}
+
+	/// A lookup whose rooted path exceeds the wire's depth is refused before it registers an
+	/// interest no session could encode.
+	#[kio::test]
+	async fn a_lookup_past_the_depth_limit_is_refused() {
+		let producer = origin(1).produce();
+		let half = vec!["a"; Path::MAX_PARTS / 2 + 1].join("/");
+		let rooted = producer.consume().scope(half.as_str(), &Prefixes::all()).unwrap();
+		assert!(matches!(rooted.follow(half.as_str(), None), Err(Error::BoundsExceeded(_))));
 	}
 
 	#[kio::test]

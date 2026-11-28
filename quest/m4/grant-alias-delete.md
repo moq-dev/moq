@@ -35,9 +35,10 @@ The alias is `alias` in `rs/moq-auth/src/wire.rs`. In JS it is `readPrefix`, `re
 
 `Prefix` (in `moq-net` and `@moq/net` since
 [moq-dev/moq#9800](https://github.com/moq-dev/moq/pull/9800)) refuses any `*` so a pattern
-written where a prefix belongs fails loudly, while a path takes `*` as an ordinary byte.
-Step 2 decides whether that refusal outlives the alias; keeping it leaves a path holding `*`
-that no grant can name exactly.
+written where a prefix belongs fails loudly, and so does every path an origin publishes,
+mounts, or looks up, in Rust and JS, so no broadcast exists that no prefix can name and that
+pre-0.22 subscribers would read as a wildcard. Step 2 decides whether both refusals outlive
+the alias: lifting them together makes `*` an ordinary path byte.
 
 ## Waiting
 

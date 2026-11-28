@@ -342,15 +342,12 @@ impl Invocation {
 				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
-				// A path too long or deep to hold a viewer's `<NAME>.echo` beneath it takes no
-				// feedback.
+				// An origin refuses a broadcast no prefix could name, so no viewer could
+				// publish its `<NAME>.echo` beneath this.
 				let feedback = prefix
 					.join(&moq_net::Path::from_static("viewer.echo"))
 					.map_err(anyhow::Error::from)
-					.and_then(|feedback| match feedback.parts().count() > moq_net::Path::MAX_PARTS {
-						true => Err(anyhow::anyhow!("more than {} segments", moq_net::Path::MAX_PARTS)),
-						false => Ok(feedback),
-					});
+					.and_then(|feedback| Ok(feedback.as_str().parse::<moq_net::Prefix>()?));
 				if let Err(err) = feedback {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
@@ -1896,13 +1893,15 @@ mod tests {
 			("room", "viewers"),
 			("room/live", "../viewers"),
 			(fits.as_str(), "viewers"),
-			("room", "view*"),
 		] {
 			import(broadcast, path).unwrap();
 		}
 		for (broadcast, path) in [
 			("room", "../viewers"),
 			("room/live", "../../viewers"),
+			("room", "*"),
+			("room", "viewers/**"),
+			("room", "view*"),
 			(too_deep.as_str(), "viewers"),
 		] {
 			let err = import(broadcast, path).unwrap_err().to_string();

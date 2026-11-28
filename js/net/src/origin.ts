@@ -557,9 +557,17 @@ class VersionedSignal<T> extends Signal<T> {
 
 // Navigation belongs to relative references, resolved before publication.
 function publishPath(path: Path.Valid): void {
+	nameable(path);
 	if (Path.parts(path).some((segment) => segment === "." || segment === "..")) {
 		throw new Error("broadcast path contains a navigation segment");
 	}
+}
+
+// A `*` stays out of every path while a prefix refuses one (so a pattern written where a
+// prefix belongs fails loudly): a broadcast no listing can root at, and that pre-0.22
+// subscribers read as a wildcard, is refused before it is published or watched.
+function nameable(path: Path.Valid): void {
+	if (path.includes("*")) throw new Error("path contains a `*`");
 }
 
 // A broadcast created through the origin: its producer, the handle the origin routes, and
@@ -2401,6 +2409,7 @@ export class Consumer implements Reader {
 	follow(path: Path.Valid, options: FollowOptions = {}): Following {
 		const identity = options.identity;
 		const absolute = this.#scope.path(path);
+		nameable(absolute);
 		let watch = this.#state.watchers.get(absolute);
 		if (!watch) {
 			watch = { users: 0, version: new Signal(0) };
@@ -2509,6 +2518,7 @@ export class Consumer implements Reader {
 	#resolve(path: Path.Valid, identity: Identity.Valid | undefined, announced: boolean): Requesting {
 		const relative = path;
 		path = this.#scope.path(path);
+		nameable(path);
 		const requests = this.#state.requests.peek();
 		if (this.#state.closed.peek() !== undefined) {
 			// Closed origin: a request that can never resolve ends at once.

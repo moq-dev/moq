@@ -3741,3 +3741,18 @@ test("published names refuse navigation segments", () => {
 		origin.close();
 	}
 });
+
+test("a `*` is refused everywhere a path is named", () => {
+	const origin = new Producer();
+	try {
+		for (const name of ["room/*", "room/cam*1", "**"]) {
+			const path = Path.from(name);
+			expect(() => origin.route(path, { hidden: true }).broadcast).toThrow("`*`");
+			expect(() => origin.claim(path)).toThrow("`*`");
+			expect(() => wireOf(origin).receive(path, WireRoute.default)).toThrow("`*`");
+			expect(() => origin.consume().follow(path)).toThrow("`*`");
+		}
+	} finally {
+		origin.close();
+	}
+});
