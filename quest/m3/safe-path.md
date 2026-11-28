@@ -78,9 +78,14 @@ recommendation the headless `/quest-plan` of 2026-11-27 made:
   work though nothing is blocked, since rust2-lean carries its model
   meanwhile; m4, which is for work no one waits on).
 
-Validation: `just ci`; the bench table above in the PR; and rust2-lean's
-census (`just driver lean-moq` in kixel-ai/rust2, pointed at this branch)
-showing no refusal from `Path`'s representation.
+Validation: `just ci`; the bench table above in the PR; and rust2-lean
+translating `Path` from this branch's Rust. In a kixel-ai/rust2 checkout with
+the hand-written model (`driver/lean/src/lower/path.rs`, which overrides
+`as_str`, `empty`, and `head` whatever `Path` holds) removed, run
+`just driver lean --census` on this branch's `rs/moq-net/Cargo.toml` from
+`Path::as_str`, `Path::empty`, and `Path::head`: all three translate, with no
+refusal from `Path`'s representation. `just driver lean-moq` alone shows
+nothing here, since it pins an older moq revision and keeps the model.
 
 ## Related
 
