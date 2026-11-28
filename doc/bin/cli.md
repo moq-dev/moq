@@ -596,7 +596,7 @@ exports and needs a hang catalog, so MSF refuses it.
 The `report`, `health`, and `echo` sinks print reports as JSON lines. `export report`
 follows one broadcast's report track until the broadcast ends; `export health`
 prints the same follow as [health](/concept/stats#health) instead, each report graded
-against the one before it over the time their `uptime`s span (a report without one has
+against the one before it over the time their `uptime`s span (a report without one, such as a browser publisher's today, has
 nothing to diff against); `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 `--broadcast` as they come and go, reading one that ends for 5 s more for its
