@@ -2987,12 +2987,12 @@ impl Reader {
 	/// Whether a fill in `waiting`, each one whose read waits on its route this pass with the
 	/// groups its track had seen arrive before that read, still owes a group from `floor` below
 	/// the candidate `first` that the reader lacks, the local bounds admit, and the reader or a
-	/// copy has not recorded skipped, as its own ordered read waits for it: one a fill of its route has yet to answer,
-	/// one whose head it asked for, or one its received route's live feed owes within the
-	/// arrival grace. Each fill judges its own drops: another route giving a group up says
-	/// nothing of this one. A fill still unanswered owes what it was asked, and one a group
-	/// reached since its read is read again. Parks `waiter` until that grace folds; the answer,
-	/// the group landing, or its drop wakes the fill's own read.
+	/// copy has not recorded skipped, as its own ordered read waits for it: one a fill of its
+	/// route has yet to answer, one whose head it asked for, or one its received route's live
+	/// feed owes within the arrival grace. Each fill judges its own drops: another route giving
+	/// a group up says nothing of this one. A fill still unanswered owes what it was asked, and
+	/// one a group reached since its read is read again. Parks `waiter` until that grace folds;
+	/// the answer, the group landing, or its drop wakes the fill's own read.
 	fn fill_owes_below(
 		&mut self,
 		waiting: &[(usize, usize)],
@@ -3006,10 +3006,6 @@ impl Reader {
 			let copy = &self.copies[index];
 			if Arc::ptr_eq(&copy.lease, &first.lease) {
 				continue;
-			}
-			// Landed on another thread after the read parked, which its owed groups no longer count.
-			if copy.track.poll_arrived(arrivals, waiter).is_ready() {
-				return true;
 			}
 			let from = floor.max(copy.start(start));
 			let below = first
@@ -3028,6 +3024,13 @@ impl Reader {
 				Sub::Ready(sub) => sub.owes(gap.clone(), waiter),
 			};
 			if open.iter().any(owes) {
+				return true;
+			}
+			// A group landing on another thread after the read parked is no longer owed, but it
+			// counts as arrived before it stops being owed: checked after, a landing at any point
+			// shows. Walk again to read it.
+			if self.copies[index].track.poll_arrived(arrivals, waiter).is_ready() {
+				waiter.waker().wake_by_ref();
 				return true;
 			}
 		}
