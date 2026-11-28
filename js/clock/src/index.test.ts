@@ -135,6 +135,17 @@ test("manual reads and wall corrections share a clock without inventing elapsed 
 	expect(ms(origin())).toBe(START + 1000 - 5);
 });
 
+test("a manual suspend moves only wall time, leaving the origin", () => {
+	const clock = manual();
+	clock.jump(Duration.millis(5));
+	clock.suspend(Duration.secs(3600));
+	expect(ns(now())).toBe(5_000_000);
+	expect(ms(wall())).toBe(START + 5 + 3_600_000);
+	expect(ms(origin())).toBe(START);
+	clock.jump(Duration.millis(1));
+	expect(ms(wall())).toBe(START + 6 + 3_600_000);
+});
+
 test("many small advances move wall time by their combined duration", () => {
 	const clock = new Manual();
 	for (let i = 0; i < 10_000; i++) clock.jump(Duration.nanos(100));

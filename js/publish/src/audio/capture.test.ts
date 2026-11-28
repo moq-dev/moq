@@ -659,13 +659,13 @@ test("a failed encoder stays failed until the capture source changes", async () 
 // takes the jump too, or audio would land behind video by the sleep and expire from the encoder's
 // backlog as it arrives.
 test("microphone audio takes the media clock's suspend jumps", async () => {
+	// On a manual clock, so the sleep is the only time that passes between the reads.
+	const clock = new Manual();
+	const installed = clock.install();
 	using webaudio = installGatedWebAudio();
 	webaudio.gesture();
 	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
 	const effect = new Effect();
-	// biome-ignore lint/style/noRestrictedGlobals: a suspend is the wall clock jumping past performance.now().
-	const host = Date;
-	const wall = host.now;
 	try {
 		await settle();
 		const frames = capture.out.frames.peek()?.subscribe(effect);
@@ -680,9 +680,9 @@ test("microphone audio takes the media clock's suspend jumps", async () => {
 		const stamped = ((first.value?.channels[0].length ?? 0) / 48_000) * 1_000_000;
 
 		// An hour asleep: the wall clock moved on while the monotonic clock and the sample count stood.
-		const asleep = 3_600_000;
-		const slept = wall();
-		spyOn(host, "now").mockImplementation(() => wall() + asleep);
+		const asleep = Duration.secs(3600);
+		const slept = wall().asUnixMillis();
+		clock.suspend(asleep);
 		// Rendered before the sleep but delivered after it: captured before the jump, so it continues
 		// the timeline rather than taking the jump.
 		worklet.render(slept);
@@ -691,19 +691,16 @@ test("microphone audio takes the media clock's suspend jumps", async () => {
 		const flown = ((flight?.channels[0].length ?? 0) / 48_000) * 1_000_000;
 		worklet.render();
 		const after = (await reader.read()).value?.timestamp.asMicros() ?? 0;
-		// Date.now() reads whole milliseconds, so the jump is the sleep within a couple of them.
-		expect(Math.abs(after - (before + stamped + flown) - asleep * 1_000)).toBeLessThan(3_000);
+		expect(after).toBeCloseTo(before + stamped + flown + asleep.asMicros(), 0);
 		expect(Math.abs(after - MediaClock.now().asMicros())).toBeLessThan(1_000_000);
 	} finally {
-		mock.restore();
 		effect.close();
 		capture.close();
 		await settle();
-		// The sleep left the page's timeline an hour past the restored wall clock; another clock's
-		// origin starts a new one, so later tests start on the wall clock again.
-		const installed = new Manual().install();
-		MediaClock.now();
 		installed.close();
+		// The suspend left the media timeline an hour ahead, and the next Manual clock has the same
+		// origin, so it would continue it: a read on the host clock's own origin starts a new one.
+		MediaClock.now();
 	}
 });
 
@@ -760,21 +757,15 @@ test("a stalled page keeps the microphone's timeline", async () => {
 // rendered from the moment the host woke, so the timeline takes the jump on the first quantum
 // rendered after the sleep, not on whichever reaches the page first.
 test("a page stalled past a suspend takes the jump where the audio thread woke", async () => {
-	// The host clock, driven by hand: a suspend moves the wall clock while the monotonic one stands,
-	// which a Manual clock can't express, since its wall time anchors its origin.
-	// biome-ignore lint/style/noRestrictedGlobals: a suspend is the wall clock jumping past performance.now().
-	const [host, monotonic] = [Date, performance];
-	const [wall0, mono0] = [host.now(), monotonic.now()];
-	let elapsed = 0;
-	let slept = 0;
+	const clock = new Manual();
+	const installed = clock.install();
 	using webaudio = installGatedWebAudio();
 	webaudio.gesture();
 	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
 	const effect = new Effect();
 	try {
 		await settle();
-		spyOn(monotonic, "now").mockImplementation(() => mono0 + elapsed);
-		spyOn(host, "now").mockImplementation(() => wall0 + elapsed + slept);
+		const quantum = Duration.millis(10);
 		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
 		if (!reader) throw new Error("no capture frames");
 		const worklet = webaudio.worklets[0];
@@ -789,19 +780,19 @@ test("a page stalled past a suspend takes the jump where the audio thread woke",
 
 		for (let i = 0; i < 1_000; i++) {
 			await render();
-			elapsed += 10;
+			clock.jump(quantum);
 		}
 		// One quantum rendered just before the sleep, then five seconds of rendering after it before the
 		// page catches up.
-		const asleep = host.now();
-		slept = 4_000;
-		const awake = host.now();
-		elapsed += 5_000;
+		const asleep = wall().asUnixMillis();
+		clock.suspend(Duration.secs(4));
+		const awake = wall().asUnixMillis();
+		clock.jump(Duration.secs(5));
 		await render(asleep);
 		for (let i = 0; i < 500; i++) await render(awake + i * 10);
 		for (let i = 0; i < 1_000; i++) {
 			await render();
-			elapsed += 10;
+			clock.jump(quantum);
 		}
 
 		expect(frames.length).toBe(2_501);
@@ -813,14 +804,12 @@ test("a page stalled past a suspend takes the jump where the audio thread woke",
 		expect(gaps.map(({ at }) => at)).toEqual([1_001]);
 		expect(Math.abs(gaps[0].gap - 4_000_000)).toBeLessThan(20_000);
 	} finally {
-		mock.restore();
 		effect.close();
 		capture.close();
 		await settle();
-		// The sleep left the page's timeline ahead of the restored wall clock; another clock's origin
-		// starts a new one, so later tests start on the wall clock again.
-		const installed = new Manual().install();
-		MediaClock.now();
 		installed.close();
+		// The suspend left the media timeline an hour ahead, and the next Manual clock has the same
+		// origin, so it would continue it: a read on the host clock's own origin starts a new one.
+		MediaClock.now();
 	}
 });

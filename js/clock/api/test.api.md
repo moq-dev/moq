@@ -16,6 +16,7 @@ export class Manual {
 	jump(duration: Duration): void;
 	now(): Instant;
 	stepWall(wall: Wall): void;
+	suspend(duration: Duration): void;
 	wall(): Wall;
 }
 
