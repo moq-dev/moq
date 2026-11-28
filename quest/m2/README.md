@@ -24,7 +24,7 @@ typed superseded group end (additive) stays only while its PR claims it.
 
 Decided 2026-11-27 (maintainer, `/quest-plan`):
 
-- ✅ Added [key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md)
+- ✅ Added key groups by frame 0 and remove group timestamps from producer APIs
   to `m2` gating [lite07-finalize](/quest/m2/lite07-finalize.md) after
   timestamp-ids ([moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)) (rejected: folding into
   [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794); dropping).

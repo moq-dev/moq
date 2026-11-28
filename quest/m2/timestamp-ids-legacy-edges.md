@@ -21,6 +21,3 @@ that lite-07 blocker; starting now beside it).
 
 Public API: none. Wire: none beyond refusing or bounding what draft-23 already forbids.
 
-## Required
-
-- [Key groups by frame 0](/quest/m2/group-frame-timestamps.md) - rewrites the legacy ingress and draft-23 ID code these fixes land in

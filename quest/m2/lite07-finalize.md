@@ -288,7 +288,7 @@ publishers switch to `cts` with [lite-08](/quest/m4/cts-encoders.md)
 
 Decided 2026-11-27 (maintainer, `/quest-plan` following the frame-0 design pass
 on [moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)): ✅ the cut
-also waits for [keying groups by frame 0](/quest/m2/group-frame-timestamps.md),
+also waits for keying groups by frame 0,
 which creates published groups eagerly from frame 0, omits the first `FRAME`
 delta at `Frame Start = 0`, removes zigzag from lite-07, and drops `seek(start)`
 before 0.22 (rejected: folding it into #9794; dropping it).
@@ -296,7 +296,6 @@ before 0.22 (rejected: folding it into #9794; dropping it).
 ## Required
 
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
-- [Key groups by frame 0 and remove group timestamps from producer APIs](/quest/m2/group-frame-timestamps.md) - omits lite-07's first `FRAME` delta at `Frame Start = 0`, removes zigzag completely, and creates groups from frame 0 across every language before 0.22
 
 ## Related
 
