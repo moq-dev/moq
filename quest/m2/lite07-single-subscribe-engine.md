@@ -24,4 +24,4 @@ Public API: none. Wire: eliminates a lite-07-wip `FIN` timing race and Rust/JS `
 
 ## Related
 
-- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - shares `TrackRun` range policy handling
+- The lite-07 subscribe and fetch redesign (finished with [moq-dev/moq#9719](https://github.com/moq-dev/moq/pull/9719)) - shares `TrackRun` range policy handling
