@@ -54,10 +54,6 @@ the drop plus bounded SUBSCRIBE baseline it compares a continuation against.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Per-range priority, order, and judged OLD drops on lite-07](/quest/m2/lite07-subscribe/per-range-policy.md) - judged Max Age on SUBSCRIBE_DROP(OLD) replaces stale_budget
-
 ## Related
 
 - [Takeover](/quest/m4/group-takeover.md) - measures this against a continuation before lite-08 brings one back

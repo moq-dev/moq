@@ -18,10 +18,20 @@
 (* subscription's. The first opens in line are owed the resets whose       *)
 (* credit has yet to return, and make no more.                             *)
 (*                                                                         *)
-(* A group handed out while another waits replaces it if it outranks it    *)
-(* (`give_way`), and is shed otherwise. While the waiting group ranks      *)
-(* below every stream its subscription serves (`stuck`), the cursor hands  *)
-(* out only groups that outrank it; otherwise none.                        *)
+(* While the waiting group ranks below every stream its subscription       *)
+(* serves (`stuck`), the cursor hands out the group ranked highest by the  *)
+(* policy it would go out at now, only if it outranks the waiting one      *)
+(* (`Admit::Above`), which then gives way (`give_way`): deferred while an  *)
+(* oldest-first range still wants it, taking the place back once it        *)
+(* empties or once it outranks the waiting one, and given up otherwise.    *)
+(* While none waits the cursor hands out any group; otherwise none.        *)
+(*                                                                         *)
+(* A subscription's groups go newest first, or oldest first in `Asc`.      *)
+(* Mixed ranges cover some at another policy: `HistOnly` groups only an    *)
+(* oldest-first history range at a lower priority covers, and `Both`       *)
+(* groups a live join covers too, which ages them into history oldest      *)
+(* first (`poll_policy`). Under `Late`, groups arrive over time, in any    *)
+(* order, rather than all at the start.                                    *)
 (*                                                                         *)
 (* The receiver is abstract: a stream sent whole or reset is eventually    *)
 (* freed, returning its credit; ReceiveCredit.tla checks that every stream *)
@@ -39,10 +49,14 @@ CONSTANTS
     Asc,        \* the subscriptions whose groups go oldest first; the rest go newest first
     MaxStreams, \* the peer's initial stream credit
     LiveSubs,   \* the subscriptions with a group whose producer never finishes
-    LiveGroup   \* that group
+    LiveGroup,  \* that group
+    HistOnly,   \* the groups only a lower-priority oldest-first history range covers
+    Both,       \* the groups a live join covers until they age, and that history range too
+    Late        \* whether groups arrive over time rather than all at the start
 
 ASSUME MaxStreams >= 1 /\ G >= 1 /\ High \subseteq Subs /\ Asc \subseteq Subs
 ASSUME LiveSubs \subseteq Subs /\ LiveGroup \in 1..G
+ASSUME HistOnly \subseteq 1..G /\ Both \subseteq 1..G /\ HistOnly \cap Both = {} /\ Late \in BOOLEAN
 
 Prio == [s \in Subs |-> IF s \in High THEN 1 ELSE 0]
 
@@ -50,8 +64,19 @@ Pairs == Subs \X (1..G)
 
 Live == LiveSubs \X {LiveGroup}
 
-\* `priority::in_group`: a group's rank within its subscription.
-InGroup(s, k) == IF s \in Asc THEN -k ELSE k
+\* A group's rank within its subscription: the priority of the policy it goes out at now, then
+\* `priority::in_group`. History ranks below its subscription's own policy, oldest first.
+Scale == 2 * G + 1
+
+Historic(x, s, k) == k \in HistOnly \/ <<s, k>> \in x.aged
+
+InGroup(x, s, k) ==
+    IF Historic(x, s, k) THEN -k
+    ELSE Scale + (IF s \in Asc THEN -k ELSE k)
+
+\* `GroupServe::history_wants`: an oldest-first range still wants the group, so giving way
+\* defers it rather than giving it up.
+HistWants(s, k) == s \in Asc \/ k \in HistOnly \/ k \in Both
 
 \* Whether rank `a` orders above rank `b`: `open::Rank`'s order, greater first.
 Above(a, b) ==
@@ -60,9 +85,11 @@ Above(a, b) ==
 
 (***************************************************************************)
 (* The whole state, one record, so a poll's parts compose as functions.    *)
-(*   st:       each group: "cached", "opening", "serving" (its stream      *)
-(*             listed), "fin" (sent whole, unlisted), "reset" (preempted), *)
+(*   st:       each group: "pending" (yet to arrive), "cached", "opening", *)
+(*             "deferred" (out of line), "serving" (its stream listed),    *)
+(*             "fin" (sent whole, unlisted), "reset" (preempted),          *)
 (*             "closed" (freed by the peer), or "given" (up, never opened) *)
+(*   aged:     the `Both` groups aged past the live join, by subscription  *)
 (*   opening:  per subscription, the group waiting for credit, or 0        *)
 (*   awake:    per subscription, its `TrackRun` has a wake pending         *)
 (*   asked:    per subscription, its open waits on the transport's credit  *)
@@ -79,7 +106,7 @@ VARIABLE v
 vars == <<v>>
 
 \* An open or stream's rank, as `open::Rank` orders it.
-Rank(x, s, k) == <<Prio[s], -x.turn[s], InGroup(s, k)>>
+Rank(x, s, k) == <<Prio[s], -x.turn[s], InGroup(x, s, k)>>
 
 Placed(x) == {s \in Subs : x.rank[s] # <<>>}
 
@@ -106,7 +133,7 @@ Leave(x, s) ==
 
 \* Whether an open of `s`'s group `k` may reset `t`'s stream of group `j`: a lower-priority
 \* subscription's, or an older one of its own; a tied subscription's turn differs.
-Preempts(s, k, t, j) == Prio[s] > Prio[t] \/ (s = t /\ InGroup(s, k) > InGroup(t, j))
+Preempts(x, s, k, t, j) == Prio[s] > Prio[t] \/ (s = t /\ InGroup(x, s, k) > InGroup(x, t, j))
 
 Listed(x) == {p \in Pairs : x.st[p] = "serving"}
 
@@ -118,8 +145,8 @@ Candidate(x, s, k, ls) ==
     IF ls = {} THEN <<>>
     ELSE LET low == Lowest(x, ls)
              own == {p \in ls : p[1] = s}
-         IN IF Preempts(s, k, low[1], low[2]) THEN low
-            ELSE IF own # {} /\ Preempts(s, k, s, Lowest(x, own)[2]) THEN Lowest(x, own)
+         IN IF Preempts(x, s, k, low[1], low[2]) THEN low
+            ELSE IF own # {} /\ Preempts(x, s, k, s, Lowest(x, own)[2]) THEN Lowest(x, own)
             ELSE <<>>
 
 \* `Lines::make_room`: each open in line not owed a reset resets the lowest stream it preempts.
@@ -140,6 +167,17 @@ Open(x, s) ==
     [x EXCEPT !.st[s, k] = "serving", !.opening[s] = 0, !.opened = x.opened + 1,
               !.turns = x.turns + 1, !.turn[s] = x.turns + 1]
 
+\* The highest-ranked of `s`'s groups `ks`.
+Best(x, s, ks) == CHOOSE k \in ks : \A j \in ks : InGroup(x, s, k) >= InGroup(x, s, j)
+
+Deferred(x, s) == {k \in 1..G : x.st[s, k] = "deferred"}
+
+\* Once the place empties, the best deferred group takes it.
+Refill(x, s) ==
+    IF x.opening[s] # 0 \/ Deferred(x, s) = {} THEN x
+    ELSE LET k == Best(x, s, Deferred(x, s)) IN
+         [x EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
+
 Join(x, s) ==
     [x EXCEPT !.rank[s] = Rank(x, s, x.opening[s]), !.arrival[s] = x.arrivals,
               !.arrivals = x.arrivals + 1]
@@ -149,47 +187,67 @@ PollOpen(x, s) ==
     IF x.opening[s] = 0 THEN x
     ELSE IF x.rank[s] = <<>> /\ Placed(x) = {}
     THEN \* Nobody waits: take credit if there is any, and join the line only without it.
-         IF Credit(x) THEN Open(x, s)
+         IF Credit(x) THEN Refill(Open(x, s), s)
          ELSE Room([Join(x, s) EXCEPT !.asked[s] = TRUE])
     ELSE LET y == IF x.rank[s] = <<>> THEN Join(x, s) ELSE x IN
          IF ~IsHead(y, s) THEN Room(y)
          ELSE IF Credit(y)
-         THEN Leave([Open(y, s) EXCEPT !.resets = IF y.resets > 0 THEN y.resets - 1 ELSE 0], s)
+         THEN Refill(Leave([Open(y, s) EXCEPT !.resets = IF y.resets > 0 THEN y.resets - 1 ELSE 0], s), s)
          ELSE Room([y EXCEPT !.asked[s] = TRUE])
 
 \* `TrackRun::stuck`: the waiting group ranks below every stream the subscription serves.
 Stuck(x, s) ==
     LET k == x.opening[s]
         held == {j \in 1..G : x.st[s, j] = "serving"}
-    IN k # 0 /\ held # {} /\ \A j \in held : InGroup(s, j) > InGroup(s, k)
+    IN k # 0 /\ held # {} /\ \A j \in held : InGroup(x, s, j) > InGroup(x, s, k)
 
-\* Whether the cursor may hand out `s`'s group `k`: any while none waits; while one waits and is
-\* stuck, any when descending, since newest first sheds the backlog, and only one that outranks
-\* it when ascending; otherwise none.
-Admitted(x, s, k) ==
-    LET w == x.opening[s] IN
-    w = 0 \/ (Stuck(x, s) /\ (s \notin Asc \/ k < w))
+\* The highest-ranked of `ks` if it outranks `s`'s waiting group, else none.
+Outranking(x, s, ks) ==
+    IF ks # {} /\ InGroup(x, s, Best(x, s, ks)) > InGroup(x, s, x.opening[s])
+    THEN {Best(x, s, ks)} ELSE {}
 
-\* The cursor hands out group `k`: shed if it ranks below the waiting group, or replacing it
-\* (`give_way`) to wait itself.
+\* The groups `s` may take next: while none waits, any cached, in the order they arrived; while one
+\* waits and is stuck, the best deferred one if it outranks it, else the best cached one if that
+\* does (`Admit::Above`); otherwise none.
+Admitted(x, s) ==
+    LET cached == {k \in 1..G : x.st[s, k] = "cached"} IN
+    IF x.opening[s] = 0 THEN cached
+    ELSE IF ~Stuck(x, s) THEN {}
+    ELSE IF Outranking(x, s, Deferred(x, s)) # {} THEN Outranking(x, s, Deferred(x, s))
+    ELSE Outranking(x, s, cached)
+
+\* Group `k` takes the place, the waiting group giving way (`give_way`): deferred while history
+\* wants it, given up otherwise.
 Cursor(x, s, k) ==
-    LET w == x.opening[s] IN
-    IF w # 0 /\ InGroup(s, k) < InGroup(s, w)
-    THEN [x EXCEPT !.st[s, k] = "given"]
-    ELSE LET z == IF w = 0 THEN x
-                   ELSE LET g == [x EXCEPT !.st[s, w] = "given", !.opening[s] = 0] IN
-                        IF g.rank[s] = <<>> THEN g ELSE Leave(g, s)
-         IN [z EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
+    LET w == x.opening[s]
+        z == IF w = 0 THEN x
+             ELSE LET g == [x EXCEPT !.st[s, w] = IF HistWants(s, w) THEN "deferred" ELSE "given",
+                                     !.opening[s] = 0] IN
+                  IF g.rank[s] = <<>> THEN g ELSE Leave(g, s)
+    IN [z EXCEPT !.st[s, k] = "opening", !.opening[s] = k]
 
-\* One pass of `TrackRun::poll_step`: the waiting open, then the cursor, which hands out groups
-\* in the order they arrived, any order here. A pass that changes nothing parks the task.
+\* One pass of `TrackRun::poll_step`: the waiting open, then the cursor. A pass that changes
+\* nothing parks the task.
 Step(s) ==
     /\ v.awake[s]
     /\ LET y == PollOpen(v, s)
-           ready == {k \in 1..G : y.st[s, k] = "cached" /\ Admitted(y, s, k)}
+           ready == Admitted(y, s)
        IN IF ready = {}
           THEN v' = IF y = v THEN [v EXCEPT !.awake[s] = FALSE] ELSE y
           ELSE \E k \in ready : v' = Cursor(y, s, k)
+
+\* A group arrives, waking its subscription's cursor.
+Arrive(p) ==
+    /\ v.st[p] = "pending"
+    /\ v' = Wake([v EXCEPT !.st[p] = "cached"], {p[1]})
+
+\* A group the live join covers ages past its budget, the older ones first, and ranks as
+\* history from then; its subscription's `poll_policy` wakes.
+CanAge(p) == p[2] \in Both /\ p \notin v.aged /\ \A j \in Both : j < p[2] => <<p[1], j>> \in v.aged
+
+Age(p) ==
+    /\ CanAge(p)
+    /\ v' = Wake([v EXCEPT !.aged = v.aged \cup {p}], {p[1]})
 
 \* A serving stream is sent whole and leaves the list; its task wakes the `TrackRun`. A live
 \* group's producer never finishes it.
@@ -207,7 +265,8 @@ Free(p) ==
                            !.asked = [s \in Subs |-> FALSE]], waiting)
 
 Init ==
-    v = [st |-> [p \in Pairs |-> "cached"],
+    v = [st |-> [p \in Pairs |-> IF Late THEN "pending" ELSE "cached"],
+         aged |-> {},
          opening |-> [s \in Subs |-> 0],
          awake |-> [s \in Subs |-> TRUE],
          asked |-> [s \in Subs |-> FALSE],
@@ -220,11 +279,13 @@ Init ==
          opened |-> 0,
          closed |-> 0]
 
-System == (\E s \in Subs : Step(s)) \/ (\E p \in Pairs : Finish(p) \/ Free(p))
+System == (\E s \in Subs : Step(s)) \/ (\E p \in Pairs : Finish(p) \/ Free(p) \/ Arrive(p) \/ Age(p))
 
 \* Where some step of the system is enabled: each step's guard. `Guarded` checks they agree.
 Enabled == \/ \E s \in Subs : v.awake[s]
-           \/ \E p \in Pairs : v.st[p] \in {"fin", "reset"} \/ (v.st[p] = "serving" /\ p \notin Live)
+           \/ \E p \in Pairs : \/ v.st[p] \in {"fin", "reset", "pending"}
+                               \/ v.st[p] = "serving" /\ p \notin Live
+                               \/ CanAge(p)
 
 Quiet == ~Enabled
 
@@ -240,16 +301,21 @@ WithinCredit == v.opened <= MaxStreams + v.closed
 
 \* Every behavior ends quiet, as in ReceiveCredit.tla, by `Progress`; `Ends` and `TopDelivered`
 \* say what a quiet state may leave undone.
-StRank(x) == CASE x = "cached" -> 0 [] x = "opening" -> 1 [] x = "serving" -> 2
-               [] x \in {"fin", "reset"} -> 3 [] OTHER -> 4
+StRank(x) == CASE x = "pending" -> 0 [] x = "cached" -> 2 [] x = "opening" -> 4
+               [] x = "deferred" -> 5 [] x = "serving" -> 7 [] x \in {"fin", "reset"} -> 9
+               [] OTHER -> 10
 
 RECURSIVE SumSet(_, _)
 SumSet(f(_), S) == IF S = {} THEN 0
                    ELSE LET e == CHOOSE e \in S : TRUE IN f(e) + SumSet(f, S \ {e})
 
-\* First the groups' states (twice, so leaving the line for a stream outweighs the place) and
-\* the places taken; then the opens asking the transport, and the tasks parked.
-Counted == 2 * SumSet(LAMBDA p: StRank(v.st[p]), Pairs) + Cardinality(Placed(v))
+\* First the groups' states and the groups aged, outweighing the places taken and the waiting
+\* groups' ranks, which a deferred group taking the place raises (twice, so it outweighs the
+\* place it leaves); then the opens asking the transport, and the tasks parked.
+Waiting(x) == SumSet(LAMBDA s: IF x.opening[s] = 0 THEN 0 ELSE InGroup(x, s, x.opening[s]) + G, Subs)
+Weight == Cardinality(Subs) * (1 + 2 * (Scale + 2 * G)) + 1
+Counted == Weight * (SumSet(LAMBDA p: StRank(v.st[p]), Pairs) + Cardinality(v.aged))
+           + Cardinality(Placed(v)) + 2 * Waiting(v)
 Waits == Cardinality({s \in Subs : v.asked[s]}) + Cardinality({s \in Subs : ~v.awake[s]})
 
 Progress ==
@@ -271,19 +337,33 @@ Ends ==
         \/ v.st[p] \in {"closed", "given"}
         \/ v.st[p] = "serving" /\ p \in Live
         \/ v.st[p] = "opening" /\ Blocked(p[1], p[2])
-        \/ v.st[p] = "cached" /\ v.opening[p[1]] # 0 /\ Blocked(p[1], v.opening[p[1]])
+        \/ v.st[p] \in {"cached", "deferred"} /\ v.opening[p[1]] # 0 /\ Blocked(p[1], v.opening[p[1]])
 
 \* Once quiet, each subscription's highest-ranked group reached the peer, was reset for a higher
 \* priority, or is blocked: a waiting group never holds back one that could reset a live stream.
 TopDelivered ==
     Quiet => \A s \in Subs :
-        LET k == CHOOSE k \in 1..G : \A j \in 1..G : InGroup(s, k) >= InGroup(s, j) IN
+        LET k == Best(v, s, 1..G) IN
         \/ v.st[s, k] \in {"serving", "fin", "reset", "closed"}
         \/ v.st[s, k] \in {"cached", "opening"} /\ Blocked(s, k)
+
+\* A group an oldest-first range wants is never given up: superseded only for the live edge, it
+\* waits, deferred or in the cache, rather than being dropped as old.
+HistoryKept == \A p \in Pairs : HistWants(p[1], p[2]) => v.st[p] # "given"
+
+\* A subscription parked behind its stuck waiting group holds no group, cached or deferred, that
+\* outranks it: nothing ranked lower holds one ranked higher back.
+NoHeadOfLine ==
+    \A s \in Subs : (~v.awake[s] /\ Stuck(v, s)) =>
+        \A k \in 1..G : v.st[s, k] \in {"cached", "deferred"} => InGroup(v, s, k) < InGroup(v, s, v.opening[s])
+
+\* Only a waiting group defers another.
+DeferredWaits == \A s \in Subs : Deferred(v, s) # {} => v.opening[s] # 0
 
 \* Witnesses, each expected to fail.
 NeverPreempts == \A p \in Pairs : v.st[p] # "reset"
 NeverWaits == \A s \in Subs : v.rank[s] = <<>>
 NeverGivesWay == \A p \in Pairs : v.st[p] # "given"
 NeverBlocked == ~(Quiet /\ \E s \in Subs : v.opening[s] # 0)
+NeverDefers == \A p \in Pairs : v.st[p] # "deferred"
 =============================================================================

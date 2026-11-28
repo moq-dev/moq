@@ -9422,6 +9422,14 @@ impl Reserved {
 		}
 	}
 
+	/// Where a [`Pick::Ranked`] read ranked it.
+	pub(super) fn rank(&self) -> Option<Rank> {
+		match self {
+			Self::Plain(peeked) => peeked.rank,
+			Self::Resume(candidate) => candidate.rank(),
+		}
+	}
+
 	/// Whether it was found in key order rather than arrival order.
 	pub(super) fn ordered(&self) -> bool {
 		match self {
@@ -10606,6 +10614,23 @@ pub(super) struct Peeked {
 	/// How taking it moves the cursor: an arrival read past where it came from, or a
 	/// key read past its key.
 	arrival: Option<Taken>,
+	/// Where it ranks, for a [`Pick::Ranked`] read that found it by rank.
+	rank: Option<Rank>,
+}
+
+/// Where a group ranks among its subscription's: the priority of the policy it goes out at,
+/// then its place in that policy's order ([`crate::priority::in_group`]), greater first.
+pub(crate) type Rank = (i8, i64);
+
+/// Which of the groups it holds unread an arrival read hands out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) enum Pick {
+	/// The first in the subscription's order.
+	Next,
+	/// The one ranked highest by the policy it would go out at now: the top of the ranges still
+	/// wanting it, past the budgets of those it aged out of.
+	Ranked,
 }
 
 /// Where a recv-order candidate came from, which taking it advances past.
@@ -11621,6 +11646,114 @@ impl Cursor {
 		}
 	}
 
+	/// The group this arrival read holds unread, owed and cached, answered by a fill, or a head
+	/// answered, that ranks highest by the policy it would go out at now, with where it came
+	/// from and its rank. Within one range's run its groups rank in that range's order, so the
+	/// first one there the range still wants ranks highest among them; the best of those, one
+	/// per range, is the best of all. `None` when no range wants any it holds.
+	#[cfg(feature = "async")]
+	fn best_unread(&self, drift: &Drift) -> Option<(group::Consumer, Taken, Rank)> {
+		let state = self.state.read();
+		let owed = state.serves_bounded(&self.filter.window);
+		let mut best: Option<(u64, Taken, Rank)> = None;
+		for (range, run) in self.filter.window.reads() {
+			let policy = range.policy();
+			let budget = clamp_max_delay(range.budget(), drift.bound);
+			let wants = |key: u64| !state.is_stale(key, &drift.edge, budget);
+			let ascending = policy.order == Order::Ascending;
+			let Some((key, taken)) = self.first_unread(&state, owed, run, ascending, wants) else {
+				continue;
+			};
+			let rank = (policy.priority, crate::priority::in_group(key, 0, policy.order));
+			if best.is_none_or(|(_, _, best)| rank > best) {
+				best = Some((key, taken, rank));
+			}
+		}
+		let (key, taken, rank) = best?;
+		let consumer = match taken {
+			Taken::Owed | Taken::Filled => state.lookup.get(&key)?.serving().consume(),
+			Taken::Head => self.heads.as_ref()?.filled.get(&key)?.clone(),
+		};
+		Some((consumer, taken, rank))
+	}
+
+	/// The first group in `run`, ascending or not, this arrival read holds unread that `wants`
+	/// takes: owed and cached when `owed` (the cache serves the window), answered by a fill,
+	/// or a head answered. Newest first, the first one `wants` passes over ends the search: a
+	/// range that gave up a group gave up every one older.
+	#[cfg(feature = "async")]
+	fn first_unread(
+		&self,
+		state: &TrackState,
+		owed: bool,
+		run: ops::RangeInclusive<u64>,
+		ascending: bool,
+		wants: impl Fn(u64) -> bool,
+	) -> Option<(u64, Taken)> {
+		let owed_keys = owed
+			.then(|| {
+				let runs = self.filter.owed.overlapping(&run);
+				let clip =
+					|owed: &ops::RangeInclusive<u64>| (*owed.start()).max(*run.start())..=(*owed.end()).min(*run.end());
+				let keys: Box<dyn Iterator<Item = u64>> = match ascending {
+					true => Box::new(runs.flat_map(move |owed| {
+						state
+							.lookup
+							.range(clip(owed))
+							.filter(|(_, slot)| slot.is_read())
+							.map(|(key, _)| *key)
+					})),
+					false => Box::new(runs.rev().flat_map(move |owed| {
+						(state.lookup.range(clip(owed)).rev())
+							.filter(|(_, slot)| slot.is_read())
+							.map(|(key, _)| *key)
+					})),
+				};
+				keys
+			})
+			.into_iter()
+			.flatten()
+			.map(|key| (key, Taken::Owed));
+		let filled = (self.misses.as_ref())
+			.map(|misses| misses.filled_in(run.clone()))
+			.into_iter()
+			.flatten();
+		let filled: Box<dyn Iterator<Item = u64> + '_> = match ascending {
+			true => Box::new(filled),
+			false => Box::new(filled.rev()),
+		};
+		let filled = (filled.filter(|key| state.lookup.get(key).is_some_and(|slot| slot.serves_end())))
+			.map(|key| (key, Taken::Filled));
+		let heads = (self.heads.as_ref())
+			.map(|heads| heads.filled.range(run.clone()).map(|(key, _)| *key))
+			.into_iter()
+			.flatten();
+		let heads: Box<dyn Iterator<Item = u64> + '_> = match ascending {
+			true => Box::new(heads),
+			false => Box::new(heads.rev()),
+		};
+		let heads = heads.map(|key| (key, Taken::Head));
+		// Each source's first that `wants` takes, then the first of those in the run's order.
+		let first = |source: Box<dyn Iterator<Item = (u64, Taken)> + '_>| -> Option<(u64, Taken)> {
+			let mut source = source;
+			match ascending {
+				true => source.find(|(key, _)| wants(*key)),
+				false => source.next().filter(|(key, _)| wants(*key)),
+			}
+		};
+		[
+			first(Box::new(owed_keys)),
+			first(Box::new(filled)),
+			first(Box::new(heads)),
+		]
+		.into_iter()
+		.flatten()
+		.reduce(|first, next| match ascending == (next.0 < first.0) {
+			true => next,
+			false => first,
+		})
+	}
+
 	/// The lowest group at or above `from` this arrival read holds unread: owed and cached,
 	/// answered by a fill, or a head answered. Costs the owed runs up to it.
 	fn lowest_unread(&self, from: u64) -> Option<group::Consumer> {
@@ -12309,7 +12442,7 @@ impl Cursor {
 	/// Move past the group `peeked` found and hand it out: the exact group, even if its
 	/// producer evicted it since, so eviction cannot advance the reader past a gap.
 	fn take(&mut self, peeked: Peeked) -> group::Consumer {
-		let Peeked { group, arrival } = peeked;
+		let Peeked { group, arrival, .. } = peeked;
 		let Some(taken) = arrival else {
 			return self.advance_key(group);
 		};
@@ -12320,7 +12453,7 @@ impl Cursor {
 		self.deliver(group)
 	}
 
-	fn poll_peek_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
+	fn poll_peek_recv(&mut self, pick: Pick, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
 		self.sync();
 		if let Some(err) = &self.filter.refused {
 			return Poll::Ready(Err(err.clone()));
@@ -12341,11 +12474,11 @@ impl Cursor {
 		if let Some(misses) = &mut self.misses {
 			misses.pick_up();
 		}
-		self.poll_recv_with(drift, waiter)
+		self.poll_recv_with(drift, pick, waiter)
 	}
 
 	/// [`Self::poll_peek_recv`] once synced, judging against `drift`.
-	fn poll_recv_with(&mut self, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
+	fn poll_recv_with(&mut self, mut drift: Drift, pick: Pick, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
 		self.poll_heads(waiter);
 		self.expire_heads(&drift, waiter);
 		loop {
@@ -12368,6 +12501,25 @@ impl Cursor {
 			// Read once, so an update landing mid-pick applies to the next pick whole.
 			let order = self.subscription.read().policy().order;
 			ready!(self.write_off_oldest(order, &drift, waiter))?;
+			// A ranked read falls back to the subscription's order only for what no range ranks,
+			// which the drift budget gives up below.
+			let ranked = match pick {
+				#[cfg(feature = "async")]
+				Pick::Ranked => self.best_unread(&drift),
+				_ => None,
+			};
+			if let Some((consumer, taken, rank)) = ranked {
+				if self.lacks_head(&consumer) {
+					self.advance_arrival(consumer.start, taken);
+					self.ask_head(consumer.start, waiter);
+					continue;
+				}
+				return Poll::Ready(Ok(Some(Peeked {
+					group: consumer,
+					arrival: Some(taken),
+					rank: Some(rank),
+				})));
+			}
 			// A fill answers what the arrivals never deliver, backfill and heads, which go in the
 			// same order. A tie goes to the arrival.
 			let (owed, filled, head) = (self.next_owed(order), self.next_filled(order), self.next_head(order));
@@ -12440,6 +12592,7 @@ impl Cursor {
 			return Poll::Ready(Ok(Some(Peeked {
 				group: consumer,
 				arrival: Some(taken),
+				rank: None,
 			})));
 		}
 	}
@@ -12912,7 +13065,11 @@ impl Cursor {
 			break group;
 		};
 
-		Poll::Ready(Ok(Some(Peeked { group, arrival: None })))
+		Poll::Ready(Ok(Some(Peeked {
+			group,
+			arrival: None,
+			rank: None,
+		})))
 	}
 
 	fn advance_key(&mut self, group: group::Consumer) -> group::Consumer {
@@ -13186,32 +13343,36 @@ impl Subscriber {
 		self.poll_group(false, waiter)
 	}
 
-	/// [`Self::poll_recv_group`], handing out the next group only if `admit` takes its key,
-	/// asked with this subscriber: one refused stays next, and the read is `Pending` without
-	/// parking on it.
+	/// [`Self::poll_recv_group`], picking the group ranked highest by the policy it would go out
+	/// at now ([`Pick::Ranked`]) and handing it out only if it ranks above `above`: one refused
+	/// stays unread, and the read is `Pending` without parking on it. Nothing ranked lower holds
+	/// back one ranked higher.
 	#[cfg(feature = "async")]
-	pub(crate) fn poll_recv_group_in(
+	pub(crate) fn poll_recv_group_above(
 		&mut self,
-		admit: impl FnOnce(&mut Self, u64) -> bool,
+		above: Rank,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		self.poll_group_in(false, admit, waiter)
+		let admit = |_: &mut Self, reserved: &Reserved| reserved.rank().is_some_and(|rank| rank > above);
+		self.poll_group_in(false, Pick::Ranked, admit, waiter)
 	}
 
 	/// The next group an arrival read picks, or in key order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		self.poll_group_in(ordered, |_, _| true, waiter)
+		self.poll_group_in(ordered, Pick::Next, |_, _| true, waiter)
 	}
 
-	/// [`Self::poll_group`], refusing a next group whose key lies outside `admit`.
+	/// [`Self::poll_group`], picking as `pick` says, and refusing the group picked unless
+	/// `admit` takes it.
 	fn poll_group_in(
 		&mut self,
 		ordered: bool,
-		admit: impl FnOnce(&mut Self, u64) -> bool,
+		pick: Pick,
+		admit: impl FnOnce(&mut Self, &Reserved) -> bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
-		let res = self.poll_group_unsettled(ordered, admit, waiter);
+		let res = self.poll_group_unsettled(ordered, pick, admit, waiter);
 		// What the read settled is billed now, and pays what it can of its readers' debt. The
 		// group it hands out stays above the fold until its reader accounts for it.
 		let handed = match &res {
@@ -13225,7 +13386,8 @@ impl Subscriber {
 	fn poll_group_unsettled(
 		&mut self,
 		ordered: bool,
-		admit: impl FnOnce(&mut Self, u64) -> bool,
+		pick: Pick,
+		admit: impl FnOnce(&mut Self, &Reserved) -> bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<group::Consumer>>> {
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
@@ -13241,8 +13403,8 @@ impl Subscriber {
 			Inner::Resume(resume, _) if resume.parked(walk, waiter) => return Poll::Pending,
 			_ => {}
 		}
-		let res = match self.poll_peek_group(ordered, waiter) {
-			Poll::Ready(Ok(Some(reserved))) => match admit(self, reserved.key()) {
+		let res = match self.poll_peek_group(ordered, pick, waiter) {
+			Poll::Ready(Ok(Some(reserved))) => match admit(self, &reserved) {
 				true => return Poll::Ready(self.take(reserved).map(Some)),
 				false => Poll::Ready(Ok(Some(reserved))),
 			},
@@ -13252,7 +13414,8 @@ impl Subscriber {
 		self.count_stale(&self.stats.meter());
 		match res {
 			Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
-			// Refused: it stays next, so nothing behind it is either.
+			// Refused: it stays unread. Picked first, so nothing it stays ahead of is admitted
+			// either: by rank for a ranked read, or in the subscription's order.
 			Poll::Ready(Ok(Some(_))) => Poll::Pending,
 			res => res.map(|res| res.map(|_| None).map_err(Error::from)),
 		}
@@ -13263,6 +13426,7 @@ impl Subscriber {
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
+		pick: Pick,
 		waiter: &kio::Waiter,
 	) -> Poll<std::result::Result<Option<Reserved>, Failure>> {
 		match &mut self.inner {
@@ -13280,7 +13444,7 @@ impl Subscriber {
 				let polled = loop {
 					let peeked = match ordered {
 						true => cursor.poll_peek_next(parked),
-						false => cursor.poll_peek_recv(parked),
+						false => cursor.poll_peek_recv(pick, parked),
 					};
 					let peeked = match peeked {
 						Poll::Pending => {
@@ -13316,7 +13480,7 @@ impl Subscriber {
 				polled
 			}
 			Inner::Resume(resume, logical) => {
-				let polled = resume.poll_peek_group(ordered, self.parks, &mut logical.record.delivered, waiter);
+				let polled = resume.poll_peek_group(ordered, pick, self.parks, &mut logical.record.delivered, waiter);
 				polled.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate)))))
 			}
 		}
@@ -15042,7 +15206,10 @@ impl Ordered {
 			let mut failed = None;
 			if !self.inner.is_closed() {
 				let _ = group.poll_closed(waiter);
-				match self.inner.poll_group_in(true, |_, lower| lower < key, waiter) {
+				match self
+					.inner
+					.poll_group_in(true, Pick::Next, |_, lower| lower.key() < key, waiter)
+				{
 					Poll::Pending | Poll::Ready(Ok(None)) => {}
 					Poll::Ready(Ok(Some(lower))) => {
 						self.held = Some(group);
@@ -23815,7 +23982,7 @@ mod test {
 			append_at(&mut producer, 1000);
 			let res = match ordered {
 				true => cursor.poll_next_with(0, drift, &waiter),
-				false => cursor.poll_recv_with(drift, &waiter),
+				false => cursor.poll_recv_with(drift, Pick::Next, &waiter),
 			};
 			let Poll::Ready(Ok(Some(peeked))) = res else {
 				panic!("group 0 is the newest group its range reads (ordered: {ordered})");
@@ -27459,7 +27626,7 @@ mod test {
 	/// The key a peek reserves, without taking it.
 	fn peek(subscriber: &mut Subscriber, ordered: bool) -> Poll<Option<u64>> {
 		subscriber
-			.poll_peek_group(ordered, &kio::Waiter::noop())
+			.poll_peek_group(ordered, Pick::Next, &kio::Waiter::noop())
 			.map(|res| res.unwrap().map(|reserved| reserved.key()))
 	}
 
@@ -27500,7 +27667,7 @@ mod test {
 			append_at(&mut producer, second * 1000);
 		}
 		let mut subscriber = producer.subscribe(within(Duration::ZERO, None));
-		let Poll::Ready(Ok(Some(reserved))) = subscriber.poll_peek_group(true, &kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(Some(reserved))) = subscriber.poll_peek_group(true, Pick::Next, &kio::Waiter::noop()) else {
 			panic!("group 3 is servable");
 		};
 		assert_eq!(reserved.key(), 3);
@@ -27557,7 +27724,8 @@ mod test {
 					.finish()
 					.unwrap();
 			}
-			let Poll::Ready(Ok(Some(reserved))) = subscriber.poll_peek_group(ordered, &kio::Waiter::noop()) else {
+			let Poll::Ready(Ok(Some(reserved))) = subscriber.poll_peek_group(ordered, Pick::Next, &kio::Waiter::noop())
+			else {
 				panic!("group 1 is servable");
 			};
 			evict(&producer, 1);
@@ -27618,7 +27786,7 @@ mod test {
 			assert_eq!(group.start, first);
 			let second = if ordered { 2 } else { 1 };
 			subscriber.set_range(..0);
-			assert!(subscriber.poll_peek_group(ordered, &waiter).is_pending());
+			assert!(subscriber.poll_peek_group(ordered, Pick::Next, &waiter).is_pending());
 			subscriber.set_range(..);
 			assert_eq!(peek(&mut subscriber, ordered), Poll::Ready(Some(second)));
 		}

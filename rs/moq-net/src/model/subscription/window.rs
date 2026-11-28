@@ -645,6 +645,18 @@ impl Window {
 		self.ranges.get(&key)
 	}
 
+	/// Each range with the groups it reads, as [`Self::covering`] counts them: a placed span's
+	/// run, or every group up to its end for a range not placed yet.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn reads(&self) -> impl Iterator<Item = (&Range, ops::RangeInclusive<u64>)> + '_ {
+		let placed = (self.spans.iter()).filter_map(|(id, span)| Some((self.ranges.get(id)?, span.groups.clone()?)));
+		let unplaced = (self.pending.iter().chain(&self.reaching)).filter_map(|id| {
+			let range = self.ranges.get(id).filter(|range| !range.is_empty())?;
+			Some((range, 0..=range.end.unwrap_or(u64::MAX)))
+		});
+		placed.chain(unplaced)
+	}
+
 	/// The ranges covering group `key`, by key, each with the budget `range` of its key gives: a
 	/// range not yet placed may cover any group up to its end, as in [`Self::budget`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

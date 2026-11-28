@@ -413,6 +413,12 @@ impl Misses {
 		self.filled.range(from..).copied()
 	}
 
+	/// The groups in `keys` a fill answered and not handed out yet, lowest first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn filled_in(&self, keys: std::ops::RangeInclusive<u64>) -> impl DoubleEndedIterator<Item = u64> + '_ {
+		self.filled.range(keys).copied()
+	}
+
 	/// The lowest key asked and not answered yet.
 	pub fn lowest_wanted(&self) -> Option<u64> {
 		self.wanted.iter().next().map(|run| run.start)

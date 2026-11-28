@@ -1284,6 +1284,7 @@ impl Subscriber {
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
+		pick: track::Pick,
 		parks: bool,
 		delivered: &mut Delivered,
 		waiter: &kio::Waiter,
@@ -1300,7 +1301,7 @@ impl Subscriber {
 			// even on a path that parks without looking at the route.
 			reader.route.register(waiter);
 			let polled = loop {
-				if let Some(result) = reader.poll_first(ordered, parks, delivered, waiter) {
+				if let Some(result) = reader.poll_first(ordered, pick, parks, delivered, waiter) {
 					break result;
 				}
 			};
@@ -1783,6 +1784,10 @@ impl Candidate {
 
 	pub(super) fn ordered(&self) -> bool {
 		self.reserved.ordered()
+	}
+
+	pub(super) fn rank(&self) -> Option<track::Rank> {
+		self.reserved.rank()
 	}
 }
 
@@ -3023,6 +3028,7 @@ impl Reader {
 	fn poll_first(
 		&mut self,
 		ordered: bool,
+		pick: track::Pick,
 		parks: bool,
 		delivered: &mut Delivered,
 		waiter: &kio::Waiter,
@@ -3064,7 +3070,7 @@ impl Reader {
 				}
 				// The copy's own record bills to its track as a direct reader's does, including
 				// what a peek skipped before it parked.
-				let res = sub.poll_peek_group(ordered, waiter);
+				let res = sub.poll_peek_group(ordered, pick, waiter);
 				sub.settle_record(None);
 				match res {
 					Poll::Pending => break,
@@ -3116,9 +3122,16 @@ impl Reader {
 							}
 							continue;
 						}
-						let goes_first = |first: &Candidate| match ascending {
-							true => key <= first.key(),
-							false => key >= first.key(),
+						// A ranked read takes the copies' best by rank, each copy ranking its own.
+						let rank = reserved.rank();
+						let goes_first = |first: &Candidate| match (rank, first.rank()) {
+							(Some(rank), Some(other)) => rank >= other,
+							(Some(_), None) => true,
+							(None, Some(_)) => false,
+							(None, None) => match ascending {
+								true => key <= first.key(),
+								false => key >= first.key(),
+							},
 						};
 						if first.as_ref().is_none_or(goes_first) {
 							first = Some(Candidate {
@@ -3191,7 +3204,7 @@ impl Reader {
 		// A later copy placed the window this pass: a group held back above may now go first.
 		if held && !self.window().is_pending() {
 			drop(first);
-			return self.poll_first(ordered, parks, delivered, waiter);
+			return self.poll_first(ordered, pick, parks, delivered, waiter);
 		}
 		if let Some(first) = first {
 			return Some(Poll::Ready(Ok(Some(first))));
@@ -8527,7 +8540,8 @@ mod test {
 
 	/// The group a peek reserves, to take later.
 	fn peek(sub: &mut track::Subscriber, ordered: bool) -> track::Reserved {
-		let Poll::Ready(Ok(Some(reserved))) = sub.poll_peek_group(ordered, &kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(Some(reserved))) = sub.poll_peek_group(ordered, track::Pick::Next, &kio::Waiter::noop())
+		else {
 			panic!("a group to reserve")
 		};
 		reserved
@@ -13428,7 +13442,7 @@ mod test {
 			// Peeked, not taken: the reader handed out nothing, so no boundary raises the join.
 			let mut delivered = Delivered::default();
 			let Poll::Ready(Ok(Some(candidate))) =
-				sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+				sub.poll_peek_group(false, track::Pick::Next, false, &mut delivered, &kio::Waiter::noop())
 			else {
 				panic!("a group to reserve")
 			};
@@ -13474,7 +13488,8 @@ mod test {
 		let preferences = track::Preferences::from(ranges(5));
 		let mut sub = routes.consume().subscribe(preferences.clone());
 		let mut delivered = Delivered::default();
-		let Poll::Ready(Ok(Some(candidate))) = sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+		let Poll::Ready(Ok(Some(candidate))) =
+			sub.poll_peek_group(false, track::Pick::Next, false, &mut delivered, &kio::Waiter::noop())
 		else {
 			panic!("a group to reserve")
 		};
@@ -13525,7 +13540,8 @@ mod test {
 		let preferences = track::Preferences::from(ranges(5));
 		let mut sub = routes.consume().subscribe(preferences.clone());
 		let mut delivered = Delivered::default();
-		let Poll::Ready(Ok(Some(candidate))) = sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+		let Poll::Ready(Ok(Some(candidate))) =
+			sub.poll_peek_group(false, track::Pick::Next, false, &mut delivered, &kio::Waiter::noop())
 		else {
 			panic!("a group to reserve")
 		};
@@ -13575,7 +13591,7 @@ mod test {
 			let mut sub = routes.consume().subscribe(preferences.clone());
 			let mut delivered = Delivered::default();
 			let Poll::Ready(Ok(Some(candidate))) =
-				sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+				sub.poll_peek_group(false, track::Pick::Next, false, &mut delivered, &kio::Waiter::noop())
 			else {
 				panic!("a group to reserve")
 			};
@@ -13603,7 +13619,7 @@ mod test {
 				true => {
 					routes.serve(b.consume());
 					assert!(matches!(
-						sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop()),
+						sub.poll_peek_group(false, track::Pick::Next, false, &mut delivered, &kio::Waiter::noop()),
 						Poll::Ready(Ok(Some(_)))
 					));
 				}
@@ -13651,7 +13667,7 @@ mod test {
 			let mut delivered = Delivered::default();
 			let mut next = |sub: &mut Subscriber| {
 				let Poll::Ready(Ok(Some(candidate))) =
-					sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+					sub.poll_peek_group(false, track::Pick::Next, false, &mut delivered, &kio::Waiter::noop())
 				else {
 					panic!("a group to reserve")
 				};

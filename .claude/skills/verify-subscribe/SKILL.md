@@ -76,7 +76,7 @@ Sync commit: `c0c963374ab127cb78d7fc18cbc9a9c6358c5563`. Run `git log c0c963374a
 | --- | --- |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `serve`, `mark_served`; `rs/moq-net/src/model/record.rs` `Record::told` | `CursorHand` |
 | `rs/moq-net/src/model/group.rs` `Producer::finish_at`; `rs/moq-net/src/model/track.rs` `TrackState::appended`, `TrackState::span_end` | `Finish`, `ends`, `CursorHole` |
-| `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way`, `shed` | a new group, or one shed, as `Serve`, then `StreamFail` with `old` whose header never arrives |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way` | a group given up for a higher-ranked one, as `Serve`, then `StreamFail` with `old` whose header never arrives |
 | `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `report`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold` | `CursorGiveUp`, `Span` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `GroupOutcomes::whole`, `GroupOutcomes::cut`) | `PubOutcomes`, `CutSkip` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `buffer_group_end`, `settle_failed`, `settle_reset`, `accounts`, `poll_given_up`, `GroupContext::reliable_reset`; `rs/moq-net/src/transport/boxed.rs` `Held::reset`, `ListedState::preempted` | `StreamHold`, `StreamFin`, `StreamFail`, `StreamAck`, `SubStop`, `Kept` |
@@ -103,10 +103,10 @@ Sync commit: `c0c963374ab127cb78d7fc18cbc9a9c6358c5563`. Run `git log c0c963374a
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/track/demand/ranges.rs` `Ranges::union`, `Ranges::fold`; `rs/moq-net/src/model/track/demand.rs` `Subscriptions::combined` | `Folds`, `Fold`, `Update`, `FoldRule` |
-| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `TrackRun::rank_now`, `GroupServe::poll_steer`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
+| `rs/moq-net/src/lite/publisher.rs` `Steer::serving`, `poll_policy`, `GroupServe::rank_now`, `GroupServe::poll_steer`; `rs/moq-net/src/model/subscription.rs` `Policy::top`, `Policy::covers` | `PubPrio`, `PubOrder`, `TopPrio`, `TopOrder` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `TrackRun::serve`, `TrackRun::mark_served` | `Send`, `told` |
 | `rs/moq-net/src/model/subscription/window.rs` `Budget::at`; `rs/moq-net/src/model/track.rs` `GroupExpiry::is_expired`; `rs/moq-net/src/model/group.rs` `Consumer::expired_under`; `rs/moq-net/src/lite/publisher.rs` `GroupServe::settle_failed` | `Wanting`, `Widest`, `PubJudged`, `Judge` |
-| `rs/moq-net/src/lite/publisher.rs` `TrackRun::hole`, `TrackRun::give_way`, `TrackRun::shed`; `rs/moq-net/src/model/subscription.rs` `Subscription::narrowest`; `rs/moq-net/src/lite/subscribe.rs` `SubscribeDrop::given_up`, `SubscribeDrop::stale` | `GiveUp`, `Narrowest`, `PubUnjudged`, `verdict` |
+| `rs/moq-net/src/lite/publisher.rs` `TrackRun::hole`, `TrackRun::give_way`; `rs/moq-net/src/model/subscription.rs` `Subscription::narrowest`; `rs/moq-net/src/lite/subscribe.rs` `SubscribeDrop::given_up`, `SubscribeDrop::stale` | `GiveUp`, `Narrowest`, `PubUnjudged`, `verdict` |
 | `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response` (`Drop` with `OLD`) | `Arrive`, `rm` |
 | `rs/moq-net/src/model/track.rs` `settles`, `Drift::settles` | `Take` |
 | `rs/moq-net/src/lite/subscriber/fills.rs` `RangeFills`, `Recovery::new` | `Serve` (`recov`), `RecoverAnswer` |
