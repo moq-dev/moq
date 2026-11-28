@@ -2126,6 +2126,20 @@ impl TrackState {
 		gone.then_some(run.end)
 	}
 
+	/// The lowest key in `keys` whose loss this track reports, should no group land there: any
+	/// on a local track a history handler serves, which asks it for every key it misses and
+	/// records what it drops, else the lowest recorded dropped or skipped.
+	fn first_reported(&self, keys: ops::Range<u64>) -> Option<u64> {
+		if keys.is_empty() {
+			return None;
+		}
+		if !self.anchors.received() && self.fills.read().has_handlers() {
+			return Some(keys.start);
+		}
+		let (run, _) = self.drops.overlapping(&keys).next()?;
+		Some(run.start.max(keys.start))
+	}
+
 	/// The runs of `keys` outside every whole group's span, where a group may still start:
 	/// none starts inside one (see [`Self::span_end`]).
 	fn outside_spans(&self, keys: ops::Range<u64>) -> Vec<ops::Range<u64>> {
@@ -8635,6 +8649,15 @@ impl Consumer {
 		self.with_state(|state| state?.read().hole_end(key, dropped))
 	}
 
+	/// The lowest key in `keys` whose loss this track reports; see [`Subscriber::first_reported`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn first_reported(&self, keys: ops::Range<u64>) -> Option<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.first_reported(keys);
+		}
+		self.with_state(|state| state?.read().first_reported(keys))
+	}
+
 	/// The parts of `groups` the publisher declared skipped, never to be produced. Parks
 	/// `waiter` until a change here while some of `groups` is not.
 	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
@@ -13538,6 +13561,17 @@ impl Subscriber {
 				logical.record.untell(range.clone());
 				resume.untell(range);
 			}
+		}
+	}
+
+	/// The lowest key in `keys` whose loss this subscriber's drops report, should no group
+	/// land there: any on a local track a history handler serves, else the lowest the track
+	/// recorded dropped or skipped.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn first_reported(&self, keys: ops::Range<u64>) -> Option<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().first_reported(keys),
+			Inner::Resume(resume, _) => resume.first_reported(keys),
 		}
 	}
 
@@ -32916,7 +32950,7 @@ mod test {
 	/// A time start before every group held asks a fill for the group containing its time,
 	/// one key wide from the time and floored at 0, which no other reader joins: a handler
 	/// knowing only keys drops it, saying no group starts at or before the time, so the
-	/// reader asks no fill below the time itself: every key from there is in range. Another
+	/// reader asks no fill at or below the time itself: every key past it is in range. Another
 	/// range still asks for its own misses.
 	#[test]
 	#[cfg(feature = "async")]
@@ -32957,8 +32991,8 @@ mod test {
 			drop(fill);
 			read.extend(drain_groups(&mut subscriber));
 		}
-		assert_eq!(asked, [(0, 2), (5, 10)], "nothing below 5 for the time start");
-		assert_eq!(read, [10, 0, 1, 5, 6, 7, 8, 9]);
+		assert_eq!(asked, [(0, 2), (6, 10)], "nothing at or below 5 for the time start");
+		assert_eq!(read, [10, 0, 1, 6, 7, 8, 9]);
 	}
 
 	/// A time start before every group held starts at the group its fill answers, whose key
@@ -35128,8 +35162,8 @@ mod test {
 		assert_eq!(fill.wanted(), Some(3), "the rest is served newest first");
 	}
 
-	/// A reader with many bounded time ranges below the feed's start asks where each later
-	/// range's time falls, asks that range as a miss once the handler closes the lookup
+	/// A reader with many bounded time ranges below the feed's start asks where each range's
+	/// time falls, asks the rest of that range as a miss once the handler closes the lookup
 	/// unanswered, and its priority update reaches every one of them.
 	#[test]
 	#[cfg(feature = "async")]
@@ -35137,17 +35171,18 @@ mod test {
 		const RUNS: u64 = 16;
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		producer.start_at(RUNS * 2).unwrap();
-		write_group(&producer, RUNS * 2);
-		// One single-group range per run, with a key between each that no range holds.
+		producer.start_at(RUNS * 3).unwrap();
+		write_group(&producer, RUNS * 3);
+		// One two-key range per run, with a key between each that no range holds: the lookup
+		// places its time before every group, leaving the key past it a miss.
 		let ranges = (0..RUNS).map(|run| Range {
-			start: Start::Time(run * 2),
-			end: Some(run * 2),
+			start: Start::Time(run * 3 + 1),
+			end: Some(run * 3 + 2),
 		});
 		let mut subscriber =
-			producer.subscribe(Subscription::default().with_ranges(ranges.chain([Range::from(Start::Time(RUNS * 2))])));
+			producer.subscribe(Subscription::default().with_ranges(ranges.chain([Range::from(Start::Time(RUNS * 3))])));
 		let waiter = kio::Waiter::noop();
-		assert_eq!(drain_groups(&mut subscriber), [RUNS * 2]);
+		assert_eq!(drain_groups(&mut subscriber), [RUNS * 3]);
 		subscriber.update(subscriber.subscription().with_priority(1)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
 
@@ -35166,24 +35201,25 @@ mod test {
 			}
 			assert!(subscriber.poll_recv_group(&waiter).is_pending());
 		}
-		assert_eq!((lookups, misses), (RUNS - 1, RUNS));
+		assert_eq!((lookups, misses), (RUNS, RUNS));
 	}
 
 	/// A reader with many disjoint ranges below the feed's start reads every group the handler
-	/// fills for them, once it closes each range's time lookup unanswered.
+	/// fills for them, once it closes each range's time lookup unanswered: no group starts at
+	/// or before the time, so each range reads from the key past it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn many_ranges_below_the_start_read_every_filled_group() {
 		const RANGES: u64 = 16;
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		// A gap before each single-group range keeps it its own fill.
-		let start = RANGES * 2 + 1;
+		// A gap before each two-key range keeps it its own fill.
+		let start = RANGES * 3 + 1;
 		producer.start_at(start).unwrap();
 		write_group(&producer, start);
 		let ranges = (0..RANGES).map(|i| Range {
-			start: Start::Time(i * 2 + 1),
-			end: Some(i * 2 + 1),
+			start: Start::Time(i * 3 + 1),
+			end: Some(i * 3 + 2),
 		});
 		let mut subscriber = producer.subscribe(Subscription::default().with_ranges(ranges));
 		let waiter = kio::Waiter::noop();
@@ -35202,7 +35238,7 @@ mod test {
 			filled.extend(drain_groups(&mut subscriber));
 		}
 		filled.sort();
-		assert_eq!(filled, (0..RANGES).map(|i| i * 2 + 1).collect::<Vec<_>>());
+		assert_eq!(filled, (0..RANGES).map(|i| i * 3 + 2).collect::<Vec<_>>());
 	}
 
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.

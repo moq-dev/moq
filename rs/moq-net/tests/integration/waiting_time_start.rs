@@ -161,6 +161,15 @@ async fn read(reader: &mut moq_net::track::Ordered, count: usize) -> Vec<Result<
 	items
 }
 
+/// The items `reader` returns through the group starting at `last`, a gap as its range.
+async fn read_through(reader: &mut moq_net::track::Ordered, last: u64) -> Vec<Result<u64, std::ops::Range<u64>>> {
+	let mut items = Vec::new();
+	while items.last() != Some(&Ok(last)) {
+		items.extend(read(reader, 1).await);
+	}
+	items
+}
+
 /// The starts of the next `count` groups `reader` returns, past any gap.
 async fn read_groups(reader: &mut moq_net::track::Ordered, count: usize) -> Vec<u64> {
 	let mut groups = Vec::new();
@@ -196,13 +205,10 @@ async fn a_filled_group_past_the_live_edge_reaches_a_subscription() {
 	fixture.serving.abort();
 }
 
-/// An unlimited reader asking from a time before every group through a time before the only
-/// one, and from that group on, reads that group, as it would at the publisher.
-#[kio::test]
-async fn a_range_before_every_group_reads_past_it() {
-	let fixture = Fixture::new().await;
-	fixture.write_live();
-	let subscription = Subscription::default()
+/// Ranges from a time before every group through a time before the only one, and from that
+/// group on: no group starts at or before the time, so the first range reads from past it.
+fn before_every_group() -> Subscription {
+	Subscription::default()
 		.with_max(None)
 		.with_order(Order::Ascending)
 		.with_ranges([
@@ -214,18 +220,55 @@ async fn a_range_before_every_group_reads_past_it() {
 				start: moq_net::track::Start::Time(LIVE),
 				end: None,
 			},
-		]);
-	let mut direct = fixture.track.subscribe(subscription.clone()).ordered();
-	let direct = read(&mut direct, 1).await;
+		])
+}
+
+/// The publisher's drops of the first range, read through to the group, as at the publisher.
+const BEFORE_EVERY_GROUP: [Result<u64, std::ops::Range<u64>>; 2] = [Err(11..21), Ok(LIVE)];
+
+/// An unlimited reader asking from a time before every group reads the same items through a
+/// relay as at the publisher, once the publisher recorded the drops of the range it asked.
+#[kio::test]
+async fn a_range_before_every_group_reads_past_it() {
+	let fixture = Fixture::new().await;
+	fixture.write_live();
+	let mut direct = fixture.track.subscribe(before_every_group()).ordered();
+	assert_eq!(read_through(&mut direct, LIVE).await, BEFORE_EVERY_GROUP);
 	let mut reader = kio::clock::timeout(
 		TIMEOUT,
-		fixture.viewers[0].track("value").unwrap().subscribe(subscription),
+		fixture.viewers[0]
+			.track("value")
+			.unwrap()
+			.subscribe(before_every_group()),
 	)
 	.await
 	.expect("subscribe timeout")
 	.unwrap()
 	.ordered();
-	assert_eq!(read(&mut reader, 1).await, direct);
+	assert_eq!(read_through(&mut reader, LIVE).await, BEFORE_EVERY_GROUP);
+	fixture.serving.abort();
+}
+
+/// The same through a relay first, before the publisher asked its handler for the range: the
+/// publisher answers the range with its start, so the relay waits for the drops to come.
+#[kio::test]
+async fn a_relayed_range_before_every_group_waits_for_its_drops() {
+	let fixture = Fixture::new().await;
+	fixture.write_live();
+	let mut reader = kio::clock::timeout(
+		TIMEOUT,
+		fixture.viewers[0]
+			.track("value")
+			.unwrap()
+			.subscribe(before_every_group()),
+	)
+	.await
+	.expect("subscribe timeout")
+	.unwrap()
+	.ordered();
+	assert_eq!(read_through(&mut reader, LIVE).await, BEFORE_EVERY_GROUP);
+	let mut direct = fixture.track.subscribe(before_every_group()).ordered();
+	assert_eq!(read_through(&mut direct, LIVE).await, BEFORE_EVERY_GROUP);
 	fixture.serving.abort();
 }
 

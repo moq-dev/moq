@@ -1075,8 +1075,8 @@ impl Window {
 			(span.start, span.floored) = match found {
 				Found::Group(group) => (group, true),
 				// A floor is one past where the groups held placed it, which then holds it; from 0,
-				// no group starts at or before it, so the span reads from the time on.
-				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),
+				// no group starts at or before it, so the span reads from past the time.
+				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time.saturating_add(1)), true),
 				Found::Unanswered => match holdings.containing(time, self.ranges[&key].budget()) {
 					Containing::At(start) => (start, true),
 					_ => (0, false),
@@ -2173,7 +2173,7 @@ mod tests {
 	/// fill for its group from past the newest held below it, and reads nothing meanwhile:
 	/// before every start, or with a group the cache evicted possibly starting between the
 	/// newest held at or before it and the time. The answer places it: a drop from 0 says no
-	/// group starts at or before it, so it reads from the time on.
+	/// group starts at or before it, so it reads from past the time.
 	#[test]
 	fn a_time_start_the_groups_cant_place_is_looked_up() {
 		let mut keys = Keys::new([4000, 9000]);
@@ -2204,12 +2204,13 @@ mod tests {
 		assert_eq!(
 			window.resolved(),
 			[Some(Resolved {
-				start: 500,
+				start: 501,
 				end: None,
 				floored: true
 			})]
 		);
-		assert!(window.contains(4000) && !window.missable(0).any(|run| *run.start() < 500));
+		assert!(window.contains(4000) && !window.contains(500));
+		assert!(!window.missable(0).any(|run| *run.start() < 501));
 		// A group below the time held since is none of the answer's.
 		keys.held.insert(200);
 		assert!(!window.contains(200));

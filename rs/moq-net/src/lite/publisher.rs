@@ -6487,7 +6487,7 @@ impl TrackRun {
 								continue;
 							}
 						},
-						None => resolved.start.max(from),
+						None => self.history_start(resolved, from),
 					};
 					let started = resolved.end.is_none_or(|end| end > start);
 					if started {
@@ -7017,7 +7017,7 @@ impl TrackRun {
 				Some(resolved) => match self.unstarted[&id].joins {
 					Some(budget) => (self.track.join_start(resolved.start, budget), resolved.end),
 					None if reaches && !resolved.floored => continue,
-					None => (resolved.start.max(start), resolved.end),
+					None => (self.history_start(resolved, start), resolved.end),
 				},
 				// A time start still waiting at or below the floor, as an update before the start
 				// leaves one: whichever group contains it is out of range, so the range starts
@@ -7030,6 +7030,18 @@ impl TrackRun {
 			starts.push((id, end.is_none_or(|end| end > from).then_some(from)));
 		}
 		starts
+	}
+
+	/// Where a history range resolved to `resolved` starts once delivery starts at `from`: no
+	/// earlier, unless that leaves it nothing to deliver while this hop reports the loss of keys
+	/// in it, as it does once a range starts there. Then it starts at the first, so its
+	/// subscriber waits for those drops rather than read the range as empty.
+	fn history_start(&self, resolved: track::Resolved, from: u64) -> u64 {
+		let start = resolved.start.max(from);
+		match resolved.end {
+			Some(end) if end <= start => self.track.first_reported(resolved.start..end).unwrap_or(start),
+			_ => start,
+		}
 	}
 
 	/// Lite-07: whether the track is a relay's copy that places each range only where its
@@ -7202,6 +7214,9 @@ impl TrackRun {
 					self.buffer_start(lite::SubscribeStart { id, start: at, largest }, writer)?;
 				}
 				self.start = Start::Resolved(lowest);
+				if lowest < start {
+					self.track.rescan_drops();
+				}
 				// A range an update added before this start is answered with it, before the
 				// drops below, which a subscriber reads only once a range has started.
 				self.report_started(false, writer, &kio::Waiter::noop())?;

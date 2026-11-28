@@ -1578,6 +1578,14 @@ impl Subscriber {
 		track::first_open(run, |key| serving.hole_end(key, false)).is_none()
 	}
 
+	/// The lowest key in `keys` whose loss the serving copy reports; see
+	/// [`track::Subscriber::first_reported`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn first_reported(&self, keys: std::ops::Range<u64>) -> Option<u64> {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		serving.and_then(|serving| serving.first_reported(keys))
+	}
+
 	/// Where a run of starts up to `end` ends with the span the serving copy knows it reaches
 	/// into; see [`track::Subscriber::span_end`].
 	pub(super) fn span_end(&self, end: u64) -> u64 {
