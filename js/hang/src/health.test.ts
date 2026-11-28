@@ -103,7 +103,9 @@ test("withUptime diffs over the time between the reports' uptimes", () => {
 
 	// A report without an uptime, or one that did not advance, leaves nothing to diff against.
 	for (const previous of [report(), report(14_000), report(20_000)]) {
-		expect(Health.withUptime(start, previous)).toBe(start);
+		const sample = Health.withUptime(spanned, previous);
+		expect(sample.previous).toBeUndefined();
+		expect(sample.interval.isZero()).toBe(true);
 	}
 	expect(Health.withUptime({ ...start, current: report() }, report(10_000)).previous).toBeUndefined();
 });

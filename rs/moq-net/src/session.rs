@@ -158,7 +158,9 @@ pub struct Stats {
 	/// How long ago the transport's counters above were sampled. A read asks the driver for a fresh
 	/// sample, so a diff of two reads spans the interval between the reads, widened by the earlier
 	/// read's age and narrowed by the later's. The session's own counters, such as
-	/// [`Self::datagrams_unrouted`], are read live.
+	/// [`Self::datagrams_unrouted`], are read live. A transport that reads its byte counts lazily,
+	/// such as qmux (at most every 250 ms, and only once they moved), can hold those counts
+	/// older than this age says.
 	pub age: Option<Duration>,
 
 	/// Total datagrams received for a subscription with no datagram track: one this session
@@ -872,7 +874,11 @@ impl Supervisor {
 		// Nothing samples once this returns, but `stats()` keeps serving
 		// this cell, so leave it holding the session's final counters
 		// rather than whichever sample the last demand happened to catch.
-		self.stats.lock().sample = snapshot(&self.session);
+		{
+			let mut stats = self.stats.lock();
+			stats.sample = snapshot(&self.session);
+			stats.sampled = self.runtime.now();
+		}
 		self.wire.take();
 		let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 			Drain::Done(res) => Some(res),

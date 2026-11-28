@@ -96,6 +96,13 @@ impl<'a, S> Sample<'a, S> {
 		}
 	}
 
+	/// Forget any `previous`, leaving nothing to diff `current` against.
+	fn without_previous(mut self) -> Self {
+		self.previous = None;
+		self.interval = Duration::ZERO;
+		self
+	}
+
 	/// Diff against `previous`, reported `interval` before `current`.
 	pub fn with_previous(mut self, previous: &'a Report<S>, interval: Duration) -> Self {
 		self.previous = Some(previous);
@@ -106,13 +113,14 @@ impl<'a, S> Sample<'a, S> {
 
 impl<'a, E> Sample<'a, stats::Snapshot<E>> {
 	/// Diff against `previous`, over the time between the two reports' `transport.uptime`s. A report
-	/// without one, or an uptime that did not advance, leaves nothing to diff against: arrival
+	/// without one, or an uptime that did not advance, leaves nothing to diff against, dropping
+	/// any `previous` the sample held: arrival
 	/// times say nothing about the time between the samples, since a congested report arrives late
 	/// and in a burst.
 	pub fn with_uptime(self, previous: &'a Report<stats::Snapshot<E>>) -> Self {
 		match uptime(&previous.snapshot.transport, &self.current.snapshot.transport) {
 			Some(span) => self.with_previous(previous, span),
-			None => self,
+			None => self.without_previous(),
 		}
 	}
 }
@@ -123,7 +131,7 @@ impl<'a, E> Sample<'a, echo::Snapshot<E>> {
 	pub fn with_uptime(self, previous: &'a Report<echo::Snapshot<E>>) -> Self {
 		match uptime(&previous.snapshot.transport, &self.current.snapshot.transport) {
 			Some(span) => self.with_previous(previous, span),
-			None => self,
+			None => self.without_previous(),
 		}
 	}
 }
@@ -751,7 +759,9 @@ mod tests {
 
 		// A report without an uptime, or one that did not advance, leaves nothing to diff against.
 		for previous in [report(None), report(Some(14)), report(Some(20))] {
-			assert!(start().with_uptime(&previous).previous.is_none());
+			let sample = start().with_uptime(&before).with_uptime(&previous);
+			assert!(sample.previous.is_none());
+			assert_eq!(sample.interval, Duration::ZERO);
 		}
 		let unstated = report(None);
 		assert!(

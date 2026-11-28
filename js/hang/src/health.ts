@@ -46,8 +46,8 @@ export interface Sample<S> {
 
 /**
  * Diff `sample.current` against `previous`, over the time between the two reports' `transport.uptime`s.
- * A report without one, or an uptime that did not advance, leaves the sample as it is, with nothing to diff
- * against: arrival times say nothing about the time between the samples, since a congested report arrives
+ * A report without one, or an uptime that did not advance, leaves the sample with nothing to diff
+ * against, dropping any `previous` it held: arrival times say nothing about the time between the samples, since a congested report arrives
  * late and in a burst.
  */
 export function withUptime<S extends { transport?: Stats.Transport }>(
@@ -56,7 +56,9 @@ export function withUptime<S extends { transport?: Stats.Transport }>(
 ): Sample<S> {
 	const before = previous.snapshot.transport?.uptime;
 	const after = sample.current.snapshot.transport?.uptime;
-	if (before === undefined || after === undefined || after <= before) return sample;
+	if (before === undefined || after === undefined || after <= before) {
+		return { ...sample, previous: undefined, interval: Duration.ZERO };
+	}
 	return { ...sample, previous, interval: Duration.millis(after - before) };
 }
 
