@@ -866,6 +866,13 @@ for (const [version, tooFarBehind] of [
 			const stopped = await cancelled.promise;
 			expect((stopped as { streamErrorCode?: number }).streamErrorCode ?? 0).toBe(expected);
 		}
+		// A bare code is translated as an error's is: DELIVERY_TIMEOUT says superseded on moq-transport.
+		const cancelled = Promise.withResolvers<unknown>();
+		new Reader(new ReadableStream<Uint8Array>({ cancel: cancelled.resolve }), undefined, version).stop(
+			StreamCode.DeliveryTimeout,
+		);
+		const stopped = (await cancelled.promise) as { streamErrorCode?: number };
+		expect(stopped.streamErrorCode ?? 0).toBe(version === QUIC ? StreamCode.DeliveryTimeout : StreamCode.Internal);
 	});
 	test(`received reset uses the negotiated registry (${version})`, async () => {
 		const reader = new Reader(

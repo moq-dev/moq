@@ -212,7 +212,8 @@ const (
 	ProtocolKindTimeout = ffi.MoqProtocolKindTimeout
 	// ProtocolKindVersion identifies version.
 	ProtocolKindVersion = ffi.MoqProtocolKindVersion
-	// ProtocolKindDeliveryTimeout identifies delivery timeout.
+	// ProtocolKindDeliveryTimeout identifies delivery timeout. Never over moq-transport, where
+	// that code says a newer group superseded this one, which reports as ProtocolKindOld.
 	ProtocolKindDeliveryTimeout = ffi.MoqProtocolKindDeliveryTimeout
 	// ProtocolKindGoingAway identifies going away.
 	ProtocolKindGoingAway = ffi.MoqProtocolKindGoingAway

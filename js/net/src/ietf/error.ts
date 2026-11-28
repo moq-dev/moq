@@ -39,7 +39,9 @@ export const IetfSessionCode = Object.freeze({
  * in moq-lite's.
  *
  * The two agree on 0x0-0x5 (INTERNAL_ERROR, CANCELLED, DELIVERY_TIMEOUT, SESSION_CLOSED,
- * GOING_AWAY, TOO_FAR_BEHIND) and 0x12 (MALFORMED_TRACK). Anything else is sent as, and read
+ * GOING_AWAY, TOO_FAR_BEHIND) and 0x12 (MALFORMED_TRACK), except that moq-transport sends
+ * moq-lite's OLD as DELIVERY_TIMEOUT and reads it back as OLD, so a publisher's own delivery
+ * timeout goes as INTERNAL_ERROR there (see `toStreamCode`). Anything else is sent as, and read
  * as, INTERNAL_ERROR: the codes moq-lite assigns in its own 48-63 range, and the ones the
  * draft assigns that moq-lite has no name for (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN,
  * EXCESSIVE_LOAD).

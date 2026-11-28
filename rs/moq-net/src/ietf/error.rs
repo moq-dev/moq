@@ -20,7 +20,8 @@ pub const INTERNAL_ERROR: u32 = 0x0;
 /// The stream was cancelled by either endpoint. A routine unsubscribe, not a failure.
 pub const CANCELLED: u32 = 0x1;
 
-/// The content missed its delivery deadline.
+/// The content missed its delivery deadline. Sent only for a group a newer one superseded,
+/// moq-lite's OLD, and read back as [`StreamError::Old`] (see [`to_stream_code`]).
 const DELIVERY_TIMEOUT: u32 = 0x2;
 
 /// The session is closing, taking this stream with it.

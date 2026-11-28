@@ -1,5 +1,12 @@
-import { fromTransport, StreamCode, streamCode, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
-import { sharedStreamCode } from "./ietf/error.ts";
+import {
+	fromTransport,
+	StreamCode,
+	Stream as StreamError,
+	streamCode,
+	TooFarBehind,
+	toStreamCode,
+	toTransport,
+} from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
 import { lines, type OpenStream, type OpenStreams, type Rank } from "./open.ts";
@@ -44,8 +51,9 @@ function withCode(reason: unknown, stream: StreamVersion): unknown {
 // withCode, which reads a number as a non-stream error and sends Internal.
 function stopReason(reason: unknown, stream: StreamVersion): unknown {
 	if (typeof reason !== "number") return withCode(reason, stream);
-	const code =
-		asIetf(stream) === undefined || sharedStreamCode(reason) ? (reason as StreamCode) : StreamCode.Internal;
+	// Translated as an error's code is, since moq-transport reads some shared numbers, such as
+	// DELIVERY_TIMEOUT, differently.
+	const code = toStreamCode(new StreamError(reason as StreamCode), { version: asIetf(stream) });
 	return toTransport(code, "cancel");
 }
 
