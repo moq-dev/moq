@@ -1,8 +1,7 @@
 //! CTS hang container: QUIC varint composition time offset (in track timescale) plus codec payload.
 //!
 //! Each MoQ frame begins with an unsigned QUIC varint CTS measured in the track's timescale,
-//! followed by the raw codec payload. The transport timestamp is the decode time, which never
-//! decreases within a group, and the presentation timestamp is `transport_timestamp + CTS`.
+//! followed by the raw codec payload. Presentation timestamp is `transport_timestamp + CTS`.
 //! Requires a timed track.
 
 use crate::container::{Container, Frame, Kind, legacy};
@@ -28,48 +27,26 @@ impl Container for Wire {
 		true
 	}
 
-	// Not advertised yet: a draft-18..22 hop stamps every object at its Group ID, losing the
-	// decode time the offset counts from, and the binding frame APIs carry no decode time.
+	// The writer waits on the cts-encoders quest: the binding frame APIs carry no decode time,
+	// and a draft-18..22 hop stamps every object at its Group ID, losing the decode time the
+	// offset counts from.
 	fn writable(&self) -> Result<(), Self::Error> {
 		Err(moq_net::Error::Unsupported.into())
 	}
 
-	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
-		// The offset is unsigned: a frame never presents before it decodes.
-		match frame.decode.is_some_and(|decode| frame.timestamp < decode) {
-			true => Err(moq_net::Error::TimestampMismatch.into()),
-			false => Ok(()),
-		}
-	}
-
 	fn finish_group(
 		&self,
-		group: &mut moq_net::group::Producer,
-		end: Option<moq_net::Timestamp>,
+		_group: &mut moq_net::group::Producer,
+		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
-		if self.0 == Kind::Video
-			&& let Some(end) = end
-		{
-			// An empty codec payload at the end, decoding and presenting there.
-			group.write_frame(end, bytes::Bytes::from_static(&[0]))?;
-		}
-		Ok(())
+		// CTS encoding requires a separate DTS per frame (not yet carried by `container::Frame`).
+		Err(moq_net::Error::Unsupported.into())
 	}
 
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
-		let scale = group.timescale().ok_or(moq_net::Error::TimestampMismatch)?;
-		// Checked up front so a refused batch writes nothing.
-		let offsets = frames
-			.iter()
-			.map(|frame| offset(frame, scale))
-			.collect::<Result<Vec<_>, _>>()?;
-		for (frame, (decode, offset)) in frames.iter().zip(offsets) {
-			let mut buf = bytes::BytesMut::with_capacity(8 + frame.payload.len());
-			moq_net::varint::encode_quic(offset, &mut buf).map_err(moq_net::Error::from)?;
-			buf.extend_from_slice(&frame.payload);
-			group.write_frame(decode, buf.freeze())?;
-		}
-		Ok(())
+	fn write(&self, _group: &mut moq_net::group::Producer, _frames: &[Frame]) -> Result<(), Self::Error> {
+		// CTS needs each frame's DTS as the transport timestamp, which `container::Frame`
+		// does not carry yet; writing CTS = 0 with the PTS would mislabel reordered video.
+		Err(moq_net::Error::Unsupported.into())
 	}
 
 	fn decode(&self, mut frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
@@ -100,29 +77,6 @@ impl Container for Wire {
 			duration: None,
 		}])
 	}
-}
-
-/// The bytes preceding `frame`'s payload in a track at `scale`: its composition offset.
-pub(crate) fn prefix(frame: &Frame, scale: moq_net::Timescale) -> crate::Result<bytes::Bytes> {
-	let (_, offset) = offset(frame, scale)?;
-	let mut buf = bytes::BytesMut::new();
-	moq_net::varint::encode_quic(offset, &mut buf).map_err(moq_net::Error::from)?;
-	Ok(buf.freeze())
-}
-
-/// A frame's decode time in `scale`, and how far after it the frame presents.
-fn offset(frame: &Frame, scale: moq_net::Timescale) -> crate::Result<(moq_net::Timestamp, u64)> {
-	let at = |timestamp: moq_net::Timestamp| timestamp.convert(scale).map_err(hang::Error::from);
-	let presentation = at(frame.timestamp)?;
-	let decode = match frame.decode {
-		Some(decode) => at(decode)?,
-		None => presentation,
-	};
-	let offset = presentation
-		.value()
-		.checked_sub(decode.value())
-		.ok_or(moq_net::Error::TimestampMismatch)?;
-	Ok((decode, offset))
 }
 
 /// Decode a CTS audio frame while attaching codec-derived packet durations.
@@ -185,49 +139,56 @@ mod tests {
 		assert!(data.is_empty());
 	}
 
-	/// A reordered stream writes each frame at its decode time and reads its presentation time
-	/// back, and a frame presenting before it decodes is refused.
-	#[kio::test]
-	async fn reordered_frames_round_trip() {
-		let scale = Timescale::new(90_000).unwrap();
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("video", moq_net::track::Info::default().with_timescale(scale))
+	/// A buffering producer refuses the first CTS write on entry, so it never opens a group it
+	/// could not flush.
+	#[test]
+	fn a_buffered_producer_refuses_before_opening_a_group() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let at = |ticks| Timestamp::new(ticks, scale).unwrap();
-		// Decode order I P B with presentation 3000, 12000, 6000.
-		let frames = [(0, 3_000), (3_000, 12_000), (6_000, 6_000)].map(|(decode, presentation)| Frame {
-			timestamp: at(presentation),
-			decode: Some(at(decode)),
-			payload: Bytes::from_static(b"pic"),
-			keyframe: false,
+		let mut producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Cts(Kind::Video))
+			.with_buffer(std::time::Duration::from_secs(1));
+		let err = producer.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			decode: None,
+			payload: Bytes::from_static(b"pkt"),
+			keyframe: true,
 			duration: None,
 		});
-		let mut group = track.append_group(at(0)).unwrap();
-		Wire(Kind::Video).write(&mut group, &frames).unwrap();
-		Wire(Kind::Video).finish_group(&mut group, Some(at(9_000))).unwrap();
-		let mut consumer = group.consume();
-		group.finish().unwrap();
+		assert!(
+			matches!(err, Err(crate::Error::Moq(moq_net::Error::Unsupported))),
+			"{err:?}"
+		);
+		assert!(producer.track().largest().is_none(), "opened a group");
+	}
 
-		for (decode, presentation) in [(0, 3_000), (3_000, 12_000), (6_000, 6_000)] {
-			let frame = consumer.read_frame().await.unwrap().unwrap();
-			assert_eq!(frame.timestamp, at(decode));
-			let decoded = Wire(Kind::Video).decode(frame).unwrap();
-			assert_eq!(decoded[0].timestamp, at(presentation));
-			assert_eq!(decoded[0].decode, (decode != presentation).then_some(at(decode)));
-		}
-		let marker = Wire(Kind::Video)
-			.decode(consumer.read_frame().await.unwrap().unwrap())
+	#[test]
+	fn write_and_finish_group_return_unsupported() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(Timescale::MILLI),
+			)
 			.unwrap();
-		assert_eq!(Wire(Kind::Video).end(&marker[0]), Some(at(9_000)));
-
-		let early = Frame {
-			timestamp: at(0),
-			decode: Some(at(3_000)),
-			payload: Bytes::from_static(b"pic"),
-			keyframe: false,
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::from_millis(33).unwrap(),
+			decode: None,
+			payload: Bytes::from_static(b"pkt"),
+			keyframe: true,
 			duration: None,
 		};
-		assert!(Wire(Kind::Video).check(&early).is_err());
+		assert!(
+			Wire(Kind::Video)
+				.write(&mut group, std::slice::from_ref(&frame))
+				.is_err()
+		);
+		assert!(
+			Wire(Kind::Video)
+				.finish_group(&mut group, Some(frame.timestamp))
+				.is_err()
+		);
 	}
 }

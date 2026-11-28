@@ -68,24 +68,16 @@ impl TryFrom<&crate::catalog::VideoHint> for Container {
 }
 
 impl Container {
-	/// The bytes preceding a `frame`'s payload, when they depend on nothing but its times, so the
-	/// payload can stream in after them. `scale` is the track's timescale. `None` for CMAF.
-	pub(crate) fn prefix(
-		&self,
-		frame: &Frame,
-		scale: Option<moq_net::Timescale>,
-	) -> crate::Result<Option<bytes::Bytes>> {
+	/// The bytes preceding a frame's payload, when they depend on nothing but its timestamp, so the
+	/// payload can stream in after them. `None` for CMAF and CTS.
+	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<Option<bytes::Bytes>> {
 		match self {
-			Self::Legacy(kind) => legacy::Wire(*kind).prefix(frame.timestamp).map(Some),
-			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).prefix(frame.timestamp).map(Some),
-			Self::Loc(kind) => loc::Wire(*kind).prefix(frame.timestamp).map(Some),
+			Self::Legacy(kind) => legacy::Wire(*kind).prefix(timestamp).map(Some),
+			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).prefix(timestamp).map(Some),
+			Self::Loc(kind) => loc::Wire(*kind).prefix(timestamp).map(Some),
 			Self::Raw(kind) => Ok(Some(raw::Wire(*kind).prefix())),
 			Self::RawAudio(_) => Ok(Some(raw::Wire(Kind::Audio).prefix())),
-			Self::Cts(_) | Self::CtsAudio(_) => {
-				let scale = scale.ok_or(moq_net::Error::TimestampMismatch)?;
-				cts::prefix(frame, scale).map(Some)
-			}
-			Self::Cmaf(_) => Ok(None),
+			Self::Cmaf(_) | Self::Cts(_) | Self::CtsAudio(_) => Ok(None),
 		}
 	}
 }

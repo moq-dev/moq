@@ -108,9 +108,10 @@ pub struct Frame {
 	/// Decode timestamp, when it differs from [`timestamp`](Self::timestamp), or `None` when the
 	/// frame decodes at its presentation time.
 	///
-	/// A [decode-order](Container::decode_order) container (`cts`, `raw`) writes each frame to the
-	/// transport at its decode time and groups by it, so a reordering source must set this there.
-	/// Other containers ignore it: they carry the presentation time in the payload and stamp the
+	/// A [decode-order](Container::decode_order) container writes each frame to the transport at
+	/// its decode time and groups by it: `raw`, which therefore refuses a reordered frame, and
+	/// `cts`, which this build still only reads (a decoded `cts` frame reports it). Other
+	/// containers ignore it: they carry the presentation time in the payload and stamp the
 	/// transport with the newest one so far in the group, since a group's timestamps never
 	/// decrease.
 	pub decode: Option<moq_net::Timestamp>,

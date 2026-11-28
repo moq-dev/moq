@@ -240,8 +240,7 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 	/// declared size commits no memory, and one past the group's limit is refused up front. A
 	/// buffering producer, or CMAF, whose `moof` describes the payload, cannot stream.
 	pub(crate) fn open(&mut self, mut frame: Frame, size: usize) -> crate::Result<Streamed> {
-		let scale = self.inner.info().timescale;
-		if !self.buffer_duration.is_zero() || self.container.prefix(&frame, scale)?.is_none() {
+		if !self.buffer_duration.is_zero() || self.container.prefix(frame.timestamp)?.is_none() {
 			return Err(crate::Error::UnsupportedContainer("a streamed frame".into()));
 		}
 		let (keyframe, duration) = (frame.keyframe, frame.duration);
@@ -272,18 +271,23 @@ impl<R: Clone + Send + 'static> Producer<crate::catalog::hang::Container, R> {
 		};
 		// At the times the frame is written at, which a group start may have moved.
 		self.place(&mut frame, source, timestamp)?;
+		// A prefix carrying the presentation time leaves the transport the newest so far, as
+		// [`hang::container::Frame::write_to`] stamps it. A decode-order container's transport
+		// is its timing, so a frame below the group's latest is refused, before the group is
+		// taken so the frames already written still finish.
+		let latest = self.group.as_ref().and_then(|group| group.latest());
+		let transport = match latest {
+			Some(latest) if timestamp < latest => match self.container.decode_order() {
+				true => return Err(moq_net::Error::TimestampMismatch.into()),
+				false => latest,
+			},
+			_ => timestamp,
+		};
 		self.present(presentation, source);
-		let prefix = (self.container.prefix(&frame, scale)?)
+		let prefix = (self.container.prefix(frame.timestamp)?)
 			.ok_or_else(|| crate::Error::UnsupportedContainer("a streamed frame".into()))?;
 		let group = self.group.take().expect("prepare opens a group");
 		let total = prefix.len().checked_add(size).ok_or(moq_net::Error::FrameTooLarge)?;
-		// A prefix carrying the presentation time leaves the transport the newest so far, as
-		// [`hang::container::Frame::write_to`] stamps it. A decode-order container's transport
-		// is its timing, so a frame below the group's latest is refused instead.
-		let transport = match group.latest() {
-			Some(latest) if timestamp < latest && !self.container.decode_order() => latest,
-			_ => timestamp,
-		};
 		let mut writer = group.create_frame(moq_net::frame::Info {
 			timestamp: transport,
 			size: total as u64,
@@ -1691,6 +1695,8 @@ mod tests {
 			stream(&mut producer, 66_000, false).unwrap();
 			let result = stream(&mut producer, 33_000, false);
 			assert_eq!(result.is_ok(), raised, "{result:?}");
+			// A refusal leaves the group open for the frames after it.
+			stream(&mut producer, 100_000, false).unwrap();
 		}
 	}
 

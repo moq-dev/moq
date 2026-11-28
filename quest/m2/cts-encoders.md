@@ -18,10 +18,12 @@ The timestamp work
 ([moq-dev/moq#9794](https://github.com/moq-dev/moq/pull/9794)) made a group's
 timestamps never decrease and landed the pieces this builds on:
 
-- `moq_mux::container::Frame::decode` and `Container::decode_order`: a `cts` or
-  `raw` producer groups by decode time and writes it to the transport. The
-  `cts` writer exists and is unit tested, but `cts::Wire::writable` still
-  refuses it, so no catalog advertises a `cts` rendition yet.
+- `moq_mux::container::Frame::decode` and `Container::decode_order`: a
+  decode-order producer groups by decode time and writes it to the transport.
+  `cts` still only decodes (`cts::Wire::writable` refuses it). A `cts` writer
+  with a round-trip test was built and then dropped before merge, until this
+  quest's questions settle; restore it from `rs/moq-mux/src/container/cts.rs`
+  at moq-dev/moq@a5ae9f23a7327a47b97b167faa5541dae3d6995d.
 - `legacy` and `loc` stamp the transport with the newest presentation time so
   far in the group, keeping each frame's own in the payload, so B-frame imports
   keep working without `cts`.
@@ -34,8 +36,8 @@ example `video_continuing_keeps_a_leading_picture_below_its_start`,
 `h264_join_drops_a_leading_picture_before_the_old_content_ends`,
 `open_gop_spans_hold_no_other_start`, and the TS recovery tests). Rework the
 producer's decode-order grouping until those behaviors hold on a `cts` track,
-fill `decode` in the MPEG-TS importer, let `cts::Wire::writable` pass, then
-flip the defaults.
+fill `decode` in the MPEG-TS importer, restore the `cts` writer, then flip the
+defaults.
 
 Open questions:
 

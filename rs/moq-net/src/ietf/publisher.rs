@@ -5663,6 +5663,8 @@ enum TrackStatusState {
 	Respond {
 		/// Taken once buffered.
 		properties: Option<ietf::Properties>,
+		/// Whether the track's Object IDs are timestamps, whatever the answer's properties say.
+		timed: bool,
 		track: track::Consumer,
 	},
 	Reject(super::request_stream::Deliver),
@@ -5822,28 +5824,35 @@ impl TrackStatusOpen {
 					else {
 						unreachable!("waiting on SETUP");
 					};
+					let version = self.publisher.version;
 					let properties = info.and_then(|info| {
-						track_properties(&info, self.properties_wanted, self.publisher.version, negotiated)
+						let timed = info.timescale.is_some() && version.timestamp_object_ids();
+						track_properties(&info, self.properties_wanted, version, negotiated)
+							.map(|properties| (properties, timed))
 					});
 					match properties {
-						Ok(properties) => {
+						Ok((properties, timed)) => {
 							self.state = TrackStatusState::Respond {
 								properties: Some(properties),
+								timed,
 								track,
 							}
 						}
 						Err(err) => self.reject(&err)?,
 					}
 				}
-				TrackStatusState::Respond { properties, track } => {
+				TrackStatusState::Respond {
+					properties,
+					timed,
+					track,
+				} => {
 					let res = 'respond: {
 						if self.gate.poll_denied(waiter).is_ready() {
 							break 'respond Err(Error::Unauthorized);
 						}
 						if let Some(properties) = properties.take() {
-							let timed = properties.timescale.is_some() && self.publisher.version.timestamp_object_ids();
 							let ok = ietf::TrackStatusOk {
-								largest: live_edge_for(track, timed).largest,
+								largest: live_edge_for(track, *timed).largest,
 								properties,
 							};
 							if let Err(err) = stream.writer.buffer_message(ietf::TrackStatusOk::ID, &ok) {
@@ -12247,6 +12256,41 @@ mod serve_tests {
 					"{version} wanted={wanted}"
 				);
 			}
+		}
+	}
+
+	/// A draft-23 TRACK_STATUS names the Largest Object by its timestamp Object ID whether or
+	/// not it asked for Track Properties, as every other request numbers it.
+	#[kio::test]
+	async fn track_status_largest_is_a_timestamp_id_without_properties() {
+		let version = Version::Draft23;
+		for wanted in [true, false] {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+			group.write_frame(group.key_time(), b"a".as_slice()).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(11).unwrap(), b"b".as_slice())
+				.unwrap();
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			let body = track_status("room", wanted, version);
+			kio::wait(
+				h.publisher
+					.clone()
+					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.unwrap(),
+			)
+			.await;
+
+			let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::TrackStatusOk::ID);
+			let ok = ietf::TrackStatusOk::decode(&mut buf, version).unwrap();
+			assert_eq!(ok.largest, Some(Location { group: 4, object: 7 }), "wanted={wanted}");
 		}
 	}
 

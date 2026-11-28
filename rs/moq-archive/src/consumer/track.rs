@@ -258,7 +258,9 @@ async fn serve_group<S: ObjectStore>(
 	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
 		let index = index.lock().unwrap();
-		let (holding, after) = index.holding(sequence, frame);
+		// From the group's first object even for a tail: replay raises each timestamp to the
+		// newest before it, which only the whole stored prefix gives.
+		let (holding, after) = index.holding(sequence, 0);
 		(holding, after, index.timed(), index.timescale)
 	};
 	let next = after.map_or(u64::MAX, |start| start.0);
@@ -389,7 +391,6 @@ pub(super) fn timescale(info: &Info) -> Result<Option<Timescale>> {
 		.transpose()
 }
 
-/// A stored timestamp on its track, which must be timed exactly when the frame is.
 /// A stored frame's timestamp, raised to the newest before it in its group: an archive
 /// recorded before groups refused decreasing timestamps, or from an unchecked lite-05/06
 /// copy, may hold one, which a `legacy` payload's own presentation time makes harmless.
@@ -400,6 +401,7 @@ fn replayed(timestamp: Timestamp, latest: Option<Timestamp>) -> Timestamp {
 	}
 }
 
+/// A stored timestamp on its track, which must be timed exactly when the frame is.
 fn timestamp(value: Option<u64>, timescale: Option<Timescale>, sequence: u64) -> Result<Timestamp> {
 	match (value, timescale) {
 		(Some(value), Some(timescale)) => Timestamp::new(value, timescale).map_err(|_| Error::Id(value)),
