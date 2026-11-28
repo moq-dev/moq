@@ -10,7 +10,8 @@ use std::{
 };
 
 use super::super::subscription::{Joining, max_of};
-use super::{JoinAsk, Order, Position, Range, Start, Subscription, TrackState, clamp_combined};
+use super::{JoinAsk, Position, Range, Start, Subscription, TrackState, clamp_combined};
+use crate::model::subscription::Policy;
 
 mod ranges;
 use ranges::Ranges;
@@ -93,20 +94,20 @@ impl Drop for SubscriptionsGuard<'_> {
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
+	/// Each non-empty range's priority, counted.
 	priority: BTreeMap<i8, usize>,
 	/// Each non-empty range's staleness budget, counted: a history range's is the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	/// The live joins already placed (see [`Subscription::placed`]), by the group each was
-	/// placed at and its end, with each one's staleness budget counted. Kept out of
-	/// [`Self::ranges`]: a placed join starts where it was placed, whatever its lag, so it
+	/// placed at, its end, and its policy, with each one's staleness budget counted. Kept out
+	/// of [`Self::ranges`]: a placed join starts where it was placed, whatever its lag, so it
 	/// merges with no other range.
-	placed: BTreeMap<(u64, Option<u64>), BTreeMap<Duration, usize>>,
-	/// History ranges placed at an exact group (lite-07 Position), by group and end. Kept out
-	/// of [`Self::ranges`] so they never trigger time-containment lookup, and out of
+	placed: BTreeMap<Placed, BTreeMap<Duration, usize>>,
+	/// History ranges placed at an exact group (lite-07 Position), by group, end, and policy.
+	/// Kept out of [`Self::ranges`] so they never trigger time-containment lookup, and out of
 	/// [`Self::placed`] so publisher max-age clamping never expires them.
-	exact: BTreeMap<(u64, Option<u64>), usize>,
-	descending: usize,
+	exact: BTreeMap<Placed, usize>,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
 	/// Where resuming subscribers resume; see [`Subscription::resume`].
@@ -184,37 +185,47 @@ pub(super) enum Requested {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Order, bool, Option<Position>, Option<Position>);
+type Scalars = (bool, Option<Position>, Option<Position>);
+
+/// A range placed at a group: the group, the range's end, and its policy.
+type Placed = (u64, Option<u64>, Policy);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, order, feed, resume, cap) = self.scalars()?;
+		let (feed, resume, cap) = self.scalars()?;
 		let mut ranges = self.ranges.union();
 		let mut placed = BTreeMap::new();
-		// Each placed join once under the widest `max` asked of it; its lag places nothing.
-		for (&(group, end), budgets) in &self.placed {
+		// Each placed join once per policy under the widest `max` asked of it; its lag places
+		// nothing.
+		for (&(group, end, policy), budgets) in &self.placed {
 			let (budget, _) = budgets.last_key_value().expect("a counted placed join");
 			placed.insert(ranges.len() as u64, group);
-			ranges.push(Range {
-				start: Start::Live {
-					min: Some(Duration::ZERO),
-					max: max_of(*budget),
-				},
-				end,
-			});
+			ranges.push(
+				Range {
+					start: Start::Live {
+						min: Some(Duration::ZERO),
+						max: max_of(*budget),
+					},
+					end,
+					..Range::ALL
+				}
+				.with_policy(policy),
+			);
 		}
-		// Each exact-group history range once, placed at its exact group.
-		for &(group, end) in self.exact.keys() {
+		// Each exact-group history range once per policy, placed at its exact group.
+		for &(group, end, policy) in self.exact.keys() {
 			placed.insert(ranges.len() as u64, group);
-			ranges.push(Range {
-				start: Start::Time(group),
-				end,
-			});
+			ranges.push(
+				Range {
+					start: Start::Time(group),
+					end,
+					..Range::ALL
+				}
+				.with_policy(policy),
+			);
 		}
 		Some(Subscription {
-			priority,
 			ranges,
-			order,
 			feed,
 			resume,
 			placed,
@@ -337,11 +348,9 @@ impl Subscriptions {
 
 	/// [`Self::combined`] without its ranges, costing none of them.
 	pub(super) fn terms(&self) -> Option<Subscription> {
-		let (priority, order, feed, resume, cap) = self.scalars()?;
+		let (feed, resume, cap) = self.scalars()?;
 		Some(Subscription {
-			priority,
 			ranges: Vec::new(),
-			order,
 			feed,
 			resume,
 			placed: BTreeMap::new(),
@@ -361,12 +370,6 @@ impl Subscriptions {
 	fn scalars(&self) -> Option<Scalars> {
 		(self.count != 0).then(|| {
 			(
-				*self.priority.last_key_value().unwrap().0,
-				if self.descending == 0 {
-					Order::Ascending
-				} else {
-					Order::Descending
-				},
 				self.feed != 0,
 				// A subscriber asking for the whole group outweighs any resuming one.
 				match self.resuming == self.count {
@@ -532,21 +535,22 @@ impl Subscriptions {
 		moved: (&[Held], &[Held]),
 	) -> kio::WaiterList {
 		let prev = self.scalars();
+		let urgent = self.priority.last_key_value().map(|(priority, _)| *priority);
 		let mut reshaped = false;
 		// New ranges count before old ones leave, so a range both hold never reads as gone.
 		let (gone, came) = moved;
 		for (range, _) in came.iter().filter(|(range, _)| !range.is_empty()) {
 			add(&mut self.max_delay, range.budget());
+			add(&mut self.priority, range.priority);
 		}
 		for (range, _) in gone.iter().filter(|(range, _)| !range.is_empty()) {
 			remove(&mut self.max_delay, range.budget());
+			remove(&mut self.priority, range.priority);
 		}
 		if let Some(new) = &new {
-			add(&mut self.priority, new.priority);
 			for held in came {
 				reshaped |= self.add_range(held);
 			}
-			self.descending += usize::from(new.order == Order::Descending);
 			self.feed += usize::from(new.feed);
 			if let Some(resume) = new.resume {
 				add(&mut self.resumes, resume);
@@ -559,11 +563,9 @@ impl Subscriptions {
 			self.count += 1;
 		}
 		if let Some(old) = &old {
-			remove(&mut self.priority, old.priority);
 			for held in gone {
 				reshaped |= self.remove_range(held);
 			}
-			self.descending -= usize::from(old.order == Order::Descending);
 			self.feed -= usize::from(old.feed);
 			if let Some(resume) = old.resume {
 				remove(&mut self.resumes, resume);
@@ -577,7 +579,7 @@ impl Subscriptions {
 		}
 		let priority = self.priority.last_key_value().map(|(priority, _)| *priority);
 		if let Some(account) = &self.account
-			&& prev.map(|prev| prev.0) != priority
+			&& urgent != priority
 		{
 			account.set_subscriber(priority);
 		}
@@ -601,12 +603,12 @@ impl Subscriptions {
 			if range.is_empty() {
 				return false;
 			}
-			let key = (*group, range.end);
+			let key = (*group, range.end, range.policy());
 			let count = self.exact.entry(key).or_default();
 			*count += 1;
 			return *count == 1;
 		}
-		let budgets = self.placed.entry((*group, range.end)).or_default();
+		let budgets = self.placed.entry((*group, range.end, range.policy())).or_default();
 		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
 		add(budgets, range.budget());
 		widest != budgets.last_key_value().map(|(budget, _)| *budget)
@@ -621,7 +623,7 @@ impl Subscriptions {
 			if range.is_empty() {
 				return false;
 			}
-			let key = (*group, range.end);
+			let key = (*group, range.end, range.policy());
 			let count = self.exact.get_mut(&key).expect("a counted exact range");
 			*count -= 1;
 			if *count == 0 {
@@ -630,7 +632,7 @@ impl Subscriptions {
 			}
 			return false;
 		}
-		let key = (*group, range.end);
+		let key = (*group, range.end, range.policy());
 		let budgets = self.placed.get_mut(&key).expect("a counted placed join");
 		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
 		remove(budgets, range.budget());
@@ -686,8 +688,6 @@ fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
 /// What one subscriber adds to the aggregate besides its ranges.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Contribution {
-	priority: i8,
-	order: Order,
 	feed: bool,
 	resume: Option<Position>,
 	cap: Option<Position>,
@@ -703,16 +703,12 @@ pub(crate) struct Edit {
 	/// The group each live join among `add` was already placed at, by its key: see
 	/// [`Subscription::placed`].
 	pub placed: BTreeMap<u64, u64>,
-	pub priority: i8,
-	pub order: Order,
 }
 
 /// A subscriber's preferences as the model holds them: the ranges by the key each was given,
 /// so an [`Edit`] costs only what it names, with a log of the keys recent changes touched so
 /// a reader catches up on those alone.
 pub(in crate::model) struct Prefs {
-	pub priority: i8,
-	pub order: Order,
 	pub feed: bool,
 	pub resume: Option<Position>,
 	pub cap: Option<Position>,
@@ -726,6 +722,8 @@ pub(in crate::model) struct Prefs {
 	since: BTreeMap<u64, u64>,
 	/// How many ranges join live and follow the live edge: see [`Self::joins_live`].
 	joining: usize,
+	/// Each range's policy, counted, those covering others first: see [`Self::policy`].
+	policies: BTreeMap<(std::cmp::Reverse<i8>, std::cmp::Reverse<super::Order>), (Policy, usize)>,
 	/// Bumped whenever the ranges change.
 	pub revision: u64,
 	/// The keys each change since `base` touched, by revision. Held to twice the ranges, so a
@@ -752,8 +750,6 @@ impl Prefs {
 	/// `value`, its live join ranges added at join tick `tick`.
 	fn new(value: Subscription, tick: u64) -> Self {
 		let mut prefs = Self {
-			priority: value.priority,
-			order: value.order,
 			feed: value.feed,
 			resume: value.resume,
 			cap: value.cap,
@@ -761,6 +757,7 @@ impl Prefs {
 			placed: BTreeMap::new(),
 			since: BTreeMap::new(),
 			joining: 0,
+			policies: BTreeMap::new(),
 			revision: 0,
 			log: VecDeque::new(),
 			base: 0,
@@ -791,9 +788,7 @@ impl Prefs {
 	/// These preferences as a [`Subscription`], its ranges in key order. Costs every range.
 	pub fn subscription(&self) -> Subscription {
 		Subscription {
-			priority: self.priority,
 			ranges: self.ranges.values().copied().collect(),
-			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
 			placed: self.placed_by_index(),
@@ -880,10 +875,16 @@ impl Prefs {
 		Changes::Keys(self.log.range(from..).map(|(_, key)| *key).collect())
 	}
 
+	/// The priority and order these ranges ask as a whole: see [`Policy::top`].
+	pub fn policy(&self) -> Policy {
+		self.policies
+			.values()
+			.next()
+			.map_or_else(Policy::default, |(policy, _)| *policy)
+	}
+
 	fn contribution(&self) -> Contribution {
 		Contribution {
-			priority: self.priority,
-			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
 			cap: self.cap,
@@ -922,10 +923,17 @@ impl Prefs {
 		Some((range, placed))
 	}
 
-	/// Count `range` `by` more into [`Self::joining`]: a placed join waits on no live edge.
+	/// Count `range` `by` more into [`Self::joining`], where a placed join waits on no live
+	/// edge, and into [`Self::policies`].
 	fn count(&mut self, range: &Range, placed: Option<u64>, by: isize) {
 		let open = range.is_open() && placed.is_none();
 		self.joining = self.joining.wrapping_add_signed(by * isize::from(open));
+		let policy = range.policy();
+		let (_, count) = self.policies.entry(policy.rank()).or_insert((policy, 0));
+		*count = count.wrapping_add_signed(by);
+		if *count == 0 {
+			self.policies.remove(&policy.rank());
+		}
 	}
 
 	/// Note that the ranges keyed `keys` changed.
@@ -971,8 +979,7 @@ impl Prefs {
 	/// `retune`, ranges that change only a live join's `max` keep their keys, so each stays
 	/// where it joined; without, as a restated subscription, every range is placed afresh.
 	fn replace(&mut self, next: Subscription, tick: u64, retune: bool) {
-		(self.priority, self.order, self.feed, self.resume, self.cap) =
-			(next.priority, next.order, next.feed, next.resume, next.cap);
+		(self.feed, self.resume, self.cap) = (next.feed, next.resume, next.cap);
 		let placed = self.placed_by_index();
 		if self.ranges.values().eq(&next.ranges) && placed == next.placed {
 			return;
@@ -980,15 +987,17 @@ impl Prefs {
 		let retunes = retune
 			&& self.ranges.len() == next.ranges.len()
 			&& placed == next.placed
-			&& (self.ranges.values().zip(&next.ranges))
-				.all(|(old, new)| old == new || (new.join().is_some() && old.join() == new.join()));
+			&& (self.ranges.values().zip(&next.ranges)).all(|(old, new)| old.retunes(new));
 		if retunes {
 			let changed: Vec<(u64, Range)> = (self.ranges.iter().zip(&next.ranges))
 				.filter(|((_, old), new)| old != new)
 				.map(|((key, _), new)| (*key, *new))
 				.collect();
 			for &(key, range) in &changed {
-				self.ranges.insert(key, range);
+				let placed = self.placed.get(&key).copied();
+				self.count(&range, placed, 1);
+				let old = self.ranges.insert(key, range).expect("a retuned range");
+				self.count(&old, placed, -1);
 			}
 			self.touched(changed.into_iter().map(|(key, _)| key));
 			return;
@@ -997,6 +1006,7 @@ impl Prefs {
 		self.placed.clear();
 		self.since.clear();
 		self.joining = 0;
+		self.policies.clear();
 		for (key, range) in (0..).zip(next.ranges) {
 			self.insert(key, (range, next.placed.get(&key).copied()), tick);
 		}
@@ -1049,8 +1059,6 @@ impl Preferences {
 		let old = value.held();
 		let contribution = value.contribution();
 		let next_contribution = Contribution {
-			priority: next.priority,
-			order: next.order,
 			feed: next.feed,
 			resume: next.resume,
 			cap: next.cap,
@@ -1081,12 +1089,7 @@ impl Preferences {
 	pub(in crate::model) fn edit(&self, edit: Edit) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
 		let contribution = value.contribution();
-		let scalars = Contribution {
-			priority: edit.priority,
-			order: edit.order,
-			..contribution
-		};
-		if contribution == scalars && edit.retire.is_empty() && edit.add.is_empty() {
+		if edit.retire.is_empty() && edit.add.is_empty() {
 			return Ok(());
 		}
 		let tick = join_tick();
@@ -1109,7 +1112,6 @@ impl Preferences {
 			came.push(held);
 			touched.push(key);
 		}
-		(value.priority, value.order) = (edit.priority, edit.order);
 		if !touched.is_empty() {
 			value.touched(touched);
 		}
@@ -1198,6 +1200,7 @@ mod tests {
 		let range = |start| Range {
 			start: Start::Time(start),
 			end: None,
+			..Default::default()
 		};
 		let sorted = |(mut gone, mut came): (Vec<Range>, Vec<Range>)| {
 			gone.sort();
@@ -1239,6 +1242,11 @@ mod tests {
 				.map(|_| Range {
 					start: start(&mut rng),
 					end: rng.random_bool(0.5).then(|| rng.random_range(0..8)),
+					priority: rng.random_range(0..3),
+					order: match rng.random_bool(0.5) {
+						true => super::super::Order::Ascending,
+						false => super::super::Order::Descending,
+					},
 				})
 				.collect();
 			// Some live joins already placed, as a route switch asks them.
@@ -1249,13 +1257,7 @@ mod tests {
 				}
 			}
 			let next = Subscription {
-				priority: rng.random_range(0..8),
 				ranges,
-				order: if rng.random_bool(0.5) {
-					Order::Ascending
-				} else {
-					Order::Descending
-				},
 				feed: rng.random_bool(0.25),
 				resume: rng
 					.random_bool(0.5)
@@ -1305,7 +1307,7 @@ mod tests {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut producer = broadcast.create_track("demand", None).unwrap();
 		// History from the oldest group covers every range the weak reader adds.
-		let strong = producer.subscribe(Subscription::default().with_ranges([Range::ALL]).with_priority(10));
+		let strong = producer.subscribe(Subscription::default().with_ranges([Range::ALL.with_priority(10)]));
 		let count = Arc::new(Count(AtomicUsize::new(0)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(count.clone()));
 		assert!(producer.poll_subscription_changed(&waiter).is_ready());
@@ -1313,9 +1315,9 @@ mod tests {
 		let mut weak = producer.subscribe(
 			Subscription::default()
 				.with_range(100..200)
-				.with_order(Order::Ascending),
+				.ordered(super::super::Order::Ascending),
 		);
-		weak.update(Subscription::default().with_priority(5)).unwrap();
+		weak.update(Subscription::default().prioritized(5)).unwrap();
 		drop(weak);
 		assert_eq!(count.0.load(Ordering::SeqCst), 0);
 		drop(strong);
@@ -1330,16 +1332,16 @@ mod tests {
 	fn controls_and_pending_subscriptions_share_one_contribution() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let producer = broadcast.create_track("demand", None).unwrap();
-		let pending = producer.consume().subscribe(Subscription::default().with_priority(3));
+		let pending = producer.consume().subscribe(Subscription::default().prioritized(3));
 		let Poll::Ready(Ok(subscriber)) = pending.poll_ok(&kio::Waiter::noop()) else {
 			panic!("known track");
 		};
 		let control = subscriber.control();
 		drop(pending);
 		drop(subscriber);
-		assert_eq!(producer.subscription().unwrap().priority, 3);
-		control.update(Subscription::default().with_priority(8)).unwrap();
-		assert_eq!(producer.subscription().unwrap().priority, 8);
+		assert_eq!(producer.subscription().unwrap().policy().priority, 3);
+		control.update(Subscription::default().prioritized(8)).unwrap();
+		assert_eq!(producer.subscription().unwrap().policy().priority, 8);
 		drop(control);
 		assert_eq!(producer.subscription(), None);
 	}

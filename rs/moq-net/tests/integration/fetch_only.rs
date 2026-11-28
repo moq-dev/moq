@@ -8,6 +8,7 @@
 
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 use support::AppendNext;
 use support::AtStart;
 
@@ -216,8 +217,8 @@ async fn a_relay_fetches_without_subscribing_upstream() {
 /// [`publish_finished`] reports. Our moq-transport publishers answer only a one-group FETCH.
 async fn subscribe_history(track: &moq_net::track::Consumer) -> moq_net::track::Subscriber {
 	let subscription = moq_net::track::Subscription::default()
-		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges([support::keys(1..2)]);
+		.with_ranges([support::keys(1..2)])
+		.ordered(moq_net::track::Order::Ascending);
 	kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 		.await
 		.expect("subscribe timed out")
@@ -508,8 +509,8 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 			// bounded feed never delivers.
 			let copy = remote.track("video").unwrap();
 			let subscription = moq_net::track::Subscription::default()
-				.with_order(moq_net::track::Order::Ascending)
 				.with_ranges([support::keys(1..3)])
+				.ordered(moq_net::track::Order::Ascending)
 				.with_max(None);
 			let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
 				.await
@@ -601,8 +602,8 @@ async fn a_relay_accounts_for_every_group_in_multi_group_history() {
 	] {
 		let copy = fetched_copy(upstream.parse().unwrap(), downstream.parse().unwrap()).await;
 		let subscription = moq_net::track::Subscription::default()
-			.with_order(moq_net::track::Order::Ascending)
 			.with_ranges([support::keys(1..3)])
+			.ordered(moq_net::track::Order::Ascending)
 			.with_max(None);
 		let mut sub = copy.fresh.subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();

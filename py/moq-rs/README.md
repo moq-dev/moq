@@ -66,12 +66,9 @@ async def main():
             broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_init_bytes)
         )
 
-        # Write frames
-        # Audio has no keyframes, so `cut` is what gives it group boundaries.
+        # Write frames; audio closes a group (one QUIC stream) once it holds 100 ms.
         audio.write_frame(payload, timestamp=moq.Timestamp(0, 1_000))
-        audio.cut()
         audio.write_frame(payload, timestamp=moq.Timestamp(20, 1_000))
-        audio.cut()
 
         # Each route mints a fresh identity, so viewers see a restart as a new stream.
         route.announce()

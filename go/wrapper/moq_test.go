@@ -1153,8 +1153,7 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	start := moq.Unscaled(0)
 	consumer, err := track.Consume(&moq.Subscription{
 		Delay:  moq.Delay{Max: 10 * time.Second},
-		Ranges: []moq.Range{{Start: &start}},
-		Order:  &order,
+		Ranges: []moq.Range{{Start: &start, Order: &order}},
 	})
 	if err != nil {
 		t.Fatal(err)

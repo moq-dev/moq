@@ -2000,14 +2000,12 @@ fn publish_track_invalid_broadcast() {
 	assert!(moq_publish_group_finish(9999) < 0);
 
 	let subscription = moq_subscription {
-		priority: 1,
 		delay: moq_delay {
 			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
-		order: 0,
 	};
 	assert!(unsafe { moq_consume_track_update(9999, &subscription) } < 0);
 }
@@ -2294,14 +2292,12 @@ fn raw_track_publish_consume() {
 	// This round trip verifies every published frame. Allow the first group to
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
-		priority: 0,
 		delay: moq_delay {
 			max_us: 1_000_000,
 			..moq_delay::default()
 		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
-		order: 0,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -2813,6 +2809,7 @@ fn raw_track_subscription_options_and_update() {
 			start_present: true,
 			end: time(20_000),
 			end_present: true,
+			..Default::default()
 		},
 		moq_range {
 			start: time(100_000_000),
@@ -2821,14 +2818,12 @@ fn raw_track_subscription_options_and_update() {
 		},
 	];
 	let subscription = moq_subscription {
-		priority: 5,
 		delay: moq_delay {
 			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
-		order: 0,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -2924,14 +2919,12 @@ fn raw_track_time_start() {
 		..moq_range::default()
 	}];
 	let subscription = moq_subscription {
-		priority: 5,
 		delay: moq_delay {
 			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
-		order: 0,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -3002,14 +2995,12 @@ fn raw_track_joins_the_latest_group_without_a_stated_min() {
 
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
-		priority: 5,
 		delay: moq_delay {
 			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
-		order: 0,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -3048,11 +3039,9 @@ fn raw_track_joins_the_latest_group_without_a_stated_min() {
 fn subscription_ranges_parse() {
 	let parse = |ranges: &[moq_range], null: bool| {
 		let subscription = moq_subscription {
-			priority: 0,
 			delay: moq_delay::default(),
 			ranges: if null { std::ptr::null() } else { ranges.as_ptr() },
 			ranges_len: ranges.len(),
-			order: 0,
 		};
 		unsafe { crate::api::parse_subscription(&subscription) }.map(|(subscription, _)| subscription.ranges)
 	};
@@ -3061,12 +3050,14 @@ fn subscription_ranges_parse() {
 		start_present: true,
 		end: time(1_999),
 		end_present: true,
+		..Default::default()
 	};
 	assert_eq!(
 		parse(&[span], false).unwrap(),
 		vec![moq_net::track::Range {
 			start: moq_net::track::Start::Time(1_500),
 			end: Some(1_999),
+			..Default::default()
 		}]
 	);
 	assert_eq!(parse(&[], false).unwrap(), Vec::new());
@@ -3088,6 +3079,7 @@ fn subscription_ranges_parse() {
 				start_present: false,
 				end: micros(1),
 				end_present: false,
+				..Default::default()
 			}],
 			false
 		)
@@ -3149,14 +3141,12 @@ fn raw_track_update_refuses_a_scaled_range_time() {
 		..moq_range::default()
 	}];
 	let update = moq_subscription {
-		priority: 3,
 		delay: moq_delay {
 			max_us: 1_000_000,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
-		order: 0,
 	};
 	assert!(unsafe { moq_consume_track_update(consumer, &update) } < 0);
 
@@ -4013,14 +4003,12 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
-		priority: 0,
 		delay: moq_delay {
 			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: std::ptr::null(),
 		ranges_len: 0,
-		order: 0,
 	};
 	id(unsafe {
 		moq_consume_track(
@@ -4151,9 +4139,7 @@ fn double_close_all_resource_types() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
-/// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
-/// what a live publisher does.
+/// `moq_publish_media_cut` closes an audio group early, here one per packet.
 #[test]
 fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
@@ -4168,7 +4154,7 @@ fn media_cut_bounds_audio_groups() {
 			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(i * 20_000)) },
 			0
 		);
-		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
+		assert_eq!(moq_publish_media_cut(media), 0);
 	}
 	assert_eq!(moq_publish_media_discontinuity(media), 0);
 
@@ -5513,12 +5499,12 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
 	let ascending = |start, end: Option<u64>| {
-		moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Start::Time(start),
-				end,
-			}])
-			.with_order(moq_net::track::Order::Ascending)
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(start),
+			end,
+			..Default::default()
+		}
+		.with_order(moq_net::track::Order::Ascending)])
 	};
 	let mut reader = {
 		let mut state = State::lock();
@@ -5598,8 +5584,8 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 			}
 			producer.subscribe(
 				moq_net::track::Subscription::default()
-					.with_order(moq_net::track::Order::Ascending)
-					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(time))]),
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(time))
+						.with_order(moq_net::track::Order::Ascending)]),
 			)
 		};
 		// Nothing is read before the time start is answered.
@@ -5706,6 +5692,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(6),
 			end: Some(6),
+			..Default::default()
 		}]);
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();

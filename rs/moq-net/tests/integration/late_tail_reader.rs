@@ -6,6 +6,7 @@
 
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -263,8 +264,8 @@ async fn an_empty_history_read_leaves_the_group_to_readers_joining_meanwhile() {
 				kio::clock::sim::spawn(async move {
 					let subscription = Subscription::default()
 						.with_max(budget)
-						.with_order(moq_net::track::Order::Ascending)
-						.with_ranges([support::keys(0..START)]);
+						.with_ranges([support::keys(0..START)])
+						.ordered(moq_net::track::Order::Ascending);
 					read(&relay, history_version.parse().unwrap(), subscription).await
 				})
 			};

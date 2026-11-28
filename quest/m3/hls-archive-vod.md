@@ -55,7 +55,10 @@ Scope:
      metadata-only subscription (`Start::Oldest` or `Anchor::Time(start)`).
      Pauses and group extents come from wire `GROUP_END` and
      `SUBSCRIBE_DROP(SKIP)` plus tiny-size candidate marker probing when
-     ambiguous (matching `hls-server-lifecycle.md`), and codec changes come
+     ambiguous (matching `hls-server-lifecycle.md`, accounting for LOC
+     variable-length headers and bounding archive marker probes to single-frame
+     byte ranges rather than whole-group fetches; noted from
+     [moq-dev/moq#9699](https://github.com/moq-dev/moq/pull/9699)), and codec changes come
      from the archived catalog; retain targeted keyframe probing in `moq-hls`
      only for inline-parameter-set video renditions that can resize without a
      catalog update. Media payload bytes for catalog-described renditions are

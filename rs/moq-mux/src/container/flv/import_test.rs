@@ -1349,9 +1349,9 @@ const ASC_HE_960: [u8; 4] = [0x2b, 0x11, 0x8a, 0x00];
 /// AudioSpecificConfig for AAC Main, 48 kHz, stereo: 1024 samples a packet, as AAC-LC.
 const ASC_MAIN: [u8; 2] = [0x09, 0x90];
 
-/// AudioSpecificConfig for ER AAC LD, 48 kHz, stereo, whose packets this importer states no
+/// AudioSpecificConfig for ER BSAC, 48 kHz, stereo, whose packets this importer states no
 /// duration for.
-const ASC_LD: [u8; 3] = [0xb9, 0x90, 0x00];
+const ASC_BSAC: [u8; 3] = [0xb1, 0x90, 0x00];
 
 /// An audio-only FLV of 24 ms MP3 frames (MPEG-1 Layer III, 48 kHz) at `timestamps` (ms).
 fn mp3_tags(timestamps: &[u32]) -> Vec<u8> {
@@ -1376,7 +1376,7 @@ async fn a_gap_before_the_first_spacing_keeps_the_next_timestamp() {
 	let published = audio_published(&mp3_tags(&[0, 72, 96, 120])).await;
 	assert_eq!(published, [0, 72_000, 96_000, 120_000]);
 
-	for asc in [&ASC_HE[..], &ASC_MAIN, &ASC_LD] {
+	for asc in [&ASC_HE[..], &ASC_MAIN, &ASC_BSAC] {
 		let published = audio_published(&aac_tags_with(asc, &[0, 85, 128, 170])).await;
 		assert_eq!(published, [0, 85_000, 128_000, 170_000], "{asc:x?}");
 	}
@@ -1417,7 +1417,7 @@ async fn groups_of(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 /// declared as audio. One whose packets state theirs ends where they do, at the end of input too.
 #[tokio::test]
 async fn groups_end_only_where_their_audio_is_known_to() {
-	let groups = audio_groups(&aac_tags_with(&ASC_LD, &[0, 85, 128])).await;
+	let groups = audio_groups(&aac_tags_with(&ASC_BSAC, &[0, 85, 128])).await;
 	assert_eq!(groups, [(0, None), (128_000, None)]);
 
 	// 21.333 ms AAC-LC packets, the last ending at 85 ms, not one 64 ms spacing past it.

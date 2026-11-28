@@ -9,6 +9,7 @@
 
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -60,7 +61,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 		let subscription = Subscription::default()
 			.with_ranges([support::keys(0..)])
 			.with_max(FOREVER)
-			.with_order(order);
+			.ordered(order);
 		let mut sub = remote
 			.track("ordered")
 			.unwrap()
@@ -193,7 +194,11 @@ async fn merged_subscribers_keep_their_own_order() {
 		let (descending_pair, descending_origin) = connect(version, relay.consume(), 3).await;
 		let (ascending_pair, ascending_origin) = connect(version, relay.consume(), 4).await;
 
-		let upstream_order = || track.subscription().map(|subscription| subscription.order);
+		let upstream_order = || {
+			track
+				.subscription()
+				.and_then(|subscription| subscription.ranges.iter().map(|range| range.order).max())
+		};
 
 		let ascending = read_arrivals(ascending_origin.clone(), Order::Ascending);
 		support::harness::subscribed(&track).await;

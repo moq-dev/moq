@@ -18,7 +18,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
-import { withMax } from "./subscription.test-util.ts";
+import { topPolicy, withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -123,7 +123,7 @@ async function receive(subscriber: TrackSubscriber, count: number): Promise<bigi
 
 // Resolve once the producer's aggregate subscription satisfies `predicate`.
 async function aggregate(track: TrackProducer, predicate: (order: Order | undefined) => boolean): Promise<void> {
-	while (!predicate(track.subscription.peek()?.order)) await track.subscription.changed();
+	while (!predicate(topPolicy(track.subscription.peek())?.order)) await track.subscription.changed();
 }
 
 interface Pair {
@@ -168,7 +168,7 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 		await aggregate(video, (upstream) => upstream === update);
 	}
 
-	const result = { upstream: video.subscription.peek()?.order, orders: liteSendOrders(transport) };
+	const result = { upstream: topPolicy(video.subscription.peek())?.order, orders: liteSendOrders(transport) };
 
 	for (const group of groups) group.finish();
 	subscriber.close();

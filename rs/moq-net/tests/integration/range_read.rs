@@ -6,6 +6,7 @@
 
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 use support::AppendNext;
 
 use std::time::Duration;
@@ -112,7 +113,7 @@ fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
 		.with_ranges([support::keys(groups)])
 		.with_max(None)
-		.with_order(Order::Ascending)
+		.ordered(Order::Ascending)
 }
 
 async fn history(version: Version, relay: bool, finished: bool) {

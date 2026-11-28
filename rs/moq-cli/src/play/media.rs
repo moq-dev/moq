@@ -714,11 +714,10 @@ impl<O: Output> Media<O> {
 				// for the shared publisher subscription to rewind to.
 				let subscriber = track
 					.subscribe(
-						playout.subscription(
-							moq_net::track::Subscription::default()
-								.with_priority(hang::catalog::PRIORITY.video)
-								.with_ranges([moq_net::track::Range::ALL]),
-						),
+						playout
+							.subscription(moq_net::track::Subscription::default().with_ranges([
+								moq_net::track::Range::ALL.with_priority(hang::catalog::PRIORITY.video),
+							])),
 					)
 					.await?;
 				let format = catalog::hang::Container::try_from(&config)?;

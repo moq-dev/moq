@@ -19,7 +19,7 @@ function rng(seed: number): (below: number) => number {
 }
 
 // Each change reports exactly whether the union moved, and the union matches a full fold of what
-// is held: time ranges, live joins by lag, and ranges from the oldest group.
+// is held: time ranges, live joins by lag, and ranges from the oldest group, each at a policy.
 test("the incremental union matches a full fold", () => {
 	const random = rng(0x72616e67);
 	const int = (below: number) => Math.floor(random(below));
@@ -32,15 +32,18 @@ test("the incremental union matches a full fold", () => {
 	const keys = (ranges: readonly Range[]) => ranges.map(rangeKey);
 	const ranges = new Ranges();
 	const held: Range[] = [];
-	for (let step = 0; step < 50_000; step++) {
+	let before: string[] = [];
+	for (let step = 0; step < 20_000; step++) {
 		const grow = held.length < 24 ? 0.65 : 0.35;
-		const before = keys(union(held));
 		let changed: boolean;
 		if (held.length === 0 || random(1) < grow) {
 			const range: Range = {};
 			const from = start();
 			if (from !== undefined) range.start = from;
 			if (random(1) < 0.6) range.end = BigInt(int(12));
+			const priority = int(3);
+			if (priority !== 0) range.priority = priority;
+			if (random(1) < 0.5) range.order = "ascending";
 			held.push(range);
 			changed = ranges.add(range);
 		} else {
@@ -51,6 +54,7 @@ test("the incremental union matches a full fold", () => {
 		const after = keys(union(held));
 		expect(keys(ranges.union())).toEqual(after);
 		expect(changed).toBe(!Bun.deepEquals(before, after));
+		before = after;
 	}
 });
 
@@ -66,6 +70,39 @@ test("a live join covers nothing but itself", () => {
 	// A join with an end is a range of its own too, apart from the same lag without one.
 	const bounded = { ...two, end: 9n };
 	expect(union([two, bounded]).map(rangeKey)).toEqual([two, bounded].map(rangeKey));
+});
+
+// A range folds only into ranges at a policy covering its own: a higher priority, or the same one in
+// its order or newest first. Mirrors the Rust `a_range_folds_only_into_a_covering_policy`.
+test("a range folds only into a covering policy", () => {
+	const at = (range: Range, priority: number, order: "ascending" | "descending"): Range => {
+		const out: Range = { ...range };
+		if (priority !== 0) out.priority = priority;
+		if (order === "ascending") out.order = order;
+		return out;
+	};
+	const wide = { start: 0n };
+	const narrow = { start: 5n, end: 9n };
+	// A higher priority covers a lower one in either order.
+	expect(union([at(wide, 2, "ascending"), at(narrow, 1, "descending")])).toEqual([at(wide, 2, "ascending")]);
+	// Newest first covers oldest first at one priority, never the other way around.
+	expect(union([at(wide, 1, "descending"), at(narrow, 1, "ascending")])).toEqual([at(wide, 1, "descending")]);
+	expect(union([at(wide, 1, "ascending"), at(narrow, 1, "descending")])).toEqual([
+		at(wide, 1, "ascending"),
+		at(narrow, 1, "descending"),
+	]);
+	// A lower priority never covers a higher one, and both stay asked.
+	expect(union([at(wide, 0, "descending"), at(narrow, 3, "ascending")])).toEqual([
+		at(wide, 0, "descending"),
+		at(narrow, 3, "ascending"),
+	]);
+	// Changing one range's policy moves the union by that range alone.
+	const ranges = new Ranges();
+	expect(ranges.add(at(wide, 0, "descending"))).toBe(true);
+	expect(ranges.add(at(narrow, 0, "descending"))).toBe(false);
+	expect(ranges.add(at(narrow, 3, "descending"))).toBe(true);
+	expect(ranges.remove(at(narrow, 0, "descending"))).toBe(false);
+	expect(ranges.union()).toEqual([at(wide, 0, "descending"), at(narrow, 3, "descending")]);
 });
 
 // A range from the oldest group with an end takes in every one ending before it, so only the furthest

@@ -636,12 +636,11 @@ impl std::task::Wake for Woken {
 /// sequence, not their time, so a join placed by time alone would land on the newest. Oldest
 /// first, as the tests read them back.
 pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default()
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: None,
-			max: Some(max),
-		})])
-		.with_order(moq_net::track::Order::Ascending)
+	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		min: None,
+		max: Some(max),
+	})
+	.with_order(moq_net::track::Order::Ascending)])
 }
 
 /// A group a test writes, created on its track by its first frame and keyed by that frame's

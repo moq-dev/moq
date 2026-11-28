@@ -1,4 +1,4 @@
-//! Criterion, or CodSpeed's instrumented Criterion when rust2-bench sets `cfg(codspeed)` to count instructions.
+//! Criterion, or CodSpeed's instrumented Criterion when swole sets `cfg(codspeed)` to count instructions.
 //!
 //! The workspace depends on this as `criterion`, so benches stay plain Criterion. CodSpeed's
 //! own compat crate is not used directly because its uninstrumented build is a Criterion 0.5

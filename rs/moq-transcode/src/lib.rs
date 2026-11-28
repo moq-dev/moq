@@ -1130,6 +1130,7 @@ mod tests {
 		let past = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(3),
 			end: Some(4),
+			..Default::default()
 		}]);
 		let rung = consumer.track("video/120p").unwrap();
 		let _subscriber = rung.subscribe(past).await.unwrap();
@@ -1194,6 +1195,7 @@ mod tests {
 		let past = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
 			start: moq_net::track::Start::Time(3),
 			end: Some(4),
+			..Default::default()
 		}]);
 		let rung = consumer.track("video/120p").unwrap();
 		let _subscriber = rung.subscribe(past).await.unwrap();
@@ -2203,6 +2205,7 @@ mod tests {
 			moq_net::track::Range {
 				start: moq_net::track::Start::Live { min, max },
 				end: None,
+				..
 			},
 		] = asked.ranges[..]
 		else {

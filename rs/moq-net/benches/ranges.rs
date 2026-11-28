@@ -56,6 +56,7 @@ fn span(start: u64, end: u64) -> track::Range {
 	track::Range {
 		start: track::Start::Time(start),
 		end: Some(end),
+		..Default::default()
 	}
 }
 
@@ -165,6 +166,7 @@ impl FillsOut {
 			track::Subscription::default().with_ranges((0..ranges).map(|i| span(i * 2, i * 2)).chain([track::Range {
 				start: track::Start::Time(start),
 				end: None,
+				..Default::default()
 			}]));
 		let mut reader = track.subscribe(subscription);
 		drain(&mut reader);

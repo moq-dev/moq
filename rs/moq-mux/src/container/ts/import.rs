@@ -10173,12 +10173,13 @@ pub(super) mod test {
 
 		// Each group as published, its empty end marker included.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			})])
-			.with_order(moq_net::track::Order::Ascending);
+			},
+		)
+		.with_order(moq_net::track::Order::Ascending)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = track.recv_group().await.unwrap() {
@@ -10420,12 +10421,13 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			})])
-			.with_order(moq_net::track::Order::Ascending);
+			},
+		)
+		.with_order(moq_net::track::Order::Ascending)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
@@ -10473,12 +10475,13 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			})])
-			.with_order(moq_net::track::Order::Ascending);
+			},
+		)
+		.with_order(moq_net::track::Order::Ascending)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
@@ -10525,12 +10528,13 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			})])
-			.with_order(moq_net::track::Order::Ascending);
+			},
+		)
+		.with_order(moq_net::track::Order::Ascending)]);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {

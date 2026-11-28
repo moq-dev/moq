@@ -21,14 +21,14 @@ pub struct Consumer<E = ()> {
 impl<E: DeserializeOwned + Default> Consumer<E> {
 	/// Read a catalog track, compressed or not, for a reader playing `delay` behind the live edge.
 	///
-	/// Subscribes to it at [`Catalog::default_subscription`]'s priority. A zero `delay` reads only
+	/// Subscribes to it at the catalog's priority, as [`Catalog::default_subscription`] does. A zero `delay` reads only
 	/// the newest catalog, for a reader that applies each on arrival. A reader that holds each update
 	/// until its media reaches the update's timestamp passes its playout delay instead, and reads
 	/// every update in order that it may still need: an update stays deliverable until it falls
 	/// `delay` behind the live edge. See [`moq_json::snapshot::Consumer::new`].
 	pub fn new(track: moq_net::track::Consumer, delay: std::time::Duration) -> Self {
 		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.priority = Catalog::default_subscription().priority;
+		config.priority = crate::catalog::PRIORITY.catalog;
 		config.delay = delay;
 		Self {
 			base: track.broadcast().path.clone(),

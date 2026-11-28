@@ -12,7 +12,7 @@ gaps before every read.
 Kept by the maintainer on 2026-11-24 ([pick round](https://github.com/moq-dev/moq/pull/9529#issuecomment-7140096782)).
 
 Found while building [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529), with the fix
-[A front's ordered reader reports a drop that lands with the group above it](/quest/m3/front-drop-with-next-group.md)
+[A front's ordered reader reports a drop that lands with the group above it](/quest/m2/front-drop-with-next-group.md)
 plans applied: `waiting_time_start::a_range_before_every_group_reads_past_it` in
 `rs/moq-net/tests/integration/` fails there, the relayed reader reporting a NotFound gap over
 `10..21` where the direct one reports none.

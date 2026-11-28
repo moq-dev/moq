@@ -24,6 +24,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Front } from "../resume.ts";
 import { Cursor, Reader, Stream, Writer } from "../stream.ts";
+import { topPolicy } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
@@ -3735,13 +3736,15 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x20, 10]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(117);
+		expect(topPolicy(track.subscription.peek())?.priority).toBe(117);
 		// Only the priority changes; the group range, and so its retention, survives.
-		expect(track.subscription.peek()?.ranges).toEqual(before?.ranges);
+		expect(track.subscription.peek()?.ranges).toEqual(
+			before?.ranges?.map((range) => ({ ...range, priority: 117 })),
+		);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(117);
+		expect(topPolicy(track.subscription.peek())?.priority).toBe(117);
 	} finally {
 		client.close();
 		track.finish();
@@ -4844,7 +4847,7 @@ test("draft-22: a SUBSCRIBE's fill reads the cache at the converted subscriber p
 		}),
 	);
 	try {
-		expect(track.subscription.peek()?.priority).toBe(-64);
+		expect(topPolicy(track.subscription.peek())?.priority).toBe(-64);
 		const stream = await nextUni(fx.uni);
 		const served = await readFill(new Reader(stream, undefined, V22), "ascending");
 		expect(served.reset).toBeUndefined();
@@ -4883,7 +4886,7 @@ test("draft-22: an update's fill reads the cache at the converted subscriber pri
 			}),
 		);
 		try {
-			expect(track.subscription.peek()?.priority).toBe(model);
+			expect(topPolicy(track.subscription.peek())?.priority).toBe(model);
 			spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
 			const parameters = new Parameters();
 			parameters.fillParameters = Filter.encodeFill(
@@ -4896,7 +4899,7 @@ test("draft-22: an update's fill reads the cache at the converted subscriber pri
 			await RequestOk.decode(client.reader, fx.version);
 			// The fill is parked writing its header, so the fork it reads through is still live.
 			await parked.promise;
-			expect(track.subscription.peek()?.priority, `wire ${wire}`).toBe(model);
+			expect(topPolicy(track.subscription.peek())?.priority, `wire ${wire}`).toBe(model);
 		} finally {
 			client.close();
 			track.finish();
@@ -5210,7 +5213,7 @@ test("a SUBSCRIBE carries no budget, so the publisher's own policy bounds it", a
 	try {
 		// With no group yet it asks history from time zero, whose groups only the publisher's max
 		// age expires.
-		const unbounded = [{ start: 0n }];
+		const unbounded = [{ start: 0n, priority: -1 }];
 		expect(track.subscription.peek()?.ranges).toEqual(unbounded);
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n }).encode(client.writer, fx.version);

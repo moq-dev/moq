@@ -144,8 +144,6 @@ private:
 		// Whether a frame was written. Until one is, the importer still holds the
 		// init's parameter sets, which a discontinuity would discard.
 		bool started = false;
-		// Audio only: where the open group starts, in microseconds, while one is open.
-		std::optional<int64_t> group_start_us;
 	};
 
 	void VideoInit(obs_encoder_t *encoder);

@@ -344,8 +344,7 @@ fn consume(generation: &Producer) -> Consumer {
 /// oldest first.
 fn subscribe_all() -> moq_net::track::Subscription {
 	moq_net::track::Subscription::default()
-		.with_ranges([moq_net::track::Range::ALL])
-		.with_order(moq_net::track::Order::Ascending)
+		.with_ranges([moq_net::track::Range::ALL.with_order(moq_net::track::Order::Ascending)])
 }
 
 /// A track whose superseded groups stay fresh, so [`subscribe_all`] reads every group.

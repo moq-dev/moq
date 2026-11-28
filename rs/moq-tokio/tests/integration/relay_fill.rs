@@ -357,13 +357,13 @@ fn table_subscription(ask: &serde_json::Value) -> Subscription {
 			.map(|range| Range {
 				start: start(range),
 				end: range.get("end").and_then(serde_json::Value::as_u64),
+				order: moq_net::track::Order::Ascending,
+				..Default::default()
 			})
 			.collect(),
-		None => vec![Range::ALL],
+		None => vec![Range::ALL.with_order(moq_net::track::Order::Ascending)],
 	};
-	Subscription::default()
-		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges(ranges)
+	Subscription::default().with_ranges(ranges)
 }
 
 /// The group starts `subscriber` hands out, until it has `want` of them, each within

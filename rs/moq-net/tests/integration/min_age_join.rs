@@ -5,6 +5,7 @@
 //! for each join and starts it exactly where the answer says. A range with no start reads from
 //! the oldest group instead.
 
+use crate::support::EveryRange;
 use std::time::Duration;
 
 use moq_net::{Timestamp, Version, cache, origin, track};
@@ -134,7 +135,8 @@ impl Chain {
 		let join = track::Range::from(track::Start::Live {
 			min: Some(min),
 			max: Some(MAX),
-		});
+		})
+		.with_order(track::Order::Ascending);
 		let mut source = self.source.clone();
 		while source
 			.subscription()
@@ -158,8 +160,8 @@ fn joining(min: Option<Duration>) -> track::Subscription {
 		None => track::Start::Oldest,
 	};
 	track::Subscription::default()
-		.with_order(track::Order::Ascending)
 		.with_ranges([track::Range::from(start)])
+		.ordered(track::Order::Ascending)
 }
 
 /// The first group `reader` reads in key order.
@@ -243,6 +245,7 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 				max: Some(MAX),
 			},
 			end: Some(1000),
+			..Default::default()
 		}])
 	};
 	kio::clock::timeout(TIMEOUT, async {
@@ -434,7 +437,8 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 			[track::Range::from(track::Start::Live {
 				min: Some(Duration::ZERO),
 				max: Some(MAX)
-			})]
+			})
+			.with_order(track::Order::Ascending)]
 		);
 	})
 	.await
@@ -468,7 +472,8 @@ async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() 
 		let join = track::Range::from(track::Start::Live {
 			min: Some(lag),
 			max: Some(MAX),
-		});
+		})
+		.with_order(track::Order::Ascending);
 		let mut asked = source.clone();
 		while asked
 			.subscription()
@@ -479,10 +484,11 @@ async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() 
 
 		// An oldest reader hides the unanswered live range before any group answers it.
 		let mut oldest = track.subscribe(joining(None)).await.unwrap().ordered();
-		while asked
-			.subscription()
-			.is_none_or(|subscription| !subscription.ranges.contains(&track::Range::ALL))
-		{
+		while asked.subscription().is_none_or(|subscription| {
+			!subscription
+				.ranges
+				.contains(&track::Range::ALL.with_order(track::Order::Ascending))
+		}) {
 			asked.subscription_changed().await.unwrap();
 		}
 		for start in (0..=2000).step_by(500) {

@@ -163,9 +163,7 @@ impl<S: ObjectStore> Track<S> {
 			Some(next) => Range::from(Start::Time(next.group)),
 			None => Range::ALL,
 		};
-		let subscription = Subscription::default()
-			.with_order(Order::Ascending)
-			.with_ranges([range]);
+		let subscription = Subscription::default().with_ranges([range.with_order(Order::Ascending)]);
 
 		let subscribed = match self.shared.broadcast.track(&self.name) {
 			Ok(track) => track.subscribe(subscription).await,

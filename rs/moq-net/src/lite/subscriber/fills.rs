@@ -50,29 +50,29 @@ impl FillAsk {
 		}
 	}
 
-	/// The bounded ranges `groups` take on the wire, each ending before a group's first
-	/// frame, as `wire_ranges` ends an absolute one.
-	pub fn wire(groups: &RangeSet<u64>) -> impl Iterator<Item = lite::Range> + '_ {
-		groups.iter().map(|groups| lite::Range {
-			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
-			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+	/// The bounded ranges `groups` take on the wire at the fills' priority and order, each
+	/// ending before a group's first frame, as `wire_ranges` ends an absolute one. A fill's
+	/// range is its own, so the demand's ranges keep their priority and the live feed never
+	/// loosens for a fill: a group it drops as stale is recovered on its own (see
+	/// [`Recovery`]).
+	pub fn wire<'a>(&self, groups: &'a RangeSet<u64>) -> impl Iterator<Item = lite::Range> + 'a {
+		let policy = lite::Policy {
+			priority: self.priority,
+			order: self.order,
+		};
+		groups.iter().map(move |groups| {
+			lite::Range {
+				start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+				end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+				..lite::Range::OPEN
+			}
+			.with_policy(policy)
 		})
 	}
 
-	/// `demand` asked with the fills' priority too. A fill's range is its own, so the demand's
-	/// live joins keep their budgets and the live feed never loosens for a fill: a group it
-	/// drops as stale is recovered on its own (see [`Recovery`]).
-	pub fn merge(&self, demand: Subscription) -> Subscription {
-		let priority = demand.priority.max(self.priority);
-		demand.with_priority(priority)
-	}
-
 	/// A subscription asking for the fills alone: no range of its own, so no floor.
-	pub fn subscription(&self) -> Subscription {
-		Subscription::default()
-			.with_ranges([])
-			.with_priority(self.priority)
-			.with_order(self.order)
+	pub fn subscription() -> Subscription {
+		Subscription::default().with_ranges([])
 	}
 }
 
@@ -723,12 +723,19 @@ impl Recovery {
 		let end = (!one_start).then_some(groups.end);
 		let subscription = Subscription::default()
 			.with_ranges(track::Range::span(Some(groups.start), end))
-			.with_priority(priority)
-			.with_order(Order::Ascending);
-		let ranges = vec![lite::Range {
-			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
-			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
-		}];
+			.prioritized(priority)
+			.ordered(Order::Ascending);
+		let ranges = vec![
+			lite::Range {
+				start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+				end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
+				..lite::Range::OPEN
+			}
+			.with_policy(lite::Policy {
+				priority,
+				order: Order::Ascending,
+			}),
+		];
 		Self::open(serve, serving, groups, subscription, ranges, !one_start)
 	}
 
@@ -739,13 +746,21 @@ impl Recovery {
 			.with_ranges([track::Range {
 				start: track::Start::Time(time),
 				end: Some(time),
+				..Default::default()
 			}])
-			.with_priority(priority)
-			.with_order(Order::Ascending);
-		let ranges = vec![lite::Range {
-			start: Some(lite::Anchor::Time(time)),
-			end: Some(lite::Anchor::Time(time)),
-		}];
+			.prioritized(priority)
+			.ordered(Order::Ascending);
+		let ranges = vec![
+			lite::Range {
+				start: Some(lite::Anchor::Time(time)),
+				end: Some(lite::Anchor::Time(time)),
+				..lite::Range::OPEN
+			}
+			.with_policy(lite::Policy {
+				priority,
+				order: Order::Ascending,
+			}),
+		];
 		Self::open(serve, serving, groups, subscription, ranges, true)
 	}
 
@@ -1115,6 +1130,7 @@ fn cap(groups: &Range<u64>, active: &mut SubStream) -> Result<(), Error> {
 	let range = lite::Range {
 		start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 		end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+		..lite::Range::OPEN
 	};
 	let (edit, _) = active.live.edit_keyed(&[((), range)], |_| ())?;
 	super::buffer_update(active, edit)

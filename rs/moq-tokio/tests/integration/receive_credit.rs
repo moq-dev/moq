@@ -16,7 +16,10 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_net::{Timestamp, frame, track::Subscription};
+use moq_net::{
+	Timestamp, frame,
+	track::{Range, Subscription},
+};
 use moq_tokio::quic::{driver, web};
 use tokio::io::AsyncWriteExt;
 
@@ -197,7 +200,7 @@ async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: 
 		remote
 			.track(name)
 			.unwrap()
-			.subscribe(Subscription::default().with_priority(priority)),
+			.subscribe(Subscription::default().with_ranges([Range::default().with_priority(priority)])),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -656,9 +659,10 @@ async fn groups_waiting_for_track_info_give_way_first() {
 
 	// Subscription 1, sent alongside a TRACK whose TRACK_INFO the publisher holds back.
 	let mut requests = setup.broadcast.broadcast().requests();
-	let every = Subscription::default()
-		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
+	let every =
+		Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))
+				.with_order(moq_net::track::Order::Ascending)]);
 	let waiting = tokio::spawn({
 		let remote = setup.remote.clone();
 		async move { remote.track("parked").unwrap().subscribe(every).await }

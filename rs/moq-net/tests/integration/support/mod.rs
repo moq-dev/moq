@@ -132,6 +132,31 @@ impl AtStart for group::Producer {
 	}
 }
 
+/// Setting every range's priority or order at once, as tests that ask one of either do.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub trait EveryRange {
+	/// These preferences with every range sent in `order`.
+	fn ordered(self, order: track::Order) -> Self;
+	/// These preferences with every range sent at `priority`.
+	fn prioritized(self, priority: i8) -> Self;
+}
+
+impl EveryRange for track::Subscription {
+	fn ordered(mut self, order: track::Order) -> Self {
+		for range in &mut self.ranges {
+			range.order = order;
+		}
+		self
+	}
+
+	fn prioritized(mut self, priority: i8) -> Self {
+		for range in &mut self.ranges {
+			range.priority = priority;
+		}
+		self
+	}
+}
+
 /// The groups from the one containing `keys`' start through the one containing its end, as
 /// times: on a track whose groups start at consecutive keys, the groups with those keys.
 ///
@@ -152,7 +177,11 @@ pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 		Some(start) => track::Start::Time(start),
 		None => track::Start::Oldest,
 	};
-	track::Range { start, end }
+	track::Range {
+		start,
+		end,
+		..Default::default()
+	}
 }
 
 /// Wait until anyone wants the track.

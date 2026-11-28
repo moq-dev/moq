@@ -17,6 +17,7 @@ use crate::mesh_withdraw::{PRODUCTION, PRODUCTION_LATENCY_MS};
 use crate::path_routes::{DEBOUNCE, HOLD, lite07};
 use crate::route_change::{payload, produce_origin, timed};
 use crate::support;
+use crate::support::EveryRange;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -190,7 +191,7 @@ async fn reader_of(
 	let remote = node.consume().request(path, None).await.unwrap();
 	let prefs = track::Subscription::default()
 		.with_max(Duration::from_secs(60))
-		.with_order(track::Order::Ascending);
+		.ordered(track::Order::Ascending);
 	let mut sub = remote.track(name).unwrap().subscribe(prefs).await.unwrap();
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {

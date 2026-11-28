@@ -28,7 +28,7 @@ import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
-import { withMax } from "./subscription.test-util.ts";
+import { everyRange, topPolicy, withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Position, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -592,10 +592,10 @@ test("integration: lite-07 joins a late live join at the live edge", async () =>
 			expect((await first.recvGroup())?.start).toBe(BigInt(key));
 		}
 		// An update that changes no range leaves each report at the edge it joined at.
-		first.update({ ...subscription, priority: 7 });
+		first.update(everyRange({ ...subscription }, { priority: 7 }));
 		await withTimeout(
 			(async () => {
-				while (producer.subscription.peek()?.priority !== 7) await yieldNow();
+				while (topPolicy(producer.subscription.peek())?.priority !== 7) await yieldNow();
 			})(),
 			Duration.millis(1000),
 			"the update never reached the publisher",

@@ -30,7 +30,7 @@ impl Requested {
 			this,
 			key,
 			subscribing: track
-				.subscribe(track::Subscription::default().with_priority(priority))
+				.subscribe(track::Subscription::default().prioritized(priority))
 				.into_inner(),
 		}
 	}
@@ -67,7 +67,7 @@ impl kio::Task for Requested {
 			self.priority = priority;
 			if let Err(err) = self
 				.subscribing
-				.update(track::Subscription::default().with_priority(priority))
+				.update(track::Subscription::default().prioritized(priority))
 			{
 				self.reject(err);
 				return Poll::Ready(());
@@ -124,14 +124,14 @@ impl Shared {
 				None => self.held = None,
 				Some(priority) => match &mut self.held {
 					Some(held) => {
-						if let Err(err) = held.update(held.subscription().with_priority(priority)) {
+						if let Err(err) = held.update(held.subscription().prioritized(priority)) {
 							self.producer.clone().abort(err);
 						}
 					}
 					None => {
 						self.held = Some(
 							self.track
-								.subscribe(track::Subscription::default().with_priority(priority))
+								.subscribe(track::Subscription::default().prioritized(priority))
 								.parked(),
 						)
 					}

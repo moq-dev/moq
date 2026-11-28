@@ -667,8 +667,7 @@ impl Consume {
 						// The publisher must retain the history the decoder needs too.
 						let subscription = playout.subscription(
 							moq_net::track::Subscription::default()
-								.with_priority(C::PRIORITY)
-								.with_ranges([moq_net::track::Range::ALL]),
+								.with_ranges([moq_net::track::Range::ALL.with_priority(C::PRIORITY)]),
 						);
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
@@ -1832,7 +1831,8 @@ mod tests {
 						max: max
 							.map(|max| max.saturating_add(warmup))
 							.filter(|max| *max != Duration::MAX),
-					})]
+					})
+					.with_priority(hang::catalog::PRIORITY.audio)]
 				);
 				consumer.cancel().await;
 			}

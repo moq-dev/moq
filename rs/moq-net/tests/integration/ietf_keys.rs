@@ -5,6 +5,7 @@
 
 use crate::WithMax as _;
 use crate::support;
+use crate::support::EveryRange;
 
 use std::time::Duration;
 
@@ -69,7 +70,7 @@ async fn a_relay_keeps_keys_and_the_gaps_between_them() {
 					Subscription::default()
 						.with_ranges([support::keys(2..=8)])
 						.with_max(None)
-						.with_order(moq_net::track::Order::Ascending),
+						.ordered(moq_net::track::Order::Ascending),
 				)
 				.await
 				.unwrap();

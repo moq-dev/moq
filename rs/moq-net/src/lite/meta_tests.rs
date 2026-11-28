@@ -401,9 +401,9 @@ async fn metadata_history_fill_carries_no_payload() {
 	}
 	let mut sub = meta(
 		&chain.remote,
-		crate::track::Subscription::default()
-			.with_ranges([crate::track::Range::from(crate::track::Start::Oldest)])
-			.with_order(crate::track::Order::Ascending),
+		crate::track::Subscription::default().with_ranges([
+			crate::track::Range::from(crate::track::Start::Oldest).with_order(crate::track::Order::Ascending)
+		]),
 	)
 	.await;
 	for at in [0, 10, 20] {

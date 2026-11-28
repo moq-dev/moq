@@ -371,8 +371,7 @@ void main() {
       final consumer = track.consume(
         subscription: Subscription(
           delay: Delay(max: const Duration(seconds: 10)),
-          ranges: [Range(start: Timestamp.unscaled(0))],
-          order: Order.ascending,
+          ranges: [Range(start: Timestamp.unscaled(0), order: Order.ascending)],
         ),
       );
       final starts = <int>[];

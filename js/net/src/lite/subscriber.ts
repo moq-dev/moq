@@ -61,7 +61,10 @@ import { Budget } from "../util/yield.ts";
 import {
 	AT_KEYS,
 	EMPTY,
+	latestAt,
+	type Policy,
 	placedAsTimes,
+	rangesPolicy,
 	rangesStart,
 	sameRanges,
 	span,
@@ -107,6 +110,7 @@ import {
 	inclusiveGroupEnd,
 	LiveRanges,
 	type RangeKind,
+	type Retune,
 	requestedRange,
 	Subscribe,
 	type SubscribeStart,
@@ -115,6 +119,7 @@ import {
 	toWireRanges,
 	type WireAnchor,
 	type WireRange,
+	withPolicy,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { decodeTracksEventMaybe, Tracks as TracksMessage } from "./tracks.ts";
@@ -267,16 +272,10 @@ interface SubscribeEntry {
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
 	declared?: { start?: bigint | null; requested?: bigint };
-	// The narrowest live join's max in milliseconds the SUBSCRIBE and every SUBSCRIBE_UPDATE asked,
-	// which a lite-07 stale drop is recorded under: the wire does not say which range or update a
-	// drop crossed, so it may have been judged under any live join's asked before it arrived, or
-	// the publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
-	// request of its own; too wide would settle it on a group it could still get.
-	staleBudget: number;
 	// The exclusive group end every live range the SUBSCRIBE and each SUBSCRIBE_UPDATE asked ended at,
 	// undefined once one followed the live edge or two ended apart: the cap a lite-07 stale drop is
-	// recorded within, so a reader capped alike settles on it. Like the budget, the wire does not say
-	// which update a drop crossed, so a cap that ever varied settles no capped reader.
+	// recorded within, so a reader capped alike settles on it. The wire does not say which update a
+	// drop crossed, so a cap that ever varied settles no capped reader.
 	staleCap: bigint | undefined;
 	// The subscribe stream, from the setup that registered this entry to its end.
 	stream: SubscribeStream;
@@ -1238,7 +1237,7 @@ export class Subscriber {
 		signal: AbortSignal,
 	): Promise<void> {
 		const key = JSON.stringify([consumed.id, request.name]);
-		const subscriber = wireOf(consumer).subscribe(request.name, { priority: request.priority.peek() ?? 0 });
+		const subscriber = wireOf(consumer).subscribe(request.name, latestAt(request.priority.peek() ?? 0));
 		try {
 			await untilAborted(subscriber.info(), signal);
 			const shared = this.#legacyDatagrams.get(key);
@@ -1465,7 +1464,7 @@ export class Subscriber {
 	) {
 		const { valid } = consumed;
 		const { ranges, placed } = wireHeld(request.subscription);
-		const msg = this.#subscribeMessage(id, broadcast, consumed, request, request.subscription, ranges, placed);
+		const msg = this.#subscribeMessage(id, broadcast, consumed, request, rangesPolicy(ranges), ranges, placed);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
@@ -1533,16 +1532,16 @@ export class Subscriber {
 		await this.#serveStream(id, broadcast, consumed, state, stream, entry, msg);
 	}
 
-	// The SUBSCRIBE of `target` (a metadata subscription for its metadata copy) for `subscription`,
-	// asking for `ranges`, its wire ranges in the model, each live join `placed` at a group by index
-	// starting there. Its own wire ranges wait for the track's timescale when they name a time (see
-	// `#withRanges`).
+	// The SUBSCRIBE of `target` (a metadata subscription for its metadata copy) asking for `ranges`,
+	// its wire ranges in the model, at `policy` as a wire without a policy per range carries one, each
+	// live join `placed` at a group by index starting there. Its own wire ranges wait for the track's
+	// timescale when they name a time (see `#withRanges`).
 	#subscribeMessage(
 		id: bigint,
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		target: { name: string; meta: boolean },
-		subscription: Readonly<track.Subscription>,
+		policy: Policy,
 		ranges: readonly track.Range[],
 		placed: ReadonlyMap<number, bigint> = new Map(),
 	): Subscribe {
@@ -1552,8 +1551,8 @@ export class Subscriber {
 			broadcast,
 			identity: consumed.identity,
 			track: target.name,
-			priority: subscription.priority ?? 0,
-			order: subscription.order,
+			priority: policy.priority,
+			order: policy.order,
 			maxDelay: maxAge(ranges),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
@@ -1785,8 +1784,8 @@ export class Subscriber {
 		}
 	}
 
-	// `msg` asking for `ranges` on a wire that carries them, each live join `placed` at a group by
-	// index as a Joined start there.
+	// `msg` asking for `ranges` on a wire that carries them, each at its own priority and order, and
+	// each live join `placed` at a group by index as a Joined start there.
 	#withRanges(msg: Subscribe, ranges: readonly track.Range[], placed?: ReadonlyMap<number, bigint>): Subscribe {
 		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, placed);
 		return msg;
@@ -1858,7 +1857,6 @@ export class Subscriber {
 		const entry: SubscribeEntry = {
 			track: producer,
 			meta: msg.meta,
-			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			...framing,
 			// Before lite-07, the effective max delay is the stopgap grace: the wrong clock (it
@@ -1903,9 +1901,9 @@ export class Subscriber {
 						held?.close();
 						held = undefined;
 					} else if (held) {
-						held.update({ priority });
+						held.update(latestAt(priority));
 					} else {
-						held = producer.subscribe({ priority });
+						held = producer.subscribe(latestAt(priority));
 					}
 				};
 				const dispose = datagrams.priority.subscribe(sync);
@@ -1919,7 +1917,7 @@ export class Subscriber {
 
 		// Before any group of it reaches a reader, its publisher may judge one too old under any
 		// live join it asked.
-		hooks.judgeUnder(producer, entry.staleBudget);
+		hooks.judgeUnder(producer, narrowest(entry.live));
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
 		return entry;
@@ -2157,10 +2155,13 @@ export class Subscriber {
 			);
 
 			const ranges: WireRange[] = [
-				{
-					start: { absolute: key, frame: 0 },
-					end: { absolute: key + 1n, frame: 0 },
-				},
+				withPolicy(
+					{
+						start: { absolute: key, frame: 0 },
+						end: { absolute: key + 1n, frame: 0 },
+					},
+					{ priority, order: "ascending" },
+				),
 			];
 			const msg = new Subscribe({
 				id,
@@ -2215,7 +2216,6 @@ export class Subscriber {
 				// Unused for fillGroup entries; satisfies the shared SubscribeEntry shape.
 				track: undefined as unknown as track.Producer,
 				meta: false,
-				staleBudget: NO_MAX_DELAY,
 				staleCap: key + 1n,
 				compress: info.compress,
 				timescale: info.timescale ?? 0,
@@ -2597,28 +2597,28 @@ export class Subscriber {
 		// past the run, and a relay's start may be its floor, which names no group.
 		const oneStart = !hasGroupEnd(this.version);
 		const oneShot = keepsSubscribeOpen(this.version);
+		const policy: Policy = { priority, order: "ascending" };
 		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
 		// A metadata copy's fill asks for headers alone too.
 		const target = { name: producer.name, meta: copy.meta };
-		const msg = this.#withRanges(
-			this.#subscribeMessage(id, broadcast, consumed, target, { priority, order: "ascending" }, ranges),
-			ranges,
-		);
+		const msg = this.#withRanges(this.#subscribeMessage(id, broadcast, consumed, target, policy, ranges), ranges);
 		// Lite-07 recovery asks for exact group bounds [Position(start, 0), Position(end, 0))
 		// rather than time-containment ranges.
 		if (hasRanges(this.version)) {
 			msg.ranges = [
-				{
-					start: { absolute: groups.start, frame: 0 },
-					end: { absolute: groups.end, frame: 0 },
-				},
+				withPolicy(
+					{
+						start: { absolute: groups.start, frame: 0 },
+						end: { absolute: groups.end, frame: 0 },
+					},
+					msg,
+				),
 			];
 		}
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
 			meta: copy.meta,
-			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			compress: copy.compress,
 			timescale: copy.timescale,
@@ -3103,11 +3103,11 @@ export class Subscriber {
 					if (hasSkip(this.version)) entry.tail.drop(start, end);
 					else entry.tail.account(start, end);
 					this.#dropped(entry, start, end);
-					// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
-					// judged under: a reader wider than that does not settle on it, and asks for the group
-					// with a request of its own.
+					// On lite-07 an OLD drop is stale, recorded under the max age it names it judged under: a
+					// reader wider than that does not settle on it, and asks for the group with a request of
+					// its own.
 					const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-					const hole = stale ? staleHole(entry.staleBudget, entry.staleCap) : { error };
+					const hole = stale ? staleHole(resp.drop.maxAge ?? NO_MAX_DELAY, entry.staleCap) : { error };
 					hooks.dropTrackGroups(entry.track, start, end, hole);
 					entry.fills?.refuse(start, end, error);
 				}
@@ -3269,11 +3269,7 @@ export class Subscriber {
 			() => null,
 			() => null,
 		);
-		let lastSent: track.Subscription = {
-			priority: msg.priority,
-			order: msg.order,
-			ranges: entry.asked,
-		};
+		let lastSent: track.Subscription = { ranges: entry.asked };
 		if (entry.askedPlaced.size > 0) lastSent.placed = entry.askedPlaced;
 
 		// The wanted group is subscription state: an update announces each new one past our
@@ -3282,6 +3278,7 @@ export class Subscriber {
 		let sentWanted: bigint | undefined;
 		// What the fills asked with the last update, and the priority it carried.
 		let sentFills: Run[] = [];
+		let sentFillOrder: track.Order | undefined;
 		let sentPriority = msg.priority;
 		// The time starts and live joins the readers waited on as the last update went out.
 		let sentAsks: bigint[] = [];
@@ -3314,16 +3311,19 @@ export class Subscriber {
 			// Lite-07 asks upstream to place each time start and live join the readers wait on.
 			const asks = hasRanges(this.version) ? hooks.requested(track).asks() : [];
 			const joins = hasRanges(this.version) ? hooks.requested(track).joins() : [];
-			// Lite-07 asks the held fills' groups through the same subscription, under the demand's
-			// terms but the more urgent priority.
+			// Lite-07 asks the held fills' groups through the same subscription, each at the fills' own
+			// priority and order; a wire before it carries one policy, the demand's or the more urgent
+			// fills'.
 			const fills = entry.fills?.ask;
 			const fillGroups = fills?.groups ?? [];
-			const priority = Math.max(current?.priority ?? 0, fills?.priority ?? -128);
+			const demandPolicy = rangesPolicy(current === undefined ? [] : wireHeld(current).ranges);
+			const priority = Math.max(demandPolicy.priority, fills?.priority ?? -128);
 			if (
 				current === undefined ||
 				(refresh === undefined &&
 					priority === sentPriority &&
 					sameRuns(fillGroups, sentFills) &&
+					(fillGroups.length === 0 || fills?.order === sentFillOrder) &&
 					sameAsks(asks, sentAsks) &&
 					sameJoins(joins, sentJoins) &&
 					this.#sameSubscription(current, lastSent))
@@ -3355,14 +3355,14 @@ export class Subscriber {
 
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
-			let edit: { remove: bigint[]; add: WireRange[]; retune: [bigint, number | null][] } | undefined;
+			let edit: { remove: bigint[]; add: WireRange[]; retune: [bigint, Retune][] } | undefined;
 			if (hasRanges(this.version)) {
 				// The demand's ranges and the fills' groups, widened together until they fit. The fills
 				// keep their exact ask, so what they ask next is compared with that, not the wire.
 				const demanded = toWireRanges(ranges, placed);
 				const fields = await this.#subscribeFields(msg, {
 					priority,
-					order: current.order,
+					order: demandPolicy.order,
 					maxDelay: maxAge(ranges),
 				});
 				const budget = Fit.budget(
@@ -3373,14 +3373,18 @@ export class Subscriber {
 				const fitted = Fit.fit(demanded, fillGroups, entry.fills?.avoid() ?? [], budget);
 				// A fill's range starting past its run speaks only while that run is asked whole.
 				entry.fills?.retireSkipped(fitted.fills);
-				const fillRanges: WireRange[] = fitted.fills.map((run) => ({
-					start: { absolute: run.start },
-					end: { absolute: run.end },
-				}));
+				// Each fill's range is its own, at the fills' priority and order, so the demand's ranges
+				// keep theirs. Mirrors the Rust `FillAsk::wire`.
+				const fillPolicy = { priority: fills?.priority ?? 0, order: fills?.order ?? "ascending" };
+				const fillRanges: WireRange[] = fitted.fills.map((run) =>
+					withPolicy({ start: { absolute: run.start }, end: { absolute: run.end } }, fillPolicy),
+				);
 				// The probes the readers' asks and joins need, as many as fit beside the rest: those left
 				// out go once an answer lets the readers waiting on others go.
 				const wanted = wantedProbes(entry, asks, joins, fitted.ranges);
-				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], wanted.probes);
+				// A probe asks on behalf of the demand's readers, at what the demand asks as a whole.
+				const asked = wanted.probes.map((probe) => withPolicy(probe, demandPolicy));
+				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], asked);
 				// A live probe asked afresh is retired and added again, which the publisher answers anew.
 				const renew = fittedReasks(wanted.reasked, entry.live, probed);
 				// The demand's ranges, then the probes, then the fills'.
@@ -3406,9 +3410,8 @@ export class Subscriber {
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
-				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
 				// Before the update reaches the wire, as the SUBSCRIBE did.
-				hooks.judgeUnder(entry.track, entry.staleBudget);
+				hooks.judgeUnder(entry.track, narrowest(entry.live));
 				if (capOf(entry.live) !== entry.staleCap) entry.staleCap = undefined;
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
@@ -3443,7 +3446,7 @@ export class Subscriber {
 			const update = new SubscribeUpdate({
 				wantedGroup: refresh ?? sentWanted,
 				priority,
-				order: current.order,
+				order: demandPolicy.order,
 				maxDelay: maxAge(ranges),
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),
@@ -3470,6 +3473,7 @@ export class Subscriber {
 			if (refresh !== undefined) sentWanted = refresh;
 			lastSent = { ...current };
 			sentFills = fillGroups;
+			sentFillOrder = fills?.order;
 			sentPriority = priority;
 			sentAsks = asks;
 			sentJoins = joins;
@@ -3563,12 +3567,16 @@ export class Subscriber {
 				: (span: typeof as) => span.start;
 			rangesEqual = start(as) === start(bs) && as.end === bs.end;
 		}
-		// A wire without `Group Order` cannot carry a change to it.
-		const sameOrder = !hasOrder(this.version) || (a.order ?? "descending") === (b.order ?? "descending");
+		// Lite-07 carries a policy per range, which the ranges compare; before it one for the whole
+		// subscription, and a wire without `Group Order` cannot carry a change to the order.
+		const pa = rangesPolicy(ar);
+		const pb = rangesPolicy(br);
+		const sameOrder = hasRanges(this.version) || !hasOrder(this.version) || pa.order === pb.order;
+		const samePriority = hasRanges(this.version) || pa.priority === pb.priority;
 		// A wire before lite-07 carries one max age for the whole subscription; lite-07 one per live
 		// join, which the ranges compare.
 		const sameMax = hasRanges(this.version) || maxAge(ar) === maxAge(br);
-		return (a.priority ?? 0) === (b.priority ?? 0) && sameOrder && sameMax && rangesEqual;
+		return samePriority && sameOrder && sameMax && rangesEqual;
 	}
 
 	/**
@@ -4231,6 +4239,18 @@ export function fittedReasks(reasked: Iterable<bigint>, live: LiveRanges, probes
 	return renew;
 }
 
+// The narrowest max in milliseconds among the live joins of `live`, {@link NO_MAX_DELAY} for none:
+// the budget an upstream may judge a group too old under, which a stream reset as too old names
+// nowhere. Mirrors the Rust `narrowest`.
+function narrowest(live: LiveRanges): number {
+	let narrowest = NO_MAX_DELAY;
+	for (const range of live.ranges()) {
+		const max = range.start?.live?.max ?? range.start?.joined?.max;
+		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
+	}
+	return narrowest;
+}
+
 // A wire live start's max in milliseconds as a budget: {@link NO_MAX_DELAY} for none.
 function wireBudget(max: number | null): number {
 	return max ?? NO_MAX_DELAY;
@@ -4247,17 +4267,6 @@ function joinKey(min: number | null, end: bigint | undefined): string {
 function wireJoin(range: WireRange): string | undefined {
 	const live = range.start?.live;
 	return live === undefined ? undefined : joinKey(live.min, through(range.end));
-}
-
-// The narrowest max in milliseconds a live join among `live` asks, as a budget: {@link NO_MAX_DELAY}
-// when none asks one. Mirrors the Rust `narrowest`.
-function narrowest(live: LiveRanges): number {
-	let narrowest = NO_MAX_DELAY;
-	for (const range of live.ranges()) {
-		const max = range.start?.live?.max ?? range.start?.joined?.max;
-		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
-	}
-	return narrowest;
 }
 
 // The exclusive group end past every range among `live`, undefined when one follows the live edge

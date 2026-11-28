@@ -3810,6 +3810,7 @@ impl Handle {
 				timestamp_ids: self.track.timestamp_ids(),
 				arrived: self.alive.arrived,
 				stale_counted: AtomicBool::new(false),
+				stale_under: std::sync::OnceLock::new(),
 			}),
 			cursor: Cursor {
 				state,
@@ -4451,6 +4452,8 @@ pub(super) struct Delivery {
 	arrived: crate::time::Instant,
 	// Whichever reader observes expiry first records its unread tail only once.
 	pub(super) stale_counted: AtomicBool,
+	// The budget the first verdict judged the group stale under.
+	stale_under: std::sync::OnceLock<std::time::Duration>,
 }
 
 /// Subscriber-specific policy for a group after it was handed out: when it expires, and
@@ -4462,11 +4465,20 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// A reader read the group's end, so it no longer keeps the track wanted.
 	fn ended(&self) {}
 
-	/// Return whether the group is stale, registering `waiter` for anything that
-	/// could change the answer while the group remains live.
+	/// The budget the group was judged stale under, `Duration::MAX` for the publisher's max
+	/// age, or `None` while it is not stale, registering `waiter` for anything that could
+	/// change the answer while the group remains live.
 	/// A logical reader's `recover` supplies its current budget after the original copy is
 	/// gone, asked only once a verdict needs it.
-	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool;
+	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter)
+	-> Option<std::time::Duration>;
+
+	/// Whether the group has aged past `budget`, held to the publisher's max age, as
+	/// [`Self::is_expired`] judges its own, registering `waiter` for anything that could change
+	/// the answer while it has not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn aged(&self, budget: std::time::Duration, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter)
+	-> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -4932,9 +4944,15 @@ impl Consumer {
 						&& self
 							.expiry
 							.as_ref()
-							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
+							.is_some_and(|e| e.is_expired(self.recover(), waiter).is_some()) =>
 				{
 					if !closed {
+						// Named by the budget that judged it, as `poll_expiry` records it.
+						let budget =
+							(self.expiry.as_ref()).and_then(|expiry| expiry.is_expired(self.recover(), waiter));
+						if let Some(budget) = budget {
+							let _ = self.delivery.stale_under.set(budget);
+						}
 						return Poll::Ready(Err(self.fail(Error::Old)));
 					}
 					self.let_go();
@@ -5011,6 +5029,14 @@ impl Consumer {
 		self.poll_expiry(waiter, true)
 	}
 
+	/// Whether the group has aged past `budget` under the subscription it was handed out
+	/// under, waking once it does: a range wanting it for that long stops wanting it then,
+	/// though another may still. `false` for a group handed out under none.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_aged(&self, budget: std::time::Duration, waiter: &kio::Waiter) -> bool {
+		(self.expiry.as_ref()).is_some_and(|expiry| expiry.aged(budget, self.recover(), waiter))
+	}
+
 	/// Apply the drift budget to a read that found nothing and is about to park, failing
 	/// it with [`Error::Old`] once the budget gives up.
 	///
@@ -5039,12 +5065,10 @@ impl Consumer {
 	fn poll_expiry(&mut self, waiter: &kio::Waiter, held: bool) -> bool {
 		if !self.expired
 			&& (held || self.expiry_pending())
-			&& self
-				.expiry
-				.as_ref()
-				.is_some_and(|expiry| expiry.is_expired(self.recover(), waiter))
+			&& let Some(budget) = (self.expiry.as_ref()).and_then(|expiry| expiry.is_expired(self.recover(), waiter))
 		{
 			self.expired = true;
+			let _ = self.delivery.stale_under.set(budget);
 			// Another read, such as `poll_expired`, may judge a frame read parked before it.
 			Idle::disarm(&mut self.idle);
 			if !self.delivery.stale_counted.swap(true, Ordering::Relaxed) {
@@ -5052,6 +5076,13 @@ impl Consumer {
 			}
 		}
 		self.expired
+	}
+
+	/// The budget this group was judged stale under, `Duration::MAX` for the publisher's max
+	/// age, or `None` while it was not.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn expired_under(&self) -> Option<std::time::Duration> {
+		self.delivery.stale_under.get().copied()
 	}
 
 	/// Whether expiry can still discard content or unblock a group that may grow.
@@ -9107,9 +9138,22 @@ mod test {
 	}
 
 	impl Expiry for Switch {
-		fn is_expired(&self, _: Option<&crate::model::resume::Recover>, waiter: &kio::Waiter) -> bool {
+		fn is_expired(
+			&self,
+			_: Option<&crate::model::resume::Recover>,
+			waiter: &kio::Waiter,
+		) -> Option<std::time::Duration> {
 			waiter.register(&mut self.0.1.lock().unwrap());
-			self.0.0.load(Ordering::Relaxed)
+			self.0.0.load(Ordering::Relaxed).then_some(std::time::Duration::ZERO)
+		}
+
+		fn aged(
+			&self,
+			_: std::time::Duration,
+			recover: Option<&crate::model::resume::Recover>,
+			waiter: &kio::Waiter,
+		) -> bool {
+			self.is_expired(recover, waiter).is_some()
 		}
 
 		fn for_track(&self, _: &track::Consumer) -> Arc<dyn Expiry> {

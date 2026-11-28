@@ -50,7 +50,7 @@ function netTrack(name: string, timed = true): NetTrack.Producer {
 
 // Every group, oldest first, as the tests read their backlogs in order.
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
-	return net.subscribe({ order: "ascending", ranges: [{}] });
+	return net.subscribe({ ranges: [{ order: "ascending" }] });
 }
 
 interface Pair {

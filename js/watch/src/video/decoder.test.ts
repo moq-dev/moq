@@ -839,7 +839,7 @@ for (const kind of ["legacy", "cmaf"] as const) {
 it("subscribes at the hang video priority unless given one, and follows a change", async () => {
 	const defaulted = await guardedPlayback("legacy", [], [], true);
 	try {
-		expect(defaulted.track?.subscription.peek()?.priority).toBe(Catalog.PRIORITY.video);
+		expect(defaulted.track?.subscription.peek()?.ranges?.[0]?.priority).toBe(Catalog.PRIORITY.video);
 	} finally {
 		defaulted.close();
 	}
@@ -847,10 +847,10 @@ it("subscribes at the hang video priority unless given one, and follows a change
 	const priority = new Signal(127);
 	const playback = await guardedPlayback("legacy", [], [], true, 0, { priority });
 	try {
-		expect(playback.track?.subscription.peek()?.priority).toBe(127);
+		expect(playback.track?.subscription.peek()?.ranges?.[0]?.priority).toBe(127);
 		priority.set(-128);
 		await microtasks();
-		expect(playback.track?.subscription.peek()?.priority).toBe(-128);
+		expect(playback.track?.subscription.peek()?.ranges?.[0]?.priority).toBe(-128);
 	} finally {
 		playback.close();
 	}

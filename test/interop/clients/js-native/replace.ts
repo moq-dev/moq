@@ -68,7 +68,7 @@ try {
 	const subscribe = (index: number, sequence: bigint) =>
 		active[index]
 			.track("value")
-			.subscribe({ order: "ascending", ranges: [{ start: sequence }] })
+			.subscribe({ ranges: [{ start: sequence, order: "ascending" }] })
 			.ordered();
 	const check = (frame: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>, sequence: bigint) => {
 		assert(frame, "track ended before its replacement");

@@ -1142,6 +1142,8 @@ export class Consumer {
 	// The copy it was mirrored from, which that copy's cache evicts.
 	readonly #mirrored: GroupState;
 	#expiry?: Expiry;
+	// The budget in milliseconds the group was judged stale under, once it was.
+	#staleUnder?: number;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
 	// Judges a short close the recovery left open again once its route changes, which may leave
@@ -1263,6 +1265,16 @@ export class Consumer {
 			() => this.#expiry?.changed ?? [],
 		);
 		return this.#expired;
+	}
+
+	/**
+	 * The budget in milliseconds this group was judged stale under, `NO_MAX_DELAY` for the
+	 * publisher's max age, or undefined while it was not, or by a budget it does not know.
+	 *
+	 * @internal Wire publishers only.
+	 */
+	get staleUnder(): number | undefined {
+		return this.#staleUnder;
 	}
 
 	// The failure that ends this reader, as `closed` would settle with it, without building that
@@ -1420,6 +1432,7 @@ export class Consumer {
 		if (this.#state.closed.peek() instanceof Error) return false;
 		if (!this.#expiry?.expired()) return false;
 
+		this.#staleUnder = this.#expiry.budget?.();
 		this.#fail(
 			new StreamError(StreamCode.Old, {
 				message: "group exceeded the subscription max delay budget",
