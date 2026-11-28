@@ -714,6 +714,13 @@ impl kio::Task for WatchCatalog {
 
 #[cfg(test)]
 mod tests {
+	/// Create a group whose first frame is `frame`, in the legacy hang framing.
+	fn create_with(track: &moq_net::track::Producer, frame: hang::container::Frame) -> moq_net::group::Producer {
+		let mut buf = bytes::BytesMut::new();
+		frame.encode(&mut buf).unwrap();
+		track.create_group(frame.timestamp, buf.freeze()).unwrap()
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	/// A millisecond track with no publisher max age, so a test's playlist window may span more
 	/// media than the default max age keeps fresh.
@@ -1630,13 +1637,13 @@ mod tests {
 
 	/// Open the group of [`Gops::gop`] `index` on `media`, holding one VP8 keyframe at its start.
 	fn keyframe_group(media: &moq_net::track::Producer, index: u64) -> moq_net::group::Producer {
-		let mut group = media.create_group((index * 2_000).into()).unwrap();
-		hang::container::Frame {
-			timestamp: moq_net::Timestamp::from_millis(index * 2_000).unwrap(),
-			payload: bytes::Bytes::from_static(KEYFRAME),
-		}
-		.write_to(&mut group)
-		.unwrap();
+		let group = create_with(
+			&media,
+			hang::container::Frame {
+				timestamp: moq_net::Timestamp::from_millis(index * 2_000).unwrap(),
+				payload: bytes::Bytes::from_static(KEYFRAME),
+			},
+		);
 		group
 	}
 
@@ -2930,40 +2937,6 @@ mod tests {
 		drop((audio, catalog, broadcast));
 	}
 
-	// A group is placed on the grid by its start, not its first frame: groups keyed on the lines'
-	// 500ms multiples whose keyframes land 100ms later still cut 2s segments at the lines.
-	#[tokio::test]
-	async fn a_group_is_placed_by_its_start() {
-		let origin = produce_origin();
-		let broadcast = origin
-			.route("live", moq_net::origin::RouteOptions::default())
-			.expect("publish allowed");
-		settle().await;
-		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
-		let mut audio = audio(&catalog, broadcast.broadcast(), "audio0", opus());
-		for millis in (0..=6_000u64).step_by(500) {
-			audio.seek(millis).unwrap();
-			audio.write(frame((millis + 100) * 1000, true)).unwrap();
-		}
-		audio.cut(None).unwrap();
-
-		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
-		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
-		let rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
-		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
-
-		let playlist = rendition.snapshot();
-		assert_eq!(numbers(&playlist), [0, 1, 2]);
-		for segment in &playlist.segments {
-			assert_eq!(segment.duration, Duration::from_secs(2), "segment {}", segment.segment);
-		}
-
-		drop((audio, catalog, broadcast));
-	}
-
-	// Audio and video renditions whose groups start on the same grid lines cut the same
-	// boundaries, with no state shared between them. Video is one group per segment; an audio
-	// segment packs every audio group inside the video segment's span.
 	#[tokio::test]
 	async fn audio_and_video_on_one_grid_line_up() {
 		let origin = produce_origin();
@@ -3799,39 +3772,25 @@ mod tests {
 		/// Write the group starting at `pts_ms` with a keyframe there and, when `frames` is more
 		/// than one, that many frames a tenth of the interval apart.
 		fn group(&mut self, pts_ms: u64, frames: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
+			let mut group: Option<moq_net::group::Producer> = None;
 			for index in 0..frames.max(1) {
 				let micros = (pts_ms + index * INTERVAL.as_millis() as u64 / 10) * 1_000;
 				let frame = vp8_frame(micros, index == 0);
-				hang::container::Frame {
+				let frame = hang::container::Frame {
 					timestamp: frame.timestamp,
 					payload: frame.payload,
+				};
+				match &mut group {
+					Some(group) => frame.write_to(group).unwrap(),
+					None => group = Some(create_with(&self.track, frame)),
 				}
-				.write_to(&mut group)
-				.unwrap();
 			}
-			group.finish().unwrap();
+			group.unwrap().finish().unwrap();
 		}
 
 		/// Write the group at `pts_ms` with a single keyframe.
 		fn at(&mut self, pts_ms: u64) {
 			self.group(pts_ms, 1);
-		}
-
-		/// Write the group starting at `start_ms` with a single keyframe at `pts_ms`.
-		fn keyed(&mut self, start_ms: u64, pts_ms: u64) {
-			let mut group = self
-				.track
-				.create_group(moq_net::group::Info { start: start_ms })
-				.unwrap();
-			let frame = vp8_frame(pts_ms * 1_000, true);
-			hang::container::Frame {
-				timestamp: frame.timestamp,
-				payload: frame.payload,
-			}
-			.write_to(&mut group)
-			.unwrap();
-			group.finish().unwrap();
 		}
 
 		/// Write the group at `pts_ms` with a single keyframe declaring a `width`x`height`
@@ -3842,16 +3801,16 @@ mod tests {
 
 		/// [`sized`](Self::sized), declaring a GROUP_END at `end_ms` when given.
 		fn sized_until(&mut self, pts_ms: u64, (width, height): (u16, u16), end_ms: Option<u64>) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
 			payload[8..10].copy_from_slice(&height.to_le_bytes());
-			hang::container::Frame {
-				timestamp: moq_net::Timestamp::from_micros(pts_ms * 1_000).unwrap(),
-				payload: payload.into(),
-			}
-			.write_to(&mut group)
-			.unwrap();
+			let group = create_with(
+				&self.track,
+				hang::container::Frame {
+					timestamp: moq_net::Timestamp::from_micros(pts_ms * 1_000).unwrap(),
+					payload: payload.into(),
+				},
+			);
 			match end_ms {
 				Some(end) => group.finish_at(end).unwrap(),
 				None => group.finish().unwrap(),
@@ -3865,14 +3824,14 @@ mod tests {
 
 		/// Start the group at `pts_ms` with a keyframe, leaving it open for more frames.
 		fn open(&mut self, pts_ms: u64) -> moq_net::group::Producer {
-			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
-			hang::container::Frame {
-				timestamp: frame.timestamp,
-				payload: frame.payload,
-			}
-			.write_to(&mut group)
-			.unwrap();
+			let group = create_with(
+				&self.track,
+				hang::container::Frame {
+					timestamp: frame.timestamp,
+					payload: frame.payload,
+				},
+			);
 			group
 		}
 
@@ -4255,10 +4214,12 @@ mod tests {
 				.step_by(100)
 				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
 				.collect();
-			let mut group = track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
 			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
-			group.write_frame(frames[0].timestamp, bytes).unwrap();
-			group.finish().unwrap();
+			track
+				.create_group(frames[0].timestamp, bytes)
+				.unwrap()
+				.finish()
+				.unwrap();
 		};
 		fragment(0, 500, 2_400);
 		fragment(1, 2_500, 4_400);
@@ -4369,14 +4330,14 @@ mod tests {
 		let test = Groups::with(&["video0"], &[]);
 		let video0 = test.publish("video0");
 		let ended = |start: u64, end: u64| {
-			let mut group = video0.track.create_group(moq_net::group::Info { start }).unwrap();
 			let frame = vp8_frame(start * 1_000, true);
-			hang::container::Frame {
-				timestamp: frame.timestamp,
-				payload: frame.payload,
-			}
-			.write_to(&mut group)
-			.unwrap();
+			let group = create_with(
+				&video0.track,
+				hang::container::Frame {
+					timestamp: frame.timestamp,
+					payload: frame.payload,
+				},
+			);
 			group.finish_at(end).unwrap();
 		};
 		// The first group too: its keyframe declares the catalog's picture size, so it is no resize
@@ -4430,14 +4391,14 @@ mod tests {
 	async fn a_peeked_segment_is_never_skipped() {
 		let test = Groups::with(&["video0"], &[]);
 		let mut video0 = test.publish("video0");
-		let mut group = video0.track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		let frame = vp8_frame(0, true);
-		hang::container::Frame {
-			timestamp: frame.timestamp,
-			payload: frame.payload,
-		}
-		.write_to(&mut group)
-		.unwrap();
+		let group = create_with(
+			&video0.track,
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			},
+		);
 		let lost = group.finish().unwrap();
 		video0.at(2_000);
 		test.listed("video0", 0).await;
@@ -4856,9 +4817,7 @@ mod tests {
 		test.sync();
 		let new = test.rendition("video0");
 		// 6 and 7 finish segment 1 past the retire; 8 to 11 are segment 2, which 12 completes.
-		// Group 6 starts at 3s with its keyframe 100ms later.
-		media.keyed(3_000, 3_100);
-		for sequence in 7..13 {
+		for sequence in 6..13 {
 			media.at(sequence * 500);
 		}
 		let snapshot = test.listed("video0", 2).await;
@@ -4875,7 +4834,7 @@ mod tests {
 		);
 		assert_eq!(
 			old.rows().last().and_then(|row| row.content),
-			Some(Duration::from_millis(3_100)),
+			Some(Duration::from_millis(3_000)),
 			"its last sample runs to the replacement's first frame"
 		);
 		let id = segments::Id {
@@ -4967,20 +4926,6 @@ mod tests {
 		);
 	}
 
-	// A lone last frame borrows the gap between the first frames before it, not between the group
-	// starts: groups keyed below their keyframes by different amounts space their media apart.
-	#[tokio::test(start_paused = true)]
-	async fn a_lone_last_frame_borrows_the_media_spacing() {
-		let test = Groups::with(&["video0"], &[]);
-		let mut media = test.publish("video0");
-		media.keyed(0, 1_900);
-		media.keyed(2_000, 2_100);
-		media.finish();
-		let snapshot = test.listed("video0", 1).await;
-		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
-		assert_eq!(durations, [2_000, 300], "the last frame at 2.1s runs 200ms");
-	}
-
 	// A segment spanning more groups than one request fetches is listed as a gap, never as a
 	// segment that every request refuses.
 	#[tokio::test(start_paused = true)]
@@ -5001,14 +4946,14 @@ mod tests {
 		);
 		// Then two groups on the next lines, at 2s and 4s.
 		for start in (0..=cap).chain([2_000_000, 4_000_000]) {
-			let mut group = media.track.create_group(start.into()).unwrap();
 			let frame = vp8_frame(start, true);
-			hang::container::Frame {
-				timestamp: frame.timestamp,
-				payload: frame.payload,
-			}
-			.write_to(&mut group)
-			.unwrap();
+			let group = create_with(
+				&media.track,
+				hang::container::Frame {
+					timestamp: frame.timestamp,
+					payload: frame.payload,
+				},
+			);
 			group.finish().unwrap();
 		}
 		let snapshot = test.listed("video0", 1).await;
