@@ -4881,8 +4881,13 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 				tb.write(5n);
 				tb.write(6n);
 			}
-			if (resolution === "drop")
+			if (resolution === "drop") {
 				hooks.dropTrackGroups(ta.producer, 5n, 6n, { error: new StreamError(StreamCode.Old) });
+				// The serving route the switch asked for 5 still owes it: a drop is only that route's.
+				await settle();
+				expect(await isPending(held)).toBe(true);
+				hooks.dropTrackGroups(tb.producer, 5n, 6n, { error: new StreamError(StreamCode.Old) });
+			}
 			if (resolution === "budget") await clock.advance(Duration.millis(1000));
 			// The budget runs from when the serving copy held 7, past the boundary at 6: once it
 			// passed, 6 is stale too, as on a plain read of one route.

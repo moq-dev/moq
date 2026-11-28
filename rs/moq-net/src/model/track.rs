@@ -2122,19 +2122,6 @@ impl TrackState {
 		gone.then_some(run.end)
 	}
 
-	/// The parts of `groups` no group will fill: declared skipped or given up for good, as
-	/// [`Self::hole_end`] has it with `dropped`. A cost in the holes it overlaps.
-	fn gone_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
-		if groups.is_empty() {
-			return RangeSet::new();
-		}
-		self.drops
-			.overlapping(&groups)
-			.filter(|(_, hole)| matches!(hole, Hole::Skip | Hole::Drop { stale: None, .. }))
-			.map(|(run, _)| run.start.max(groups.start)..run.end.min(groups.end))
-			.collect()
-	}
-
 	/// The runs of `keys` outside every whole group's span, where a group may still start:
 	/// none starts inside one (see [`Self::span_end`]).
 	fn outside_spans(&self, keys: ops::Range<u64>) -> Vec<ops::Range<u64>> {
@@ -8635,15 +8622,6 @@ impl Consumer {
 		self.with_state(|state| state?.read().hole_end(key, dropped))
 	}
 
-	/// The parts of `groups` no group will fill here; see `TrackState::gone_in`.
-	pub(super) fn gone_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
-		if let Some(serving) = self.serving() {
-			return serving.gone_in(groups);
-		}
-		self.with_state(|state| state.map(|state| state.read().gone_in(groups)))
-			.unwrap_or_default()
-	}
-
 	/// The parts of `groups` the publisher declared skipped, never to be produced. Parks
 	/// `waiter` until a change here while some of `groups` is not.
 	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
@@ -13382,9 +13360,9 @@ impl Subscriber {
 	}
 
 	/// Whether an ordered read here still waits for a group in `groups`: one a fill it asked
-	/// has yet to answer, or one this received copy's live feed owes within its arrival grace
-	/// (see `TrackState::owed`). Parks `waiter` until that grace folds. A front's logical track
-	/// asks the route copies it keeps.
+	/// has yet to answer, one whose head a bounded window asked for, or one this received
+	/// copy's live feed owes within its arrival grace (see `TrackState::owed`). Parks `waiter`
+	/// until that grace folds. A front's logical track asks the route copies it keeps.
 	pub(super) fn owes(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> bool {
 		let cursor = match &self.inner {
 			Inner::Plain(cursor) => cursor,
@@ -13394,6 +13372,10 @@ impl Subscriber {
 			return false;
 		}
 		if cursor.misses.as_ref().is_some_and(|misses| misses.wants(&groups)) {
+			return true;
+		}
+		// The live feed counts a group whose head is still asked for as arrived.
+		if (cursor.heads.as_ref()).is_some_and(|heads| heads.fetching.range(groups.clone()).next().is_some()) {
 			return true;
 		}
 		let state = cursor.state.read();

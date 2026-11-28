@@ -2984,26 +2984,32 @@ impl Reader {
 			})
 	}
 
-	/// Whether a fill in `waiting`, each one whose read waits on its route this pass, still
-	/// owes a group from `floor` below the candidate `first` that the reader lacks, the local
-	/// bounds admit, and no copy declares skipped or given up for good, as its own ordered read
-	/// waits for it: one a fill of its route has yet to answer, or its received route's live
-	/// feed owes within the arrival grace. A fill still unanswered owes what it was asked. Parks
-	/// `waiter` until that grace folds; the answer, the group landing, or its drop wakes the
-	/// fill's own read.
+	/// Whether a fill in `waiting`, each one whose read waits on its route this pass with the
+	/// groups its track had seen arrive before that read, still owes a group from `floor` below
+	/// the candidate `first` that the reader lacks, the local bounds admit, and the reader or a
+	/// copy has not recorded skipped, as its own ordered read waits for it: one a fill of its route has yet to answer,
+	/// one whose head it asked for, or one its received route's live feed owes within the
+	/// arrival grace. Each fill judges its own drops: another route giving a group up says
+	/// nothing of this one. A fill still unanswered owes what it was asked, and one a group
+	/// reached since its read is read again. Parks `waiter` until that grace folds; the answer,
+	/// the group landing, or its drop wakes the fill's own read.
 	fn fill_owes_below(
 		&mut self,
-		waiting: &[usize],
+		waiting: &[(usize, usize)],
 		first: &Candidate,
 		floor: u64,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> bool {
 		let (start, cap) = self.groups;
-		for &index in waiting {
+		for &(index, arrivals) in waiting {
 			let copy = &self.copies[index];
 			if Arc::ptr_eq(&copy.lease, &first.lease) {
 				continue;
+			}
+			// Landed on another thread after the read parked, which its owed groups no longer count.
+			if copy.track.poll_arrived(arrivals, waiter).is_ready() {
+				return true;
 			}
 			let from = floor.max(copy.start(start));
 			let below = first
@@ -3014,10 +3020,8 @@ impl Reader {
 				.take_while(|run| *run.start() < below)
 				.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(below)))
 				.collect();
-			for copy in &self.copies {
-				for run in copy.track.gone_in(from..below).iter() {
-					open.remove(run.clone());
-				}
+			for run in self.skipped_in(from..below, waiter).iter() {
+				open.remove(run.clone());
 			}
 			let owes = |gap: &std::ops::Range<u64>| match &self.copies[index].sub {
 				Sub::Pending(_) => true,
@@ -3149,7 +3153,7 @@ impl Reader {
 				let sub = match copy.poll_ready(groups, waiter) {
 					Poll::Pending => {
 						if copy.fills {
-							waiting.push(index);
+							waiting.push((index, arrivals));
 						}
 						break;
 					}
@@ -3169,7 +3173,7 @@ impl Reader {
 				match res {
 					Poll::Pending => {
 						if self.copies[index].fills {
-							waiting.push(index);
+							waiting.push((index, arrivals));
 						}
 						break;
 					}
@@ -10999,28 +11003,84 @@ mod test {
 		}
 	}
 
-	/// A group a replaced copy's publisher gives up for good is passed, though the switch asked
-	/// the serving route for it too: that verdict on the group settles it, as on one route.
+	/// A group a replaced copy drops, as a relay that lost it does, is still waited for on the
+	/// serving route the switch asked for it, while one its publisher skipped is passed: a skip
+	/// is the track's, a drop only that route's.
 	#[test]
 	#[cfg(feature = "async")]
-	fn an_ordered_read_passes_a_group_a_replaced_copy_gave_up() {
+	fn an_ordered_read_passes_a_group_a_replaced_copy_skipped_but_not_one_it_dropped() {
+		for skipped in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = received_copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, true), [0]);
+			// Group 1 is still in flight on the copy the switch replaces.
+			write(&a, 2);
+			let mut b = received_copy();
+			// Its session asked the feed from below the resume point, as the switch's backfill does.
+			b.request_start(Some(1)).unwrap();
+			write(&b, 3);
+			routes.serve(b.consume());
+			assert_eq!(drain(&mut sub, true), [0u64; 0], "skipped {skipped}");
+			assert!(asked_for(&b, 1), "{:?}", b.subscription());
+			if skipped {
+				a.skip_groups(1..2);
+				assert_eq!(drain(&mut sub, true), [2, 3]);
+				continue;
+			}
+			a.drop_groups(1..2, StreamError::NotFound);
+			assert_eq!(drain(&mut sub, true), [0u64; 0], "the serving route still owes 1");
+			write(&b, 1);
+			assert_eq!(drain(&mut sub, true), [1, 2, 3]);
+		}
+	}
+
+	/// A lost group the serving route's feed delivers without its head is waited for while a
+	/// bounded read asks for its head, before an ordered read hands out the group above: the
+	/// feed already counts it as arrived.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_bounded_read_waits_for_a_lost_groups_head() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = received_copy();
 		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, HOUR);
+		let bounded = Subscription::default()
+			.with_ranges([track::Range::groups(0..5)])
+			.with_max(HOUR);
+		let mut sub = logical.consume().subscribe(bounded).now_or_never().unwrap().unwrap();
 		write(&a, 0);
 		assert_eq!(drain(&mut sub, true), [0]);
-		// Group 1 is still in flight on the copy the switch replaces.
-		write(&a, 2);
+		for key in 1..4 {
+			write(&a, key);
+		}
 		let mut b = received_copy();
-		// Its session asked the feed from below the resume point, as the switch's backfill does.
-		b.request_start(Some(1)).unwrap();
+		let fills = b.requests();
+		// Its session asked the feed from 2, as a lowered demand does.
+		b.request_start(Some(2)).unwrap();
 		write(&b, 3);
 		routes.serve(b.consume());
+		let Poll::Ready(Ok(Some(group))) = sub.poll_next_group(&kio::Waiter::noop()) else {
+			panic!("the replaced copy's group 1");
+		};
+		assert_eq!(group.start, 1);
+		a.evict(2);
 		assert_eq!(drain(&mut sub, true), [0u64; 0]);
-		assert!(asked_for(&b, 1), "{:?}", b.subscription());
-		a.drop_groups(1..2, StreamError::NotFound);
+		let track::Received::Group(mut tail) = b.create_group_at(group::Info { start: 2 }, 1, 0..0).unwrap() else {
+			panic!("nothing else holds group 2");
+		};
+		tail.write_frame(ts(2), b"x".as_ref()).unwrap();
+		tail.finish().unwrap();
+		assert_eq!(drain(&mut sub, true), [0u64; 0], "its head is still asked for");
+		let request = fills.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.key(), request.frame_start()), (2, 0));
+		let mut head = request.accept(None).unwrap().expect("a fresh group");
+		head.write_frame(ts(2), b"x".as_ref()).unwrap();
+		head.write_frame(ts(2), b"x".as_ref()).unwrap();
+		head.finish().unwrap();
 		assert_eq!(drain(&mut sub, true), [2, 3]);
 	}
 

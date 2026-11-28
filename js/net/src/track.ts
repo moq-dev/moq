@@ -5592,11 +5592,6 @@ export class Subscriber {
 		};
 		hooks.producerHoldsGroup = (producer, key, whole) => cachedHolds(producer, key, whole);
 		hooks.holeEnd = (subscriber, key, dropped) => holeEnd(subscriber.#state.drops, key, dropped);
-		hooks.goneIn = (subscriber, start, end) =>
-			subscriber.#state.drops
-				.overlapping(start, end)
-				.filter((run) => run.skip || run.stale === undefined)
-				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.wholeEnd = (subscriber, key) => {
 			// A reader following route copies knows what the serving copy holds, as the Rust
 			// `Subscriber::span_end` asks it.

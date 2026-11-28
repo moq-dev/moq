@@ -1388,12 +1388,6 @@ export const hooks: {
 	 */
 	holeEnd: (subscriber: Subscriber, key: bigint, dropped: boolean) => bigint | undefined;
 	/**
-	 * The parts of `[start, end)` no group can arrive at on the subscriber's track, lowest first: a
-	 * skip, or a drop given up for good, as {@link holeEnd} has it with `dropped`. Mirrors the Rust
-	 * `track::Consumer::gone_in`.
-	 */
-	goneIn: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
-	/**
 	 * The abort that closed the subscriber's track after its declared end settled, which its
 	 * readers saw as a clean end. Mirrors the Rust crate-private `track::Consumer::aborted`.
 	 */
@@ -1950,9 +1944,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	wholeAround: () => {
-		throw new Error("track.ts not loaded");
-	},
-	goneIn: () => {
 		throw new Error("track.ts not loaded");
 	},
 	holeEnd: () => {

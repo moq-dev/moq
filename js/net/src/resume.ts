@@ -1065,9 +1065,10 @@ class Reader implements ResumeSource {
 	/**
 	 * Whether a fill other than `next`, the copy an ordered read is about to hand out `key` from,
 	 * still owes a group below `key` that `delivered` lacks, the reader's window and cursor name, and
-	 * no copy says no group arrives at, as its own ordered read waits for it: one a fill of its route
-	 * has yet to answer, or its received route's live feed owes within the budget. Arms that read's
-	 * wakeups, which wake this one. Mirrors the Rust `Reader::fill_owes_below`.
+	 * the reader or a copy has not recorded skipped, as its own ordered read waits for it: one a fill
+	 * of its route has yet to answer, or its received route's live feed owes within the budget. Each
+	 * fill judges its own drops: another route giving a group up says nothing of this one. Arms that
+	 * read's wakeups, which wake this one. Mirrors the Rust `Reader::fill_owes_below`.
 	 */
 	#fillOwesBelow(next: Copy, key: bigint, delivered: Delivered): boolean {
 		const floor = delivered.runEnd(0n) ?? 0n;
@@ -1077,13 +1078,10 @@ class Reader implements ResumeSource {
 			const start = max(floor, copy.backfill ? cursor.start : max(cursor.start, copy.floor ?? 0n));
 			const end = min(min(key, copyEnd(copy) ?? key), cursor.end ?? key);
 			if (start >= end) continue;
-			const gone: Run[] = [];
-			for (const other of this.#copies) {
-				for (const run of hooks.goneIn(other.sub, start, end)) insertRun(gone, run.start, run.end);
-			}
+			const skipped = this.skippedIn(start, end);
 			for (const run of this.#window().runs(start, end)) {
 				for (const gap of delivered.gaps(run.start, run.end)) {
-					for (const open of runGaps(gone, gap.start, gap.end)) {
+					for (const open of runGaps(skipped, gap.start, gap.end)) {
 						if (hooks.owes(copy.sub, open.start, open.end)) return true;
 					}
 				}
