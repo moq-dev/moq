@@ -31,6 +31,14 @@ Decided 2026-11-28 (maintainer, /quest-run): ✅ keep R2 until an agent
 confirms or rules out manifest overwrites on B2 (rejected: tear R2 down now;
 move the Rust cache back to R2).
 
+Decided 2026-11-28 (maintainer, /quest-run pick round): ✅ tear R2 down
+after the first Nightly with the shallow-writer fix shows no job loading a
+manifest that matches none of its build (rejected: only once mbx stops
+losing manifest updates; move the Rust cache back to R2), and ✅ raise mbx's
+lost manifest updates upstream as
+[jdx/mr-boxington#1030](https://github.com/jdx/mr-boxington/issues/1030)
+(rejected: accept the loss). That issue does not gate the teardown.
+
 Steps:
 
 1. Compare each Rust-cache job's hits and "not looked up" counts
@@ -105,20 +113,13 @@ Steps:
 
 ## Waiting
 
-- Maintainer: The Rust cache moved from R2 to B2, and R2's bucket, API
-  tokens, and `MBX_R2_*` secrets are still there. The eight jobs that went
-  cold on the second B2 Nightly were caused by a shallow cache writer, which
-  would have done the same on R2, and is fixed now. B2's lack of conditional
-  writes does lose concurrent jobs' prediction updates (one night's
-  Linux-ARM64 manifest kept 2,327 of the 4,680 predictions written to it),
-  which costs prefetch coverage on later builds but never a wrong result.
-  Deleting R2 is irreversible. When should R2 be torn down?
-  - After the first Nightly with the shallow-writer fix shows no job loading a manifest that matches none of its build (Recommended) - the remaining loss is coverage, which totals show inside R2's own night-to-night swing, and R2 empties itself by about 2026-12-25 anyway
-  - Only once mbx stops losing manifest updates on stores without conditional writes - keeps a revert to R2 open, at the cost of a bucket and tokens kept indefinitely
-  - Move the Rust cache back to R2 - keeps conditional writes and drops the B2 credits
-- Maintainer: mbx (jdx/mr-boxington, outside moq-dev) loses concurrent task manifest updates on stores without conditional writes such as B2, since it merges against the manifest read when the build started and then writes unconditionally. Only mbx can fix this; this repository cannot key manifests per job without splitting the results jobs share. Raise it upstream?
-  - Open an issue on jdx/mr-boxington with this quest's B2 version evidence, asking for a re-read and merge just before an unconditional write, or per-writer manifest shards merged on read (Recommended) - the fix belongs where the bug is, and an agent can draft it once posting there is approved
-  - Accept the loss - coverage only, and night-to-night totals sit within R2's swing
+- moq-dev/moq: the first scheduled Nightly on `main` after the shallow-writer
+  fix merges shows no job loading a manifest that matches none of its build.
+  Check with `gh run list --workflow nightly.yml --branch main --event
+  schedule` for the first run started after the fix's merge commit, then
+  `gh run view <id> --log | grep "loaded, but none matched"`: no match
+  clears this item, and steps 2 to 4 follow. A match means another cause;
+  bring it to the maintainer before deleting anything.
 
 ## Related
 
